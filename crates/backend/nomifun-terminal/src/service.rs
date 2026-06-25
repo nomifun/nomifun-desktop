@@ -19,6 +19,26 @@ use crate::events::TerminalEventEmitter;
 use crate::pty::{PtyHandle, SpawnParams};
 use crate::types::{resolve_command, row_to_response};
 
+/// Set default environment that describes the emulator the PTY is actually
+/// wired to: `xterm.js` — an xterm-compatible, truecolor-capable terminal.
+///
+/// `portable-pty` seeds the child from the app process's own environment. A
+/// macOS app launched from Finder/Dock/launchd inherits a *minimal* environment
+/// with **no `TERM`** (the same reason `nomifun-runtime::shell_env` has to
+/// repair `PATH`). With no `TERM`, interactive programs fall back to a dumb,
+/// monochrome, no-cursor-control mode: `claude` renders gray-on-gray and zsh's
+/// `zle` emits no cursor-movement/erase sequences for Backspace, so a delete
+/// looks like the cursor just walks backward without removing the character.
+///
+/// These are *defaults*: an explicit per-session env (or an inherited value the
+/// caller chose to forward) still wins via `or_insert`. We deliberately set
+/// `xterm-256color` regardless of any inherited `TERM`, because the child talks
+/// to xterm.js, not to whatever terminal happened to launch the app.
+fn apply_emulator_env_defaults(env: &mut HashMap<String, String>) {
+    env.entry("TERM".to_owned()).or_insert_with(|| "xterm-256color".to_owned());
+    env.entry("COLORTERM".to_owned()).or_insert_with(|| "truecolor".to_owned());
+}
+
 /// Interval between debounced scrollback persistence passes. Each pass writes
 /// only the *dirty* live sessions (see [`PtyHandle::take_dirty_scrollback`]), so
 /// idle terminals are never rewritten. A hard app kill loses at most this much
@@ -415,6 +435,10 @@ impl TerminalService {
             }
         };
         let mut env: HashMap<String, String> = env.unwrap_or_default();
+        // Describe the xterm.js emulator the PTY talks to (TERM/COLORTERM), so a
+        // Finder/launchd-launched macOS app — which inherits no TERM — still gets
+        // color + correct backspace rendering. Defaults only; explicit env wins.
+        apply_emulator_env_defaults(&mut env);
         for (k, v) in hook_env {
             env.insert(k, v);
         }
@@ -980,6 +1004,29 @@ mod tests {
     use nomifun_realtime::EventBroadcaster;
     use std::sync::Mutex;
     use std::time::Duration;
+
+    // --- Emulator env defaults -------------------------------------------
+
+    #[test]
+    fn emulator_env_defaults_fill_term_and_colorterm_when_absent() {
+        // A Finder/launchd-launched macOS app inherits no TERM; without a
+        // default the PTY child (zsh/claude) falls back to a dumb, monochrome,
+        // no-cursor-control mode (gray output + backspace that doesn't erase).
+        let mut env: HashMap<String, String> = HashMap::new();
+        apply_emulator_env_defaults(&mut env);
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+    }
+
+    #[test]
+    fn emulator_env_defaults_preserve_explicit_term() {
+        // An explicit per-session TERM must win; COLORTERM is still defaulted.
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("TERM".to_owned(), "screen-256color".to_owned());
+        apply_emulator_env_defaults(&mut env);
+        assert_eq!(env.get("TERM").map(String::as_str), Some("screen-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+    }
 
     // --- In-memory repo --------------------------------------------------
 
