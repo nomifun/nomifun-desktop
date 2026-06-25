@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Site Memory Fixture</title>
+</head>
+<body>
+    <h1>Site Memory Test Page</h1>
+    <button id="action-btn" aria-label="Perform Action">Perform Action</button>
+    <a href="#help" id="help-link">Help Center</a>
+    <div id="status">ready</div>
+    <script>
+        document.getElementById('action-btn').addEventListener('click', function() {
+            document.getElementById('status').textContent = 'clicked';
+        });
+    </script>
+</body>
+</html>

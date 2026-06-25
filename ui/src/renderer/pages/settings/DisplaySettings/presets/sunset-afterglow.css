@@ -1,0 +1,462 @@
+/* ============================================================================
+ * 落日余晖 Sunset Afterglow  (id: sunset-afterglow)
+ *
+ * 设计意图：最美落日的余晖——金灿灿与红火火韵律交替。金（琥珀，hue≈42°）是
+ * 主旋律：链接、强调、辉光晕都由它点亮；朱砂（偏橙的猩红，hue≈12–18°）是重音：
+ * 主按钮、危险态、落日尽头的那道余烬归它。二者一上一下交替呼吸，绚烂而不脏。
+ * 暗色是灵魂「日已落、天未黑」：深暖 umber 天幕（#120c05→#1a1208→#241408，
+ * 红橙微泛进黑，绝非冷靛），辉光只灼在画面「下缘」的地平线、顶部不放亮晕，
+ * 再用 background-attachment: fixed 把这道天际线钉死、不随滚动——落日的物理。
+ * 亮色是「同一暮色开灯／黎明霞」：暖奶白底（#fff7ec），下缘一缕极淡的金→蜜桃
+ * 珊瑚→朱黎明晕。纪律：高饱和的鲜金鲜朱只活在半透明 radial 辉光与 hover 辉光里，
+ * 承载正文的面板／弹层一律守不透明实底——氛围归氛围，可读归可读。
+ * 刻意不用 backdrop-filter（与冰晶幻境区分）：走「天幕实底 + 地平线辉光」。
+ *
+ * Design intent: the afterglow of the most beautiful sunset — gold and fiery red
+ * trading places in rhythm. Gold (amber, hue≈42°) is the melody: links, accents
+ * and glow halos are lit by it; scarlet (orange-leaning vermilion, hue≈12–18°) is
+ * the accent beat: primary buttons, danger, and the last ember on the horizon.
+ * Dark mode is the soul — "the sun is down but the sky isn't black yet": a deep warm
+ * umber sky (#120c05 → #1a1208 → #241408, red-orange bleeding into black, never cold
+ * indigo), with glow blazing only along the LOWER-EDGE horizon and nothing bright up
+ * top, then pinned with background-attachment: fixed so the horizon never scrolls —
+ * the physics of a sunset. Light mode is the same dusk with the lights on / a dawn
+ * sky: a warm ivory ground (#fff7ec) with a faint gold → peach-coral → scarlet glow
+ * along the lower edge. Discipline: vivid gold/scarlet live ONLY in translucent radial
+ * halos and hover glows; surfaces carrying text/forms stay fully opaque. No
+ * backdrop-filter (a clean break from Frosted Glass): "solid sky + horizon glow".
+ *
+ * 辨识度：现有 4 套主题集中在 244–349°（暗夜霓虹/冰晶/深海三套紫靛 + 律动玫红），
+ * 本主题全锁 8–48° 纯暖带，与之相隔 ≥200° 色相。防撞律动玫红 #fe2c55(348°)：本主题
+ * 红走偏橙朱砂(12–18°)、底色是暖 umber 而非中性纯黑、点缀是金而非电光青；danger 推
+ * 到偏冷正红(#d11f2e/#ff6a4d)与主色朱砂在语义上拉开，绝不会被误认成玫红。
+ * ========================================================================== */
+
+/* ===== Light / 暮色开灯 · 黎明霞 ===== */
+:root,
+body {
+  /* ---- A. 主色 Primary（亮底上主色走深朱砂，链接/按钮同色，白字 ≥4.5；金留给辉光） ---- */
+  --color-primary: #bb3614;
+  --primary: #bb3614;
+  --color-primary-light-1: #d14a22;
+  --color-primary-light-2: #e06a3a;
+  --color-primary-light-3: #f0a074;
+  --color-primary-light-4: #f8d6c0;
+  --color-primary-dark-1: #98290d;
+  --primary-rgb: 187, 54, 20;
+
+  /* ---- A. 品牌 Brand（暖琥珀橙） ---- */
+  --brand: #c2531a;
+  --brand-light: #fdeedd;
+  --brand-hover: #e8965a;
+  --color-brand-fill: #c2531a;
+  --color-brand-bg: #fdeedd;
+
+  /* ---- A. 品牌色阶 AOU（暖金→琥珀→朱→深褐，1 最浅 → 10 最深） ---- */
+  --aou-1: #fdf0df;
+  --aou-2: #fbe1c2;
+  --aou-3: #f6c894;
+  --aou-4: #eda85e;
+  --aou-5: #df8232;
+  --aou-6: #c2531a;
+  --aou-7: #9e3d13;
+  --aou-8: #762c0e;
+  --aou-9: #4e1d09;
+  --aou-10: #2a1208;
+
+  /* ---- A+B. 背景 Background（暖奶白霞底，自浅入深；1 浅 → 10 深） ---- */
+  --bg-base: #fffaf2;
+  --color-bg-1: #fff7ec;
+  --bg-1: #fff7ec;
+  --color-bg-2: #fdeeda;
+  --bg-2: #fdeeda;
+  --color-bg-3: #fae3c6;
+  --bg-3: #fae3c6;
+  --color-bg-4: #f4d2ab;
+  --bg-4: #f4d2ab;
+  --bg-5: #e6bd8f;
+  --bg-6: #c99a66;
+  --bg-8: #8a5e34;
+  --bg-9: #3a2410;
+  --bg-10: #1a1208;
+  --color-bg-5: #fffefb;
+  --color-bg-popup: #fffaf3;
+  --color-bg-white: #ffffff;
+
+  /* ---- A. 交互状态 Interactive（朱砂水洗） ---- */
+  --bg-hover: rgba(187, 54, 20, 0.06);
+  --bg-active: rgba(187, 54, 20, 0.12);
+
+  /* ---- A+B. 填充 Fill（fill-2 = hover/下拉，fill-3 = 选中/侧栏；用暖琥珀金水洗，
+       让「金」做选择态主旋律；fill-1 走暖墨灰给浅底一点深度） ---- */
+  --fill: #fdf3e8;
+  --color-fill: #fdf3e8;
+  --fill-0: #fffefb;
+  --fill-white-to-black: #ffffff;
+  --dialog-fill-0: #fff8f0;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(58, 29, 14, 0.04);
+  --color-fill-2: rgba(214, 120, 40, 0.10);
+  --color-fill-3: rgba(214, 120, 40, 0.16);
+  --color-fill-4: rgba(214, 120, 40, 0.24);
+
+  /* ---- A+B. 文字 Text（深咖墨字，远超 AA） ---- */
+  --color-text-1: #3a1d0e;
+  --text-primary: #3a1d0e;
+  --color-text-2: #7a4a2a;
+  --text-secondary: #7a4a2a;
+  --color-text-3: #946238;
+  --color-text-4: #c2a585;
+  --text-disabled: #c2a585;
+  --text-0: #2a1408;
+  --text-white: #ffffff;
+
+  /* ---- A+B. 边框 Border（暖砂细线） ---- */
+  --color-border: #f0d9bb;
+  --color-border-1: #f7e8d3;
+  --color-border-2: #f0d9bb;
+  --color-border-3: #e6c69e;
+  --color-border-4: #d3a877;
+  --border-base: #f0d9bb;
+  --border-light: #f7e8d3;
+  --border-special: #ecd0a8;
+
+  /* ---- A. 语义 Semantic（success 暖绿、warning 暮金褐、danger 偏冷正红与主色朱砂
+       拉开、info 暖琥珀承落日意象不引冷蓝；均深化保 AA） ---- */
+  --success: #0f7a4a;
+  --warning: #8a5a12;
+  --danger: #d11f2e;
+  --info: #b35a12;
+
+  /* ---- A. 组件 Components（暖金气泡 + 浅霞提示） ---- */
+  --message-user-bg: #fde4c8;
+  --message-tips-bg: #fdf0df;
+  --workspace-btn-bg: #fbeed9;
+  --color-guid-agent-bar: #fdebd5;
+  --sider-section-title-color: #946238;
+
+  /* ---- A. 终端 Terminal（画布恒深，取暗色暖渊底） ---- */
+  --terminal-surface-bg: #1a1208;
+  --terminal-border: rgba(58, 29, 14, 0.16);
+
+  /* ---- B. Arco 主色阶 primary-1..7（RGB 三元组，浅 → 深，6 = 主色基色 #bb3614） ---- */
+  --primary-1: 253, 237, 228;
+  --primary-2: 250, 218, 202;
+  --primary-3: 244, 185, 158;
+  --primary-4: 233, 138, 98;
+  --primary-5: 214, 90, 46;
+  --primary-6: 187, 54, 20;
+  --primary-7: 152, 41, 13;
+
+  /* ---- B. Arco 次级按钮 Secondary（暖砂水洗） ---- */
+  --color-secondary: #fbeed9;
+  --color-secondary-hover: #f6e1c4;
+  --color-secondary-active: #efd2ac;
+  --color-secondary-disabled: #fdf5e9;
+
+  /* ---- B. Arco 杂项 Misc ---- */
+  --color-tooltip-bg: #3a2410;
+  --color-mask-bg: rgba(42, 18, 8, 0.45);
+  --color-spin-layer-bg: rgba(255, 250, 242, 0.72);
+  --color-menu-light-bg: #fff8f0;
+  --color-menu-dark-bg: #1a1208;
+}
+
+/* ===== Dark / 日已落 · 天未黑（灵魂，必须在亮色块之后） ===== */
+[data-theme='dark'],
+[data-theme='dark'] body {
+  /* ---- A. 主色 Primary（暗下主色＝金琥珀做链接/强调「主旋律」，远过 AA；
+       按钮基色另由 Arco primary-6 与签名渐变压到朱砂保白字，见文末点缀 3） ---- */
+  --color-primary: #f3b240;
+  --primary: #f3b240;
+  --color-primary-light-1: #f6c468;
+  --color-primary-light-2: #f9d488;
+  --color-primary-light-3: #fbe1a8;
+  --color-primary-light-4: #fdeece;
+  --color-primary-dark-1: #d2922a;
+  --primary-rgb: 243, 178, 64;
+
+  /* ---- A. 品牌 Brand ---- */
+  --brand: #f3b240;
+  --brand-light: #2e1c0d;
+  --brand-hover: #9e3d13;
+  --color-brand-fill: #f3b240;
+  --color-brand-bg: #2e1c0d;
+
+  /* ---- A. 品牌色阶 AOU（暗模式反转：1 最深 → 10 最浅，余烬升温） ---- */
+  --aou-1: #2a1208;
+  --aou-2: #3d1c0b;
+  --aou-3: #5c2c10;
+  --aou-4: #8a4116;
+  --aou-5: #b85a1e;
+  --aou-6: #d8822a;
+  --aou-7: #f3b240;
+  --aou-8: #f6c86c;
+  --aou-9: #fadb9c;
+  --aou-10: #fdeece;
+
+  /* ---- A+B. 背景 Background（深暖 umber 天幕四层；1 深 → 10 浅） ---- */
+  --bg-base: #120c05;
+  --color-bg-1: #1a1208;
+  --bg-1: #1a1208;
+  --color-bg-2: #241809;
+  --bg-2: #241809;
+  --color-bg-3: #30210d;
+  --bg-3: #30210d;
+  --color-bg-4: #3f2c12;
+  --bg-4: #3f2c12;
+  --bg-5: #4f3818;
+  --bg-6: #6e5026;
+  --bg-8: #9a7a48;
+  --bg-9: #d8b48f;
+  --bg-10: #fbeede;
+  --color-bg-5: #1f1509;
+  --color-bg-popup: #241809;
+  --color-bg-white: #241809;
+
+  /* ---- A. 交互状态 Interactive（白光提亮，hover 中性不抢金朱） ---- */
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+
+  /* ---- A+B. 填充 Fill（fill-3 = 选中金水洗，fill-2 = hover/下拉金微洗——金做选择态主旋律） ---- */
+  --fill: #241809;
+  --color-fill: #241809;
+  --fill-0: rgba(255, 255, 255, 0.08);
+  --fill-white-to-black: #000000;
+  --dialog-fill-0: #241809;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(255, 255, 255, 0.04);
+  --color-fill-2: rgba(243, 178, 64, 0.12);
+  --color-fill-3: rgba(243, 178, 64, 0.18);
+  --color-fill-4: rgba(243, 178, 64, 0.26);
+
+  /* ---- A+B. 文字 Text（暖白 + 砂金灰阶） ---- */
+  --color-text-1: #fbeede;
+  --text-primary: #fbeede;
+  --color-text-2: #d8b48f;
+  --text-secondary: #d8b48f;
+  --color-text-3: #a78360;
+  --color-text-4: #6e5630;
+  --text-disabled: #6e5630;
+  --text-0: #ffffff;
+  --text-white: #ffffff;
+
+  /* ---- A+B. 边框 Border（半透明暖金 + 金特殊边） ---- */
+  --color-border: rgba(245, 178, 64, 0.16);
+  --color-border-1: rgba(245, 178, 64, 0.1);
+  --color-border-2: rgba(245, 178, 64, 0.16);
+  --color-border-3: rgba(245, 178, 64, 0.24);
+  --color-border-4: rgba(245, 178, 64, 0.34);
+  --border-base: rgba(245, 178, 64, 0.16);
+  --border-light: rgba(245, 178, 64, 0.1);
+  --border-special: rgba(245, 178, 64, 0.3);
+
+  /* ---- A. 语义 Semantic（暗下提亮：薄荷绿 success、暮金 warning、珊瑚红 danger、暖金 info） ---- */
+  --success: #34d399;
+  --warning: #f5c451;
+  --danger: #ff6a4d;
+  --info: #f6c468;
+
+  /* ---- A. 组件 Components（深暖金气泡 + 深褐提示） ---- */
+  --message-user-bg: #33200c;
+  --message-tips-bg: #241809;
+  --workspace-btn-bg: rgba(255, 255, 255, 0.05);
+  --color-guid-agent-bar: rgba(243, 178, 64, 0.12);
+  --sider-section-title-color: #b39468;
+
+  /* ---- A. 终端 Terminal（画布恒深） ---- */
+  --terminal-surface-bg: #120c05;
+  --terminal-border: rgba(255, 255, 255, 0.08);
+
+  /* ---- B. Arco 主色阶 primary-1..7（RGB 三元组，暗模式反转：深 → 浅；6 = 按钮基色朱砂，7 = 金亮强调） ---- */
+  --primary-1: 38, 18, 9;
+  --primary-2: 58, 26, 12;
+  --primary-3: 92, 38, 16;
+  --primary-4: 138, 52, 20;
+  --primary-5: 168, 62, 24;
+  --primary-6: 191, 52, 23;
+  --primary-7: 243, 178, 64;
+
+  /* ---- B. Arco 次级按钮 Secondary ---- */
+  --color-secondary: rgba(255, 255, 255, 0.08);
+  --color-secondary-hover: rgba(255, 255, 255, 0.12);
+  --color-secondary-active: rgba(255, 255, 255, 0.16);
+  --color-secondary-disabled: rgba(255, 255, 255, 0.04);
+
+  /* ---- B. Arco 杂项 Misc ---- */
+  --color-tooltip-bg: #3a2410;
+  --color-mask-bg: rgba(0, 0, 0, 0.66);
+  --color-spin-layer-bg: rgba(18, 12, 5, 0.66);
+  --color-menu-light-bg: #241809;
+  --color-menu-dark-bg: #120c05;
+}
+
+/* ============================================================================
+ * 签名点缀 Signature touches（仅外观：背景/渐变/描边/阴影/圆角，刻意不用
+ * backdrop-filter——「天幕实底 + 地平线辉光」而非毛玻璃，与 Frosted Glass 区分）
+ * ========================================================================== */
+
+/* 点缀 1：body 落日天幕 —— 实底是 178deg 近竖直天幕渐变（压低饱和保正文沉静）；
+ * 鲜亮的金→橙→朱只活在「画面下缘」的方向性 radial 辉光里（顶部不放亮晕＝日已落、
+ * 光压天际线），沿相邻色相连续过渡绝不跳品红；background-attachment: fixed 把
+ * 这道地平线钉死、不随滚动。 */
+body {
+  background-color: #fff7ec;
+  background-image:
+    radial-gradient(120% 80% at 50% 108%, rgba(245, 178, 64, 0.1), transparent 60%),
+    radial-gradient(100% 60% at 50% 102%, rgba(255, 150, 90, 0.08), transparent 58%),
+    radial-gradient(80% 60% at 16% 106%, rgba(214, 60, 30, 0.06), transparent 60%),
+    linear-gradient(178deg, #fffaf2 0%, #fff4e4 50%, #fde3cf 100%);
+  background-attachment: fixed;
+}
+
+[data-theme='dark'] body {
+  background-color: #1a1208;
+  background-image:
+    radial-gradient(120% 80% at 50% 108%, rgba(245, 178, 64, 0.16), transparent 60%),
+    radial-gradient(100% 60% at 50% 100%, rgba(191, 52, 23, 0.16), transparent 55%),
+    radial-gradient(80% 60% at 18% 105%, rgba(214, 120, 40, 0.12), transparent 60%),
+    linear-gradient(178deg, #160f06 0%, #1a1208 52%, #241408 100%);
+  background-attachment: fixed;
+}
+
+/* 点缀 2：侧边栏 —— 顶部金辉 → 底部朱砂洋流的竖向渐变 + inset 顶缘高光 +
+ * 右缘一道熔金极光细线（不用模糊，靠 inset 阴影画出余烬边缘），复刻天际线由金入朱。 */
+.layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(214, 120, 40, 0.06) 0%,
+    rgba(255, 255, 255, 0) 46%,
+    rgba(191, 52, 23, 0.06) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset -1px 0 0 rgba(214, 120, 40, 0.16),
+    8px 0 40px rgba(120, 60, 20, 0.06);
+}
+
+[data-theme='dark'] .layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(245, 178, 64, 0.08) 0%,
+    rgba(0, 0, 0, 0) 46%,
+    rgba(191, 52, 23, 0.1) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset -1px 0 0 rgba(245, 178, 64, 0.18),
+    8px 0 40px rgba(8, 5, 2, 0.45);
+}
+
+/* 点缀 3：主按钮 —— 金→朱一档线性渐变（金灿灿在上、红火火在下＝金朱交替；base 压得
+ * 够深保白字 ≥ AA，不靠渐变浅端虚标）+ hover 双层柔辉（熔金主辉 + 一丝朱红余烬）；
+ * :not() 排除语义状态按钮，避免 danger/warning/success 被染朱橙 */
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success) {
+  background-image: linear-gradient(135deg, #c64518 0%, #bb3614 100%);
+  border-color: transparent;
+  color: #ffffff;
+  transition: box-shadow 0.25s ease, background-color 0.2s ease;
+}
+
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success):hover {
+  box-shadow: 0 6px 20px rgba(245, 178, 64, 0.4), 0 0 24px rgba(226, 82, 30, 0.22);
+}
+
+[data-theme='dark'] .arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success) {
+  background-image: linear-gradient(135deg, #c94818 0%, #bf3417 100%);
+}
+
+[data-theme='dark'] .arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success):hover {
+  box-shadow: 0 6px 20px rgba(245, 178, 64, 0.45), 0 0 26px rgba(255, 106, 77, 0.22);
+}
+
+/* 点缀 4：下拉 / 弹层 / 悬浮卡 —— 实底（不透明，保正文可读）+ 暖金细描边 + 暖调投影
+ * 里掺一丝朱红余晖 + inset 顶高光，落日辉光浮起感而非毛玻璃 */
+.arco-select-popup,
+.arco-dropdown-menu,
+.arco-popover-content {
+  background: #fff8f0;
+  border: 1px solid rgba(214, 120, 40, 0.18);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 16px 44px rgba(96, 48, 16, 0.16),
+    0 2px 10px rgba(96, 48, 16, 0.06);
+}
+
+[data-theme='dark'] .arco-select-popup,
+[data-theme='dark'] .arco-dropdown-menu,
+[data-theme='dark'] .arco-popover-content {
+  background: #241809;
+  border: 1px solid rgba(245, 178, 64, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 16px 44px rgba(8, 5, 2, 0.6),
+    0 0 22px rgba(226, 82, 30, 0.07);
+}
+
+/* 点缀 5：模态框 / 抽屉 —— 实底 + 暖金细边 + 大圆角 + 暖调投影掺朱红余晖 */
+.arco-modal,
+.arco-drawer {
+  background: #fffaf3;
+  border: 1px solid rgba(214, 120, 40, 0.16);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 24px 64px rgba(96, 48, 16, 0.2),
+    0 0 36px rgba(226, 82, 30, 0.08);
+}
+
+[data-theme='dark'] .arco-modal,
+[data-theme='dark'] .arco-drawer {
+  background: #241809;
+  border: 1px solid rgba(245, 178, 64, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 24px 64px rgba(6, 4, 1, 0.66),
+    0 0 40px rgba(255, 106, 77, 0.06);
+}
+
+/* 点缀 6：Toast 消息条 —— 实底 + 暖金细边 + 暖调投影 */
+.arco-message {
+  background: #fff8f0;
+  border: 1px solid rgba(214, 120, 40, 0.16);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 12px 34px rgba(96, 48, 16, 0.16);
+}
+
+[data-theme='dark'] .arco-message {
+  background: #241809;
+  border: 1px solid rgba(245, 178, 64, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 12px 34px rgba(8, 5, 2, 0.5);
+}
+
+/* 点缀 7：会话搜索弹窗取色（落日暖金系，沿用各容器的可读性红线） */
+.conversation-search-modal {
+  --conversation-search-mask-bg: rgba(42, 18, 8, 0.2);
+  --conversation-search-panel-bg: rgba(255, 248, 240, 0.97);
+  --conversation-search-panel-inner-bg: #ffffff;
+  --conversation-search-panel-border: rgba(214, 120, 40, 0.2);
+  --conversation-search-panel-shadow: 0 22px 56px rgba(96, 48, 16, 0.2);
+  --conversation-search-panel-outline: rgba(255, 255, 255, 0.85);
+  --conversation-search-surface-bg: rgba(253, 243, 232, 0.92);
+  --conversation-search-input-bg: #ffffff;
+  --conversation-search-hover-bg: rgba(214, 120, 40, 0.12);
+}
+
+[data-theme='dark'] .conversation-search-modal,
+body[arco-theme='dark'] .conversation-search-modal {
+  --conversation-search-mask-bg: rgba(6, 4, 1, 0.58);
+  --conversation-search-panel-bg: rgba(36, 24, 9, 0.97);
+  --conversation-search-panel-inner-bg: #2a1c0c;
+  --conversation-search-panel-border: rgba(245, 178, 64, 0.16);
+  --conversation-search-panel-shadow: 0 24px 58px rgba(6, 4, 1, 0.6);
+  --conversation-search-panel-outline: rgba(255, 255, 255, 0.07);
+  --conversation-search-surface-bg: rgba(26, 18, 8, 0.86);
+  --conversation-search-input-bg: rgba(42, 28, 12, 0.96);
+  --conversation-search-hover-bg: rgba(245, 178, 64, 0.18);
+}

@@ -1,0 +1,33 @@
+{
+  "referenceLanguage": "en-US",
+  "fallbackLanguage": "en-US",
+  "supportedLanguages": ["zh-CN", "en-US"],
+  "modules": [
+    "common",
+    "agentMode",
+    "update",
+    "login",
+    "fileSelection",
+    "preview",
+    "conversation",
+    "settings",
+    "messages",
+    "mcp",
+    "acp",
+    "codex",
+    "tools",
+    "google",
+    "cron",
+    "requirements",
+    "idmm",
+    "starOffice",
+    "guid",
+    "agent",
+    "team",
+    "terminal",
+    "webhook",
+    "autowork",
+    "nomi",
+    "knowledge"
+  ]
+}

@@ -1,0 +1,438 @@
+/* ============================================================
+ * 暗夜霓虹 Neon Night  (id: neon-rainbow —— 历史 id，保持稳定不动)
+ * ------------------------------------------------------------
+ * 暗色是本体：近黑石墨底（#0b0b10 → #14141c → #1d1d28 → #262633），
+ * 像没开灯的录音棚。签名是一圈霓虹彩虹光管——只描在「边框」上，绝不在
+ * 框内画浮线：聊天主输入框常亮一圈全光谱彩虹边，普通输入框聚焦时整圈点亮，
+ * 像点起的霓虹灯带。其余点缀仍是克制的单色紫辉光（主按钮紫罗兰渐变 + hover
+ * 辉光、侧栏一束竖直紫光、弹层细紫描边）。全部靠 border-image / box-shadow
+ * 实现，静态、零重绘、无动画。
+ * 亮色是开灯的录音棚：近白底保持同一套点缀，切换不破。
+ *
+ * Dark is the soul: a near-black graphite studio (#0b0b10 / #14141c
+ * / #1d1d28 / #262633), lights off. The signature is a ring of neon
+ * tubing drawn ONLY on the border — never a filament floating inside
+ * the box: the chat composer (.sendbox-panel) carries a permanent
+ * full-spectrum rainbow edge, and plain inputs light their whole
+ * border on focus, like a neon strip switching on. Everything else
+ * keeps a single restrained violet glow (violet-gradient primary
+ * buttons with a hover bloom, a vertical violet shaft on the sider,
+ * thin violet popover outlines). All via border-image / box-shadow —
+ * static, zero repaint, no animation. Light mode is the lights-on
+ * studio: a near-white ground keeping the same accents so a switch
+ * never breaks.
+ * ============================================================ */
+
+/* ===== Light / 开灯的录音棚 ===== */
+:root,
+body {
+  /* Primary Colors - 主色（光谱里偏品红的霓虹紫，开灯后压深一档保白字 ≥4.5:1） */
+  --color-primary: #8f2dd6;
+  --primary: #8f2dd6;
+  --color-primary-light-1: #b14bff;
+  --color-primary-light-2: #c987ff;
+  --color-primary-light-3: #ddb4ff;
+  --color-primary-light-4: #efdcff;
+  --color-primary-dark-1: #7321ad;
+  --primary-rgb: 143, 45, 214;
+
+  /* Arco Primary Scale - 主色阶（RGB 三元组，1 浅 → 7 深；5/6/7 压深保白字对比） */
+  --primary-1: 244, 235, 255;
+  --primary-2: 233, 214, 255;
+  --primary-3: 221, 180, 255;
+  --primary-4: 201, 135, 255;
+  --primary-5: 177, 75, 255;
+  --primary-6: 143, 45, 214;
+  --primary-7: 115, 33, 173;
+
+  /* Brand Colors - 品牌色 */
+  --brand: #9d3ce0;
+  --brand-light: #f4ebff;
+  --brand-hover: #c987ff;
+  --color-brand-fill: #9d3ce0;
+  --color-brand-bg: #f4ebff;
+
+  /* Nomi Brand Scale - 品牌色阶（1 最浅 → 10 最深） */
+  --aou-1: #f6edff;
+  --aou-2: #ead7ff;
+  --aou-3: #d9b6ff;
+  --aou-4: #c189ff;
+  --aou-5: #a557ee;
+  --aou-6: #8f2dd6;
+  --aou-7: #7321ad;
+  --aou-8: #561783;
+  --aou-9: #390f57;
+  --aou-10: #1d082c;
+
+  /* Background Colors - 背景（亮场四层梯度，微冷紫灰） */
+  --bg-base: #ffffff;
+  --color-bg-1: #fafafd;
+  --bg-1: #fafafd;
+  --color-bg-2: #f1f1f6;
+  --bg-2: #f1f1f6;
+  --color-bg-3: #e3e3ec;
+  --bg-3: #e3e3ec;
+  --color-bg-4: #cfcfdb;
+  --bg-4: #cfcfdb;
+  --bg-5: #b2b2c2;
+  --bg-6: #88889b;
+  --bg-8: #53536a;
+  --bg-9: #1d1d28;
+  --bg-10: #0b0b10;
+  --color-bg-5: #ffffff;
+  --color-bg-popup: #ffffff;
+  --color-bg-white: #ffffff;
+
+  /* Interactive State Colors - 交互状态 */
+  --bg-hover: #f2f2f7;
+  --bg-active: #e6e6ee;
+
+  /* Fill Colors - 填充（fill-2 = 下拉 hover/选中淡紫水洗，
+     fill-3 = 侧栏选中态 = 主紫 10% 水洗） */
+  --fill: #f4f4f9;
+  --color-fill: #f4f4f9;
+  --fill-0: #ffffff;
+  --fill-white-to-black: #ffffff;
+  --dialog-fill-0: #ffffff;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(11, 11, 16, 0.03);
+  --color-fill-2: rgba(143, 45, 214, 0.08);
+  --color-fill-3: rgba(143, 45, 214, 0.14);
+  --color-fill-4: rgba(143, 45, 214, 0.2);
+
+  /* Text Colors - 文字（高对比墨字） */
+  --color-text-1: #14141c;
+  --text-primary: #14141c;
+  --color-text-2: #4c4c5a;
+  --text-secondary: #4c4c5a;
+  --color-text-3: #82828f;
+  --text-disabled: #c0c0cb;
+  --color-text-4: #c0c0cb;
+  --text-0: #000000;
+  --text-white: #ffffff;
+
+  /* Border Colors - 边框 */
+  --color-border: #e3e3ec;
+  --color-border-1: #eeeef3;
+  --color-border-2: #e3e3ec;
+  --color-border-3: #d3d3df;
+  --color-border-4: #b6b6c5;
+  --border-base: #e3e3ec;
+  --border-light: #eeeef3;
+  --border-special: var(--bg-3);
+
+  /* Secondary Button - 次级按钮 */
+  --color-secondary: #f1f1f6;
+  --color-secondary-hover: #e6e6ee;
+  --color-secondary-active: #d8d8e2;
+  --color-secondary-disabled: #f6f6fa;
+
+  /* Semantic Colors - 语义色（成功翠、警告橙、危险红、信息青，标准语义槽） */
+  --success: #16a34a;
+  --warning: #ea7a00;
+  --danger: #dc2f3a;
+  --info: #0e8ea3;
+
+  /* Misc Arco - 杂项 */
+  --color-tooltip-bg: #1d1d28;
+  --color-mask-bg: rgba(11, 11, 16, 0.5);
+  --color-spin-layer-bg: rgba(255, 255, 255, 0.6);
+  --color-menu-light-bg: #ffffff;
+  --color-menu-dark-bg: #1d1d28;
+
+  /* Component Colors - 组件（用户气泡淡紫，提示淡青，与霓虹紫同族） */
+  --message-user-bg: #f0e4ff;
+  --message-tips-bg: #e2f5f8;
+  --workspace-btn-bg: #f1f1f6;
+  --color-guid-agent-bar: #f3e8ff;
+  --sider-section-title-color: #6a6a78;
+
+  /* Terminal - 终端（画布恒深） */
+  --terminal-surface-bg: #0b0b10;
+  --terminal-border: rgba(0, 0, 0, 0.12);
+}
+
+/* ===== Dark / 近黑石墨录音棚（本体，必须在亮色块之后） ===== */
+[data-theme='dark'],
+[data-theme='dark'] body {
+  /* Primary Colors - 主色（霓虹紫原色，暗底上发光） */
+  --color-primary: #b14bff;
+  --primary: #b14bff;
+  --color-primary-light-1: #c36dff;
+  --color-primary-light-2: #d28cff;
+  --color-primary-light-3: #e0acff;
+  --color-primary-light-4: #eeccff;
+  --color-primary-dark-1: #9a2ff0;
+  --primary-rgb: 177, 75, 255;
+
+  /* Arco Primary Scale - 主色阶（暗模式反转：1 深 → 7 浅） */
+  --primary-1: 42, 14, 64;
+  --primary-2: 62, 20, 94;
+  --primary-3: 90, 29, 138;
+  --primary-4: 124, 41, 190;
+  --primary-5: 154, 56, 230;
+  --primary-6: 177, 75, 255;
+  --primary-7: 201, 130, 255;
+
+  /* Brand Colors - 品牌色 */
+  --brand: #bd5cff;
+  --brand-light: #2a0e40;
+  --brand-hover: #6a1ea3;
+  --color-brand-fill: #bd5cff;
+  --color-brand-bg: #2a0e40;
+
+  /* Nomi Brand Scale - 品牌色阶（暗模式反转：1 最深 → 10 最浅） */
+  --aou-1: #1c0a2b;
+  --aou-2: #2a0e40;
+  --aou-3: #3d1560;
+  --aou-4: #561f83;
+  --aou-5: #7029a8;
+  --aou-6: #9038d0;
+  --aou-7: #b14bff;
+  --aou-8: #c87dff;
+  --aou-9: #dca8ff;
+  --aou-10: #efd4ff;
+
+  /* Background Colors - 背景（近黑石墨四层梯度，微紫青冷调） */
+  --bg-base: #08080c;
+  --color-bg-1: #0b0b10;
+  --bg-1: #0b0b10;
+  --color-bg-2: #14141c;
+  --bg-2: #14141c;
+  --color-bg-3: #1d1d28;
+  --bg-3: #1d1d28;
+  --color-bg-4: #262633;
+  --bg-4: #262633;
+  --bg-5: #323240;
+  --bg-6: #4a4a5c;
+  --bg-8: #7a7a8e;
+  --bg-9: #c0c0cb;
+  --bg-10: #ededf2;
+  --color-bg-5: #1a1a24;
+  --color-bg-popup: #14141c;
+  --color-bg-white: #14141c;
+
+  /* Interactive State Colors - 交互状态（hover = 白 6% 提亮） */
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+
+  /* Fill Colors - 填充（fill-2 = hover 白 6%，fill-3 = 选中紫 14%） */
+  --fill: #14141c;
+  --color-fill: #14141c;
+  --fill-0: rgba(255, 255, 255, 0.08);
+  --fill-white-to-black: #000000;
+  --dialog-fill-0: #1a1a24;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(255, 255, 255, 0.04);
+  --color-fill-2: rgba(255, 255, 255, 0.06);
+  --color-fill-3: rgba(177, 75, 255, 0.14);
+  --color-fill-4: rgba(177, 75, 255, 0.22);
+
+  /* Text Colors - 文字（近白 + 灰阶） */
+  --color-text-1: #f5f5fa;
+  --text-primary: #f5f5fa;
+  --color-text-2: #b4b4c2;
+  --text-secondary: #b4b4c2;
+  --color-text-3: #88889a;
+  --text-disabled: #56566a;
+  --color-text-4: #56566a;
+  --text-0: #ffffff;
+  --text-white: #ffffff;
+
+  /* Border Colors - 边框 */
+  --color-border: #262633;
+  --color-border-1: #1f1f2a;
+  --color-border-2: #262633;
+  --color-border-3: #333342;
+  --color-border-4: #474758;
+  --border-base: #262633;
+  --border-light: #1f1f2a;
+  --border-special: #383848;
+
+  /* Secondary Button - 次级按钮 */
+  --color-secondary: rgba(255, 255, 255, 0.08);
+  --color-secondary-hover: rgba(255, 255, 255, 0.12);
+  --color-secondary-active: rgba(255, 255, 255, 0.16);
+  --color-secondary-disabled: rgba(255, 255, 255, 0.04);
+
+  /* Semantic Colors - 语义色（暗底上提亮，标准语义槽） */
+  --success: #3ddc84;
+  --warning: #ffb02e;
+  --danger: #ff6b6b;
+  --info: #2bd4e8;
+
+  /* Misc Arco - 杂项 */
+  --color-tooltip-bg: #2a2a38;
+  --color-mask-bg: rgba(0, 0, 0, 0.7);
+  --color-spin-layer-bg: rgba(11, 11, 16, 0.6);
+  --color-menu-light-bg: #14141c;
+  --color-menu-dark-bg: #0b0b10;
+
+  /* Component Colors - 组件（深紫气泡 + 深青提示） */
+  --message-user-bg: #2a1240;
+  --message-tips-bg: #0c2a2f;
+  --workspace-btn-bg: #14141c;
+  --color-guid-agent-bar: #1e1030;
+  --sider-section-title-color: #9090a2;
+
+  /* Terminal - 终端（画布恒深） */
+  --terminal-surface-bg: #0b0b10;
+  --terminal-border: rgba(255, 255, 255, 0.1);
+}
+
+/* ============================================================
+ * 签名点缀 / Signature touches —— 霓虹彩虹边框（只描边，绝不画浮线）
+ * 教训：装饰线不能"横"在框内——浮在输入框中段的下划线既丑又像故障，
+ * 而且当时同时打在 wrapper 与内层 input 上，于是框里横了两道线。
+ * 改为只点在「边框」：盒子自己的轮廓亮成一圈霓虹彩虹光管。聊天主输入框
+ * 常亮、普通输入框聚焦时点亮；其余仍走单色紫辉光（按钮、侧栏、弹层）。
+ * 全部靠 border-image / box-shadow，不新建定位元素、不改尺寸、无动画、零重绘。
+ *
+ * Lesson: a decorative line must never cut ACROSS the box — a mid-box
+ * underline read as ugly and glitchy, and it was painted on both the
+ * wrapper and the inner input, so two lines stacked inside the field.
+ * Now the accent lives ONLY on the border: the box's own outline lights
+ * up as a ring of neon-rainbow tubing. The chat composer glows always,
+ * plain inputs light their border on focus; the rest keeps a single
+ * violet glow (buttons, sider, popovers). All via border-image /
+ * box-shadow — no positioned elements, no size changes, no animation.
+ * ============================================================ */
+
+/* 1. 普通 Arco 输入框：静息只有 token 边框（干净），聚焦时整圈边框点亮成
+      霓虹彩虹光管（全光谱渐变描边，圆角保留）+ 一层紫辉光。彩虹只描在边框上，
+      框内不画任何横线，因此不会再出现"框中段两道横线"。 */
+.arco-input,
+.arco-input-inner,
+.arco-textarea,
+.arco-input-wrapper,
+.arco-textarea-wrapper {
+  border-radius: 8px;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.arco-input:focus,
+.arco-input-inner:focus,
+.arco-textarea:focus,
+.arco-input-wrapper.arco-input-focus,
+.arco-textarea-wrapper.arco-textarea-focus {
+  box-shadow: 0 0 11px rgba(177, 75, 255, 0.3);
+}
+
+/* 彩虹只描在「有边框的 wrapper」上：透明边 + 双层背景(实底 padding-box + 彩虹
+   border-box) + background-clip，既得整圈彩虹边、又保住 8px 圆角。内层 input 透明
+   无边、不参与描边，所以绝不会再出现"框内两道横线"。 */
+.arco-input-wrapper.arco-input-focus,
+.arco-textarea-wrapper.arco-textarea-focus {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background-image: linear-gradient(var(--color-bg-2), var(--color-bg-2)),
+    linear-gradient(
+      100deg,
+      #ff3b6b,
+      #ff8a3b,
+      #ffd93b,
+      #3bff8a,
+      #2bd4e8,
+      #6a7bff,
+      #b14bff,
+      #ff3bd4,
+      #ff3b6b
+    );
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+
+/* 2. 聊天主输入框 .sendbox-panel：常亮一圈霓虹彩虹光管（3px 边，与 border-3
+      对齐；双层背景 + background-clip 保住 20px 圆角，静态如点亮的灯带）；
+      聚焦/输入态再叠一层紫辉光。框内不画任何横线。 */
+.sendbox-panel {
+  border: 3px solid transparent;
+  border-radius: 20px;
+  background-image: linear-gradient(var(--dialog-fill-0), var(--dialog-fill-0)),
+    linear-gradient(
+      100deg,
+      #ff3b6b,
+      #ff8a3b,
+      #ffd93b,
+      #3bff8a,
+      #2bd4e8,
+      #6a7bff,
+      #b14bff,
+      #ff3bd4,
+      #ff3b6b
+    );
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  transition: box-shadow 0.3s ease;
+}
+
+[data-theme='dark'] .sendbox-panel {
+  box-shadow: 0 0 18px rgba(177, 75, 255, 0.16);
+}
+
+.sendbox-panel:focus-within {
+  box-shadow: 0 0 22px rgba(177, 75, 255, 0.3);
+}
+
+/* 3. 主按钮：霓虹紫罗兰渐变 + hover 辉光（亮色压深保白字 ≥4.5:1，暗色提亮发光）；
+      :not() 排除语义状态按钮，避免 danger/warning/success 被染紫 */
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success) {
+  background-image: linear-gradient(135deg, #9d3ce0 0%, #7c29be 100%);
+  border-color: transparent;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: box-shadow 0.25s ease;
+}
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success):hover {
+  box-shadow: 0 0 14px rgba(177, 75, 255, 0.45), 0 0 28px rgba(177, 75, 255, 0.2);
+}
+
+[data-theme='dark'] .arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success) {
+  background-image: linear-gradient(135deg, #c36dff 0%, #9a2ff0 100%);
+}
+
+/* 4. 侧栏：一束竖直霓虹紫流光（顶部辉光 → 中段淡出 → 底部微辉，background-image，
+      静态，不占布局）+ 紫色右缘细线。暗色明显、亮色克制。 */
+[data-theme='dark'] .layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(177, 75, 255, 0.12) 0%,
+    rgba(177, 75, 255, 0) 46%,
+    rgba(154, 47, 240, 0.1) 100%
+  );
+  box-shadow: inset -1px 0 0 rgba(177, 75, 255, 0.22);
+}
+
+[data-theme='light'] .layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(143, 45, 214, 0.06) 0%,
+    rgba(143, 45, 214, 0) 46%,
+    rgba(143, 45, 214, 0.05) 100%
+  );
+  box-shadow: inset -1px 0 0 rgba(143, 45, 214, 0.12);
+}
+
+/* 5. 暗色弹层/对话框：细紫描边 + 深投影，从近黑底浮起 */
+[data-theme='dark'] .arco-select-popup,
+[data-theme='dark'] .arco-dropdown-menu,
+[data-theme='dark'] .arco-popover-content,
+[data-theme='dark'] .arco-modal {
+  border: 1px solid rgba(177, 75, 255, 0.16);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.62);
+}
+
+/* 6. 选中文本：霓虹紫高亮 */
+[data-theme='dark'] ::selection {
+  background: rgba(177, 75, 255, 0.32);
+  color: #ffffff;
+}
+
+/* 7. 滚动条：暗色一条半透明霓虹紫，hover 提亮 */
+[data-theme='dark'] ::-webkit-scrollbar-thumb {
+  background: rgba(177, 75, 255, 0.28);
+  border-radius: 6px;
+}
+[data-theme='dark'] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(177, 75, 255, 0.45);
+}

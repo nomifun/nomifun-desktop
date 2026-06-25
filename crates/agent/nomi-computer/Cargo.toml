@@ -1,0 +1,51 @@
+[package]
+name = "nomi-computer"
+description = "Computer-use tool for Nomi (screenshot, mouse/keyboard synthesis, window control)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-types.workspace    = true
+nomi-protocol.workspace = true
+nomi-config.workspace   = true
+nomi-tools.workspace    = true
+nomi-a11y.workspace     = true
+
+tracing.workspace     = true
+tokio.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+
+xcap.workspace   = true
+enigo.workspace  = true
+image.workspace  = true
+base64.workspace = true
+# Reliable app/URL/file launch via the OS shell. The workspace enables the
+# `shellexecute-on-windows` feature so this uses ShellExecuteExW on Windows
+# instead of the `cmd /c start` fallback (whose window-title quirk pops the
+# "Windows cannot find 'X'" dialog). macOS/Linux use `open`/`xdg-open`.
+open.workspace   = true
+
+# macOS TCC permission probing (Accessibility / Screen Recording): proactive
+# status + prompt via AXIsProcessTrusted(WithOptions) and CG*ScreenCaptureAccess.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
+# Windows: correct absolute mouse actuation across the whole virtual desktop
+# (enigo 0.6's Coordinate::Abs normalizes against the PRIMARY monitor only and
+# omits MOUSEEVENTF_VIRTUALDESK, mis-projecting multi-monitor / negative-origin
+# targets) and real window activation (SetForegroundWindow). 0.61 matches the
+# version nomi-a11y already pins.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# test-util enables tokio::test(start_paused) so wait-clamp tests run instantly.
+tokio = { workspace = true, features = ["test-util"] }

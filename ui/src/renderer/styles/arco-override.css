@@ -1,0 +1,481 @@
+/* Arco Design custom overrides - non-theme related */
+
+/* Arco's arco.css puts 'Inter' first in font-family, which causes very thin
+   text on systems that have Inter installed. Override to use system fonts. */
+html,
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+/* Override Arco Design component backgrounds to white in light mode */
+/* 覆盖 Arco Design 组件背景色为白色（浅色模式） */
+/* .arco-input,
+.arco-textarea,
+.arco-select-view,
+.arco-picker,
+.arco-input-number,
+.arco-cascader-view,
+.arco-tree-select-view,
+.arco-auto-complete-view,
+.arco-mentions-view {
+  background-color: #ffffff !important;
+}
+
+.arco-input-wrapper {
+  background-color: #ffffff !important;
+}
+
+.arco-select-popup .arco-select-option {
+  &:hover {
+    background-color: #fafafa !important;
+  }
+} */
+
+.arco-btn {
+  &.arco-btn-outline {
+    border-color: #86909c;
+    color: #86909c;
+  }
+}
+
+.arco-btn-primary.arco-btn-disabled {
+  background-color: var(--aou-2) !important;
+  border-color: var(--aou-2) !important;
+}
+
+.arco-collapse {
+  border: none;
+  border-radius: 8px;
+  .arco-collapse-item-header {
+    border-bottom: none;
+  }
+}
+
+/* Arco Tag dark mode styles - enhance contrast with semi-transparent backgrounds */
+/* Arco Tag 深色模式样式 - 使用半透明背景增强对比度 */
+body[arco-theme='dark'] .arco-tag-checked.arco-tag-blue {
+  background-color: rgba(59, 130, 246, 0.2) !important;
+  color: rgb(96, 165, 250) !important;
+}
+
+body[arco-theme='dark'] .arco-tag-checked.arco-tag-green {
+  background-color: rgba(34, 197, 94, 0.2) !important;
+  color: rgb(74, 222, 128) !important;
+}
+
+body[arco-theme='dark'] .arco-tag-checked.arco-tag-red {
+  background-color: rgba(239, 68, 68, 0.2) !important;
+  color: rgb(248, 113, 113) !important;
+}
+
+body[arco-theme='dark'] .arco-tag-checked.arco-tag-orange {
+  background-color: rgba(245, 158, 11, 0.2) !important;
+  color: rgb(251, 191, 36) !important;
+}
+
+body[arco-theme='dark'] .arco-tag-checked.arco-tag-gray {
+  background-color: rgba(156, 163, 175, 0.2) !important;
+  color: rgb(209, 213, 219) !important;
+}
+
+/* Nomi Steps wrapper styles */
+.nomifun-steps .arco-steps-item-process .arco-steps-item-icon {
+  background-color: var(--aou-6-brand) !important;
+  border-color: var(--aou-6-brand) !important;
+}
+
+.nomifun-steps .arco-steps-item-finish .arco-steps-item-icon {
+  background-color: #e8f3ff !important;
+  border-color: #e8f3ff !important;
+  border-radius: 50% !important;
+}
+
+.nomifun-steps .arco-steps-item-finish .arco-steps-item-icon .arco-steps-icon {
+  line-height: 28px !important;
+}
+
+/* Nomi Modal wrapper styles */
+.nomifun-modal .arco-modal-content {
+  background: var(--dialog-fill-0) !important;
+  border: 1px solid var(--border-base) !important;
+  border-radius: 16px !important;
+}
+
+body[arco-theme='dark'] .arco-modal-content {
+  background-color: var(--dialog-fill-0) !important;
+  border: 1px solid var(--border-base) !important;
+}
+
+body[arco-theme='dark'] .arco-modal {
+  background-color: var(--dialog-fill-0) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-header {
+  background-color: var(--dialog-fill-0) !important;
+  border-bottom-color: var(--border-base) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-body,
+body[arco-theme='dark'] .arco-modal-footer {
+  background-color: var(--dialog-fill-0) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-footer {
+  border-top-color: var(--border-base) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-title {
+  color: var(--text-primary) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-body,
+body[arco-theme='dark'] .arco-modal-confirm-title,
+body[arco-theme='dark'] .arco-modal-confirm-content {
+  color: var(--text-primary) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-close-icon {
+  color: var(--text-secondary) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-close-icon:hover {
+  color: var(--text-primary) !important;
+  background-color: var(--color-fill-1) !important;
+}
+
+body[arco-theme='dark'] .arco-modal-confirm-icon {
+  color: var(--warning) !important;
+}
+
+/* Sider footer popovers: WebUI and theme controls need a softer shell than Arco's default card. */
+.sider-soft-popover {
+  --sider-popover-radius: 16px;
+}
+
+.sider-soft-popover .arco-popover-content {
+  background: var(--dialog-fill-0) !important;
+  border: 1px solid var(--border-base) !important;
+  border-radius: var(--sider-popover-radius) !important;
+  box-shadow:
+    0 18px 46px rgba(15, 23, 42, 0.13),
+    0 3px 12px rgba(15, 23, 42, 0.06) !important;
+  overflow: hidden;
+}
+
+.sider-soft-popover .arco-popover-inner {
+  border-radius: calc(var(--sider-popover-radius) - 2px);
+}
+
+.sider-soft-popover .arco-popover-arrow {
+  background: var(--dialog-fill-0) !important;
+  border-color: var(--border-base) !important;
+}
+
+body[arco-theme='dark'] .sider-soft-popover .arco-popover-content {
+  border-color: var(--color-border-2) !important;
+  box-shadow:
+    0 20px 52px rgba(0, 0, 0, 0.42),
+    0 2px 12px rgba(0, 0, 0, 0.26) !important;
+}
+
+body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
+  border-color: var(--color-border-2) !important;
+}
+
+/* Conversation capability popovers (smart-decision / knowledge): Arco adds its
+   own inner padding, while IdmmControl / KnowledgeControl already own the panel
+   padding. Zero the shell padding so the content has one consistent left/right
+   gutter instead of a doubled left side. */
+.idmm-control-popover .arco-popover-content,
+.idmm-control-popover .arco-popover-inner,
+.idmm-control-popover .arco-popover-inner-content,
+.knowledge-control-popover .arco-popover-content,
+.knowledge-control-popover .arco-popover-inner,
+.knowledge-control-popover .arco-popover-inner-content {
+  padding: 0 !important;
+}
+
+.knowledge-control-popover .knowledge-control-search,
+.knowledge-control-popover .knowledge-control-search .arco-input-inner-wrapper {
+  border-color: var(--color-border-2) !important;
+  background: var(--color-bg-1) !important;
+}
+
+.knowledge-control-popover .knowledge-control-search input,
+.knowledge-control-popover .knowledge-control-search .arco-input {
+  color: var(--color-text-1) !important;
+}
+
+.knowledge-control-popover .knowledge-control-search input::placeholder,
+.knowledge-control-popover .knowledge-control-search .arco-input::placeholder {
+  color: var(--color-text-3) !important;
+  opacity: 1 !important;
+}
+
+/* Modal form controls need visible idle outlines so fields don't disappear into the dialog surface. */
+.arco-modal
+  .arco-input:not(.arco-input-disabled):not(.arco-input-error):not(.arco-input-warning):not(.arco-input-focus):not(
+    :focus
+  ),
+.arco-modal
+  .arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled):not(.arco-input-inner-wrapper-error):not(
+    .arco-input-inner-wrapper-warning
+  ):not(.arco-input-inner-wrapper-focus),
+.arco-modal
+  .arco-textarea:not(.arco-textarea-disabled):not(.arco-textarea-error):not(.arco-textarea-warning):not(
+    .arco-textarea-focus
+  ):not(:focus),
+.arco-modal
+  .arco-select:not(.arco-select-disabled):not(.arco-select-error):not(.arco-select-warning):not(.arco-select-focused)
+  .arco-select-view,
+.arco-modal
+  .arco-cascader:not(.arco-cascader-disabled):not(.arco-cascader-error):not(.arco-cascader-warning):not(
+    .arco-cascader-focused
+  )
+  .arco-cascader-view,
+.arco-modal
+  .arco-tree-select:not(.arco-tree-select-disabled):not(.arco-tree-select-error):not(.arco-tree-select-warning):not(
+    .arco-tree-select-focused
+  )
+  .arco-tree-select-view,
+.arco-modal
+  .arco-picker:not(.arco-picker-disabled):not(.arco-picker-error):not(.arco-picker-warning):not(.arco-picker-focused) {
+  border-color: var(--border-base) !important;
+}
+
+.arco-modal
+  .arco-input:not(.arco-input-disabled):not(.arco-input-error):not(.arco-input-warning):not(.arco-input-focus):hover,
+.arco-modal
+  .arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled):not(.arco-input-inner-wrapper-error):not(
+    .arco-input-inner-wrapper-warning
+  ):not(.arco-input-inner-wrapper-focus):hover,
+.arco-modal
+  .arco-textarea:not(.arco-textarea-disabled):not(.arco-textarea-error):not(.arco-textarea-warning):not(
+    .arco-textarea-focus
+  ):hover,
+.arco-modal
+  .arco-select:not(.arco-select-disabled):not(.arco-select-error):not(.arco-select-warning):not(
+    .arco-select-focused
+  ):hover
+  .arco-select-view,
+.arco-modal
+  .arco-cascader:not(.arco-cascader-disabled):not(.arco-cascader-error):not(.arco-cascader-warning):not(
+    .arco-cascader-focused
+  ):hover
+  .arco-cascader-view,
+.arco-modal
+  .arco-tree-select:not(.arco-tree-select-disabled):not(.arco-tree-select-error):not(.arco-tree-select-warning):not(
+    .arco-tree-select-focused
+  ):hover
+  .arco-tree-select-view,
+.arco-modal
+  .arco-picker:not(.arco-picker-disabled):not(.arco-picker-error):not(.arco-picker-warning):not(
+    .arco-picker-focused
+  ):hover {
+  border-color: var(--bg-4) !important;
+}
+
+.nomifun-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px 16px;
+}
+
+.nomifun-modal-title {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.nomifun-modal-close-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  transition: background-color 0.2s;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
+.nomifun-modal-close-btn:hover {
+  background: var(--color-fill-1);
+}
+
+/* Arco Message custom styles */
+.arco-message {
+  border: none !important;
+  border-radius: 8px !important;
+  /* Compact toast: Arco's 10px padding + 20px icon makes a ~42px-tall bar */
+  padding: 6px 12px !important;
+}
+
+/* The !important shorthand above clobbers Arco's .arco-message-closable
+   (padding-right: 38px), letting text run under the absolute-positioned
+   close button. 34px = right offset 12 + button ~12 + breathing room. */
+.arco-message-closable {
+  padding-right: 34px !important;
+}
+
+.arco-message .arco-message-icon {
+  font-size: 16px;
+}
+
+/* Arco hardcodes top: 14px, sized for the default 42px-tall message */
+.arco-message .arco-message-close-btn {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Light mode */
+.arco-message-success {
+  background: linear-gradient(270deg, #f9fff2 0%, #d2ffd9 100%) !important;
+}
+
+.arco-message-warning {
+  background: linear-gradient(90deg, #fff3dc 0%, #fff8de 100%) !important;
+}
+
+.arco-message-info {
+  background: linear-gradient(90deg, #e8f3ff 0%, #f8f8ff 49.52%) !important;
+}
+
+.arco-message-error {
+  background: linear-gradient(90deg, #ffdddb 0%, #fff3f0 100%) !important;
+}
+
+/* Dark mode */
+body[arco-theme='dark'] .arco-message-success {
+  background: linear-gradient(270deg, rgba(249, 255, 242, 0.3) 0%, rgba(210, 255, 217, 0.3) 100%) !important;
+}
+
+body[arco-theme='dark'] .arco-message-warning {
+  background: linear-gradient(90deg, rgba(255, 243, 220, 0.3) 0%, rgba(255, 248, 222, 0.3) 100%) !important;
+}
+
+body[arco-theme='dark'] .arco-message-info {
+  background: linear-gradient(90deg, rgba(232, 243, 255, 0.3) 0%, rgba(248, 248, 255, 0.3) 49.52%) !important;
+}
+
+body[arco-theme='dark'] .arco-message-error {
+  background: linear-gradient(90deg, rgba(255, 221, 219, 0.3) 0%, rgba(255, 243, 240, 0.3) 100%) !important;
+}
+
+/* Workspace tree selection styles - use text color instead of background */
+.workspace-tree .arco-tree-node-selected .arco-tree-node-title {
+  background-color: transparent !important;
+}
+
+/* Workspace tree hover styles - more visible hover effect */
+.workspace-tree .arco-tree-node:hover .arco-tree-node-title {
+  background-color: var(--color-fill-3) !important;
+}
+
+/* Alert styles - content is now displayed below the Alert card, so these rules are no longer needed */
+/* Alert 样式 - 内容现在显示在 Alert 卡片下方，因此不再需要这些规则 */
+
+/* Settings modal mobile tabs styles */
+/* 设置弹窗移动端 Tabs 样式 */
+.settings-mobile-tabs {
+  .arco-tabs-nav {
+    border-bottom: 1px solid var(--color-border-2);
+  }
+
+  .arco-tabs-nav-tab {
+    font-size: 14px;
+    padding: 8px 0;
+    margin: 0 12px;
+    color: var(--color-text-2);
+  }
+
+  .arco-tabs-nav-tab:first-child {
+    margin-left: 0;
+  }
+
+  .arco-tabs-nav-tab-active {
+    color: var(--color-text-1);
+    font-weight: 500;
+  }
+
+  .arco-tabs-nav-ink {
+    height: 2px;
+    background: var(--color-primary);
+  }
+}
+
+/* WebUI / Channels tabs in Remote settings */
+.settings-remote-tabs {
+  .arco-tabs-nav {
+    border-bottom: 1px solid var(--color-border-2);
+  }
+
+  .arco-tabs-nav-tab {
+    color: var(--color-text-2);
+    padding: 8px 0;
+  }
+
+  .arco-tabs-nav-tab:hover {
+    color: var(--color-text-1);
+  }
+
+  .arco-tabs-nav-tab-active {
+    color: var(--color-text-1);
+    font-weight: 600;
+  }
+
+  .arco-tabs-nav-ink {
+    height: 2px;
+    background: var(--color-primary);
+  }
+}
+
+/* Guid (homepage) mobile: cap model / permission pills so long values
+ * truncate instead of pushing the `+` and send buttons off-screen.
+ * Driven by LayoutContext.isMobile (data-mobile attribute) so it fires
+ * even when CSS media queries don't — Electron windows can report widths
+ * wider than 768px while still being shaped like mobile. Lives here in
+ * the global stylesheet because the homepage doesn't import sendbox.css. */
+[data-mobile='true'] .agent-mode-compact-pill,
+[data-mobile='true'] [data-testid='guid-model-selector'],
+[data-mobile='true'] [data-testid='mode-selector'] {
+  max-width: 130px !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+[data-mobile='true'] .agent-mode-compact-pill .arco-btn-content {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+/* Inside the guid model selector, only the label text shrinks/truncates;
+ * the leading brain icon and trailing down chevron stay at their natural
+ * size so the dropdown affordance never disappears. The button's direct
+ * child is a flex span containing [icon, label, chevron]. */
+[data-mobile='true'] [data-testid='guid-model-selector'] > span {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+
+[data-mobile='true'] [data-testid='guid-model-selector'] > span > span:nth-child(2) {
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: clip !important;
+  white-space: nowrap !important;
+}
+
+/* Tighten the gap between model and mode pills on mobile by trimming
+ * each pill's horizontal padding — Arco's round buttons default to
+ * ~12px each side, leaving a visible ~24px chasm even with gap:0. */
+[data-mobile='true'] [data-testid='guid-model-selector'].arco-btn-shape-round,
+[data-mobile='true'] [data-testid='mode-selector'] .arco-btn-shape-round {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+}

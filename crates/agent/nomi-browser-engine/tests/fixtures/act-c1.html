@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>C1 click/type/set_value</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  /* fixed 定位让元素稳定在视口内（C1 走真实 getContentQuads，非硬编码点）。 */
+  .row { position: relative; margin: 8px; }
+  #name   { display: block; width: 240px; height: 28px; }
+  #notes  { display: block; width: 240px; height: 60px; }
+  #toggle { display: block; width: 200px; height: 36px; }
+  /* F2 元素 fixed 钉在视口右上角——永远在视口内（C1 走真实 getContentQuads），
+     且不挤占文档流，不会把 #submit 顶出视口。 */
+  #agree-row { position: fixed; top: 8px; right: 120px; }
+  #noop  { position: fixed; top: 8px; right: 8px; width: 100px; height: 28px; }
+  form#login { margin: 8px; }
+  #login input { display: block; width: 240px; height: 28px; margin: 4px 0; }
+  #login button { width: 200px; height: 36px; }
+</style>
+</head>
+<body>
+  <h1>C1 actions</h1>
+
+  <!-- type: 文本输入，type 后读回 value 验证 -->
+  <div class="row"><label>Name <input id="name" type="text"></label></div>
+
+  <!-- set_value: textarea，直接设值后读回 -->
+  <div class="row"><label>Notes <textarea id="notes"></textarea></label></div>
+
+  <!-- click: 按钮点击改自身文案，验证点击真分发到元素 -->
+  <div class="row"><button id="toggle">Not clicked</button></div>
+
+  <!-- 登录表单（验收点）：user/pass input + submit button；submit 时打标记（不真导航，preventDefault）。 -->
+  <form id="login" action="javascript:void(0)">
+    <label>Username <input id="username" name="username" type="text" autocomplete="username"></label>
+    <label>Password <input id="password" name="password" type="password" autocomplete="current-password"></label>
+    <button id="submit" type="submit">Sign in</button>
+  </form>
+
+  <!-- 登录提交后的可见标记（aria 可观测：role=status）。 -->
+  <div id="login-status" role="status" aria-label="login status">idle</div>
+
+  <!-- F2 富锚点（fixed 钉视口右上角，永在视口内、不挤占文档流、不顶出 #submit）:
+       checkbox 点击切换 checked（URL 不变也能经元素态锚点判 changed=true）；
+       #noop 点击不改态不导航（changed 应如实 false）。 -->
+  <div id="agree-row"><label><input id="agree" type="checkbox"> I agree</label></div>
+  <button id="noop" type="button">No-op</button>
+
+  <script>
+    document.getElementById('toggle').addEventListener('click', function () {
+      this.textContent = 'Clicked';
+    });
+    document.getElementById('login').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var u = document.getElementById('username').value;
+      // 把提交时捕获的用户名写进可见标记（证明 type 真写入 + click submit 真触发）；
+      // 不回显 password 值（与脱敏精神一致——这里只为证明表单态变）。
+      document.getElementById('login-status').textContent = 'submitted:' + u;
+    });
+  </script>
+</body>
+</html>

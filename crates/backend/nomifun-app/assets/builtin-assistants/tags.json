@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "tags": [
+    { "key": "office",     "dimension": "audience", "sort_order": 1, "label": "Office",      "label_i18n": { "en-US": "Office",        "zh-CN": "职场办公" } },
+    { "key": "student",    "dimension": "audience", "sort_order": 2, "label": "Student",     "label_i18n": { "en-US": "Student/Academic","zh-CN": "学生学术" } },
+    { "key": "designer",   "dimension": "audience", "sort_order": 3, "label": "Designer",    "label_i18n": { "en-US": "Designer/Creative","zh-CN": "设计创意" } },
+    { "key": "developer",  "dimension": "audience", "sort_order": 4, "label": "Developer",   "label_i18n": { "en-US": "Developer",     "zh-CN": "开发者" } },
+    { "key": "marketing",  "dimension": "audience", "sort_order": 5, "label": "Marketing",   "label_i18n": { "en-US": "Ops/Marketing", "zh-CN": "运营营销" } },
+    { "key": "finance",    "dimension": "audience", "sort_order": 6, "label": "Finance",     "label_i18n": { "en-US": "Finance/Business","zh-CN": "金融商务" } },
+    { "key": "general",    "dimension": "audience", "sort_order": 7, "label": "General",     "label_i18n": { "en-US": "General",       "zh-CN": "通用" } },
+
+    { "key": "document",     "dimension": "scenario", "sort_order": 1,  "label": "Documents",      "label_i18n": { "en-US": "Documents",        "zh-CN": "文档写作" } },
+    { "key": "presentation", "dimension": "scenario", "sort_order": 2,  "label": "Presentations", "label_i18n": { "en-US": "Presentations",   "zh-CN": "演示文稿" } },
+    { "key": "spreadsheet",  "dimension": "scenario", "sort_order": 3,  "label": "Spreadsheets",  "label_i18n": { "en-US": "Spreadsheets",    "zh-CN": "表格数据" } },
+    { "key": "dataviz",      "dimension": "scenario", "sort_order": 4,  "label": "Data Viz",      "label_i18n": { "en-US": "Data Viz",        "zh-CN": "数据可视化" } },
+    { "key": "design",       "dimension": "scenario", "sort_order": 5,  "label": "Design",        "label_i18n": { "en-US": "Design",          "zh-CN": "设计创作" } },
+    { "key": "coding",       "dimension": "scenario", "sort_order": 6,  "label": "Coding",        "label_i18n": { "en-US": "Coding",          "zh-CN": "编程开发" } },
+    { "key": "research",     "dimension": "scenario", "sort_order": 7,  "label": "Research",      "label_i18n": { "en-US": "Research",        "zh-CN": "学术研究" } },
+    { "key": "writing",      "dimension": "scenario", "sort_order": 8,  "label": "Creative",      "label_i18n": { "en-US": "Creative Writing","zh-CN": "创意写作" } },
+    { "key": "planning",     "dimension": "scenario", "sort_order": 9,  "label": "Planning",      "label_i18n": { "en-US": "Planning",        "zh-CN": "规划管理" } },
+    { "key": "social",       "dimension": "scenario", "sort_order": 10, "label": "Social",        "label_i18n": { "en-US": "Social Media",    "zh-CN": "社交媒体" } },
+    { "key": "setup",        "dimension": "scenario", "sort_order": 11, "label": "Setup",         "label_i18n": { "en-US": "Tooling/Setup",   "zh-CN": "工具配置" } }
+  ]
+}

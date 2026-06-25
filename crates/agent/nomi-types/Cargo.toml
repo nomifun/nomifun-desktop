@@ -1,0 +1,13 @@
+[package]
+name = "nomi-types"
+description = "Shared provider-neutral data types for Nomi (LLM, message, tool)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+chrono.workspace      = true

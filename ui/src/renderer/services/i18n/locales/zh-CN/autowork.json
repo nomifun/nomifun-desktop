@@ -1,0 +1,40 @@
+{
+  "title": "标签会话管理",
+  "tabs": {
+    "tagSessions": "标签会话管理"
+  },
+  "tagSessions": {
+    "tag": "标签",
+    "counts": "需求统计",
+    "countsFmt": "{{done}}/{{total}}",
+    "boundCount": "绑定会话数",
+    "webhook": "绑定 Webhook",
+    "webhookPlaceholder": "选择 Webhook",
+    "webhookNone": "无",
+    "description": "描述",
+    "descriptionPlaceholder": "输入标签描述",
+    "actions": "操作",
+    "sessions": "绑定会话",
+    "unbind": "解绑",
+    "activeStopInSession": "该会话正在执行中，请前往会话页面停止后再解绑",
+    "unbindOk": "已成功解绑",
+    "unbindError": "解绑失败：{{error}}",
+    "settingSaved": "标签设置已保存",
+    "settingError": "保存标签设置失败：{{error}}",
+    "conflictWarning": "多个会话同时活跃",
+    "empty": "暂无标签数据",
+    "noBindings": "无绑定会话",
+    "pausedBadge": "已暂停：{{reason}}",
+    "pausedReasons": {
+      "requirementFailed": "需求执行失败",
+      "userInterrupted": "手动停止"
+    },
+    "resume": "恢复",
+    "resumeSuccess": "标签已恢复"
+  },
+  "runState": {
+    "off": "已关闭",
+    "idle": "空闲",
+    "active": "执行中"
+  }
+}

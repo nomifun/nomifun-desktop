@@ -1,0 +1,241 @@
+[workspace]
+resolver = "3"
+members = ["crates/agent/*", "crates/backend/*", "crates/shared/*", "apps/web", "apps/desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "local/nomifun-tauri"
+
+[workspace.dependencies]
+# --- Internal crates: backend (from nomifun-be-rs) ---
+nomifun-common = { path = "crates/backend/nomifun-common" }
+nomifun-assets = { path = "crates/backend/nomifun-assets" }
+nomifun-db = { path = "crates/backend/nomifun-db" }
+nomifun-api-types = { path = "crates/backend/nomifun-api-types" }
+nomifun-realtime = { path = "crates/backend/nomifun-realtime" }
+nomifun-runtime = { path = "crates/backend/nomifun-runtime" }
+nomifun-auth = { path = "crates/backend/nomifun-auth" }
+nomifun-system = { path = "crates/backend/nomifun-system" }
+nomifun-file = { path = "crates/backend/nomifun-file" }
+nomifun-office = { path = "crates/backend/nomifun-office" }
+nomifun-shell = { path = "crates/backend/nomifun-shell" }
+nomifun-ai-agent = { path = "crates/backend/nomifun-ai-agent" }
+nomifun-mcp = { path = "crates/backend/nomifun-mcp" }
+nomifun-conversation = { path = "crates/backend/nomifun-conversation" }
+nomifun-extension = { path = "crates/backend/nomifun-extension" }
+nomifun-channel = { path = "crates/backend/nomifun-channel" }
+nomifun-team = { path = "crates/backend/nomifun-team" }
+nomifun-cron = { path = "crates/backend/nomifun-cron" }
+nomifun-requirement = { path = "crates/backend/nomifun-requirement" }
+nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
+nomifun-knowledge = { path = "crates/backend/nomifun-knowledge" }
+nomifun-companion = { path = "crates/backend/nomifun-companion" }
+nomifun-gateway = { path = "crates/backend/nomifun-gateway" }
+nomifun-public = { path = "crates/backend/nomifun-public" }
+nomifun-webhook = { path = "crates/backend/nomifun-webhook" }
+nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
+nomifun-assistant = { path = "crates/backend/nomifun-assistant" }
+nomifun-secret = { path = "crates/backend/nomifun-secret" }
+nomifun-app = { path = "crates/backend/nomifun-app" }
+
+# --- Internal crates: shared ---
+nomifun-net = { path = "crates/shared/nomifun-net" }
+nomi-redact = { path = "crates/shared/nomi-redact" }
+
+# --- Internal crates: agent (from nomifun-agent-rs, now local) ---
+nomi-types = { path = "crates/agent/nomi-types" }
+nomi-protocol = { path = "crates/agent/nomi-protocol" }
+nomi-compact = { path = "crates/agent/nomi-compact" }
+nomi-config = { path = "crates/agent/nomi-config" }
+nomi-providers = { path = "crates/agent/nomi-providers" }
+nomi-tools = { path = "crates/agent/nomi-tools" }
+nomi-mcp = { path = "crates/agent/nomi-mcp" }
+nomi-skills = { path = "crates/agent/nomi-skills" }
+nomi-memory = { path = "crates/agent/nomi-memory" }
+nomi-agent = { path = "crates/agent/nomi-agent" }
+nomi-computer = { path = "crates/agent/nomi-computer" }
+nomi-a11y = { path = "crates/agent/nomi-a11y" }
+nomi-browser-engine = { path = "crates/agent/nomi-browser-engine" }
+nomi-browser = { path = "crates/agent/nomi-browser" }
+
+# --- Core framework ---
+tokio = { version = "1", features = ["full"] }
+# CancellationToken (tokio_util::sync) — exposed in default features on 0.7.x.
+# Hierarchical parent→child cancellation is the Rust idiom for Playwright's
+# LongStandingScope (page.close / frame.detach cancels all in-flight ops below).
+tokio-util = { version = "0.7" }
+axum = { version = "0.8", features = ["multipart", "ws"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit", "fs"] }
+http = "1"
+futures = "0.3"
+futures-util = "0.3"
+
+# --- Serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# --- Async / error / log ---
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+
+# --- CLI ---
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- Database ---
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# --- Auth / Crypto ---
+# NOTE: nomi-providers uses jsonwebtoken 10; nomifun-auth pins 9 in its own
+# manifest (the only be-rs consumer). Keep the workspace default at 10.
+jsonwebtoken = "10"
+bcrypt = "0.17"
+aes-gcm = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+# Public Suffix List (compile-time embedded, offline) for eTLD+1 domain binding
+# in nomifun-secret. Correctly handles multi-level suffixes (co.uk, com.cn).
+psl = "2"
+
+uuid = { version = "1", features = ["v7"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "rustls-tls", "socks", "system-proxy"], default-features = false }
+dashmap = "6"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+prost = "0.13"
+semver = "1"
+dirs = "6"
+regex = "1"
+
+# --- File system ---
+include_dir = "0.7"
+notify = "8"
+walkdir = "2"
+ignore = "0.4"
+# Unified-diff computation for the knowledge-base inbox review panel (P4).
+similar = "2"
+zip = "2"
+# Node portable-runtime archive extraction (provisioner): tar.gz on unix/macos.
+flate2 = "1"
+tar = "0.4"
+git2 = { version = "0.20", default-features = false }
+mime_guess = "2"
+rust-embed = "8"
+fs2 = "0.4"
+zstd = "0.13"
+glob = "0.3"
+
+# --- Cron / time ---
+cron = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# --- PTY / shell ---
+portable-pty = "0.8"
+# `shellexecute-on-windows`: launch via real ShellExecuteExW on Windows instead
+# of the default `cmd /c start "" <target>` fallback. The `start` builtin
+# mis-parses URLs/paths as window titles, runs with no console (CREATE_NO_WINDOW)
+# so its failure dialog can't surface, and pops a blocking "Windows cannot find
+# '\\'" modal. ShellExecuteExW delegates to the interactive shell (like the
+# `microsoft-edge:` protocol path that works) — no cmd, no console, no dialog.
+# Windows-only feature; macOS/Linux paths are unaffected.
+open = { version = "5", features = ["shellexecute-on-windows"] }
+which = "7"
+
+# --- Office ---
+calamine = "0.26"
+rust_xlsxwriter = "0.82"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+
+# --- AWS ---
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrock = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sigv4 = "1"
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+
+# --- TLS ---
+rustls = "0.23"
+rustls-native-certs = "0.8"
+
+# --- OAuth / config ---
+oauth2 = "5.0.0-rc.1"
+# NOTE: nomi-config uses toml 1.0; be-rs (nomifun-mcp/runtime) uses 0.8 which is
+# the workspace default. nomi-config pins 1.0 in its own manifest.
+toml = "0.8"
+
+# --- Encoding / misc ---
+base64 = "0.22"
+http-body-util = "0.1"
+getrandom = "0.2"
+hex = "0.4"
+# Nostr protocol (keys, NIP-04 DMs, event signing) — pure crypto, no net/TLS deps.
+nostr = { version = "0.37", default-features = false, features = ["std", "nip04"] }
+# HTML → Markdown (URL knowledge-source snapshots)
+htmd = "0.5"
+libc = "0.2"
+lru = "0.18"
+url = "2"
+unicode-width = "0.2.2"
+crossterm = "0.29"
+is-terminal = "0.4"
+
+# --- Computer / browser use ---
+image = { version = "0.25", default-features = false, features = ["png"] }
+xcap = "0.9"
+enigo = "0.6"
+# In-process self-hosted CDP browser engine (nomi-browser-engine). 0.9.1 has NO
+# `tokio-runtime` feature — its transport rides `async-tungstenite` and is
+# runtime-agnostic, so the core CDP engine needs NO extra features here.
+# Deliberately default-features-only: we do NOT use chromiumoxide's built-in
+# Chrome *fetcher*. Task 6 ships a self-contained, proxy-aware download
+# (workspace `zip` + `nomifun_net::http_client`) instead — the fetcher uses a
+# non-proxy-aware reqwest and would break the proxy-aware install promise, so its
+# `rustls`/`native-tls`/`zip*` features stay OFF (enabling a TLS feature without
+# `zip0`/`zip8` also won't compile in 0.9.1). CDP generated types arrive
+# transitively via `chromiumoxide_cdp`, so no separate workspace entry.
+chromiumoxide = { version = "0.9" }
+
+# --- Testing ---
+tempfile = "3"
+wiremock = "0.6"
+tokio-test = "0.4"
+mockall = "0.14"
+rstest = "0.26"
+serial_test = "3"
+# 快照测试：注入侧 aria 契约（observe_fixtures.rs）+ 序列化层契约（T6）防 PW 升级漂移。
+# yaml/json/redactions feature 用于结构化快照与随机字段归一。
+insta = { version = "1.48", features = ["yaml", "json", "redactions"] }
+
+# Minimal debuginfo to shrink build output. Incremental compilation stays at
+# the Cargo default (on for dev/test): it only applies to workspace members and
+# cuts touched-crate rebuilds 2-3x, which is the hot path of local iteration.
+# The disk cost lives in the build dir (see .cargo/config.toml build-dir) and
+# is reclaimed by the self-cleaning preflight in scripts/prune-build.mjs, which
+# runs at the start of every dev/build/test entry point (package.json scripts).
+# CI, if added, should set CARGO_INCREMENTAL=0 instead of hardcoding it here.
+[profile.dev]
+debug = "line-tables-only"
+
+# Dependencies don't need debuginfo — you never single-step into them. Dropping
+# it for the whole dependency graph (not workspace crates) is where most of the
+# build-dir size and file count lived: under macOS unpacked split-debuginfo each
+# dep emits many object/.dwo files, and high-frequency rebuilds never GC the old
+# ones. Workspace members keep line-tables above for usable stack traces; deps
+# compile once, so there is no rebuild-speed cost. Stale artifacts are pruned by
+# the self-cleaning preflight (scripts/prune-build.mjs) at each build start.
+[profile.dev.package."*"]
+debug = false
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false

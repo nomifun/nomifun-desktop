@@ -1,0 +1,122 @@
+{
+  "newTerminal": "新建终端",
+  "category": "终端",
+  "untitled": "终端",
+  "empty": "暂无终端",
+  "extended": {
+    "autoworkApplyFailed": "终端已创建，但自动工作启用失败，可在终端内重试",
+    "autoworkDesc": "让编排器在该终端按需求标签自动驱动并裁决完成（仅 Claude / Codex）",
+    "autoworkLabel": "自动工作",
+    "autoworkRequiresAgent": "自动工作需要 Claude / Codex 终端",
+    "idmmApplyFailed": "终端已创建，但智能决策启用失败，可在终端内重试",
+    "idmmApplyNote": "创建终端后立即生效，可在终端内继续调整。",
+    "knowledgeConnectNote": "内置 Claude / Codex 挂载即自动注入；包装命令 / 自定义 / 外置终端请用「一键接入」写入工作路径。",
+    "knowledgeDesc": "挂载知识库到工作路径，供该终端的 Agent 检索。",
+    "knowledgeLabel": "平台知识库",
+    "subtitle": "把平台能力开放给该终端启动的 Agent CLI",
+    "title": "扩展能力"
+  },
+  "batchSelect": "选择",
+  "selectAll": "全选",
+  "batchDelete": "删除（{{count}}）",
+  "batchDeleteTitle": "删除终端",
+  "batchDeleteContent": "确认删除 {{count}} 个终端会话？运行中的进程将被终止。",
+  "batchDeleteDone": "已删除 {{count}} 个终端",
+  "relaunch": "重新启动",
+  "statusExited": "已退出（{{code}}）",
+  "composerPlaceholder": "输入命令，点击发送即可在终端中执行",
+  "quickCommand": {
+    "clear": "清空终端",
+    "interrupt": "发送 Ctrl-C（中断）"
+  },
+  "registerKnowledge": {
+    "button": "一键接入平台知识库",
+    "buttonCompact": "接入知识库",
+    "confirm": "接入",
+    "cwdRequired": "请先选择工作目录",
+    "familyNote": {
+      "claude": "写项目配置文件",
+      "codex": "写全局 ~/.codex/config.toml",
+      "gemini": "写项目配置文件"
+    },
+    "modalDesc": "选择 CLI 类型，一键将知识检索 MCP 写入工作路径配置文件。",
+    "modalTitle": "接入平台知识库"
+  },
+  "preset": {
+    "shell": "自定义",
+    "claude": "Claude",
+    "codex": "Codex",
+    "gemini": "Gemini"
+  },
+  "create": {
+    "title": "新建终端",
+    "subtitle": "选择工作目录，并可选择要启动的智能体。",
+    "workspace": "工作目录",
+    "workspacePlaceholder": "选择文件夹（自动 cd 进入）",
+    "recent": "最近",
+    "chooseFolder": "选择其他文件夹",
+    "preset": "启动方式",
+    "presetHint": "可选择使用 Claude / Codex / Gemini 等 CLI 作为启动方式",
+    "permission": "权限模式",
+    "permissionDefault": "需要确认",
+    "permissionFullAuto": "全自动（跳过确认）",
+    "knowledge": "知识库",
+    "knowledgePlaceholder": "可选——选择要挂载的知识库",
+    "knowledgeHint": "挂载到工作目录下的 .nomi/knowledge/，会话将其作为扩展知识源读取。",
+    "command": "启动命令",
+    "commandHint": "可以自定义启动命令，创建终端时自动注入。",
+    "mcpPanel": {
+      "claudeCmd": "Claude 命令",
+      "claudeJson": "Claude .mcp.json",
+      "codexToml": "Codex config.toml",
+      "description": "使用自定义或外置终端时，将下方配置注册到你的 CLI，即可使用平台知识库。凭据由桥在运行时安全获取，不会写入你的配置文件。需要 NomiFun 桌面应用正在运行。",
+      "geminiJson": "Gemini settings.json",
+      "loading": "加载中...",
+      "title": "高级：手动注册到其它 CLI / 外置终端",
+      "unavailable": "平台能力 API 暂不可用"
+    },
+    "recentCommands": "最近使用",
+    "commandRequired": "请输入启动命令",
+    "launch": "启动"
+  },
+  "knowledge": {
+    "applyAfterRelaunch": "更改将在重新启动会话后生效。"
+  },
+  "newConversation": "新建会话",
+  "action": {
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "rename": "重命名",
+    "delete": "删除",
+    "close": "关闭",
+    "wake": "唤醒",
+    "restart": "重启"
+  },
+  "hoverCard": {
+    "name": "会话名",
+    "id": "会话 ID",
+    "status": "状态",
+    "cwd": "工作路径",
+    "command": "启动命令",
+    "backend": "后端 / 模式",
+    "statusRunning": "运行中",
+    "statusExited": "已退出",
+    "statusError": "错误"
+  },
+  "renameTitle": "重命名终端",
+  "renamePlaceholder": "输入终端名称",
+  "deleteConfirmTitle": "删除终端",
+  "deleteConfirmContent": "确认删除该终端会话？运行中的进程将被终止。",
+  "submitHint": "回车发送并执行",
+  "autowork": {
+    "requiresAgentCli": "自动工作需要 Agent CLI 终端（Claude / Codex / Gemini）",
+    "terminalExited": "终端已退出 —— 请重新启动后再使用自动工作",
+    "fullAutoHint": "当前不是 full-auto 模式：注入的需求可能卡在审批确认。"
+  },
+  "workspace": {
+    "title": "项目",
+    "expand": "展开工作区",
+    "collapse": "收起工作区",
+    "ariaLabel": "终端工作区"
+  }
+}

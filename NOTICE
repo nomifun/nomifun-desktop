@@ -1,0 +1,20 @@
+NomiFun
+Copyright 2025-2026 NomiFun (nomifun.com)
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+----------------------------------------------------------------------
+Third-party attributions
+----------------------------------------------------------------------
+
+This product began as a fork of, and incorporates software from, the
+AionUi project, which has since been substantially refactored and
+extended:
+
+  AionUi
+  https://github.com/iOfficeAI/AionUi
+  Copyright iOfficeAI
+  Licensed under the Apache License, Version 2.0.
+
+Our sincere thanks to the AionUi maintainers and community, and to the
+many other excellent open-source projects NomiFun builds on.

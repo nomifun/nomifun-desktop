@@ -1,0 +1,71 @@
+[package]
+name = "nomi-agent"
+description = "Agent engine, session management, output sinks, and orchestration for Nomi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Desktop control (screenshots, synthetic input). Gated because xcap/enigo
+# pull native display-server libraries that headless hosts must not require.
+computer-use = ["dep:nomi-computer"]
+# Browser automation (in-process self-hosted CDP engine). Gated because it pulls
+# the chromiumoxide CDP stack + a managed/connected Chromium; headless hosts that
+# never drive a browser must not require it.
+browser-use = ["dep:nomi-browser", "dep:base64"]
+
+[dependencies]
+nomi-types.workspace     = true
+nomi-protocol.workspace  = true
+nomi-config.workspace    = true
+nomi-providers.workspace = true
+nomi-tools.workspace     = true
+nomi-mcp.workspace       = true
+nomi-skills.workspace    = true
+nomi-memory.workspace    = true
+nomi-compact.workspace   = true
+nomi-redact.workspace    = true
+nomi-computer = { workspace = true, optional = true }
+nomi-browser = { workspace = true, optional = true }
+# Used only by the browser-use SessionVisualLocator adapter (base64-encode the
+# screenshot PNG into a ContentBlock::Image for the vision model). Optional →
+# pulled in only with the browser-use feature.
+base64 = { workspace = true, optional = true }
+
+tracing.workspace     = true
+tokio.workspace       = true
+tokio-util.workspace  = true
+futures.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+glob.workspace        = true
+chrono.workspace      = true
+dirs.workspace        = true
+crossterm.workspace   = true
+is-terminal.workspace = true
+
+
+[dev-dependencies]
+nomi-mcp = { path = "../nomi-mcp", features = ["test-utils"] }
+wiremock.workspace    = true
+tokio-test.workspace  = true
+tempfile.workspace    = true
+mockall.workspace     = true
+rstest.workspace      = true
+serial_test.workspace = true
+
+# ── Integration test binaries ──────────────────────────────────────────────
+[[test]]
+name = "e2e"
+path = "tests/e2e/mod.rs"
+# E2E tests require real API keys; run via: cargo nextest run --profile e2e --test e2e
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance/mod.rs"
+# Acceptance tests for evolution features; run via: cargo nextest run --profile e2e --test acceptance
+

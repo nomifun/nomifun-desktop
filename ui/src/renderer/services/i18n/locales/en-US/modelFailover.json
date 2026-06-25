@@ -1,0 +1,20 @@
+{
+  "title": "Model failover queue",
+  "desc": "When a provider faults (rate-limit, 5xx, network) before any reply is produced, the conversation automatically switches to the next usable candidate in this queue and keeps going. Applies to NOMI sessions only.",
+  "enable": "Enable failover queue",
+  "queue": "Candidates (in order)",
+  "queueHint": "Tried head-to-tail; the first enabled, healthy candidate that isn't the failed one is used.",
+  "empty": "No candidates yet. Add a provider + model below.",
+  "selectProvider": "Select a provider",
+  "selectModel": "Select a model",
+  "add": "Add",
+  "remove": "Remove candidate",
+  "moveUp": "Move up",
+  "moveDown": "Move down",
+  "duplicate": "That provider + model is already in the queue.",
+  "maxSwitches": "Max switches per turn",
+  "maxSwitchesHint": "Upper bound on switches within a single turn (also capped by the queue length).",
+  "stampUnhealthy": "Mark failed model unhealthy",
+  "stampUnhealthyHint": "On switch, stamp the failed model as Unhealthy so it is skipped next time.",
+  "saved": "Failover queue saved"
+}

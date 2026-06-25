@@ -1,0 +1,56 @@
+{
+  "label": "Webhook",
+  "title": "Webhook Management",
+  "columns": {
+    "name": "Name",
+    "platform": "Platform",
+    "url": "URL",
+    "description": "Description",
+    "enabled": "Enabled",
+    "secret": "Secret",
+    "actions": "Actions"
+  },
+  "form": {
+    "createTitle": "Create Webhook",
+    "editTitle": "Edit Webhook",
+    "name": "Name",
+    "namePlaceholder": "Enter webhook name",
+    "nameRequired": "Name is required",
+    "platform": "Platform",
+    "url": "URL",
+    "urlPlaceholder": "Enter webhook URL",
+    "urlRequired": "URL is required",
+    "secret": "Signing Secret",
+    "secretPlaceholder": "Signing secret (optional)",
+    "secretHint": "Leave empty when editing to keep existing secret",
+    "clearSecret": "Clear secret",
+    "description": "Description",
+    "descriptionPlaceholder": "Enter description (optional)",
+    "enabled": "Enabled"
+  },
+  "platform": {
+    "lark": "Lark / Feishu",
+    "http": "Generic HTTP",
+    "slack": "Slack"
+  },
+  "secret": {
+    "configured": "Configured",
+    "notConfigured": "Not configured"
+  },
+  "actions": {
+    "create": "Create Webhook",
+    "edit": "Edit",
+    "delete": "Delete",
+    "test": "Test",
+    "deleteConfirm": "Are you sure you want to delete this webhook?"
+  },
+  "messages": {
+    "createOk": "Webhook created successfully",
+    "updateOk": "Webhook updated successfully",
+    "deleteOk": "Webhook deleted",
+    "testOk": "Webhook test successful",
+    "testError": "Webhook test failed: {{error}}",
+    "loadError": "Failed to load webhooks"
+  },
+  "empty": "No webhooks yet"
+}

@@ -1,0 +1,152 @@
+{
+  "title": "需求平台",
+  "subtitle": "管理需求、扩展能力与数据源",
+  "section": {
+    "workspace": "需求",
+    "extensions": "扩展能力",
+    "sources": "数据源"
+  },
+  "newRequirement": "新建需求",
+  "empty": "暂无需求",
+  "search": "搜索标题、内容或 #编号",
+  "allTags": "全部标签",
+  "allStatuses": "全部状态",
+  "viewList": "列表",
+  "viewKanban": "看板",
+  "loadError": "加载需求失败",
+  "retry": "重试",
+  "columns": {
+    "seq": "编号",
+    "id": "ID",
+    "title": "需求名",
+    "tag": "标签",
+    "order": "次序",
+    "status": "状态",
+    "session": "会话",
+    "createdAt": "创建时间",
+    "actions": "操作"
+  },
+  "status": {
+    "pending": "待处理",
+    "in_progress": "进行中",
+    "done": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "needs_review": "待复核"
+  },
+  "actions": {
+    "edit": "编辑",
+    "delete": "删除",
+    "deleteConfirm": "确定删除该需求吗？",
+    "deleteOk": "需求已删除",
+    "batchDelete": "删除选中 {{count}} 项",
+    "batchDeleteConfirm": "确定删除选中的 {{count}} 个需求吗？",
+    "batchDeleteOk": "已删除 {{count}} 个需求"
+  },
+  "detail": {
+    "createdBy": "创建者",
+    "completedAt": "完成时间",
+    "session": "执行会话",
+    "completionNote": "完成记录",
+    "attachments": "图片附件"
+  },
+  "form": {
+    "createTitle": "新建需求",
+    "editTitle": "编辑需求",
+    "titleLabel": "需求名",
+    "titlePlaceholder": "请输入需求名称",
+    "contentLabel": "需求内容",
+    "contentPlaceholder": "描述需要完成的任务（支持 Markdown）",
+    "tagLabel": "标签",
+    "tagPlaceholder": "选择或新建标签",
+    "orderLabel": "执行次序",
+    "orderHelp": "点分十进制，如 1、1.2、2.3.1 —— 数值越小越先执行",
+    "statusLabel": "状态",
+    "submit": "保存",
+    "cancel": "取消",
+    "createdOk": "需求已创建",
+    "updatedOk": "需求已更新",
+    "titleRequired": "需求名不能为空",
+    "tagRequired": "标签不能为空",
+    "attachmentsLabel": "图片附件",
+    "attachmentsHelp": "支持粘贴、拖拽或点击上传图片（jpg/png/gif/webp/bmp/svg），随需求持久保存并提供给执行模型",
+    "attachmentsOnlyImages": "仅支持图片文件",
+    "addImage": "添加图片",
+    "attachmentTooLarge": "图片超过 30MB 上限"
+  },
+  "autowork": {
+    "label": "自动工作",
+    "hint": "在当前会话中按次序自动完成某个标签下的需求。",
+    "tagLabel": "标签",
+    "selectTag": "请选择标签",
+    "disableToChangeTag": "关闭自动工作后才能更换标签",
+    "tagRequired": "请选择一个标签以开启自动工作",
+    "enabledOk": "自动工作已开启",
+    "disabledOk": "自动工作已关闭",
+    "completedCount": "已完成：{{count}}",
+    "state": {
+      "off": "未开启",
+      "idle": "空闲",
+      "active": "活跃"
+    }
+  },
+  "kanban": {
+    "selectTag": "请选择标签",
+    "emptyColumn": "空"
+  },
+  "emptyState": {
+    "title": "还没有需求",
+    "desc": "创建第一个需求，开始管理与自动执行",
+    "cta": "新建需求"
+  },
+  "drawer": {
+    "detailTitle": "需求详情",
+    "view": "查看",
+    "edit": "编辑"
+  },
+  "ext": {
+    "notify": "通知",
+    "autowork": "自动执行"
+  },
+  "notify": {
+    "channelsTitle": "通知渠道",
+    "channelsHint": "消息发送到哪里",
+    "newChannel": "新建渠道",
+    "rulesTitle": "触发规则",
+    "rulesHint": "什么情况下通知",
+    "ruleWhen": "当",
+    "ruleReq": "的需求",
+    "ruleThen": "→ 通知",
+    "ruleAnyTag": "任意标签",
+    "eventsLabel": "事件",
+    "selectChannel": "选择渠道",
+    "clearChannel": "不通知",
+    "noChannel": "未绑定",
+    "eventsRequired": "至少选择一个事件",
+    "futureGlobalRule": "全局兜底规则（即将支持）"
+  },
+  "source": {
+    "connectedTitle": "已连接",
+    "upcomingTitle": "即将支持 · 已为对接预留",
+    "status": {
+      "active": "使用中",
+      "soon": "即将支持",
+      "planned": "规划中"
+    },
+    "connect": "连接…",
+    "count": "{{count}} 条需求",
+    "local": {
+      "name": "本地需求库",
+      "desc": "应用内创建与管理，离线可用"
+    },
+    "lark": {
+      "name": "飞书 · Lark 多维表格",
+      "desc": "把多维表格记录映射为需求，周期同步（只读为先）"
+    },
+    "other": {
+      "name": "其他第三方",
+      "desc": "通用 API / Notion / Jira 等，按同一套来源接口接入"
+    },
+    "note": "每条需求带「来源」标记；平台对接收口抽象为「数据源提供方」，本地只是其中一种。未来接入 = 新增一个 provider，不改核心 CRUD。"
+  }
+}

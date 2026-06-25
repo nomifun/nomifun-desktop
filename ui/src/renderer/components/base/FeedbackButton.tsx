@@ -1,0 +1,64 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ * Based on AionUi (https://github.com/iOfficeAI/AionUi)
+ */
+
+import { useFeedback } from '@/renderer/hooks/context/FeedbackContext';
+import { Comment } from '@icon-park/react';
+import classNames from 'classnames';
+import React, { useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+
+type FeedbackButtonProps = {
+  /** Pre-selects the module in the feedback modal (see FEEDBACK_MODULES tags). */
+  module?: string;
+  /** Extra Sentry tags attached to the feedback event. */
+  feedbackTags?: Record<string, string>;
+  /** Extra structured context attached to the feedback event. */
+  feedbackExtra?: Record<string, unknown>;
+  /** Additional classes appended to the default pill styling. */
+  className?: string;
+};
+
+/**
+ * Inline feedback chip shown near error messages — styled as a compact pill
+ * consistent with Nomi's existing Mention/Agent pill patterns. Click
+ * auto-captures the current window and opens the feedback modal with the
+ * relevant module preselected; the user only needs to describe the issue.
+ */
+const FeedbackButton: React.FC<FeedbackButtonProps> = ({ module, feedbackTags, feedbackExtra, className }) => {
+  const { t } = useTranslation();
+  const { openFeedback } = useFeedback();
+
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      event.stopPropagation();
+      openFeedback({ module, autoScreenshot: true, tags: feedbackTags, extra: feedbackExtra }).catch((err) => {
+        console.error('[FeedbackButton] Failed to open feedback:', err);
+      });
+    },
+    [feedbackExtra, feedbackTags, module, openFeedback]
+  );
+
+  return (
+    <button
+      type='button'
+      role='button'
+      onClick={handleClick}
+      className={classNames(
+        'inline-flex items-center gap-3px cursor-pointer select-none b-none',
+        'px-8px py-4px rd-16px',
+        'bg-transparent hover:bg-fill-2 text-t-primary',
+        'text-13px leading-18px transition-colors duration-150',
+        className
+      )}
+    >
+      <Comment theme='outline' size='14' fill='currentColor' className='flex-shrink-0 pt-4px' />
+      <span>{t('settings.oneClickFeedback')}</span>
+    </button>
+  );
+};
+
+export default FeedbackButton;

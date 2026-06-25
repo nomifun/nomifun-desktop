@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>P2 F3 multi-step e2e form</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  /* 所有可交互元素固定在视口内 + 大尺寸，让 facade 经真实 getContentQuads 稳定命中
+     （无 DPR、不依赖滚动）。 */
+  form#signup { margin: 8px; }
+  #signup label { display: block; margin: 6px 0; }
+  #username, #password { display: block; width: 280px; height: 32px; margin: 4px 0; }
+  #plan { display: block; width: 280px; height: 32px; margin: 4px 0; }
+  #submit { display: block; width: 240px; height: 40px; margin: 8px 0; }
+</style>
+</head>
+<body>
+  <h1>P2 F3 e2e form</h1>
+  <!--
+    F3 端到端多步 fixture（facade BrowserTool::execute 真 Chrome 跑）：
+      navigate → observe → type username → type password → select_option plan → click submit。
+    submit 按钮 accname 含 "Submit"（→ facade redline classify_action 判 Irreversible）：
+      - yolo/审批旁路会话 click submit → facade redline 门 hard-deny Blocked（红线生效证据）；
+      - 普通会话 click submit → 门不拦（交 orchestration），表单真提交 → onsubmit 写可见标记。
+    onsubmit preventDefault（不真导航），把提交时捕获的 username + 所选 plan 写进 #form-status（role=status，
+    aria 可观测），证明 type/select 真写入 + click submit 真触发。password 值不回显（脱敏精神）。
+  -->
+  <form id="signup" action="javascript:void(0)">
+    <label>Username <input id="username" name="username" type="text" autocomplete="username"></label>
+    <label>Password <input id="password" name="password" type="password" autocomplete="new-password"></label>
+    <label>Plan
+      <select id="plan" name="plan" aria-label="Plan">
+        <option value="free">Free</option>
+        <option value="pro">Pro</option>
+        <option value="enterprise">Enterprise</option>
+      </select>
+    </label>
+    <button id="submit" type="submit" aria-label="Submit order">Submit order</button>
+  </form>
+
+  <!-- 提交后的可见标记（aria 可观测：role=status）。初始 idle。 -->
+  <div id="form-status" role="status" aria-label="form status">idle</div>
+
+  <script>
+    document.getElementById('signup').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var u = document.getElementById('username').value;
+      var p = document.getElementById('plan').value;
+      // 把提交时捕获的 username + plan 写进可见标记（证明 type/select 真写入 + submit 真触发）；
+      // 不回显 password 值（脱敏精神）。
+      document.getElementById('form-status').textContent = 'submitted:' + u + ':' + p;
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>F1-sec redline gate facade test</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  button { display: block; margin: 12px; padding: 8px 16px; }
+</style>
+</head>
+<body>
+  <h1>F1-sec redline gate</h1>
+  <!--
+    F1-sec facade 集成测试用：一个不可逆（accname="Pay now"）按钮 + 一个良性（"Show more"）按钮。
+    facade 的 redline 门据 observe 的 accname 分类 click：
+      - yolo/companion（审批旁路）会话点 "Pay now" → hard-deny Blocked（证 fail-open 已闭）；
+      - 普通会话点 "Pay now" → 门不拦（交 orchestration）。
+    用 file:// fixture（非 data: URL），与其它集成测试同接线，避免 data: URL 解析坑。
+  -->
+  <button id="pay" aria-label="Pay now">Pay now</button>
+  <button id="more" aria-label="Show more">Show more</button>
+</body>
+</html>

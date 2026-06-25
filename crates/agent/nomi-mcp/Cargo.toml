@@ -1,0 +1,26 @@
+[package]
+name = "nomi-mcp"
+description = "MCP (Model Context Protocol) client implementation for Nomi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-types.workspace    = true
+nomi-protocol.workspace = true
+nomi-tools.workspace    = true
+nomi-config.workspace   = true
+
+tracing.workspace     = true
+tokio.workspace       = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+thiserror.workspace   = true
+reqwest.workspace     = true
+futures.workspace     = true
+
+
+[features]
+test-utils = []

@@ -1,0 +1,70 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { useCallback, useEffect, useState } from 'react';
+import { ipcBridge } from '@/common';
+import type { ITerminalSession } from '@/common/adapter/ipcBridge';
+import { emitter } from '@/renderer/utils/emitter';
+
+/**
+ * Live list of terminal sessions for the sidebar. Loads via HTTP and stays in
+ * sync through `terminal.created/updated/removed/exit` WS events and a local
+ * `terminal.list.refresh` emitter event (fired after create/relaunch).
+ */
+export function useTerminalSessions() {
+  const [sessions, setSessions] = useState<ITerminalSession[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const list = await ipcBridge.terminal.list.invoke();
+      setSessions(Array.isArray(list) ? list : []);
+    } catch {
+      setSessions([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+
+    const offCreated = ipcBridge.terminal.onCreated.on((s) => {
+      setSessions((prev) => (prev.some((p) => p.id === s.id) ? prev : [s, ...prev]));
+    });
+    const offUpdated = ipcBridge.terminal.onUpdated.on((s) => {
+      setSessions((prev) => prev.map((p) => (p.id === s.id ? s : p)));
+    });
+    const offRemoved = ipcBridge.terminal.onRemoved.on((evt) => {
+      setSessions((prev) => prev.filter((p) => p.id !== evt.id));
+    });
+    const offExit = ipcBridge.terminal.onExit.on((evt) => {
+      setSessions((prev) =>
+        prev.map((p) => (p.id === evt.id ? { ...p, last_status: 'exited', exit_code: evt.exit_code } : p))
+      );
+    });
+    const offRefresh = (): void => {
+      void refresh();
+    };
+    emitter.on('terminal.list.refresh', offRefresh);
+
+    return () => {
+      offCreated();
+      offUpdated();
+      offRemoved();
+      offExit();
+      emitter.off('terminal.list.refresh', offRefresh);
+    };
+  }, [refresh]);
+
+  const removeSession = useCallback(async (id: number) => {
+    await ipcBridge.terminal.remove.invoke({ id });
+    setSessions((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  return { sessions, loading, refresh, removeSession };
+}

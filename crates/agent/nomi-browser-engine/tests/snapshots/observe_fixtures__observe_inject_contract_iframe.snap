@@ -1,0 +1,11 @@
+---
+source: crates/agent/nomi-browser-engine/tests/observe_fixtures.rs
+expression: full
+---
+- generic [active] [ref=f0e1]:
+  - heading "Smoke" [level=1] [ref=f0e2]
+  - button "Submit order" [ref=f0e3]
+  - generic [ref=f0e4]:
+    - text: Email
+    - textbox "Email" [ref=f0e5]
+  - iframe [ref=f0e6]

@@ -1,0 +1,26 @@
+[package]
+name = "nomifun-idmm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-realtime.workspace = true
+nomifun-conversation.workspace = true
+nomifun-ai-agent.workspace = true
+nomifun-terminal.workspace = true
+nomifun-requirement.workspace = true
+nomifun-auth.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+sqlx = { workspace = true }

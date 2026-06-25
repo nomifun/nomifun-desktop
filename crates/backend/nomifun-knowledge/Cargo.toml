@@ -1,0 +1,38 @@
+[package]
+name = "nomifun-knowledge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-realtime.workspace = true
+nomifun-auth.workspace = true
+nomifun-net.workspace = true
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+walkdir.workspace = true
+similar.workspace = true
+zip.workspace = true
+reqwest.workspace = true
+url.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+htmd.workspace = true
+base64.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# NTFS junctions mount knowledge bases into workspaces without requiring
+# the SeCreateSymbolicLink privilege (same rationale as nomifun-extension).
+junction = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true
+tower = { workspace = true, features = ["util"] }
+http-body-util.workspace = true

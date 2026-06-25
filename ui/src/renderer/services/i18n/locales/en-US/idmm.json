@@ -1,0 +1,139 @@
+{
+  "label": "IDMM",
+  "hint": "Intelligent Decision-Making Mode keeps a chat/terminal session moving through provider faults and decision stalls. Two independent, default-off watches share one engine: Fault watch and Decision watch.",
+  "tierLabel": "Mode",
+  "tier": {
+    "ruleOnly": "Rule only (no model)",
+    "rulePlusModel": "Rule + backup model",
+    "ruleOnlyDesc": "No model: scans by rules and keeps the session alive (auto-retry on faults, auto-pick the first safe option on a choice). Never answers open questions.",
+    "rulePlusModelDesc": "Rules scan; the backup model decides on your behalf and drives the work to completion (escalates to the model when rules can't decide)."
+  },
+  "watch": {
+    "faultTitle": "Fault watch",
+    "faultDesc": "Detect provider/network faults and auto-retry (failover queue arrives later).",
+    "decisionTitle": "Decision watch",
+    "decisionDesc": "Detect in-session questions (option decisions + open questions) and answer so work never hangs.",
+    "scanInterval": "Scan interval",
+    "secondsSuffix": "s",
+    "maxRetries": "Max retries",
+    "scanScope": "Scan scope",
+    "bypassModel": "Backup model"
+  },
+  "scanScope": {
+    "lastTurn": "Last turn only",
+    "lastMessages": "Recent messages",
+    "fullSession": "Full session"
+  },
+  "strategy": {
+    "title": "Decision strategy",
+    "tendency": "Tendency",
+    "onBlocked": "When blocked",
+    "freeform": "Free-form policy",
+    "freeformPlaceholder": "Extra guidance appended to the backup-model prompt, e.g. 'keep changes minimal; prefer reversible actions'.",
+    "answerOpenQuestions": "Answer open questions",
+    "answerOpenQuestionsHint": "Let the backup model write a free-form answer to open-ended questions (backup-model mode only)."
+  },
+  "tendency": {
+    "conservative": "Conservative",
+    "balanced": "Balanced",
+    "aggressive": "Aggressive"
+  },
+  "onBlocked": {
+    "preferContinue": "Prefer continue",
+    "preferPause": "Prefer pause",
+    "mustAsk": "Must ask"
+  },
+  "categoryMode": {
+    "auto": "Auto",
+    "askFirst": "Ask first",
+    "off": "Off"
+  },
+  "category": {
+    "optionDecision": "Option decisions",
+    "preferRecommended": "Prefer recommended option",
+    "allowUnmarkedPick": "Auto-pick unmarked options",
+    "neverDestructive": "Never pick destructive",
+    "openQuestion": "Open questions",
+    "maxAnswerChars": "Max answer chars",
+    "permission": "Permission prompts",
+    "onlySafeValue": "Only confirm read-only",
+    "escalateRisky": "Escalate risky to model"
+  },
+  "sessionBackupHint": "Leave empty to prefer the global default backup provider (Settings → Intelligent Decision-Making), then fall back to this session's own model; set one here to apply it to this watch only.",
+  "backupRequired": "Backup-model mode needs a usable model: pick one here, set a global default in Settings → Intelligent Decision-Making, or enable it on a session that already has a model (its model is reused automatically).",
+  "state": {
+    "off": "Off",
+    "armed": "Armed",
+    "intervening": "Intervening"
+  },
+  "interventions": "{{count}} interventions",
+  "enabledOk": "IDMM updated",
+  "disabledOk": "IDMM disabled",
+  "settings": {
+    "title": "Intelligent Decision-Making (IDMM)",
+    "desc": "Defaults for the backup-model mode, used when a watch does not set its own.",
+    "backupProvider": "Backup provider",
+    "backupModel": "Backup model",
+    "selectProvider": "Select a provider",
+    "selectModel": "Select a model",
+    "defaultSteering": "Default policy",
+    "defaultSteeringPlaceholder": "Default decision policy applied when a watch leaves its free-form policy empty.",
+    "saved": "IDMM settings saved",
+    "none": "None"
+  },
+  "log": {
+    "title": "Decision log",
+    "empty": "No interventions yet.",
+    "loading": "Loading…",
+    "stall": "Stall",
+    "signal": "Signal",
+    "tier": "Tier",
+    "category": "Category",
+    "action": "Action",
+    "detail": "Detail",
+    "reason": "Reasoning",
+    "confidence": "Confidence",
+    "outcome": "Outcome",
+    "clear": "Clear log",
+    "clearOk": "Decision log cleared",
+    "watch": {
+      "fault": "Fault watch",
+      "decision": "Decision watch"
+    },
+    "tierValue": {
+      "rule": "Rule",
+      "sidecar": "Backup model",
+      "rule_fallback": "Rule fallback"
+    },
+    "categoryValue": {
+      "option": "Option",
+      "open_question": "Open question",
+      "permission": "Permission",
+      "fault": "Fault"
+    },
+    "actionValue": {
+      "retry": "Retry",
+      "answer_choice": "Pick option",
+      "send_text": "Send reply",
+      "confirm": "Confirm",
+      "wait": "Wait",
+      "stop": "Stop"
+    },
+    "outcomeValue": {
+      "applied": "Applied",
+      "resolved": "Resolved",
+      "failed": "Failed",
+      "halted": "Halted",
+      "skipped": "Skipped"
+    }
+  },
+  "activity": {
+    "title": "Decision activity",
+    "desc": "Recent IDMM interventions across all sessions (most recent first). This is a rolling window, not a full history — old records age out automatically.",
+    "empty": "No interventions across any session yet.",
+    "refresh": "Refresh",
+    "clearAll": "Clear all",
+    "clearConfirm": "Clear all decision activity across every session? This cannot be undone.",
+    "clearOk": "Decision activity cleared"
+  }
+}

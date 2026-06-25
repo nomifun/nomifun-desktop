@@ -1,0 +1,68 @@
+[package]
+name = "nomifun-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# P3-GW1 路线 A：网关浏览器工具（per-companion BrowserTool registry）。门控因为它拉入
+# `nomi-browser`（→ chromiumoxide CDP 栈 + 受管 Chromium）——无浏览器的 headless 宿主不应被迫依赖。
+# 由 `nomifun-app` 的同名 feature 经 `nomifun-gateway/browser-use` 向下传导；关时网关不暴露
+# nomi_browser_* 工具（dispatch 走 unknown tool，schema 不注册）。依赖方向：gateway → nomi-browser
+# （nomi-browser 不反依赖 gateway，已核对无环）。
+browser-use = ["dep:nomi-browser", "dep:nomi-types", "dep:nomi-config", "dep:nomi-tools", "dep:nomifun-secret", "dep:futures"]
+# Gateway computer-use tools (single shared desktop ComputerTool). Forwarded by
+# `nomifun-app`'s `computer-use` feature via `nomifun-gateway/computer-use`; off
+# on headless/web hosts (which never pull the native screen/input/UIA stack).
+# Reuses the optional nomi-types/-config/-tools deps shared with browser-use.
+computer-use = ["dep:nomi-computer", "dep:nomi-types", "dep:nomi-config", "dep:nomi-tools"]
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-api-types.workspace = true
+nomifun-conversation.workspace = true
+nomifun-cron.workspace = true
+nomifun-requirement.workspace = true
+nomifun-companion.workspace = true
+nomifun-ai-agent.workspace = true
+nomifun-db.workspace = true
+nomifun-terminal.workspace = true
+nomifun-idmm.workspace = true
+nomifun-knowledge.workspace = true
+# System domain capabilities (settings / client preferences / providers / model fetch).
+nomifun-system.workspace = true
+# Channel domain capabilities (IM bot plugins / pairing / users / companion binding).
+nomifun-channel.workspace = true
+# Filesystem + shell-open domain capabilities.
+nomifun-file.workspace = true
+nomifun-shell.workspace = true
+# MCP-server + extensions/hub/skills domain capabilities.
+nomifun-mcp.workspace = true
+nomifun-extension.workspace = true
+# P3-GW1: per-companion BrowserTool registry（路线 A）。optional + feature 门控，关时不拉浏览器栈。
+nomi-browser = { workspace = true, optional = true }
+# Computer-use: shared desktop ComputerTool. optional + feature 门控，关时不拉 screen/input/UIA 栈。
+nomi-computer = { workspace = true, optional = true }
+# P3-X2: per-pet secret vault path resolver for gateway-driven secret:NAME (browser-use only).
+nomifun-secret = { workspace = true, optional = true }
+nomi-types = { workspace = true, optional = true }
+nomi-config = { workspace = true, optional = true }
+# `Tool` trait（execute/category）——facade BrowserTool 实现它，registry 经它驱动动作。
+nomi-tools = { workspace = true, optional = true }
+# CC: BrowserRegistry::execute_parallel 用 futures::future::join_all 并行多 key（异 key 真并发/同 key 串行）。
+futures = { workspace = true, optional = true }
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Capability registry: single-source JSON Schema generation from each capability's
+# typed Request struct (same schemars major as rmcp 1.7 re-exports → identical shape
+# for the MCP clients consuming tools/list). The bridge passes these schema maps
+# straight through to `rmcp::model::Tool`, so only the gateway needs schemars.
+schemars = "1"
+tracing.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true

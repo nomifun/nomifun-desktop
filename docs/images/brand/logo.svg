@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" fill="none" role="img" aria-label="NomiFun">
+  <defs>
+    <linearGradient id="logo-bg" x1="0" y1="0" x2="0" y2="80" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#1B1822"/><stop offset="1" stop-color="#0B0A10"/></linearGradient>
+    <linearGradient id="logo-bowl" x1="15" y1="49" x2="65" y2="69" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FF9FB4"/><stop offset="1" stop-color="#FF6F91"/></linearGradient>
+  </defs>
+  <rect width="80" height="80" rx="18" fill="url(#logo-bg)"/>
+  <path d="M33 17 q-4.5 -4 0 -8.5" stroke="#FF8FA8" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M40 15 q-4.5 -4 0 -8.5" stroke="#FFB3C4" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M47 17 q-4.5 -4 0 -8.5" stroke="#FF8FA8" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path d="M22 46 Q22 27 40 27 Q58 27 58 46 Z" fill="#FFFFFF"/>
+  <path d="M14 49 H66 Q61.5 70 40 70 Q18.5 70 14 49 Z" fill="url(#logo-bowl)"/>
+</svg>

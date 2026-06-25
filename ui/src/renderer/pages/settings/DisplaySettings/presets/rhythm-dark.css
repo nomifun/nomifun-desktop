@@ -1,0 +1,330 @@
+/* ============================================================
+ * 律动暗黑 Rhythm Dark
+ * ------------------------------------------------------------
+ * 暗色是本体：抖音/TikTok 舞台暗黑风。纯黑舞台四层梯度
+ * （#000000 → #121212 → #1f1f1f → #2a2a2a），主色玫红 #fe2c55
+ * 像聚光灯打在黑幕上，电光青 #25f4ee 作 info/链接的冷色对位。
+ * 选中态玫红 12% 水洗、hover 白 6%，用户气泡深玫红 #3a0d18，
+ * 主按钮纯玫红 + hover 微辉光，侧栏一层 ≤5% 的玫红→青舞台光晕。
+ * 亮色模式是开灯后的舞台：#fafafa 底 + 高对比黑字，主玫红加深
+ * 一档到 #e8174a 保住白字对比（hover 闪回原玫红），hover 水洗与
+ * 侧栏光晕带极淡电光青，danger 移向橙红与主玫红拉开。
+ *
+ * Dark is the soul: a TikTok-stage black built from four pure-dark
+ * layers (#000000 / #121212 / #1f1f1f / #2a2a2a), lit by rose-red
+ * #fe2c55 spotlights with electric-cyan #25f4ee as the cold
+ * counterpoint for info/links. Selection is a 12% rose wash, hover
+ * a 6% white lift; user bubbles sit in deep rose #3a0d18, primary
+ * buttons glow faintly on hover, and the sider carries a sub-5%
+ * rose-to-cyan stage gradient. Light mode is the same stage with
+ * the house lights on: #fafafa ground, high-contrast ink text, the
+ * rose deepened one step to #e8174a for AA white-on-rose buttons
+ * (hover flashes back to the original rose), with a faint cyan wash
+ * on hovers and the sider, and danger shifted to vermilion to keep
+ * its distance from the rose.
+ * ============================================================ */
+
+/* ===== Light / 开灯的舞台 ===== */
+:root,
+body {
+  /* Primary Colors - 主色（玫红聚光灯；开灯后加深一档保住白字 ≥4.5:1，
+     hover 槽位顺移承接舞台原玫红 #fe2c55） */
+  --color-primary: #e8174a;
+  --primary: #e8174a;
+  --color-primary-light-1: #fe2c55;
+  --color-primary-light-2: #ff7992;
+  --color-primary-light-3: #ffa8b8;
+  --color-primary-light-4: #ffd3dc;
+  --color-primary-dark-1: #c41141;
+  --primary-rgb: 232, 23, 74;
+
+  /* Arco Primary Scale - 主色阶（RGB 三元组，1 浅 → 7 深；5/6/7 整体下沉一档：
+     默认 #e8174a 白字 4.5:1，hover 闪回原玫红，active #c41141 6:1） */
+  --primary-1: 255, 236, 240;
+  --primary-2: 255, 211, 220;
+  --primary-3: 255, 168, 184;
+  --primary-4: 255, 121, 146;
+  --primary-5: 254, 44, 85;
+  --primary-6: 232, 23, 74;
+  --primary-7: 196, 17, 65;
+
+  /* Brand Colors - 品牌色 */
+  --brand: #e8345c;
+  --brand-light: #ffecf0;
+  --brand-hover: #ff93a8;
+  --color-brand-fill: #e8345c;
+  --color-brand-bg: #ffecf0;
+
+  /* Nomi Brand Scale - 品牌色阶（1 最浅 → 10 最深） */
+  --aou-1: #ffecf0;
+  --aou-2: #ffd9e0;
+  --aou-3: #ffbcc9;
+  --aou-4: #ff93a8;
+  --aou-5: #fb5f7f;
+  --aou-6: #e8345c;
+  --aou-7: #c0214a;
+  --aou-8: #8e1737;
+  --aou-9: #5c0e24;
+  --aou-10: #2e0712;
+
+  /* Background Colors - 背景（亮场四层梯度，微冷灰） */
+  --bg-base: #ffffff;
+  --color-bg-1: #fafafa;
+  --bg-1: #fafafa;
+  --color-bg-2: #f2f2f3;
+  --bg-2: #f2f2f3;
+  --color-bg-3: #e4e4e6;
+  --bg-3: #e4e4e6;
+  --color-bg-4: #cfcfd2;
+  --bg-4: #cfcfd2;
+  --bg-5: #b3b3b8;
+  --bg-6: #8a8a90;
+  --bg-8: #55555c;
+  --bg-9: #1f1f23;
+  --bg-10: #0f0f12;
+  --color-bg-5: #ffffff;
+  --color-bg-popup: #ffffff;
+  --color-bg-white: #ffffff;
+
+  /* Interactive State Colors - 交互状态 */
+  --bg-hover: #f3f3f4;
+  --bg-active: #e7e7e9;
+
+  /* Fill Colors - 填充（整条 fill 阶跟随主色玫红，hover→选中渐强：
+     fill-2 = hover 玫红 6% 水洗，fill-3 = 选中/侧栏 玫红 10%，fill-4 = 16%；
+     电光青只留给 info/链接做点缀，不进容器底，避免与玫红主色相冲） */
+  --fill: #f5f5f6;
+  --color-fill: #f5f5f6;
+  --fill-0: #ffffff;
+  --fill-white-to-black: #ffffff;
+  --dialog-fill-0: #ffffff;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(15, 15, 18, 0.03);
+  --color-fill-2: rgba(254, 44, 85, 0.06);
+  --color-fill-3: rgba(254, 44, 85, 0.1);
+  --color-fill-4: rgba(254, 44, 85, 0.16);
+
+  /* Text Colors - 文字（高对比黑字） */
+  --color-text-1: #111114;
+  --text-primary: #111114;
+  --color-text-2: #4b4b52;
+  --text-secondary: #4b4b52;
+  --color-text-3: #84848c;
+  --text-disabled: #c2c2c8;
+  --color-text-4: #c2c2c8;
+  --text-0: #000000;
+  --text-white: #ffffff;
+
+  /* Border Colors - 边框 */
+  --color-border: #e4e4e6;
+  --color-border-1: #efeff0;
+  --color-border-2: #e4e4e6;
+  --color-border-3: #d4d4d7;
+  --color-border-4: #b8b8bd;
+  --border-base: #e4e4e6;
+  --border-light: #efeff0;
+  --border-special: var(--bg-3);
+
+  /* Secondary Button - 次级按钮 */
+  --color-secondary: #f2f2f3;
+  --color-secondary-hover: #e6e6e8;
+  --color-secondary-active: #d9d9dc;
+  --color-secondary-disabled: #f7f7f8;
+
+  /* Semantic Colors - 语义色（info 走深青保对比度；danger 走橙红
+     与主玫红拉开色相，#d4380d 白底 4.8:1） */
+  --success: #00b42a;
+  --warning: #ff7d00;
+  --danger: #d4380d;
+  --info: #00838f;
+
+  /* Misc Arco - 杂项 */
+  --color-tooltip-bg: #1f1f23;
+  --color-mask-bg: rgba(15, 15, 18, 0.5);
+  --color-spin-layer-bg: rgba(255, 255, 255, 0.6);
+  --color-menu-light-bg: #ffffff;
+  --color-menu-dark-bg: #1f1f23;
+
+  /* Component Colors - 组件（玫红气泡 + 青提示的双色对位） */
+  --message-user-bg: #ffe3e9;
+  --message-tips-bg: #e0f7f6;
+  --workspace-btn-bg: #f2f2f3;
+  --color-guid-agent-bar: #ffe8ed;
+  --sider-section-title-color: #6b6b73;
+
+  /* Terminal - 终端（画布恒深） */
+  --terminal-surface-bg: #0f0f12;
+  --terminal-border: rgba(0, 0, 0, 0.12);
+}
+
+/* ===== Dark / 纯黑舞台（本体，必须在亮色块之后） ===== */
+[data-theme='dark'],
+[data-theme='dark'] body {
+  /* Primary Colors - 主色（玫红聚光灯原色） */
+  --color-primary: #fe2c55;
+  --primary: #fe2c55;
+  --color-primary-light-1: #ff5775;
+  --color-primary-light-2: #ff7d94;
+  --color-primary-light-3: #ffa3b3;
+  --color-primary-light-4: #ffc9d3;
+  --color-primary-dark-1: #d91a44;
+  --primary-rgb: 254, 44, 85;
+
+  /* Arco Primary Scale - 主色阶（暗模式反转：1 深 → 7 浅） */
+  --primary-1: 61, 10, 24;
+  --primary-2: 92, 15, 35;
+  --primary-3: 133, 21, 48;
+  --primary-4: 184, 29, 63;
+  --primary-5: 224, 36, 75;
+  --primary-6: 254, 44, 85;
+  --primary-7: 255, 99, 128;
+
+  /* Brand Colors - 品牌色 */
+  --brand: #f04268;
+  --brand-light: #3f0d1b;
+  --brand-hover: #7e1733;
+  --color-brand-fill: #f04268;
+  --color-brand-bg: #3f0d1b;
+
+  /* Nomi Brand Scale - 品牌色阶（暗模式反转：1 最深 → 10 最浅） */
+  --aou-1: #2b0a13;
+  --aou-2: #3f0d1b;
+  --aou-3: #5c1226;
+  --aou-4: #7e1733;
+  --aou-5: #a51d42;
+  --aou-6: #d2264f;
+  --aou-7: #fe2c55;
+  --aou-8: #ff6480;
+  --aou-9: #ff9dad;
+  --aou-10: #ffd2da;
+
+  /* Background Colors - 背景（纯黑舞台四层梯度） */
+  --bg-base: #000000;
+  --color-bg-1: #121212;
+  --bg-1: #121212;
+  --color-bg-2: #1f1f1f;
+  --bg-2: #1f1f1f;
+  --color-bg-3: #2a2a2a;
+  --bg-3: #2a2a2a;
+  --color-bg-4: #353535;
+  --bg-4: #353535;
+  --bg-5: #424242;
+  --bg-6: #5c5c5c;
+  --bg-8: #8a8a8a;
+  --bg-9: #c4c4c4;
+  --bg-10: #ededed;
+  --color-bg-5: #262626;
+  --color-bg-popup: #1f1f1f;
+  --color-bg-white: #1f1f1f;
+
+  /* Interactive State Colors - 交互状态（hover = 白 6% 提亮） */
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+
+  /* Fill Colors - 填充（fill-2 = hover 白 6%，fill-3 = 选中玫红 12%） */
+  --fill: #1f1f1f;
+  --color-fill: #1f1f1f;
+  --fill-0: rgba(255, 255, 255, 0.08);
+  --fill-white-to-black: #000000;
+  --dialog-fill-0: #262626;
+  --inverse: #ffffff;
+  --color-fill-1: rgba(255, 255, 255, 0.04);
+  --color-fill-2: rgba(255, 255, 255, 0.06);
+  --color-fill-3: rgba(254, 44, 85, 0.12);
+  --color-fill-4: rgba(254, 44, 85, 0.2);
+
+  /* Text Colors - 文字（纯白 + 灰阶） */
+  --color-text-1: #ffffff;
+  --text-primary: #ffffff;
+  --color-text-2: #b3b3b3;
+  --text-secondary: #b3b3b3;
+  --color-text-3: #8a8a8a;
+  --text-disabled: #5c5c5c;
+  --color-text-4: #5c5c5c;
+  --text-0: #ffffff;
+  --text-white: #ffffff;
+
+  /* Border Colors - 边框 */
+  --color-border: #2a2a2a;
+  --color-border-1: #232323;
+  --color-border-2: #2a2a2a;
+  --color-border-3: #383838;
+  --color-border-4: #4d4d4d;
+  --border-base: #2a2a2a;
+  --border-light: #232323;
+  --border-special: #3d3d3d;
+
+  /* Secondary Button - 次级按钮 */
+  --color-secondary: rgba(255, 255, 255, 0.08);
+  --color-secondary-hover: rgba(255, 255, 255, 0.12);
+  --color-secondary-active: rgba(255, 255, 255, 0.16);
+  --color-secondary-disabled: rgba(255, 255, 255, 0.04);
+
+  /* Semantic Colors - 语义色（info = 电光青） */
+  --success: #2ed573;
+  --warning: #ffb02e;
+  --danger: #f76560;
+  --info: #25f4ee;
+
+  /* Misc Arco - 杂项 */
+  --color-tooltip-bg: #383838;
+  --color-mask-bg: rgba(0, 0, 0, 0.7);
+  --color-spin-layer-bg: rgba(18, 18, 18, 0.6);
+  --color-menu-light-bg: #1f1f1f;
+  --color-menu-dark-bg: #121212;
+
+  /* Component Colors - 组件（深玫红气泡 + 深青提示） */
+  --message-user-bg: #3a0d18;
+  --message-tips-bg: #0e2423;
+  --workspace-btn-bg: #1f1f1f;
+  --color-guid-agent-bar: #2b0e17;
+  --sider-section-title-color: #8f8f96;
+
+  /* Terminal - 终端（画布恒深） */
+  --terminal-surface-bg: #0f0f12;
+  --terminal-border: rgba(255, 255, 255, 0.1);
+}
+
+/* ===== 签名点缀 / Signature touches ===== */
+
+/* 1. 主按钮：纯玫红（由 --primary-6 驱动）+ hover 微辉光，亮暗通用，
+      辉光取 --primary-6 跟随各模式主色；
+      :not() 排除语义状态按钮，避免 danger/warning/success 被染玫红 */
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success) {
+  transition: box-shadow 0.25s ease, background-color 0.2s ease;
+}
+.arco-btn-primary:not(.arco-btn-status-danger):not(.arco-btn-status-warning):not(.arco-btn-status-success):hover {
+  box-shadow: 0 0 12px rgba(var(--primary-6), 0.45);
+}
+
+/* 2. 暗色弹层/对话框：细白描边 + 深投影，从纯黑舞台上浮起 */
+[data-theme='dark'] .arco-select-popup,
+[data-theme='dark'] .arco-dropdown-menu,
+[data-theme='dark'] .arco-popover-content,
+[data-theme='dark'] .arco-modal {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+/* 3. 暗色侧栏：≤5% 的玫红→电光青舞台光晕，双色身份的最后一笔 */
+[data-theme='dark'] .layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(254, 44, 85, 0.05) 0%,
+    rgba(0, 0, 0, 0) 40%,
+    rgba(0, 0, 0, 0) 75%,
+    rgba(37, 244, 238, 0.04) 100%
+  );
+}
+
+/* 4. 亮色侧栏：开灯后残留的玫红→青舞台光晕（≤4%，青用可见深度的
+      #0bb8b2，电光青原色在白底上会消失） */
+[data-theme='light'] .layout-sider {
+  background-image: linear-gradient(
+    180deg,
+    rgba(232, 23, 74, 0.03) 0%,
+    rgba(255, 255, 255, 0) 40%,
+    rgba(255, 255, 255, 0) 75%,
+    rgba(11, 184, 178, 0.04) 100%
+  );
+}

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" fill="none" role="img" aria-label="NomiFun">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="630" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#131019"/>
+      <stop offset="1" stop-color="#07060B"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.1" r="0.7">
+      <stop offset="0" stop-color="#FF6F91" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#FF6F91" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.9" cy="0.95" r="0.6">
+      <stop offset="0" stop-color="#7583B2" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#7583B2" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bowl" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FF9FB4"/>
+      <stop offset="1" stop-color="#FF6F91"/>
+    </linearGradient>
+    <linearGradient id="pinktext" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFB3C4"/>
+      <stop offset="1" stop-color="#FF6F91"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect width="1200" height="630" fill="url(#glow2)"/>
+
+  <!-- Logo mark, scaled -->
+  <g transform="translate(110,150) scale(3.2)">
+    <rect width="80" height="80" rx="18" fill="#1B1822"/>
+    <path d="M33 17 q-4.5 -4 0 -8.5" stroke="#FF8FA8" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M40 15 q-4.5 -4 0 -8.5" stroke="#FFB3C4" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M47 17 q-4.5 -4 0 -8.5" stroke="#FF8FA8" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M22 46 Q22 27 40 27 Q58 27 58 46 Z" fill="#FFFFFF"/>
+    <path d="M14 49 H66 Q61.5 70 40 70 Q18.5 70 14 49 Z" fill="url(#bowl)"/>
+  </g>
+
+  <text x="430" y="250" font-family="Inter, 'PingFang SC', sans-serif" font-size="86" font-weight="800" fill="#F5F3F7">NomiFun</text>
+  <text x="432" y="320" font-family="Inter, 'PingFang SC', sans-serif" font-size="34" font-weight="600" fill="url(#pinktext)">完全开源 · 本地优先的超级 AI 工作站</text>
+  <text x="432" y="378" font-family="Inter, 'PingFang SC', sans-serif" font-size="26" font-weight="400" fill="#B8B3C4">Fully open-source, local-first super AI workstation</text>
+
+  <g font-family="Inter, 'PingFang SC', sans-serif" font-size="22" font-weight="500" fill="#B8B3C4">
+    <rect x="432" y="430" width="190" height="46" rx="23" fill="#1B1822" stroke="#322E3C"/>
+    <text x="458" y="460">数据全在本地</text>
+    <rect x="640" y="430" width="160" height="46" rx="23" fill="#1B1822" stroke="#322E3C"/>
+    <text x="666" y="460">免费商用</text>
+    <rect x="818" y="430" width="190" height="46" rx="23" fill="#1B1822" stroke="#322E3C"/>
+    <text x="844" y="460">Apache-2.0</text>
+  </g>
+</svg>

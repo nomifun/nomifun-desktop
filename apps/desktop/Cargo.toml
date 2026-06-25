@@ -1,0 +1,57 @@
+[package]
+name = "nomifun-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# NOTE: this crate is EXCLUDED from the root workspace (see root Cargo.toml)
+# until P2 wires the Tauri toolchain. It is the scaffold/target for the
+# "Tauri shell embeds the backend in-process" spike.
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The unified backend, linked in-process (no spawned binary, no bundled-nomicore).
+# computer-use: the desktop host is the one place screen/input control is sane.
+# browser-use: likewise, the desktop host is where a managed/connected Chromium
+# is sane (the in-process self-hosted CDP engine).
+nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
+nomifun-runtime.workspace = true
+clap.workspace = true
+
+# `macos-private-api` is required for the transparent nomi companion window on macOS.
+# `tray-icon` powers the system tray (close-to-tray default + tray Show/Quit menu).
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+# `deep-link` feature is REQUIRED for runtime deep links on Windows/Linux: those
+# OSes deliver `nomifun://` as argv to a second process, which single-instance
+# intercepts. Only with this feature does single-instance forward that argv into
+# the deep-link plugin so `on_open_url` fires while the app is already running
+# (macOS uses Apple Events and is unaffected). Without it the link is silently
+# dropped. single-instance must also be registered FIRST (see main.rs), which it is.
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-autostart = "2"
+
+# 跨平台保持唤醒:阻止系统空闲休眠(macOS=IOPMAssertion via objc2-io-kit,
+# Windows=SetThreadExecutionState via windows crate)。仅阻止系统休眠,不阻止显示器息屏。
+keepawake = "0.6"
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Tests build a real NTFS junction inside the fake legacy tree (the same
+# primitive nomifun-extension's skill_service materializes workspace skill
+# links with) to prove the data relocation skips links instead of failing.
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

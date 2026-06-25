@@ -1,0 +1,31 @@
+[package]
+name = "nomi-cli"
+description = "CLI binary for Nomi — a multi-provider AI agent with tool orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["ai", "agent", "cli", "llm", "anthropic"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "nomi"
+path = "src/main.rs"
+
+[dependencies]
+nomi-agent = { workspace = true, features = ["computer-use"] }
+nomi-compact.workspace  = true
+nomi-config.workspace   = true
+nomi-memory.workspace   = true
+nomi-providers.workspace = true
+nomi-tools.workspace    = true
+nomi-mcp.workspace      = true
+nomi-protocol.workspace = true
+nomi-skills.workspace   = true
+
+tokio.workspace              = true
+anyhow.workspace             = true
+clap.workspace               = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+

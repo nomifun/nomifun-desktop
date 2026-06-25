@@ -1,0 +1,69 @@
+{
+  "agentFallbackNotice": "{{original}} 不可用，已自动切换到 {{fallback}}。",
+  "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",
+  "noAgentAvailableShort": "没有可用的 Main Agent。点击配置。",
+  "agentTabAutoSwitch": "模型不兼容 Gemini，已自动切换到 {{fallback}}",
+  "autoSwitchToAgent": "Gemini 未配置，正在自动切换到 {{agent}}",
+  "autoSwitchedAgent": "{{from}} 不可用，已自动切换到 {{to}}",
+  "promptExamplesHint": "试试这些可点击的案例提示词：",
+  "selectAssistantHint": "选择一位助手开始任务",
+  "agentSwitcherLabel": "Agent",
+  "switchedToAgent": "已切换到 {{agent}}",
+  "workspace": {
+    "workInProject": "在项目中工作",
+    "optional": "可选",
+    "clearWorkspace": "清除",
+    "specifyWorkspace": "选择项目文件夹",
+    "searchPlaceholder": "搜索项目…",
+    "defaultWorkspace": "默认工作路径（Nomi 管理）"
+  },
+  "scanning": {
+    "initialMessage": "当前Agent不可用, 正在检测其他可用agent...",
+    "scanningMessage": "正在扫描本地可用agent...",
+    "connectingMessage": "已连接成功，请稍后...",
+    "establishingConnection": "正在建立连接...",
+    "statusQueued": "排队中",
+    "statusTesting": "正在测试延迟...",
+    "statusUnreachable": "不可达",
+    "statusAvailable": "可用"
+  },
+  "advanced": {
+    "applyNote": "将在会话创建后自动应用。",
+    "applyFailed": "「{{feature}}」设置应用失败，可进入会话后重新开启",
+    "draftOn": "已预设 · 创建后启用",
+    "draftOff": "未预设",
+    "willMount": "将挂载 {{count}} 个知识库"
+  },
+  "entry": {
+    "free": "自由发挥",
+    "summon": "召唤助手",
+    "skills": "使用 Skills",
+    "skillsActive": "使用 Skills · 已启用",
+    "skillsAdjustAria": "调整本次会话已启用的 {{count}} 个 Skills",
+    "skillsActiveAria": "查看本次会话已启用的 {{count}} 个 Skills",
+    "backToFree": "自由发挥"
+  },
+  "skillsPopover": {
+    "title": "本次会话使用的 Skills",
+    "description": "这些 Skills 会随本次会话注入，可在发送前由「使用 Skills」调整。",
+    "enabledCount": "已启用 {{count}} 个",
+    "overflowCount": "还有 {{count}} 个 Skills",
+    "adjustHint": "点击「使用 Skills」调整本次会话。"
+  },
+  "drawer": {
+    "assistantTab": "助手",
+    "skillsTab": "Skills",
+    "searchAssistant": "搜索助手名称或描述…",
+    "searchSkill": "搜索 Skill 名称或描述…",
+    "summon": "召唤",
+    "keepFree": "保持自由发挥",
+    "applySkills": "应用到本次会话",
+    "selectedCount": "已选 {{count}} 个 Skill",
+    "sourceCustom": "自定义",
+    "sourceBuiltin": "内置",
+    "autoInject": "自动注入",
+    "assistantCount": "位助手",
+    "skillCount": "个 Skill",
+    "assistantHint": "点卡片「召唤」即让本次会话使用该助手（单选）"
+  }
+}

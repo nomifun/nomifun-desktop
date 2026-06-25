@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NomiFun",
+  "version": "0.1.0",
+  "identifier": "com.nomifun.desktop",
+  "build": {
+    "frontendDist": "../../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "bun run --filter=./ui dev",
+    "beforeBuildCommand": "bun scripts/prune-build.mjs --pre && bun run --filter=./ui build"
+  },
+  "app": {
+    "windows": [],
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": ["../../ui/dist"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["nomifun"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhGOTlCMjEwMzg2MDFFRDgKUldUWUhtQTRFTEtaajNCVlBFS3ZvVzFheVo5RkttMnJnNnk4b3gycS95MFZNdnlvRjhMRG5nUDcK"
+    }
+  }
+}

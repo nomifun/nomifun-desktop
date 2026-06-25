@@ -1,0 +1,41 @@
+[package]
+name = "nomifun-secret"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# AES-GCM vault reuses nomifun-common::crypto (encrypt_string/decrypt_string)
+# per P2 design ruling ⑦ — single shared AES-256-GCM implementation.
+nomifun-common.workspace = true
+# Compile-time embedded Public Suffix List for offline eTLD+1 domain binding.
+psl.workspace = true
+thiserror.workspace = true
+# Ephemeral random key generation (tests / headless fallback callers).
+getrandom.workspace = true
+# X2 vault persistence: serializable records (ciphertext stays encrypted on disk).
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+# X2 `web` feature: the per-pet secret CRUD service + axum routes. Gated so the
+# agent-layer consumers (nomi-browser / nomi-browser-engine) that only use the
+# pure SecretStore/SecretValue do NOT pull axum / auth / api-types. Enabled by
+# nomifun-app, which mounts the routes.
+nomifun-api-types = { workspace = true, optional = true }
+nomifun-auth = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+
+[features]
+default = []
+web = ["dep:nomifun-api-types", "dep:nomifun-auth", "dep:axum"]
+
+[dev-dependencies]
+# X2 vault round-trip tests use a temp per-pet dir.
+tempfile.workspace = true
+# Route tests (web feature) exercise the router via tower oneshot.
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower = { workspace = true, features = ["util"] }
+http-body-util.workspace = true
+nomifun-api-types.workspace = true
+nomifun-auth.workspace = true
+axum.workspace = true

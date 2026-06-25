@@ -1,0 +1,139 @@
+{
+  "label": "智能决策",
+  "hint": "智能决策模式（IDMM）在会话/终端遇到供应商故障或决策卡顿时主动推进，让任务不挂起。两个可独立开关、默认关的值守共享同一引擎：故障值守与决策值守。",
+  "tierLabel": "模式",
+  "tier": {
+    "ruleOnly": "仅规则（不调用模型）",
+    "rulePlusModel": "规则 + 旁路模型",
+    "ruleOnlyDesc": "无需模型：按规则扫描并为会话保活（故障自动重试，选择题自动选第一个安全项）。永不作答开放式问答。",
+    "rulePlusModelDesc": "规则扫描，旁路模型代你决策、全托管推进工作（规则无法决断时升级到模型判断）。"
+  },
+  "watch": {
+    "faultTitle": "故障值守",
+    "faultDesc": "检测供应商/网络故障并自动重试（故障转移队列后续接入）。",
+    "decisionTitle": "决策值守",
+    "decisionDesc": "检测会话内的问题（选项决策 + 纯问答）并自动作答，让任务不中断。",
+    "scanInterval": "监测间隔",
+    "secondsSuffix": "秒",
+    "maxRetries": "最大重试",
+    "scanScope": "扫描范围",
+    "bypassModel": "旁路模型"
+  },
+  "scanScope": {
+    "lastTurn": "仅末轮",
+    "lastMessages": "最近若干条",
+    "fullSession": "全会话"
+  },
+  "strategy": {
+    "title": "决策策略",
+    "tendency": "倾向",
+    "onBlocked": "受阻时",
+    "freeform": "自由文本策略",
+    "freeformPlaceholder": "附加到旁路模型提示词的额外指引，例如「改动保持最小；优先选择可逆操作」。",
+    "answerOpenQuestions": "纯问答自动作答",
+    "answerOpenQuestionsHint": "允许旁路模型对开放式提问生成自由文本回答（仅旁路模型档生效）。"
+  },
+  "tendency": {
+    "conservative": "保守",
+    "balanced": "均衡",
+    "aggressive": "激进"
+  },
+  "onBlocked": {
+    "preferContinue": "倾向继续",
+    "preferPause": "倾向暂停",
+    "mustAsk": "必须询问"
+  },
+  "categoryMode": {
+    "auto": "自动",
+    "askFirst": "先询问",
+    "off": "关闭"
+  },
+  "category": {
+    "optionDecision": "选项决策",
+    "preferRecommended": "优先推荐项",
+    "allowUnmarkedPick": "自动选未标注项",
+    "neverDestructive": "绝不选破坏性项",
+    "openQuestion": "纯问答",
+    "maxAnswerChars": "回答字数上限",
+    "permission": "权限确认",
+    "onlySafeValue": "仅放行只读项",
+    "escalateRisky": "风险项升级到模型"
+  },
+  "sessionBackupHint": "留空则优先使用全局默认旁路供应商（在「设置 → 智能决策」中配置），其次自动复用当前会话模型；在此设置则仅对该值守生效。",
+  "backupRequired": "旁路模型档需要一个可用模型：可在此选择，或在「设置 → 智能决策」配置全局默认；在已选模型的会话中开启时会自动复用当前会话模型。",
+  "state": {
+    "off": "已关闭",
+    "armed": "守护中",
+    "intervening": "介入中"
+  },
+  "interventions": "已介入 {{count}} 次",
+  "enabledOk": "智能决策已更新",
+  "disabledOk": "已关闭智能决策",
+  "settings": {
+    "title": "智能决策（IDMM）",
+    "desc": "旁路模型模式的默认配置，值守未单独设置时使用。",
+    "backupProvider": "旁路供应商",
+    "backupModel": "旁路模型",
+    "selectProvider": "选择供应商",
+    "selectModel": "选择模型",
+    "defaultSteering": "默认决策策略",
+    "defaultSteeringPlaceholder": "当值守未填写自由文本策略时套用的默认决策策略。",
+    "saved": "智能决策设置已保存",
+    "none": "无"
+  },
+  "log": {
+    "title": "决策记录",
+    "empty": "暂无介入记录。",
+    "loading": "加载中…",
+    "stall": "卡顿类型",
+    "signal": "信号",
+    "tier": "档位",
+    "category": "分类",
+    "action": "动作",
+    "detail": "详情",
+    "reason": "思路",
+    "confidence": "置信度",
+    "outcome": "结果",
+    "clear": "清空记录",
+    "clearOk": "决策记录已清空",
+    "watch": {
+      "fault": "故障值守",
+      "decision": "决策值守"
+    },
+    "tierValue": {
+      "rule": "规则",
+      "sidecar": "旁路模型",
+      "rule_fallback": "规则兜底"
+    },
+    "categoryValue": {
+      "option": "选项",
+      "open_question": "开放问答",
+      "permission": "权限",
+      "fault": "故障"
+    },
+    "actionValue": {
+      "retry": "重试",
+      "answer_choice": "选定选项",
+      "send_text": "发送回复",
+      "confirm": "确认",
+      "wait": "等待",
+      "stop": "停止"
+    },
+    "outcomeValue": {
+      "applied": "已应用",
+      "resolved": "已解决",
+      "failed": "失败",
+      "halted": "已停手",
+      "skipped": "已跳过"
+    }
+  },
+  "activity": {
+    "title": "决策活动",
+    "desc": "所有会话最近的 IDMM 介入记录(最新在前)。这是滚动窗口而非完整历史——旧记录会自动淘汰。",
+    "empty": "尚无任何会话的介入记录。",
+    "refresh": "刷新",
+    "clearAll": "清空全部",
+    "clearConfirm": "清空所有会话的决策活动?此操作不可撤销。",
+    "clearOk": "已清空决策活动"
+  }
+}

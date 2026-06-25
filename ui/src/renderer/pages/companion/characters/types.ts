@@ -1,0 +1,55 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type React from 'react';
+
+/** Moods every character must express (driven by the learner / chat). */
+export type CompanionMood = 'happy' | 'content' | 'sleepy' | 'worried' | 'excited';
+
+/** Activities: idle breathing vs. a learn run in flight. */
+export type CompanionActivity = 'idle' | 'thinking';
+
+export interface CharacterProps {
+  mood: CompanionMood;
+  activity: CompanionActivity;
+  size?: number;
+}
+
+/** Per-character desktop window/render spec. Characters without one use DEFAULT_DESK. */
+export interface CharacterDeskSpec {
+  /** Companion window logical size (px). */
+  windowWidth: number;
+  windowHeight: number;
+  /** Figure height passed to the component as `size` inside the companion window. */
+  figureHeight: number;
+}
+
+/** Metadata for a user-supplied single-image figure (DIY custom character). */
+export interface CustomFigureMeta {
+  /** width / height of the cutout image. */
+  aspect: number;
+  /** Head-and-shoulders crop in image-fraction coords: left x + width w (of image
+   *  width), top y + height h (of image height). Free rectangle; a legacy square
+   *  box has h = w·aspect. */
+  headBox: { x: number; y: number; w: number; h: number };
+  /** Desk size tier. */
+  sizeTier: 's' | 'm' | 'l';
+  /** Library figure backing this companion (`figure_…`). When set, the image comes
+   *  from the shared figure library; absent for legacy per-companion figures. */
+  figureId?: string;
+}
+
+export interface CharacterMeta {
+  /** Stable id persisted in companion config (appearance.character). */
+  id: string;
+  /** i18n key suffix: nomi.characters.<id>.name / .style */
+  nameKey: string;
+  /** Two swatch colors shown in the picker chip. */
+  palette: [string, string];
+  /** Optional desktop spec — full-figure characters need a taller window. */
+  desk?: CharacterDeskSpec;
+  Component: React.FC<CharacterProps>;
+}

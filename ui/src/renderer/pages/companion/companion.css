@@ -1,0 +1,568 @@
+/* nomi desktop-companion styles: bubble chrome + window shell + quick-input.
+   Character art/animation lives in characters/*.tsx (scoped per character).
+   The companion window webview is transparent; everything visible is drawn here.
+
+   主题：本文件全程使用全局主题变量（--bg-*、--text-*、--border-base、--primary）。
+   桌宠窗口在模块初始化时已应用 data-theme(亮/暗) + data-color-scheme='default' 基础 palette
+   （default-color-scheme.css 定义了亮/暗两套变量；4 套氛围预设走 Layout 的 customCss 注入，
+   桌宠不挂 Layout 故不镜像预设——只跟随亮/暗，用中性基础 palette）。主窗切换亮/暗时由
+   index.tsx 的跨窗口事件实时同步 data-theme。 */
+
+.nomi-companion-window,
+.nomi-companion-window * {
+  box-sizing: border-box;
+}
+
+.nomi-companion-window {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+/* ---- character shell ---- */
+
+.nomi-ch {
+  cursor: grab;
+}
+
+.nomi-ch:active {
+  cursor: grabbing;
+}
+
+/* ---- forehead reply bubble ---- */
+
+.nomi-companion-bubble {
+  /* 聊天态：index.tsx 把原生窗口按屏幕比例放大后，CSS 才能真正撑出这些尺寸
+     （桌面态 240×320 窗口装不下）。横向几乎铺满窗口、纵向吃掉「可用高度 =
+     100vh − 预留(立绘高+输入条)」，都带上限——既舒展又不喧宾夺主。 */
+  display: flex;
+  flex-direction: column;
+  max-width: min(94vw, 560px);
+  max-height: clamp(180px, calc(100vh - var(--companion-reserve, 300px)), 560px);
+  margin-bottom: 8px;
+  padding: 11px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  position: relative;
+  animation: nomi-bubble-in 0.22s ease-out;
+}
+
+.nomi-companion-bubble::after {
+  content: '';
+  position: absolute;
+  bottom: -7px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 12px;
+  height: 12px;
+  background: var(--bg-base);
+  border-right: 1px solid var(--border-base);
+  border-bottom: 1px solid var(--border-base);
+}
+
+@keyframes nomi-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.nomi-companion-bubble--loading {
+  color: var(--text-secondary);
+}
+
+/* 快捷反应控件：□ 打断（本地/远程生成中）+ × 忽略（有气泡时）。原先浮在气泡右上角，
+   气泡随内容伸缩、动态难点中；现固定在输入条发送按钮右侧，作为稳定易点的常驻按钮。 */
+.nomi-companion-reaction {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.nomi-companion-reaction:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+/* 正文滚动视口：粘底自动追尾由 index.tsx 用 ref 驱动；这里负责外观——
+   细滚动条 + 向下滚动后顶部渐隐（旧文字溶进上沿，强化持续上滚的对话感）。 */
+.nomi-companion-bubble__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-4) transparent;
+}
+
+.nomi-companion-bubble__scroll.is-scrolled {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+}
+
+.nomi-companion-bubble__scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.nomi-companion-bubble__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.nomi-companion-bubble__scroll::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border-radius: 3px;
+}
+
+.nomi-companion-bubble__scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-5);
+}
+
+.nomi-companion-bubble__content {
+  min-height: 0;
+}
+
+/* 流式占位的三点跳动打字指示（替代旧的「…」纯文本）。 */
+.nomi-companion-bubble__typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 1px;
+}
+
+.nomi-companion-bubble__typing i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  animation: nomi-typing 1.1s infinite ease-in-out both;
+}
+
+.nomi-companion-bubble__typing i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.nomi-companion-bubble__typing i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes nomi-typing {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+
+/* ---- remote IM turn header (platform logo + the visitor's message) ---- */
+
+.nomi-companion-bubble__remote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--border-base);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.nomi-companion-bubble__remote img {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  object-fit: contain;
+}
+
+.nomi-companion-bubble__remote span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- unread badge ---- */
+
+.nomi-companion-badge {
+  position: absolute;
+  top: 10px;
+  right: 26px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  z-index: 3;
+}
+
+/* ---- quick-input row (mini, appears on hover) ---- */
+
+.nomi-companion-chatbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 桌面态窗口仅 240 宽 → ~220px（仅 输入/展开/发送，放得下）；聊天态窗口放大 →
+     封顶 360px，给发送右侧的 反应控件（□/×）留位。 */
+  width: min(92vw, 360px);
+  margin-top: 6px;
+  margin-bottom: 10px;
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+  pointer-events: none;
+}
+
+.nomi-companion-window:hover .nomi-companion-chatbar,
+.nomi-companion-chatbar.is-active {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.nomi-companion-chatbar input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 15px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.nomi-companion-chatbar input:focus {
+  border-color: var(--primary);
+}
+
+.nomi-companion-chatbar input::placeholder {
+  color: var(--text-secondary);
+}
+
+/* circular icon button (expand) + send button share the pill shape */
+.nomi-companion-iconbtn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.nomi-companion-iconbtn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.nomi-companion-chatbar button.nomi-companion-send {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 15px;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.nomi-companion-chatbar button.nomi-companion-send:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.nomi-companion-chatbar button.nomi-companion-send:disabled {
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+/* ---- expanded composer (multi-line text + pasted images) ---- */
+
+.nomi-companion-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(94vw, 520px);
+  margin-top: 6px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid var(--border-base);
+  background: var(--bg-base);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  animation: nomi-bubble-in 0.18s ease-out;
+}
+
+.nomi-companion-composer__thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.nomi-companion-composer__thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-base);
+  background: var(--bg-2);
+  flex: none;
+}
+
+.nomi-companion-composer__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.nomi-companion-composer__thumb-x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.nomi-companion-composer__input {
+  width: 100%;
+  min-height: 64px;
+  max-height: min(40vh, 240px);
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
+.nomi-companion-composer__input::placeholder {
+  color: var(--text-secondary);
+}
+
+.nomi-companion-composer__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nomi-companion-composer__bar .spacer {
+  flex: 1;
+}
+
+.nomi-companion-composer__ghost {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  border: 1px solid var(--border-base);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.nomi-companion-composer__ghost:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.nomi-companion-composer__send {
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: none;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.nomi-companion-composer__send:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.nomi-companion-composer__send:disabled {
+  background: var(--bg-2);
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+/* 附件按钮（选本地图片）+ 拖拽高亮 + 上传 loading 态 */
+.nomi-companion-composer__attach {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-base);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.nomi-companion-composer__attach:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.nomi-companion-composer__attach:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* 拖拽图片悬停整窗时给 composer 一圈虚线高亮（drop 经 Tauri 原生事件，落点为整窗）。 */
+.nomi-companion-composer.is-dragover {
+  outline: 2px dashed var(--primary);
+  outline-offset: 2px;
+}
+
+.nomi-companion-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--border-base);
+  border-top-color: var(--primary);
+  animation: nomi-spin 0.7s linear infinite;
+}
+
+@keyframes nomi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- suggestions popover ---- */
+
+.nomi-companion-suggestions {
+  position: absolute;
+  top: 32px;
+  right: 0;
+  width: 220px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-base);
+  border: 1px solid var(--border-base);
+  border-radius: 12px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  padding: 6px;
+  z-index: 5;
+}
+
+.nomi-companion-suggestions__item {
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.nomi-companion-suggestions__item:hover {
+  background: var(--bg-hover);
+}
+
+.nomi-companion-suggestions__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.nomi-companion-suggestions__body {
+  font-size: 11px;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- web fallback hint ---- */
+
+.nomi-companion-web-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100vh;
+  color: var(--text-secondary);
+  font-size: 13px;
+}

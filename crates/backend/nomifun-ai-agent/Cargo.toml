@@ -1,0 +1,100 @@
+[package]
+name = "nomifun-ai-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+nomifun-auth.workspace = true
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-mcp.workspace = true
+nomifun-runtime.workspace = true
+nomifun-extension.workspace = true
+nomifun-knowledge.workspace = true
+nomifun-api-types.workspace = true
+nomifun-net.workspace = true
+axum.workspace = true
+base64.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+hex.workspace = true
+dirs.workspace = true
+getrandom.workspace = true
+regex.workspace = true
+dashmap.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+nomi-agent.workspace = true
+nomi-types.workspace = true
+nomi-protocol.workspace = true
+nomi-config.workspace = true
+nomi-mcp.workspace = true
+nomi-providers.workspace = true
+nomi-memory.workspace = true
+nomi-redact.workspace = true
+# P3-K2: rendering page-fetch backend (BrowserFetcher) for knowledge URL sources.
+# Optional + gated behind the `browser-use` feature — this is the ONE place the
+# (agent-layer) browser engine is bridged into the (backend-layer) knowledge
+# `PageFetcher` trait. The knowledge crate itself NEVER depends on the engine
+# (P3 anti-cycle decision ②); the bridge lives here because this crate already
+# depends on `nomifun-knowledge` (the trait) and is the natural late-wire home
+# (same layering as `LiveKnowledgeCompleter`).
+nomi-browser-engine = { workspace = true, optional = true }
+# Phase D: the facade `BrowserApprovalGate` trait — the desktop `DesktopApprovalGate`
+# impl (Confirmation + ToolApprovalManager) lives in this crate and is threaded into
+# the native BrowserTool via `AgentBootstrap::approval_gate`. Optional (browser-use only).
+nomi-browser = { workspace = true, optional = true }
+# P3-X2: shared per-pet secret vault path resolver (`pet_vault_path`) so the agent
+# factory builds the same vault location the registration endpoint writes to. Pure
+# (no web feature) — only the path helper is used here.
+nomifun-secret.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+agent-client-protocol = { version = "0.11.1", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage", "unstable_session_fork", "unstable_session_additional_directories", "unstable_session_resume"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+rusqlite.workspace = true
+libc.workspace = true
+ts-rs = "12.0.1"
+
+[features]
+# Enables the `AgentInstance::Mock` variant used by downstream test harnesses
+# (conversation/cron/team/app) to inject trait-object stubs without having to
+# spawn a real agent process. Production builds must NOT turn this on — it
+# introduces a `dyn IAgentTask` branch that defeats the enum's zero-dispatch
+# guarantee.
+test-support = []
+# Desktop control tools for the nomi engine (desktop host only).
+computer-use = ["nomi-agent/computer-use"]
+# Browser-automation tools for the nomi engine (desktop host only).
+browser-use = ["nomi-agent/browser-use", "dep:nomi-browser-engine", "dep:nomi-browser"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber.workspace = true
+nomifun-common.workspace = true
+nomifun-extension.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+# E2E knowledge_search regression (knowledge_search_e2e): a local NoopBroadcaster
+# implements nomifun_realtime::EventBroadcaster, and the tool itself comes from
+# nomi-tools' Tool trait. Both are workspace crates not pulled by [dependencies].
+nomifun-realtime.workspace = true
+nomi-tools.workspace = true
+wiremock.workspace = true
+# Used by the acp_session_sync test setup to seed the conversations FK parent
+# directly on the in-memory pool (mirrors nomifun-db's own acp_session tests).
+sqlx = { workspace = true }
+
+# Integration tests under `tests/` need the `AgentInstance::Mock` variant.
+# Unlike unit tests (which see `cfg(test)` on the library), integration
+# tests compile as separate binaries and must opt in via a feature.
+[[test]]
+name = "agent_types_integration"
+required-features = ["test-support"]

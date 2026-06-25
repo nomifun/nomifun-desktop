@@ -1,0 +1,50 @@
+[Unit]
+Description=NomiFun headless WebUI server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Authentication is ON by default, but first-run setup can be claimed by the
+# first reachable browser. Keep 127.0.0.1 until setup is complete, or pre-seed
+# NOMIFUN_ADMIN_PASSWORD before switching to 0.0.0.0. For anything
+# internet-facing, put TLS (Caddy/nginx) in front and set NOMIFUN_HTTPS=true.
+Environment=NOMIFUN_WEB_HOST=127.0.0.1
+Environment=NOMIFUN_WEB_PORT=8787
+# NOTE: keep NOMIFUN_DATA_DIR in sync with StateDirectory below — both must
+# point at /var/lib/nomifun. If you drop this line, the data dir silently falls
+# back to the service user's per-user app-data dir
+# ($XDG_DATA_HOME/NomiFun/Nomi, usually ~nomifun/.local/share/NomiFun/Nomi),
+# decoupled from the systemd-managed StateDirectory.
+Environment=NOMIFUN_DATA_DIR=/var/lib/nomifun
+Environment=NOMIFUN_WEB_DIST=/opt/nomifun/web
+Environment=SHELL=/bin/bash
+# Behind a TLS proxy, uncomment:
+# Environment=NOMIFUN_HTTPS=true
+# Pre-seed the admin before LAN/public binding (recommended):
+# Environment=NOMIFUN_ADMIN_USERNAME=admin
+# Environment=NOMIFUN_ADMIN_PASSWORD=change-me-to-something-strong
+
+ExecStart=/opt/nomifun/nomifun-web
+WorkingDirectory=/opt/nomifun
+
+# Run as a dedicated unprivileged user you created (see README). Comment these
+# two lines out to run as root (simplest, but not recommended).
+User=nomifun
+Group=nomifun
+
+# /var/lib/nomifun, created + owned by the service user automatically.
+StateDirectory=nomifun
+
+Restart=on-failure
+RestartSec=3
+
+# Moderate hardening. Do NOT add ProtectHome=yes or a strict ProtectSystem:
+# the agent engine spawns processes (bun) and reads/writes files the operator
+# directs it to, so over-sandboxing breaks core features.
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

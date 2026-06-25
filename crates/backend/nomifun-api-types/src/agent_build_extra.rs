@@ -1,0 +1,369 @@
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    BrowserMcpConfig, GatewayMcpConfig, GuideMcpConfig, KnowledgeMcpConfig, KnowledgeMountInfo,
+    OpenMcpConfig, RequirementMcpConfig, ComputerMcpConfig,
+    TeamMcpStdioConfig,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionMcpTransport {
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+    Sse {
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+    StreamableHttp {
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMcpServer {
+    pub id: String,
+    pub name: String,
+    pub transport: SessionMcpTransport,
+}
+
+/// ACP-specific fields extracted from `extra` in build task options.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AcpBuildExtra {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub cli_path: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub custom_agent_id: Option<String>,
+    #[serde(default)]
+    pub preset_context: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub preset_assistant_id: Option<String>,
+    #[serde(default)]
+    pub session_mode: Option<String>,
+    #[serde(default)]
+    pub current_model_id: Option<String>,
+    #[serde(default)]
+    pub cron_job_id: Option<String>,
+    #[serde(default)]
+    pub team_mcp_stdio_config: Option<TeamMcpStdioConfig>,
+    #[serde(default)]
+    pub guide_mcp_config: Option<GuideMcpConfig>,
+    /// Requirement MCP stdio bridge config. When `Some`, the ACP assembler
+    /// injects `nomicore mcp-requirement-stdio` so the agent gets the
+    /// `requirement_complete` / `requirement_update_status` declaration tools.
+    /// Injected from `AgentFactoryDeps::requirement_mcp_config` at build time.
+    #[serde(default)]
+    pub requirement_mcp_config: Option<RequirementMcpConfig>,
+    /// Knowledge-search MCP stdio bridge config. When `Some`, the ACP assembler
+    /// injects `nomicore mcp-knowledge-stdio` so the agent gets a scoped
+    /// knowledge-search tool over the session's bound knowledge bases. The bound
+    /// `kb_ids` ride the bridge env (`NOMI_KB_MCP_KB_IDS`), not this struct, so
+    /// the agent tool takes only a query and cannot widen the bound base set.
+    /// Injected at build time; the nomi engine has `knowledge_search` natively
+    /// and so carries no equivalent field.
+    #[serde(default)]
+    pub knowledge_mcp_config: Option<KnowledgeMcpConfig>,
+    /// Marks a session entitled to the Desktop Gateway MCP (`nomi_*` tools —
+    /// full desktop control: conversations, cron, memory, requirements).
+    /// Backend-set only (channel master-agent sessions, companion companion
+    /// threads); the HTTP conversation routes strip it from client-supplied
+    /// extra so a session cannot self-authorize. Accepts both camelCase
+    /// (`desktopGateway`, the extra-JSON spelling) and snake_case.
+    #[serde(default, alias = "desktopGateway")]
+    pub desktop_gateway: bool,
+    /// Desktop Gateway MCP stdio bridge config. Injected from
+    /// `AgentFactoryDeps::gateway_mcp_config` at build time when
+    /// `desktop_gateway` is set.
+    #[serde(default)]
+    pub gateway_mcp_config: Option<GatewayMcpConfig>,
+    /// Reliable-launch (`open`) MCP stdio bridge config. When `Some`, the ACP
+    /// assembler injects `nomicore mcp-open-stdio` so the agent gets the `open`
+    /// tool (ShellExecute a URL/file/app). Injected from
+    /// `AgentFactoryDeps::open_mcp_config` at build time — populated on Windows
+    /// only (macOS/Linux already launch reliably), independent of any flag.
+    #[serde(default)]
+    pub open_mcp_config: Option<OpenMcpConfig>,
+    /// Computer-use discrete-tool MCP stdio bridge config. When `Some`, the ACP
+    /// assembler injects `nomicore mcp-computer-stdio` so the agent gets discrete
+    /// desktop tools (snapshot / click / type / launch / …). Injected from
+    /// `AgentFactoryDeps::computer_mcp_config` at build time — populated on every
+    /// desktop OS (macOS / Windows / Linux) when the host binary has the
+    /// `computer-use` feature.
+    #[serde(default)]
+    pub computer_mcp_config: Option<ComputerMcpConfig>,
+    /// Browser-use discrete-tool MCP stdio bridge config. When `Some`, the ACP
+    /// assembler injects `nomicore mcp-browser-stdio` so the agent gets discrete
+    /// browser tools (navigate / observe / click / type / …). Injected from
+    /// `AgentFactoryDeps::browser_mcp_config` at build time — populated on every
+    /// desktop OS when the host binary has the `browser-use` feature. Symmetric
+    /// with `computer_mcp_config`; the bridge is stateless fail-safe (R2: no
+    /// per-pet context over the env boundary — see `BrowserMcpConfig`).
+    #[serde(default)]
+    pub browser_mcp_config: Option<BrowserMcpConfig>,
+    /// The companion this session is bound to (multi-companion upgrade). Set by the
+    /// channel layer on master-agent sessions (platform binding > default
+    /// companion); rides the gateway MCP env (`NOMI_GW_MCP_COMPANION_ID`) so desktop
+    /// tools can attribute the caller. Accepts both camelCase (`companionId`, the
+    /// extra-JSON spelling) and snake_case.
+    #[serde(default, alias = "companionId")]
+    pub companion_id: Option<String>,
+    /// IM platform this session serves (e.g. "lark") when it is a channel
+    /// master-agent. Set by the channel layer; rides the gateway MCP env
+    /// (`NOMI_GW_MCP_CHANNEL_PLATFORM`) so the gateway resolves the write surface
+    /// (channel → write-disabled unless re-enabled). Mirrors `NomiBuildExtra`.
+    #[serde(default, alias = "channelPlatform")]
+    pub channel_platform: Option<String>,
+    #[serde(default)]
+    pub mcp_server_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub session_mcp_servers: Vec<SessionMcpServer>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Knowledge bases mounted into this session's workspace, computed at
+    /// task start by the conversation service. The ACP assembler renders
+    /// these into a preset-context section so the agent knows what extended
+    /// knowledge is available and where it lives.
+    #[serde(default)]
+    pub knowledge_mounts: Vec<KnowledgeMountInfo>,
+    /// Write-back ("回血") switch: `true` invites the agent to persist new
+    /// knowledge as markdown into the mounted directories; `false` declares
+    /// them read-only. Prompt-level contract — the mounts themselves stay
+    /// writable on disk.
+    #[serde(default)]
+    pub knowledge_writeback: bool,
+    /// Write-back mode while `knowledge_writeback` is true: `staged` confines
+    /// writes to `_inbox/{conversation_id}/` (conflict-free across sessions,
+    /// the default), `direct` allows editing the base body.
+    #[serde(default)]
+    pub knowledge_writeback_mode: Option<String>,
+    /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
+    /// `conservative` (restrained, the default) only persists clearly-useful
+    /// knowledge, `aggressive` captures anything plausibly relevant. Orthogonal
+    /// to `knowledge_writeback_mode`.
+    #[serde(default)]
+    pub knowledge_writeback_eagerness: Option<String>,
+}
+
+/// OpenClaw gateway configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenClawGatewayConfig {
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub token: Option<String>,
+    pub password: Option<String>,
+    #[serde(default)]
+    pub use_external_gateway: bool,
+    pub cli_path: Option<String>,
+}
+
+/// OpenClaw-specific fields extracted from `extra` in build task options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenClawBuildExtra {
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub gateway: OpenClawGatewayConfig,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub preset_assistant_id: Option<String>,
+    #[serde(default)]
+    pub cron_job_id: Option<String>,
+    #[serde(default, rename = "sessionKey")]
+    pub session_key: Option<String>,
+}
+
+/// Remote agent-specific fields extracted from `extra` in build task options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteBuildExtra {
+    /// Primary key of the `remote_agents` row (i64 since the primary-key
+    /// rework). The frontend carries it as a JSON number.
+    pub remote_agent_id: i64,
+}
+
+/// Opt-in goal-driven continuation for a session. When present, the engine
+/// keeps working toward `objective` across turns (with a completion audit)
+/// until the model proves completion, hits `max_auto_continuations`, or
+/// `max_turns`. Absent (the default) = normal one-shot turn behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NomiGoalSpec {
+    pub objective: String,
+    /// Cap on automatic continuations (anti-runaway). Defaults to 8 when unset.
+    #[serde(default)]
+    pub max_auto_continuations: Option<usize>,
+}
+
+/// Nomi-specific fields extracted from `extra` in build task options.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NomiBuildExtra {
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub preset_rules: Option<String>,
+    #[serde(default = "default_nomi_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+    /// Opt-in goal-driven continuation (see [`NomiGoalSpec`]).
+    #[serde(default)]
+    pub goal: Option<NomiGoalSpec>,
+    #[serde(default)]
+    pub session_mode: Option<String>,
+    #[serde(default)]
+    pub team_mcp_stdio_config: Option<TeamMcpStdioConfig>,
+    #[serde(default)]
+    pub guide_mcp_config: Option<GuideMcpConfig>,
+    #[serde(default)]
+    pub mcp_server_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub session_mcp_servers: Vec<SessionMcpServer>,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Marks a companion-companion conversation: the factory registers the
+    /// companion memory tools (recall/save memory, recent events) and skips
+    /// the guide MCP injection (the companion talks, it doesn't create teams).
+    /// Accepts both camelCase (frontend extra) and snake_case.
+    #[serde(default, alias = "companionSession")]
+    pub companion: bool,
+    /// Opt-in to the Computer tool (screen/mouse/keyboard control) for this
+    /// session. Falls back to host config / NOMIFUN_COMPUTER_USE when None.
+    #[serde(default, alias = "computerUse")]
+    pub computer_use: Option<bool>,
+    /// Opt-in to the Browser tool (CDP automation) for this session.
+    /// Falls back to host config / NOMIFUN_BROWSER_USE when None.
+    #[serde(default, alias = "browserUse")]
+    pub browser_use: Option<bool>,
+    /// Marks a session entitled to the Desktop Gateway MCP (`nomi_*` tools).
+    /// Backend-set only; stripped from client-supplied extra by the HTTP
+    /// conversation routes. See `AcpBuildExtra::desktop_gateway`.
+    #[serde(default, alias = "desktopGateway")]
+    pub desktop_gateway: bool,
+    /// Desktop Gateway MCP stdio bridge config, injected from
+    /// `AgentFactoryDeps::gateway_mcp_config` when `desktop_gateway` is set.
+    #[serde(default)]
+    pub gateway_mcp_config: Option<GatewayMcpConfig>,
+    /// IM platform this conversation serves (e.g. "telegram", "lark"), set by
+    /// the channel layer on master-agent sessions. Consumed by the companion
+    /// prompt provider so the persona can acknowledge the remote context.
+    #[serde(default, alias = "channelPlatform")]
+    pub channel_platform: Option<String>,
+    /// The companion this session is bound to (multi-companion upgrade). Set by the
+    /// channel layer on master-agent sessions (platform binding > default
+    /// companion) and consumed by the companion prompt provider to pick the
+    /// persona; also rides the gateway MCP env (`NOMI_GW_MCP_COMPANION_ID`).
+    /// `None` resolves to the host's default companion. Accepts both camelCase
+    /// (`companionId`, the extra-JSON spelling) and snake_case.
+    #[serde(default, alias = "companionId")]
+    pub companion_id: Option<String>,
+    /// Knowledge bases mounted into this session's workspace, computed at
+    /// task start by the conversation service. The nomi factory renders
+    /// these into a system-prompt section so the agent knows what extended
+    /// knowledge is available and where it lives. Same serde shape as
+    /// `AcpBuildExtra::knowledge_mounts`.
+    #[serde(default)]
+    pub knowledge_mounts: Vec<KnowledgeMountInfo>,
+    /// Write-back ("回血") switch: `true` invites the agent to persist new
+    /// knowledge as markdown into the mounted directories; `false` declares
+    /// them read-only. Prompt-level contract — the mounts themselves stay
+    /// writable on disk. Same shape as `AcpBuildExtra::knowledge_writeback`.
+    #[serde(default)]
+    pub knowledge_writeback: bool,
+    /// Write-back mode while `knowledge_writeback` is true: `staged` confines
+    /// writes to `_inbox/{conversation_id}/` (conflict-free across sessions,
+    /// the default), `direct` allows editing the base body. Same shape as
+    /// `AcpBuildExtra::knowledge_writeback_mode`.
+    #[serde(default)]
+    pub knowledge_writeback_mode: Option<String>,
+    /// Write-back disposition ("回写意识") while `knowledge_writeback` is true:
+    /// `conservative` (the default) or `aggressive`. Orthogonal to
+    /// `knowledge_writeback_mode`; same shape as
+    /// `AcpBuildExtra::knowledge_writeback_eagerness`.
+    #[serde(default)]
+    pub knowledge_writeback_eagerness: Option<String>,
+}
+
+fn default_nomi_max_tokens() -> u32 {
+    8192
+}
+
+/// ACP model information returned by the ACP backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpModelInfo {
+    pub model_id: String,
+    pub model_name: Option<String>,
+    pub provider: Option<String>,
+}
+
+/// A slash command item available in a conversation session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlashCommandItem {
+    pub command: String,
+    pub description: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P4-2: the `browser_mcp_config` field on `AcpBuildExtra` round-trips
+    /// symmetrically with `computer_mcp_config` (both `Some`, both preserved).
+    #[test]
+    fn acp_build_extra_browser_mcp_config_json_roundtrip() {
+        let extra = AcpBuildExtra {
+            browser_mcp_config: Some(BrowserMcpConfig {
+                binary_path: "/usr/bin/nomicore".into(),
+            }),
+            computer_mcp_config: Some(ComputerMcpConfig {
+                binary_path: "/usr/bin/nomicore".into(),
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&extra).unwrap();
+        let parsed: AcpBuildExtra = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.browser_mcp_config.as_ref().map(|c| c.binary_path.as_str()),
+            Some("/usr/bin/nomicore"),
+            "browser_mcp_config must survive the round-trip"
+        );
+        // Symmetry: the sibling computer field still round-trips alongside it.
+        assert_eq!(
+            parsed.computer_mcp_config.as_ref().map(|c| c.binary_path.as_str()),
+            Some("/usr/bin/nomicore"),
+        );
+    }
+
+    /// Default `AcpBuildExtra` (feature OFF / no injection) leaves
+    /// `browser_mcp_config` `None`, so the assembler injects nothing (no-op).
+    #[test]
+    fn acp_build_extra_browser_mcp_config_defaults_none() {
+        let extra = AcpBuildExtra::default();
+        assert!(extra.browser_mcp_config.is_none());
+    }
+}

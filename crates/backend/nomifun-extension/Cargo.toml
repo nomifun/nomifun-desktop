@@ -1,0 +1,37 @@
+[package]
+name = "nomifun-extension"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-api-types.workspace = true
+nomifun-db.workspace = true
+nomifun-realtime.workspace = true
+nomifun-runtime.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+dirs.workspace = true
+fs2.workspace = true
+include_dir.workspace = true
+semver.workspace = true
+notify.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+mime_guess.workspace = true
+zip.workspace = true
+
+# NTFS junctions are used on Windows to materialize skill links without
+# requiring `SeCreateSymbolicLink` (Developer Mode / Admin). Pulled in
+# only on Windows targets to avoid building it on Linux/macOS.
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+
+[dev-dependencies]
+async-trait.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

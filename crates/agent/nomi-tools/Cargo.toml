@@ -1,0 +1,34 @@
+[package]
+name = "nomi-tools"
+description = "Built-in agent tools for Nomi (Read, Write, Edit, Bash, Grep, Glob, Spawn)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Cross-platform test fixture spawned by the PTY/process unit tests (replaces
+# the unix-only `cat`/`sleep`/`sh` programs). Built with the crate so unit tests
+# in `src/` can locate it next to the test runner via `current_exe()`.
+[[bin]]
+name = "pty_test_helper"
+path = "src/bin/pty_test_helper.rs"
+
+[dependencies]
+nomi-types.workspace    = true
+nomi-protocol.workspace = true
+nomi-config.workspace   = true
+
+tracing.workspace     = true
+tokio.workspace       = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+base64.workspace      = true
+glob.workspace        = true
+lru.workspace         = true
+portable-pty.workspace = true
+libc.workspace        = true
+
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>D2 networkidle never-idle (long polling)</title>
+</head>
+<body>
+  <h1>Never-idle fixture</h1>
+  <div id="state" role="status">polling</div>
+  <script>
+    // 永不空闲：持续发起请求（每个请求在前一个完成后立即再发），模拟长轮询 / SSE 站。
+    // inflight 计数永远 >0（或频繁回到 >0），networkidle 永远等不到 500ms 连续空闲 →
+    // navigate 应在 networkidle 短 cap（~4s）到点后降级返 Load（不卡 30s）。
+    //
+    // 请求目标用本页自身（file://），每次带不同 query 防缓存命中即返回。即便 file:// 的
+    // fetch 行为受限，requestWillBeSent 仍会发出 → inflight 计数仍被打破，验证 cap 降级。
+    let n = 0;
+    function poll() {
+      n++;
+      fetch(location.pathname + '?poll=' + n + '&t=' + Date.now())
+        .catch(function () {})
+        .finally(function () {
+          // 立即再发下一个：让 inflight 在 500ms 静默窗口内总被打破。
+          setTimeout(poll, 30);
+        });
+    }
+    // 同时并发多条，进一步保证窗口内总有 inflight。
+    poll(); poll(); poll();
+  </script>
+</body>
+</html>

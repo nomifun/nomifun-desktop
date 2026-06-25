@@ -1,0 +1,261 @@
+/* Titlebar + window controls */
+
+/* Close-button hover/active color (Windows/Linux window controls). Follows the
+   active theme's `--danger` token so it stays coherent in dark / neon / frosted
+   presets, instead of the hardcoded Windows red that ignored `data-theme`. The
+   classic Windows red is kept only as the ultimate fallback if a theme somehow
+   omits `--danger`. `--window-close-danger-active` is a slightly darker shade
+   for the :active press, derived from the same token. */
+:root {
+  --window-close-danger: var(--danger, #e81123);
+  --window-close-danger-active: color-mix(in srgb, var(--danger, #c10f1f) 80%, #000);
+}
+
+.app-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  height: var(--titlebar-height);
+  min-height: var(--titlebar-height);
+  line-height: var(--titlebar-height);
+  user-select: none;
+  position: relative;
+  z-index: 10;
+}
+
+.app-titlebar--desktop {
+  -webkit-app-region: drag;
+}
+
+.app-titlebar--mobile {
+  height: 48px;
+  min-height: 48px;
+  padding: 0 8px;
+}
+
+.app-titlebar--mobile-conversation {
+  background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-2) 100%) !important;
+  border-bottom: none !important;
+}
+
+.app-titlebar--mac {
+  height: 45px;
+  min-height: 36px;
+  /* Reserve space for macOS traffic light buttons (left side) */
+  padding-right: 12px;
+}
+
+/* Windows/Linux desktop: taller titlebar so 36px buttons have breathing room,
+   and a bit of left padding so the first button isn't glued to the window edge. */
+.app-titlebar--desktop:not(.app-titlebar--mac) {
+  height: 42px;
+  min-height: 42px;
+  padding-left: 16px;
+  /* Let the right-side toolbar stretch edge-to-edge so system window controls
+     (minimize/maximize/close) go full height AND hug the right window edge like
+     native Windows chrome (the base `padding: 0 8px` would otherwise leave an
+     8px gap on the right). */
+  padding-right: 0;
+  align-items: stretch;
+}
+
+/* Only the menu group stays vertically centered in the taller titlebar. */
+.app-titlebar--desktop:not(.app-titlebar--mac) .app-titlebar__menu,
+.app-titlebar--desktop:not(.app-titlebar--mac) .app-titlebar__brand {
+  align-self: center;
+}
+
+.app-titlebar__brand {
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  color: var(--text-primary);
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+
+.app-titlebar--mobile .app-titlebar__brand {
+  position: static;
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  text-align: left;
+  min-width: 0;
+  margin: 0 8px;
+}
+
+.app-titlebar--mobile .app-titlebar__brand--centered {
+  position: absolute;
+  left: 50%;
+  transform: translateX(calc(-50% + var(--app-titlebar-mobile-center-offset, 0px)));
+  max-width: calc(100% - 180px);
+  text-align: center;
+  margin: 0;
+}
+
+.app-titlebar__brand-mobile {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.app-titlebar__brand-text {
+  display: block;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.app-titlebar__brand-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 0;
+  color: var(--text-primary);
+}
+
+.app-titlebar__menu {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+}
+
+.app-titlebar__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  margin-left: auto;
+  min-height: var(--titlebar-height);
+}
+
+/* Mobile slot for chat-header actions (model picker, cron, etc.). */
+.app-titlebar__actions-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-titlebar__actions-slot:empty {
+  display: none;
+}
+
+.app-titlebar__button {
+  -webkit-app-region: no-drag;
+  width: var(--titlebar-height);
+  height: var(--titlebar-height);
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.app-titlebar__button:hover {
+  background-color: rgba(0, 0, 0, 0.08);
+}
+
+.app-titlebar__button:active {
+  background-color: rgba(0, 0, 0, 0.14);
+}
+
+[data-theme='dark'] .app-titlebar__button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+[data-theme='dark'] .app-titlebar__button:active {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+
+.app-titlebar__button:disabled,
+.app-titlebar__button[disabled] {
+  opacity: 0.35;
+  cursor: default;
+  background-color: transparent;
+}
+
+/* Optical alignment: arrow icons have their visual weight pulled upward by
+   the V tip; nudge them down 1px to sit on the same centerline as the
+   sidebar rectangle icon (which has a solid, symmetric visual weight). */
+.app-titlebar__button--nav svg {
+  transform: translateY(1px);
+}
+
+.app-titlebar__button:disabled:hover,
+.app-titlebar__button[disabled]:hover {
+  background-color: transparent;
+}
+
+.app-titlebar__button--mobile {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+
+.app-titlebar__button--mobile svg {
+  width: 18px !important;
+  height: 18px !important;
+}
+
+.app-window-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  -webkit-app-region: no-drag;
+}
+
+.app-window-controls__button {
+  width: 40px;
+  /* Match the parent titlebar height so system buttons go edge-to-edge
+     like native Windows chrome. */
+  height: 100%;
+  align-self: stretch;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.app-window-controls__button:hover {
+  background-color: rgba(128, 128, 128, 0.2);
+}
+
+.app-window-controls__button:active {
+  background-color: rgba(128, 128, 128, 0.3);
+}
+
+.app-window-controls__button--close:hover {
+  background-color: var(--window-close-danger);
+  color: #fff;
+}
+
+.app-window-controls__button--close:active {
+  background-color: var(--window-close-danger-active);
+  color: #fff;
+}

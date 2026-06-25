@@ -1,0 +1,76 @@
+[package]
+name = "nomi-a11y"
+description = "Cross-platform accessibility-tree + Set-of-Marks engine for Nomi computer-use (macOS AX / Windows UIA / Linux AT-SPI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-types.workspace = true
+
+tracing.workspace    = true
+thiserror.workspace  = true
+serde.workspace      = true
+serde_json.workspace = true
+image.workspace      = true
+base64.workspace     = true
+
+# --- macOS backend: Accessibility (AXUIElement) + CoreGraphics actuation +
+#     AppKit (NSRunningApplication focus) + Vision (OCR/text fusion). macOS only. ---
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics   = "0.25"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSData",
+    "NSArray",
+    "NSString",
+    "NSError",
+    "NSDictionary",
+    "NSValue",
+] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-vision = { version = "0.3", features = [
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "VNTypes",
+    "VNGeometry",
+    "objc2-core-foundation",
+] }
+
+# --- Windows backend: UI Automation (via the `uiautomation` high-level wrapper)
+#     for the accessibility tree + actuation, and `windows` (windows-rs) for
+#     Win32 foreground/window management + `Windows.Media.Ocr` text fusion.
+#     Windows only. ---
+[target.'cfg(target_os = "windows")'.dependencies]
+# High-level IUIAutomation wrapper (COM init via new_direct + MTA, tree walkers,
+# patterns, control types). leexgone/uiautomation-rs.
+uiautomation = "0.25"
+# windows-rs: foreground window (Win32) + on-device OCR (Windows.Media.Ocr).
+# 0.61 aligns with the version xcap already pulls into Cargo.lock.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+] }
+
+# --- Linux backend: AT-SPI2 (pure-Rust, async via zbus over D-Bus). Compiled
+#     only on Linux. No C deps — the actor thread runs a current-thread tokio
+#     runtime and block_on's the async atspi calls. ---
+[target.'cfg(target_os = "linux")'.dependencies]
+atspi = "0.30"
+zbus = { version = "5", features = ["tokio"] }
+tokio = { workspace = true }
+
+[dev-dependencies]
+image.workspace = true

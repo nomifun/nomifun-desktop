@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>F1-sec executable download red-line</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  a { display: block; margin: 12px; }
+</style>
+</head>
+<body>
+  <h1>F1-sec executable download red-line</h1>
+
+  <!--
+    F1-sec 集成测试用：触发一次「可执行文件」下载（suggestedFilename=setup.exe）。
+    引擎的下载循环订阅 Browser.downloadWillBegin，命中 reject_executable_download（.exe denylist）
+    即 cancelDownload（fail-closed，红线——yolo/companion 也取消，因为该判定不看 session_mode）。
+    用 data: URL + download="setup.exe"：点击即让 chrome 把内容当 setup.exe 下载（无需服务器）；
+    引擎应在落盘前取消它，故沙箱目录里不会出现非空 .exe（也不会出现任何最终落盘文件）。
+  -->
+  <a id="dl-exe"
+     download="setup.exe"
+     href="data:application/octet-stream;base64,TVqQAAEABLOCKED_FAKE_PE_PAYLOAD_NomiFun_F1sec">Download setup.exe</a>
+</body>
+</html>

@@ -1,0 +1,34 @@
+{
+  "groups": [
+    { "id": "dev",   "title": "开发（热重载）" },
+    { "id": "build", "title": "构建（出制品）" },
+    { "id": "serve", "title": "运行（组装好的应用）" },
+    { "id": "test",  "title": "测试" },
+    { "id": "check", "title": "静态检查 / 门禁" },
+    { "id": "fmt",   "title": "格式化" },
+    { "id": "gen",   "title": "代码生成" },
+    { "id": "maint", "title": "维护 / 工具" }
+  ],
+  "scripts": {
+    "dev":           { "group": "dev",   "desc": "启动桌面应用开发（tauri dev，热重载）" },
+    "dev:web":       { "group": "dev",   "desc": "启动 Web 全栈开发（后端 API + 前端 vite）" },
+    "dev:ui":        { "group": "dev",   "desc": "仅启动前端开发服务器（纯 vite，无后端）" },
+    "build":         { "group": "build", "desc": "为当前操作系统打桌面安装包" },
+    "build:signed":  { "group": "build", "desc": "打桌面包并签名+公证（仅 macOS）" },
+    "build:updater": { "group": "build", "desc": "打桌面包并产出自更新 .sig 制品" },
+    "build:ui":      { "group": "build", "desc": "前端生产构建 → ui/dist" },
+    "serve:web":     { "group": "serve", "desc": "启动 Web 服务器，托管已构建的前端" },
+    "test":          { "group": "test",  "desc": "运行全部 Rust 测试（含 doctest）" },
+    "test:fast":     { "group": "test",  "desc": "用 nextest 快速跑 Rust 测试（日常）" },
+    "check":         { "group": "check", "desc": "聚合静态门禁：typecheck + i18n + 主题契约 + 脚本登记" },
+    "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
+    "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },
+    "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },
+    "fmt":           { "group": "fmt",   "desc": "格式化 Rust 代码（cargo fmt）" },
+    "fmt:check":     { "group": "fmt",   "desc": "校验 Rust 代码格式（cargo fmt --check）" },
+    "gen:i18n":      { "group": "gen",   "desc": "由 locale 重新生成 i18n 类型声明" },
+    "clean":         { "group": "maint", "desc": "深度回收构建空间（debug 产物 + flycheck + 旧安装包）" },
+    "seed:dev":      { "group": "maint", "desc": "用生产数据目录播种 dev 数据目录" },
+    "help":          { "group": "maint", "desc": "打印脚本目录（--check 校验登记 / --readme 生成 README 表）" }
+  }
+}

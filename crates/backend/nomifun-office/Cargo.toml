@@ -1,0 +1,29 @@
+[package]
+name = "nomifun-office"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-api-types.workspace = true
+nomifun-realtime.workspace = true
+nomifun-auth.workspace = true
+nomifun-file.workspace = true
+nomifun-runtime.workspace = true
+axum.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+which.workspace = true
+calamine.workspace = true
+sha1.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rust_xlsxwriter.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

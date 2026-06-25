@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>D2 SPA soft navigation</title>
+</head>
+<body>
+  <h1>SPA fixture</h1>
+  <button id="go">Go to /step2</button>
+  <div id="state" role="status">at start</div>
+  <script>
+    // 点击即 history.pushState 改 URL（same-document soft navigation，无 newDocument）。
+    // CDP 据此发 Page.navigatedWithinDocument（不发 frameNavigated/loadEventFired）。
+    document.getElementById('go').addEventListener('click', function () {
+      history.pushState({}, '', '/step2');
+      document.getElementById('state').textContent = 'at step2';
+    });
+    // 加载即自动软导航一次（让 navigate 到本页后立即触发 navigatedWithinDocument，
+    // 便于集成测试在不依赖点击的情况下观察 SPA 降级路径）。延迟到下一帧，确保 navigate
+    // 的初始文档 load 与软导航分离。
+    window.addEventListener('load', function () {
+      setTimeout(function () {
+        history.pushState({}, '', '/auto-soft-nav');
+        document.getElementById('state').textContent = 'auto soft-nav done';
+      }, 50);
+    });
+  </script>
+</body>
+</html>

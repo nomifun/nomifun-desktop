@@ -1,0 +1,9 @@
+---
+source: crates/agent/nomi-browser-engine/tests/integration_act.rs
+expression: summary
+---
+normal(button,visible+stable+enabled)   = Pass
+disabled(button,visible+stable+enabled)  = Missing("enabled")
+readonly(input,editable)                 = Missing("editable")
+non_editable(heading,editable)           = Err(Blocked)=true
+hidden(input,visible)                    = Missing("visible")

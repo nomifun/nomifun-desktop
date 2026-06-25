@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Hit-target / modal overlay</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+
+  /* 页面背景里的按钮：被全屏 modal 遮罩盖住，点它会命中 overlay（误点）。 */
+  #covered {
+    position: fixed;
+    left: 40px; top: 200px;
+    width: 160px; height: 48px;
+    z-index: 1;
+  }
+
+  /* 全屏半透明遮罩：盖住整个视口（含 #covered）。z-index 高于页面背景按钮。 */
+  #overlay {
+    position: fixed;
+    left: 0; top: 0;
+    width: 100vw; height: 100vh;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+  }
+
+  /* modal 里的「可达」按钮：z-index 高于遮罩，点它真命中它自己（不被遮）。
+     定位到确定坐标，便于测试硬编码命中点（不依赖 quad 计算，那是 B5）。 */
+  #reachable {
+    position: fixed;
+    left: 40px; top: 40px;
+    width: 160px; height: 48px;
+    z-index: 1001;
+  }
+</style>
+</head>
+<body>
+  <h1>Hit target</h1>
+  <button id="covered">Behind overlay</button>
+  <div id="overlay"></div>
+  <button id="reachable">Reachable in modal</button>
+</body>
+</html>

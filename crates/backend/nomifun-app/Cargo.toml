@@ -1,0 +1,135 @@
+[package]
+name = "nomifun-app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nomicore"
+path = "src/main.rs"
+
+[features]
+default = ["telegram", "lark", "dingtalk", "weixin", "discord", "matrix", "mattermost", "slack", "twitch", "nostr", "qqbot"]
+telegram = ["nomifun-channel/telegram"]
+lark = ["nomifun-channel/lark"]
+dingtalk = ["nomifun-channel/dingtalk"]
+weixin = ["nomifun-channel/weixin"]
+discord = ["nomifun-channel/discord"]
+matrix = ["nomifun-channel/matrix"]
+mattermost = ["nomifun-channel/mattermost"]
+slack = ["nomifun-channel/slack"]
+twitch = ["nomifun-channel/twitch"]
+nostr = ["nomifun-channel/nostr"]
+qqbot = ["nomifun-channel/qqbot"]
+# Desktop control tools (desktop host enables this; web/server hosts do not).
+# Also pulls the discrete-tool MCP bridge (`mcp-computer-stdio`) deps so codex/
+# ACP sessions get the same computer-use; web/headless builds omit them entirely.
+computer-use = [
+    "nomifun-ai-agent/computer-use",
+    "nomifun-gateway/computer-use",
+    "dep:nomi-computer",
+    "dep:nomi-config",
+    "dep:nomi-tools",
+    "dep:nomi-types",
+]
+# Browser-automation tools (desktop host enables this; web/server hosts do not).
+# Also pulls the discrete-tool MCP bridge (`mcp-browser-stdio`) deps so codex/
+# ACP sessions get the same browser-use; web/headless builds omit them entirely
+# (no self-hosted-CDP / Chromium stack). Mirrors how `computer-use` pulls
+# nomi-computer/-config/-tools/-types for mcp-computer-stdio.
+# P3-GW1: also forwards to `nomifun-gateway/browser-use` so the desktop gateway
+# exposes the per-companion `nomi_browser_*` tools (route A). Web/headless builds
+# omit the feature → the gateway registers no browser tools.
+browser-use = [
+    "nomifun-ai-agent/browser-use",
+    "nomifun-gateway/browser-use",
+    "dep:nomi-browser",
+    "dep:nomi-config",
+    "dep:nomi-tools",
+    "dep:nomi-types",
+]
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-assets.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-realtime.workspace = true
+nomifun-auth.workspace = true
+nomifun-system.workspace = true
+nomifun-file.workspace = true
+nomifun-office.workspace = true
+nomifun-shell.workspace = true
+nomifun-ai-agent.workspace = true
+nomifun-mcp.workspace = true
+nomifun-conversation.workspace = true
+nomifun-extension.workspace = true
+nomifun-channel.workspace = true
+nomifun-team.workspace = true
+nomifun-cron.workspace = true
+nomifun-requirement.workspace = true
+nomifun-idmm.workspace = true
+nomifun-knowledge.workspace = true
+nomifun-companion.workspace = true
+nomifun-gateway.workspace = true
+nomifun-public.workspace = true
+nomifun-webhook.workspace = true
+# P3-X2: per-pet browser-use credential secret CRUD endpoints (web feature mounts routes).
+nomifun-secret = { workspace = true, features = ["web"] }
+nomifun-terminal.workspace = true
+nomifun-assistant.workspace = true
+nomifun-runtime.workspace = true
+nomifun-net.workspace = true
+axum.workspace = true
+dirs.workspace = true
+# OS-level advisory lock for the exclusive per-data-dir server lock
+# (bootstrap/server_lock.rs) — same dep nomifun-db's migrate lock uses.
+fs2.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+rmcp = { version = "1.5", features = ["server", "transport-io", "schemars"] }
+anyhow.workspace = true
+async-trait.workspace = true
+# Network-interface enumeration for desktop LAN-IP detection (WebUI remote access).
+if-addrs = "0.13"
+
+# Computer-use discrete-tool MCP bridge (`mcp-computer-stdio`) — facade over
+# ComputerTool. Optional; only the `computer-use` feature pulls the native
+# screen/input/UI-Automation stack, so web/headless builds stay lean.
+nomi-computer = { workspace = true, optional = true }
+# Browser-use discrete-tool MCP bridge (`mcp-browser-stdio`) — facade over
+# BrowserTool. Optional; only the `browser-use` feature pulls the self-hosted-CDP
+# browser engine + Chromium, so web/headless builds stay lean. Shares the
+# optional nomi-config/-tools/-types deps with computer-use.
+nomi-browser = { workspace = true, optional = true }
+nomi-config = { workspace = true, optional = true }
+nomi-tools = { workspace = true, optional = true }
+nomi-types = { workspace = true, optional = true }
+
+[dev-dependencies]
+nomifun-api-types.workspace = true
+nomifun-realtime.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+# Enable the `AgentInstance::Mock` variant so tests can build fake agents
+# through the trait-object escape hatch without spawning real CLI processes.
+nomifun-ai-agent = { workspace = true, features = ["test-support"] }
+async-trait.workspace = true
+base64.workspace = true
+git2.workspace = true
+http-body-util.workspace = true
+rust_xlsxwriter.workspace = true
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+wiremock = "0.6"

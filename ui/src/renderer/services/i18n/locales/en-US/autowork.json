@@ -1,0 +1,40 @@
+{
+  "title": "Tag Sessions",
+  "tabs": {
+    "tagSessions": "Tag Sessions"
+  },
+  "tagSessions": {
+    "tag": "Tag",
+    "counts": "Requirements",
+    "countsFmt": "{{done}}/{{total}}",
+    "boundCount": "Bound Sessions",
+    "webhook": "Webhook",
+    "webhookPlaceholder": "Select webhook",
+    "webhookNone": "None",
+    "description": "Description",
+    "descriptionPlaceholder": "Enter tag description",
+    "actions": "Actions",
+    "sessions": "Bound Sessions",
+    "unbind": "Unbind",
+    "activeStopInSession": "This session is actively executing. Please stop it from the session page before unbinding.",
+    "unbindOk": "Unbound successfully",
+    "unbindError": "Unbind failed: {{error}}",
+    "settingSaved": "Tag setting saved",
+    "settingError": "Failed to save tag setting: {{error}}",
+    "conflictWarning": "Multiple sessions active",
+    "empty": "No tags yet",
+    "noBindings": "No bound sessions",
+    "pausedBadge": "Paused: {{reason}}",
+    "pausedReasons": {
+      "requirementFailed": "requirement failed",
+      "userInterrupted": "stopped by user"
+    },
+    "resume": "Resume",
+    "resumeSuccess": "Tag resumed"
+  },
+  "runState": {
+    "off": "Off",
+    "idle": "Idle",
+    "active": "Active"
+  }
+}

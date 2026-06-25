@@ -1,0 +1,23 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ * Based on AionUi (https://github.com/iOfficeAI/AionUi)
+ */
+
+/**
+ * Type definitions for message tool results
+ * 消息工具结果类型定义
+ */
+
+export interface ImageGenerationResult {
+  img_url?: string;
+  relative_path?: string;
+  error?: string;
+}
+
+export interface WriteFileResult {
+  file_diff: string;
+  file_name: string;
+  [key: string]: unknown;
+}

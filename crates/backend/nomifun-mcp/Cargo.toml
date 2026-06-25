@@ -1,0 +1,30 @@
+[package]
+name = "nomifun-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-runtime.workspace = true
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+nomifun-net.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+axum.workspace = true
+dirs.workspace = true
+thiserror.workspace = true
+oauth2.workspace = true
+open.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

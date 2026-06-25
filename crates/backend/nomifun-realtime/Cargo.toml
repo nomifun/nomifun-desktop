@@ -1,0 +1,16 @@
+[package]
+name = "nomifun-realtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-api-types.workspace = true
+axum.workspace = true
+tokio.workspace = true
+dashmap.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true

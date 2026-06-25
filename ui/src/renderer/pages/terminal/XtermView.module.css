@@ -1,0 +1,63 @@
+/* Card wrapper for the terminal — rounded, clipped, constant-dark surface. */
+.card {
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background-color: var(--terminal-surface-bg);
+  border: 1px solid var(--terminal-border);
+}
+
+/* Internal padding for the terminal screen. FitAddon 0.10.0 reads the .xterm
+   element's computed padding and subtracts it when computing cols/rows, so this
+   gives breathing room WITHOUT clipping the last row/column. */
+.card :global(.xterm) {
+  padding: 12px 14px;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+/* The viewport/screen should fill the padded area, not paint their own bg. */
+.card :global(.xterm-viewport),
+.card :global(.xterm-screen) {
+  background-color: transparent !important;
+}
+
+/* Glass header — mirrors the conversation ChatLayout header treatment so the
+   terminal matches the app's design language. */
+.header {
+  position: relative;
+  isolation: isolate;
+  contain: paint;
+  background-color: color-mix(in srgb, var(--bg-1) 92%, transparent);
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -12px;
+  height: 12px;
+  pointer-events: none;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--bg-1) 68%, transparent) 0%, transparent 100%);
+}
+
+@supports ((-webkit-backdrop-filter: blur(6px)) or (backdrop-filter: blur(6px))) {
+  .header {
+    -webkit-backdrop-filter: saturate(110%) blur(6px);
+    backdrop-filter: saturate(110%) blur(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .header {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--bg-1);
+  }
+
+  .header::after {
+    display: none;
+  }
+}

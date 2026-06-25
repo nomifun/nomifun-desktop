@@ -1,0 +1,46 @@
+import type { TooltipProps } from '@arco-design/web-react';
+
+/**
+ * 侧边栏内 Tooltip 的挂载容器：将 popup 挂到左侧边栏根节点，
+ * 这样在收起/关闭侧边栏时 tooltip 会随侧边栏一起隐藏，避免残留在屏幕遮挡内容。
+ * See: https://github.com/nomifun/nomifun-app/issues/987
+ */
+export const getSiderPopupContainer = (_node: HTMLElement): Element =>
+  document.querySelector('.layout-sider') || document.body;
+
+const SIDER_TOOLTIP_CLASS = 'sider-tooltip-popup';
+
+export const cleanupSiderTooltips = () => {
+  if (typeof document === 'undefined') return;
+  // Arco Tooltip occasionally leaves detached popup nodes; remove both scoped and global tooltip popups.
+  document.querySelectorAll(`.${SIDER_TOOLTIP_CLASS}, .arco-tooltip-popup`).forEach((node) => node.remove());
+};
+
+export type SiderTooltipProps = Pick<
+  TooltipProps,
+  | 'className'
+  | 'trigger'
+  | 'disabled'
+  | 'unmountOnExit'
+  | 'popupHoverStay'
+  | 'popupVisible'
+  | 'getPopupContainer'
+  | 'triggerProps'
+>;
+
+export const getSiderTooltipProps = (enabled = false): SiderTooltipProps => {
+  const disabled = !enabled;
+  return {
+    className: SIDER_TOOLTIP_CLASS,
+    trigger: (disabled ? [] : 'hover') as 'hover' | 'hover'[],
+    disabled,
+    unmountOnExit: true,
+    popupHoverStay: false,
+    popupVisible: disabled ? false : undefined,
+    getPopupContainer: getSiderPopupContainer,
+    triggerProps: {
+      mouseEnterDelay: 0,
+      mouseLeaveDelay: 0,
+    },
+  };
+};

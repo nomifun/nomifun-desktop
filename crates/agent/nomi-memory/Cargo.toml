@@ -1,0 +1,23 @@
+[package]
+name = "nomi-memory"
+description = "Long-term memory system for Nomi: cross-session storage of user preferences, feedback, project context, and external references"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-config.workspace = true
+
+tracing.workspace    = true
+serde.workspace      = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+chrono.workspace     = true
+thiserror.workspace  = true
+
+
+[dev-dependencies]
+tempfile.workspace    = true
+rstest.workspace      = true
+serial_test.workspace = true

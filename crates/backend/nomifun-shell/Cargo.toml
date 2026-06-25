@@ -1,0 +1,27 @@
+[package]
+name = "nomifun-shell"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomifun-api-types.workspace = true
+nomifun-system.workspace = true
+nomifun-runtime.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+open.workspace = true
+which.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+nomifun-db.workspace = true
+http-body-util.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
+wiremock.workspace = true

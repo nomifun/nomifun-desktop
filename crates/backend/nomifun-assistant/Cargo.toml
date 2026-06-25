@@ -1,0 +1,24 @@
+[package]
+name = "nomifun-assistant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-common = { workspace = true }
+nomifun-api-types = { workspace = true }
+nomifun-db = { workspace = true }
+nomifun-extension = { workspace = true }
+axum = { workspace = true }
+include_dir = "0.7"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+nomifun-realtime = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }

@@ -1,0 +1,9 @@
+---
+source: crates/agent/nomi-browser-engine/tests/integration_act.rs
+expression: summary
+---
+reachable.expect_hit_target((120,64))    = Ok
+reachable.hit_setup(mouse,block=false)   = Ok(interceptor handle, group=act-0)
+reachable.hit_stop(no click)             = Ok
+covered.expect_hit_target((120,224))     = Err(Blocked: <div id="overlay"></div>)
+covered.hit_setup(preliminary)           = Err(Blocked: <div id="overlay"></div>)

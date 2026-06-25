@@ -1,0 +1,33 @@
+[package]
+name = "nomi-config"
+description = "Configuration layer for Nomi: Config struct, ProviderCompat, auth, hooks, session config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+nomi-types.workspace   = true
+nomi-compact.workspace = true
+
+serde.workspace      = true
+serde_json.workspace = true
+toml                 = "1" # pinned: agent code uses toml 1.0 (workspace default is 0.8 for be-rs)
+anyhow.workspace     = true
+thiserror.workspace  = true
+dirs.workspace       = true
+chrono.workspace     = true
+reqwest.workspace    = true
+glob.workspace       = true
+tokio.workspace      = true
+
+tracing.workspace            = true
+tracing-appender.workspace   = true
+tracing-subscriber.workspace = true
+
+
+[dev-dependencies]
+wiremock.workspace            = true
+tokio-test.workspace          = true
+tempfile.workspace            = true
+tracing-subscriber.workspace  = true

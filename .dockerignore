@@ -1,0 +1,19 @@
+# Keep the Docker build context small & deterministic. The image rebuilds
+# ui/dist and the Rust binary from source, so ship only sources.
+target/
+**/target/
+node_modules/
+**/node_modules/
+ui/dist/
+dist/
+.git/
+.smoketest/
+.claude/
+*.log
+# The repo's .cargo/config.toml points crates-io at a CN mirror (rsproxy.cn),
+# which stalls non-CN Docker builds. Exclude it so the image build uses the
+# default registry; opt into a mirror with the CARGO_REGISTRY_MIRROR build-arg.
+.cargo/
+# Local runtime data must never leak into the image.
+data/
+**/data/

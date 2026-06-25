@@ -1,0 +1,32 @@
+# 行尾统一：仓库与工作区一律 LF
+# 根治 autocrlf 幻影改动（索引 LF + 工作区 CRLF 预期 + 工具写回 LF → status 永远脏）。
+# .gitattributes 优先级高于各机器的 core.autocrlf —— mac（autocrlf=input/false）与
+# Windows（autocrlf=true）从此行为一致，不再依赖本地配置。
+# 要求 git >= 2.10（text=auto + eol 组合正确跳过二进制；现代 mac/Windows git 均远高于此）。
+* text=auto eol=lf
+
+# Unix shell 脚本必须 LF（mac/Linux 可执行；全局规则已覆盖，此处显式自文档化）
+*.sh text eol=lf
+
+# Windows 脚本必须 CRLF（当前仓库无此类文件，前瞻防御）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制显式声明（防御任何 git 版本/环境的文本误判与行尾改写）
+*.png binary
+*.ico binary
+*.icns binary
+*.pptx binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.zip binary
+*.p12 binary
+*.p8 binary
+*.key binary

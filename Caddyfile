@@ -1,0 +1,17 @@
+# TLS + reverse proxy for nomifun-web (Caddy auto-provisions HTTPS certs).
+#
+# The app provides its own login screen, so NO basic_auth is needed here —
+# Caddy's job is just TLS termination and proxying. The /ws WebSocket upgrade
+# passes through automatically.
+#
+# IMPORTANT: when serving over HTTPS, set NOMIFUN_HTTPS=true on the nomifun
+# service so the session cookie gets the Secure flag.
+#
+# Replace the domain below with yours. For a LAN-only host without a public
+# domain you can use an internal name + `tls internal`, or just skip Caddy and
+# publish port 8787 directly (the in-app login still protects it).
+
+your.domain.com {
+	encode zstd gzip
+	reverse_proxy nomifun:8787
+}

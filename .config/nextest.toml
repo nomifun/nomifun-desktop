@@ -1,0 +1,22 @@
+# cargo-nextest 配置。
+#
+# 真 Chrome 集成/端到端测试的串行化（browser-use 自研引擎）：
+# nomi-browser-engine / nomi-browser 的 `#[ignore]` 真 Chrome 用例每个都 fork 一个
+# 完整 Chrome 进程。nextest 默认跨二进制并行调度,`--run-ignored all` 会同时拉起十几个
+# Chrome → 机器过载,个别会话在启动/早期 navigate 阶段掉线,报
+# "browser session lost (recoverable=false)"。这是**并行负载竞争的伪失败,非产品/测试
+# 代码 bug**——串行(`-j1`)下 100% 绿(实测 15/15)。
+#
+# 本组把这些真 Chrome 用例钉在单线程,使默认并行的 `--run-ignored all` 也稳定,避免
+# CI/他人因伪失败误判、损套件可信度。匹配(scoped 到两个 browser crate,对其余 workspace
+# 零影响):
+#   - 所有 integration_* / *_e2e 集成二进制(按构造全是真 Chrome;不跑 --ignored 时为空,无开销);
+#   - 散落在 lib 单测二进制里、以 `_real` 结尾的 facade 真 Chrome 用例。
+# 快速纯逻辑单测(不含 Chrome)不匹配 → 默认并行不受影响。
+
+[test-groups]
+serial-chrome = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = '(package(nomi-browser-engine) | package(nomi-browser)) & (binary_id(/integration/) | binary_id(/_e2e$/) | test(/_real$/))'
+test-group = 'serial-chrome'

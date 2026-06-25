@@ -1,0 +1,17 @@
+[package]
+name = "nomifun-assets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+axum.workspace = true
+http.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tokio.workspace = true
+tower = { workspace = true, features = ["util"] }

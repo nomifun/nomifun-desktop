@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>F-actions upload_file</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  input { display: block; margin: 12px; }
+</style>
+</head>
+<body>
+  <h1>F-actions upload</h1>
+
+  <!--
+    F-actions 集成测试用：一个 <input type=file>，验证 act(UploadFile) 经 DOM.setFileInputFiles
+    把本地文件路径塞进 input.files（绕系统文件对话框）。给它 aria-label 让 observe 暴露稳定 accname。
+    测试断言：setFileInputFiles 后 input.files.length == 1 且 files[0].name 含被上传的文件名。
+  -->
+  <label>Attachment <input id="file" type="file" aria-label="Attachment"></label>
+
+  <script>
+    // 暴露一个只读探针：返回 file input 当前的 {count, first}（测试也可直接经 act 的 verify 锚点拿到）。
+    window.__fileInputState = function () {
+      var f = document.getElementById('file').files;
+      return { count: f ? f.length : 0, first: (f && f.length > 0) ? f[0].name : null };
+    };
+  </script>
+</body>
+</html>

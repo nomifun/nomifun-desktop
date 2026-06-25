@@ -1,0 +1,18 @@
+[package]
+name = "nomi-protocol"
+description = "JSON stream protocol (events, commands, approval manager) for Nomi host integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+tracing.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+tokio.workspace      = true
+
+
+[dev-dependencies]
+rstest.workspace = true

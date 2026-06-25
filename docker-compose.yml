@@ -1,0 +1,49 @@
+# Headless WebUI deployment.
+#
+#   docker compose up -d --build
+#   # then open http://<server-ip>:8787. The FIRST reachable browser creates
+#   # the initial admin unless you pre-seed NOMIFUN_ADMIN_PASSWORD below.
+#
+# `restart: unless-stopped` makes it start on boot — installing the service IS
+# enabling the WebUI. Pre-seed the admin or complete setup on a trusted network
+# before exposing the port broadly; add TLS (the optional caddy service below)
+# for anything internet-facing.
+
+services:
+  nomifun:
+    build: .
+    image: nomifun-web:local
+    restart: unless-stopped
+    ports:
+      - "8787:8787" # LAN / VPN / localhost. Finish setup or pre-seed admin first.
+    volumes:
+      - nomifun-data:/data # SQLite db, logs, bun runtime cache, agent state.
+    # environment:
+    #   # Pre-seed the admin instead of interactive first-run setup:
+    #   NOMIFUN_ADMIN_USERNAME: admin
+    #   NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
+    #   # When fronted by the caddy service below (TLS), make cookies Secure:
+    #   NOMIFUN_HTTPS: "true"
+
+  # --- Optional: TLS + reverse proxy for internet exposure --------------------
+  # To use it: (1) edit Caddyfile with your domain, (2) set NOMIFUN_HTTPS=true
+  # in the nomifun environment above, (3) replace the nomifun `ports:` block
+  # with `expose: ["8787"]` so only Caddy is published, (4) uncomment below.
+  #
+  # caddy:
+  #   image: caddy:2
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     - nomifun
+
+volumes:
+  nomifun-data:
+  # caddy-data:
+  # caddy-config:

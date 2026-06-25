@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>E4 download sandbox</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  a { display: block; margin: 12px; }
+</style>
+</head>
+<body>
+  <h1>E4 download</h1>
+
+  <!--
+    E4 集成测试用：触发一次真实下载落进沙箱（per-pet workspace/downloads）。
+    用 data: URL + download 属性——点击即让 chrome 把内容当文件下载（无需服务器）。
+    内容是一段可识别的文本（>0 字节，便于断言 size>0）；文件名 report.txt（非可执行，
+    denylist 不命中——本测试验证「良性文件落盘 + MOTW」，红线拒绝走纯逻辑单测）。
+    注：data: URL 下 download 属性的 suggestedFilename 取 download 属性值（report.txt）。
+  -->
+  <a id="dl"
+     download="report.txt"
+     href="data:text/plain;charset=utf-8,NomiFun%20E4%20download%20sandbox%20test%20payload%0Aline2%0Aline3%0A">Download report.txt</a>
+
+  <script>
+    // 暴露一个程序化触发（集成测试可直接 click DOM，或经 evaluate 调用——但 E4 测试走真实 click）。
+    window.__triggerDownload = function () {
+      document.getElementById('dl').click();
+    };
+  </script>
+</body>
+</html>

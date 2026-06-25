@@ -1,0 +1,57 @@
+import { useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
+import { ipcBridge } from '@/common';
+import { deriveAutoTitleFromMessages } from '@/renderer/utils/chat/autoTitle';
+import { emitter } from '@/renderer/utils/emitter';
+import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
+
+export const useAutoTitle = () => {
+  const { t } = useTranslation();
+
+  const syncTitleFromHistory = useCallback(
+    async (conversation_id: number, fallbackContent?: string) => {
+      const defaultTitle = t('conversation.welcome.newConversation');
+      try {
+        const conversation = await getConversationOrNull(conversation_id);
+        if (!conversation || conversation.name !== defaultTitle) {
+          return;
+        }
+
+        const messagesResult = await ipcBridge.database.getConversationMessages.invoke({
+          conversation_id: conversation_id,
+          page: 0,
+          page_size: 1000,
+        });
+        const newTitle = deriveAutoTitleFromMessages(messagesResult.items, fallbackContent);
+        if (!newTitle) {
+          return;
+        }
+
+        const success = await ipcBridge.conversation.update.invoke({
+          id: conversation_id,
+          updates: { name: newTitle },
+        });
+        if (!success) {
+          return;
+        }
+
+        emitter.emit('chat.history.refresh');
+      } catch (error) {
+        console.error('Failed to auto-update conversation title:', error);
+      }
+    },
+    [t]
+  );
+
+  const checkAndUpdateTitle = useCallback(
+    async (conversation_id: number, messageContent: string) => {
+      await syncTitleFromHistory(conversation_id, messageContent);
+    },
+    [syncTitleFromHistory]
+  );
+
+  return {
+    checkAndUpdateTitle,
+    syncTitleFromHistory,
+  };
+};

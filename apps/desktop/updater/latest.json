@@ -1,0 +1,23 @@
+{
+  "version": "0.1.1",
+  "notes": "示例发布说明 — 替换为真实更新内容。",
+  "pub_date": "2026-06-08T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<<粘贴 .exe.sig 内容>>",
+      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "<<粘贴 .app.tar.gz.sig 内容>>",
+      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_x64.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "<<粘贴 .app.tar.gz.sig 内容>>",
+      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_aarch64.app.tar.gz"
+    },
+    "linux-x86_64": {
+      "signature": "<<粘贴 .AppImage.sig 内容>>",
+      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_amd64.AppImage"
+    }
+  }
+}

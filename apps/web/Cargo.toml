@@ -1,0 +1,24 @@
+[package]
+name = "nomifun-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nomifun-web"
+path = "src/main.rs"
+
+[dependencies]
+# The unified backend, consumed in-process as a library (no spawned binary).
+# P2 will expose nomifun_app's boot entry (init_environment / data layer /
+# AppServices) so this host can mount the real /api router. For now this host
+# serves the built SPA (ui/dist) and a health endpoint.
+nomifun-app.workspace = true
+nomifun-runtime.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+tower-http = { workspace = true, features = ["fs", "trace"] }
+tracing.workspace = true
+anyhow.workspace = true
+clap.workspace = true

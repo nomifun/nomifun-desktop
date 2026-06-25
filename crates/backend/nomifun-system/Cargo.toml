@@ -1,0 +1,26 @@
+[package]
+name = "nomifun-system"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-auth.workspace = true
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomifun-api-types.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+aws-config.workspace = true
+aws-sdk-bedrock.workspace = true
+semver.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true }
+http-body-util.workspace = true
+reqwest.workspace = true
+wiremock = "0.6"

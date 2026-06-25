@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>C2 hover/select/press_key/scroll/scroll_to_text</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  .row { margin: 8px; }
+  /* hover 目标：onmouseover 时打标记 + :hover 改色（验证 hover 真投递）。 */
+  #hovertarget { display: inline-block; width: 200px; height: 40px; line-height: 40px;
+                 text-align: center; background: #ddd; }
+  #hovertarget:hover { background: #8cf; }
+  /* select 目标。 */
+  #picker { display: block; width: 240px; height: 28px; }
+  /* press_key 目标：表单里的输入框，Enter 触发 submit 打标记。 */
+  form#search { margin: 8px; }
+  #q { display: block; width: 240px; height: 28px; }
+  /* 长页：spacer 撑高，底部有可滚到的文本 + 元素，验证 scroll / scroll_to_text。 */
+  #spacer { height: 3000px; background: linear-gradient(#fff, #eee); }
+  #bottom { padding: 24px; background: #cfc; }
+  #bottomtarget { display: block; width: 200px; height: 40px; background: #fc9; }
+</style>
+</head>
+<body>
+  <h1>C2 actions</h1>
+
+  <!-- hover: onmouseover 打标记（验证 hover 真投递到元素）。用 button 让 aria 给它稳定 name。 -->
+  <div class="row">
+    <button id="hovertarget" data-hovered="no">Hover me</button>
+  </div>
+
+  <!-- select_option: 三个选项，act 选 opt2 后读回 select.value。 -->
+  <div class="row">
+    <label>Pick <select id="picker" aria-label="Pick">
+      <option value="opt1">First</option>
+      <option value="opt2">Second</option>
+      <option value="opt3">Third</option>
+    </select></label>
+  </div>
+
+  <!-- press_key: 输入框在 form 内，Enter 触发 submit 打标记（验证 Enter-in-form）。
+       带一个 submit 按钮让隐式提交在合成键事件下也可靠（单字段无按钮时浏览器启发式不稳）。 -->
+  <form id="search" action="javascript:void(0)">
+    <label>Query <input id="q" name="q" type="text"></label>
+    <button id="search-submit" type="submit" style="position:absolute;left:-9999px">Go</button>
+  </form>
+  <div id="search-status" role="status" aria-label="search status">idle</div>
+
+  <!-- 长页 spacer：撑高让初始 scrollY=0，scroll down 后变大；底部文本/元素验证 scroll_to_text。 -->
+  <div id="spacer"></div>
+  <div id="bottom">
+    <p id="bottommarker">Unique footer sentinel text</p>
+    <button id="bottomtarget">Bottom target button</button>
+  </div>
+
+  <script>
+    // hover 标记：onmouseover 置位（hit-target 验证 hover 真命中目标本身）。
+    document.getElementById('hovertarget').addEventListener('mouseover', function () {
+      this.setAttribute('data-hovered', 'yes');
+      this.textContent = 'Hovered';
+    });
+    // Enter-in-form 提交标记。
+    document.getElementById('search').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var q = document.getElementById('q').value;
+      document.getElementById('search-status').textContent = 'searched:' + q;
+    });
+  </script>
+</body>
+</html>

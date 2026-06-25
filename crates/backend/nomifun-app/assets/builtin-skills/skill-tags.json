@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "skills": [
+    { "name": "officecli-docx", "audience_tags": ["office"], "scenario_tags": ["document"] },
+    { "name": "officecli-pptx", "audience_tags": ["office"], "scenario_tags": ["presentation"] },
+    { "name": "officecli-xlsx", "audience_tags": ["office", "finance"], "scenario_tags": ["spreadsheet"] },
+    { "name": "officecli-word-form", "audience_tags": ["office"], "scenario_tags": ["document", "spreadsheet"] },
+    { "name": "officecli-academic-paper", "audience_tags": ["student"], "scenario_tags": ["document", "research"] },
+    { "name": "officecli-data-dashboard", "audience_tags": ["office", "marketing"], "scenario_tags": ["dataviz"] },
+    { "name": "officecli-financial-model", "audience_tags": ["finance"], "scenario_tags": ["spreadsheet", "dataviz"] },
+    { "name": "officecli-pitch-deck", "audience_tags": ["finance", "office"], "scenario_tags": ["presentation"] },
+    { "name": "morph-ppt", "audience_tags": ["office", "designer"], "scenario_tags": ["presentation"] },
+    { "name": "morph-ppt-3d", "audience_tags": ["designer", "office"], "scenario_tags": ["presentation", "design"] },
+    { "name": "star-office-helper", "audience_tags": ["office", "general"], "scenario_tags": ["document"] },
+    { "name": "mermaid", "audience_tags": ["developer", "office"], "scenario_tags": ["dataviz"] },
+    { "name": "moltbook", "audience_tags": ["student", "general"], "scenario_tags": ["document"] },
+    { "name": "story-roleplay", "audience_tags": ["general", "designer"], "scenario_tags": ["writing"] },
+    { "name": "xiaohongshu-recruiter", "audience_tags": ["marketing"], "scenario_tags": ["social"] },
+    { "name": "x-recruiter", "audience_tags": ["marketing"], "scenario_tags": ["social"] },
+    { "name": "weixin-file-send", "audience_tags": ["general"], "scenario_tags": ["setup"] },
+    { "name": "openclaw-setup", "audience_tags": ["developer", "general"], "scenario_tags": ["setup"] },
+    { "name": "nomifun-webui-setup", "audience_tags": ["developer", "general"], "scenario_tags": ["setup"] },
+    { "name": "cron", "audience_tags": ["general", "developer"], "scenario_tags": ["setup"] },
+    { "name": "nomifun-skills", "audience_tags": ["developer", "general"], "scenario_tags": ["setup"] },
+    { "name": "officecli", "audience_tags": ["office"], "scenario_tags": ["document"] },
+    { "name": "skill-creator", "audience_tags": ["developer"], "scenario_tags": ["setup"] }
+  ]
+}

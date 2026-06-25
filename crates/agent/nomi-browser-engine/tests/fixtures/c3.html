@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>C3 read-only actions (get_page_text/search_page/find_elements/get_dropdown_options/cursor/wait/wait_for)</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  .row { margin: 8px; }
+  /* find_elements 目标：两个 .primary button + 一个 .secondary。 */
+  button.primary { display: inline-block; width: 180px; height: 36px; }
+  button.secondary { display: inline-block; width: 180px; height: 36px; }
+  #picker { display: block; width: 240px; height: 28px; }
+  /* cursor: 让若干元素有 cursor:pointer。button 默认非 pointer，显式设。 */
+  button, a, .clickable { cursor: pointer; }
+  /* wait_for TextVisible 目标：初始隐藏，1s 后注入文本节点。 */
+  #late { color: #060; }
+</style>
+</head>
+<body>
+  <h1>C3 read-only actions</h1>
+
+  <!-- get_page_text / search_page：可读正文含唯一 sentinel（search 命中）+ 明文 secret（验证脱敏）。 -->
+  <div class="row">
+    <p id="intro">Welcome to the unique-sentinel-marker order page. Your order is ready.</p>
+    <!-- 明文 secret：get_page_text/search_page 的输出必须脱敏（绝不出现明文 sk-... / Bearer ...）。 -->
+    <p id="leak">API key sk-ABCDEFGHIJ0123456789xyzQRSTUV must never reach the LLM.</p>
+    <p id="leak2">Authorization: Bearer abcdef0123456789ABCDEFghij is also a secret.</p>
+    <!-- password 输入框：DOM 信号 type=password；其 value 经 get_page_text(innerText) 通常不进文本，但保留以对齐 observe 口径。 -->
+    <label>Password <input id="pw" type="password" value="hunter2plain"></label>
+  </div>
+
+  <!-- find_elements：CSS 选择器 button.primary 命中两个；再用其中一个 ref click 验证可反解。 -->
+  <div class="row">
+    <button class="primary" id="p1">Primary One</button>
+    <button class="primary" id="p2">Primary Two</button>
+    <button class="secondary" id="s1">Secondary</button>
+  </div>
+
+  <!-- get_dropdown_options：含 selected + disabled option，枚举验证。 -->
+  <div class="row">
+    <label>Pick <select id="picker" aria-label="Pick">
+      <option value="opt1">First</option>
+      <option value="opt2" selected>Second</option>
+      <option value="opt3" disabled>Third (disabled)</option>
+    </select></label>
+  </div>
+
+  <!-- wait_for TextVisible：测试侧用 __eval_page_world_for_test 注入延迟文本（确定性控制时序），
+       fixture 只提供空容器 #late。 -->
+  <div class="row"><span id="late"></span></div>
+
+  <!-- find_elements click 反解目标：点击 #p1 改自身文案（证明 ref 真能 act）。 -->
+  <div id="click-status" role="status" aria-label="click status">idle</div>
+
+  <script>
+    // #p1 点击改文案（find_elements 返回的 ref → act(Click) 验证可反解端到端）。
+    document.getElementById('p1').addEventListener('click', function () {
+      this.textContent = 'Primary One Clicked';
+      document.getElementById('click-status').textContent = 'p1-clicked';
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+{
+  "title": "Requirements",
+  "subtitle": "Manage requirements, extensions, and data sources",
+  "section": {
+    "workspace": "Requirements",
+    "extensions": "Extensions",
+    "sources": "Data Sources"
+  },
+  "newRequirement": "New Requirement",
+  "empty": "No requirements yet",
+  "search": "Search title, content, or #number",
+  "allTags": "All tags",
+  "allStatuses": "All statuses",
+  "viewList": "List",
+  "viewKanban": "Kanban",
+  "loadError": "Failed to load requirements",
+  "retry": "Retry",
+  "columns": {
+    "seq": "No.",
+    "id": "ID",
+    "title": "Title",
+    "tag": "Tag",
+    "order": "Order",
+    "status": "Status",
+    "session": "Session",
+    "createdAt": "Created",
+    "actions": "Actions"
+  },
+  "status": {
+    "pending": "Pending",
+    "in_progress": "In Progress",
+    "done": "Done",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "needs_review": "Needs review"
+  },
+  "actions": {
+    "edit": "Edit",
+    "delete": "Delete",
+    "deleteConfirm": "Delete this requirement?",
+    "deleteOk": "Requirement deleted",
+    "batchDelete": "Delete {{count}} selected",
+    "batchDeleteConfirm": "Delete {{count}} selected requirements?",
+    "batchDeleteOk": "Deleted {{count}} requirements"
+  },
+  "detail": {
+    "createdBy": "Created by",
+    "completedAt": "Completed",
+    "session": "Session",
+    "completionNote": "Completion note",
+    "attachments": "Images"
+  },
+  "form": {
+    "createTitle": "New Requirement",
+    "editTitle": "Edit Requirement",
+    "titleLabel": "Title",
+    "titlePlaceholder": "Requirement name",
+    "contentLabel": "Content",
+    "contentPlaceholder": "Describe the task (markdown supported)",
+    "tagLabel": "Tag",
+    "tagPlaceholder": "Select or create a tag",
+    "orderLabel": "Execution order",
+    "orderHelp": "Dotted decimal, e.g. 1, 1.2, 2.3.1 — smaller runs first",
+    "statusLabel": "Status",
+    "submit": "Save",
+    "cancel": "Cancel",
+    "createdOk": "Requirement created",
+    "updatedOk": "Requirement updated",
+    "titleRequired": "Title is required",
+    "tagRequired": "Tag is required",
+    "attachmentsLabel": "Images",
+    "attachmentsHelp": "Paste, drag in, or click to upload images (jpg/png/gif/webp/bmp/svg). Stored with the requirement and given to the executing model",
+    "attachmentsOnlyImages": "Only image files are supported",
+    "addImage": "Add image",
+    "attachmentTooLarge": "Image exceeds the 30MB limit"
+  },
+  "autowork": {
+    "label": "AutoWork",
+    "hint": "Automatically work through a tag's requirements one by one in this session.",
+    "tagLabel": "Tag",
+    "selectTag": "Select a tag",
+    "disableToChangeTag": "Turn off AutoWork to change the tag",
+    "tagRequired": "Choose a tag to enable AutoWork",
+    "enabledOk": "AutoWork enabled",
+    "disabledOk": "AutoWork disabled",
+    "completedCount": "Completed: {{count}}",
+    "state": {
+      "off": "Off",
+      "idle": "Idle",
+      "active": "Active"
+    }
+  },
+  "kanban": {
+    "selectTag": "Select a tag",
+    "emptyColumn": "Empty"
+  },
+  "emptyState": {
+    "title": "No requirements yet",
+    "desc": "Create your first requirement to start managing and automating",
+    "cta": "New Requirement"
+  },
+  "drawer": {
+    "detailTitle": "Requirement Details",
+    "view": "View",
+    "edit": "Edit"
+  },
+  "ext": {
+    "notify": "Notifications",
+    "autowork": "AutoWork"
+  },
+  "notify": {
+    "channelsTitle": "Notification Channels",
+    "channelsHint": "Where messages are sent",
+    "newChannel": "New Channel",
+    "rulesTitle": "Trigger Rules",
+    "rulesHint": "When to notify",
+    "ruleWhen": "When",
+    "ruleReq": "requirements",
+    "ruleThen": "→ notify",
+    "ruleAnyTag": "any tag",
+    "eventsLabel": "Events",
+    "selectChannel": "Select channel",
+    "clearChannel": "Don't notify",
+    "noChannel": "Not bound",
+    "eventsRequired": "Select at least one event",
+    "futureGlobalRule": "Global fallback rule (coming soon)"
+  },
+  "source": {
+    "connectedTitle": "Connected",
+    "upcomingTitle": "Coming soon · reserved for integration",
+    "status": {
+      "active": "In use",
+      "soon": "Coming soon",
+      "planned": "Planned"
+    },
+    "connect": "Connect…",
+    "count": "{{count}} requirements",
+    "local": {
+      "name": "Local Requirements",
+      "desc": "Created and managed in-app, works offline"
+    },
+    "lark": {
+      "name": "Lark · Feishu Bitable",
+      "desc": "Map Bitable records to requirements, synced periodically (read-only first)"
+    },
+    "other": {
+      "name": "Other Third-Party",
+      "desc": "Generic API / Notion / Jira and more, integrated through the same source interface"
+    },
+    "note": "Every requirement carries a \"source\" tag; platform integrations are abstracted as \"data source providers\", and local is just one of them. Future integrations = adding a provider, without touching the core CRUD."
+  }
+}

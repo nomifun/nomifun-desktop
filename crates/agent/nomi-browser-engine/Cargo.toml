@@ -1,0 +1,96 @@
+[package]
+name = "nomi-browser-engine"
+description = "In-process self-hosted Rust CDP browser engine for Nomi browser-use (Chromium-only, no bundled Playwright/Node)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace      = true
+tokio-util.workspace = true
+serde.workspace      = true
+serde_json.workspace = true
+base64.workspace     = true
+thiserror.workspace  = true
+tracing.workspace    = true
+# Self-hosted CDP engine foundation. 0.9.1 has NO `tokio-runtime` feature —
+# transport rides `async-tungstenite` and is runtime-agnostic, so default
+# features suffice. chromiumoxide's built-in Chrome fetcher is deliberately
+# unused (Task 6 does a self-contained proxy-aware download); its TLS/zip
+# features stay OFF — see the workspace dep comment. CDP generated types arrive
+# transitively via `chromiumoxide_cdp`.
+chromiumoxide = { workspace = true }
+# CDP transport: single WS connection, sessionId multiplexing. CDP is ws://
+# localhost — no TLS needed, but the workspace pins the rustls feature; that's
+# inert for plain ws://. `connect_async_with_config` lets us lift the default
+# 64MiB/16MiB frame caps (large DOM / screenshots otherwise silently disconnect).
+tokio-tungstenite.workspace = true
+# SinkExt/StreamExt for the WS split sink + read loop.
+futures-util.workspace = true
+# 注入管线（Task D）的 utility-world 名 / binding 名按会话随机化（`__nomi_<hex>__`，
+# 反检测 + 防与页面全局冲突）。getrandom 是 workspace 已锁的 CSPRNG 原语，hex 化即可，
+# 无需引入 `rand` 的大依赖面。
+getrandom.workspace = true
+# getrandom 出 CSPRNG 字节，hex 出 `__nomi_<hex>__` 名（均 workspace 已锁）。
+hex.workspace = true
+nomifun-net.workspace     = true
+nomifun-runtime.workspace = true
+# P3-W4d storage_state vault：登录态（cookie token / localStorage JWT）敏感，加密落盘。复用
+# nomifun-common 的 encrypt_string/decrypt_string（AES-256-GCM）——DESIGN §4/§16 裁决⑦「不另起第二套
+# crypto 栈」（与 nomifun-secret 凭据 vault 同一实现）。nomifun-common 已是本 crate 的传递依赖
+# （经 nomifun-secret），直列为直接依赖零额外构建成本，依赖方向不成环（common 是近叶 crate）。
+nomifun-common.workspace  = true
+# E5 出口防火墙：跨域判定复用 nomifun-secret 的 eTLD+1（PSL 机器，离线）——`same_etld_plus_one` /
+# `host_of` / `etld_plus_one` 是纯函数（与 secret vault 解耦），E1 已交付。不复用死字段
+# BrowserConfig.allowed_origins（裁决⑪/不变量⑭）。
+nomifun-secret.workspace  = true
+# 序列化层脱敏（redact.rs）：复用共享的 best-effort 正则脱敏（sk-/AKIA/Bearer/k=v/PEM），
+# 高熵 token 兜底是本 crate 的补充。
+nomi-redact.workspace = true
+# Structural URL parsing (debug_capture redact_url): parse + strip userinfo/query/path-secrets.
+url.workspace = true
+# Debug-context redactor regex (expanded keyword set + key=value fallback). nomi-redact already
+# transitively pulls regex; this direct dep costs zero extra build time.
+regex.workspace = true
+# CfT chrome 下载兜底的 zip 解压（三平台包都是 .zip）。复用 workspace 锁定的
+# zip = "2"（与 nomifun-app::provision::install 的解压同款，版本对齐）。
+zip.workspace = true
+# SD-2 上传路径沙箱的跨平台 canonical 归一：`std::fs::canonicalize` 在 Windows 返回
+# verbatim `\\?\C:\...` 前缀路径，`dunce::simplified` 把它剥回普通 `C:\...`，既用于送给
+# Chrome 的 setFileInputFiles 路径（绝不让 `\\?\` 形态到达 Chrome），也让 workspace 包含
+# 判定不依赖分隔符/前缀字节算术（改用 `Path::starts_with` 组件级比较）。已是 Cargo.lock 的
+# 传递依赖，直列零额外构建成本。
+dunce = "1"
+
+# --- display 探测的平台原生绑定（仅 display_available 用）---------------------
+# Windows: GetSystemMetrics(SM_CMONITORS) 监视器数。0.61 与 nomi-a11y /
+# nomi-computer 已固定的版本对齐，避免冗余/版本分裂。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+# macOS: CGDisplay::active_display_count()（CGGetActiveDisplayList 的安全封装）。
+# 0.25 与 nomi-a11y 对齐。
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25"
+
+# Unix（mac+linux）：`pipe(2)` 建 `--remote-debugging-pipe` 的 fd3/fd4（浏览器在父死/管道 EOF 时
+# 自退,免疫 SIGKILL）+ download.rs::write_motw 的 `setxattr(com.apple.quarantine)`（仅 mac）。
+# libc 已在 workspace 构建图（tokio / nomifun-runtime 等传递依赖），unix-target 直接依赖零额外成本。
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# 注入侧 aria 契约快照（tests/observe_fixtures.rs，#[ignore] 本机 chrome）+ T6 序列化契约，
+# 供人审 aria 输出形态 + 防 vendor Playwright 升级后无声漂移。
+insta.workspace = true
+# 集成测试 tests/observe_fixtures.rs 需直接构造 CDP 生成类型（CallArgument / EvaluateParams /
+# CreateTargetParams 等）来手动接线注入母本——这些类型只在 chromiumoxide 里。它已是普通依赖，
+# 但外部集成测试 crate 不继承普通依赖的命名空间，故 dev-deps 再列一次（同 workspace 版本，零额外成本）。
+chromiumoxide.workspace = true
+# `test-util` enables tokio's controllable clock (pause/advance/start_paused) so
+# the deadline tests run on virtual time — fast and deterministic, no real sleep.
+# Not in `full`, hence layered on only for tests.
+tokio = { workspace = true, features = ["test-util"] }

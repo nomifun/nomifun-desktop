@@ -1,0 +1,56 @@
+{
+  "label": "Webhook",
+  "title": "Webhook 管理",
+  "columns": {
+    "name": "名称",
+    "platform": "平台",
+    "url": "URL",
+    "description": "描述",
+    "enabled": "启用",
+    "secret": "密钥",
+    "actions": "操作"
+  },
+  "form": {
+    "createTitle": "新建 Webhook",
+    "editTitle": "编辑 Webhook",
+    "name": "名称",
+    "namePlaceholder": "输入 Webhook 名称",
+    "nameRequired": "请输入名称",
+    "platform": "平台",
+    "url": "URL",
+    "urlPlaceholder": "输入 Webhook URL",
+    "urlRequired": "请输入 URL",
+    "secret": "签名密钥",
+    "secretPlaceholder": "加签密钥（可选）",
+    "secretHint": "编辑时留空则保持现有密钥不变",
+    "clearSecret": "清除密钥",
+    "description": "描述",
+    "descriptionPlaceholder": "输入描述（可选）",
+    "enabled": "启用"
+  },
+  "platform": {
+    "lark": "飞书 / Lark",
+    "http": "通用 HTTP",
+    "slack": "Slack"
+  },
+  "secret": {
+    "configured": "已配置",
+    "notConfigured": "未配置"
+  },
+  "actions": {
+    "create": "新建 Webhook",
+    "edit": "编辑",
+    "delete": "删除",
+    "test": "测试",
+    "deleteConfirm": "确认删除此 Webhook？"
+  },
+  "messages": {
+    "createOk": "Webhook 创建成功",
+    "updateOk": "Webhook 更新成功",
+    "deleteOk": "Webhook 已删除",
+    "testOk": "Webhook 测试成功",
+    "testError": "Webhook 测试失败：{{error}}",
+    "loadError": "加载 Webhook 列表失败"
+  },
+  "empty": "暂无 Webhook"
+}

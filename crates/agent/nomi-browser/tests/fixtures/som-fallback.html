@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>SoM fallback test</title>
+    <!-- Stack the buttons vertically so the SoM overlay's (y, then x) numbering is
+         deterministic: the topmost button ("Alpha") is always label 1. -->
+    <style>
+      button { display: block; margin: 12px; width: 200px; height: 36px; }
+    </style>
+  </head>
+  <body>
+    <h1>SoM fallback test</h1>
+    <!-- Real, accessible buttons → each gets an aria ref + a bounding box during observe.
+         They set distinct results so the test can prove WHICH one the SoM click landed on. -->
+    <button id="b-top" onclick="document.getElementById('result').textContent = 'top-clicked'">Alpha</button>
+    <button id="b-mid" onclick="document.getElementById('result').textContent = 'mid-clicked'">Bravo</button>
+    <button id="b-bot" onclick="document.getElementById('result').textContent = 'bottom-clicked'">Charlie</button>
+    <div id="result" role="status">none</div>
+  </body>
+</html>

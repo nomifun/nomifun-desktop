@@ -1,0 +1,25 @@
+# Linux a11y dev/CI image for nomi-a11y.
+#
+# Purpose: develop + verify the Linux (AT-SPI2) backend from a non-Linux host.
+# - Native Rust build inside the container (no cross-linker needed).
+# - Headless AT-SPI test harness: Xvfb (virtual X11 display) + a private D-Bus
+#   session + at-spi2-core (the a11y bus) + a real accessible GTK app
+#   (gtk3-widget-factory) to `observe` and `do_action` against.
+#
+# Build:  docker build -t nomi-a11y-linux:dev -f crates/agent/nomi-a11y/dev/Dockerfile.linux-a11y .
+# Use:    see crates/agent/nomi-a11y/dev/run-linux-a11y.sh
+#
+# The `atspi`/`zbus` crates are pure Rust (no C deps), so nomi-a11y itself needs
+# no system libs to compile; the X11/dbus dev libs below are only so the wider
+# computer-use chain (xcap/enigo) can also be built for Linux if desired.
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      at-spi2-core \
+      xvfb dbus dbus-x11 x11-utils \
+      gtk-3-examples \
+      libx11-dev libxtst-dev libxi-dev libxcb1-dev libxkbcommon-dev \
+      libdbus-1-dev pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work

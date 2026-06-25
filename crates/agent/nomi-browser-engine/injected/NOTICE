@@ -1,0 +1,60 @@
+NomiFun browser engine — vendored Playwright InjectedScript
+============================================================
+
+This directory (`crates/agent/nomi-browser-engine/injected/`) contains source
+code vendored from the Playwright project, plus a generated bundle of it.
+
+Upstream
+--------
+- Project:  Playwright
+- Owner:    Microsoft Corporation
+- Repo:     https://github.com/microsoft/playwright
+- License:  Apache License, Version 2.0
+- Pinned commit: 4b1b9d681f8a7b1dffafa973ef705f28661d4607  (2026-04-14)
+- Vendored on:   2026-06-17
+
+What is vendored
+----------------
+`vendor/injected/src/`   — Playwright `packages/injected/src/**` (the in-page
+                           browser toolbox: InjectedScript + actionability,
+                           ARIA/role utils, aria-snapshot, selector engines).
+`vendor/isomorphic/`     — Playwright `packages/isomorphic/**` (helpers that
+                           `@isomorphic/*` imports resolve to; esbuild inlines
+                           only the reachable subset at bundle time).
+`vendor/protocol/src/channels.d.ts`
+                         — Playwright `packages/protocol/src/channels.d.ts`,
+                           imported type-only (`import type ... from
+                           '@protocol/channels'`) and erased at build time.
+
+Most vendored source files retain their original Apache-2.0 license header
+(Copyright (c) Microsoft Corporation). The following carry their own (preserved
+verbatim) third-party license headers:
+- `vendor/isomorphic/cssTokenizer.ts` — CC0 1.0 (public domain); original at
+  https://github.com/tabatkins/parse-css.
+- `vendor/injected/src/clock.ts` — BSD-3-Clause (Christian Johansen / sinonjs),
+  with Microsoft modifications.
+- `vendor/injected/src/recorder/clipPaths.ts` — MIT (Copyright (c) Microsoft).
+- `vendor/isomorphic/stackTrace.ts` — MIT (Isaac Z. Schlueter et al.).
+(clock.ts / clipPaths.ts / stackTrace.ts are not reachable from the
+`injectedScript.ts` entry and are tree-shaken out of `dist/injected.js`; they
+are vendored only because the package is vendored whole.)
+
+Generated bundle
+----------------
+`dist/injected.js` is a GENERATED single-IIFE bundle of the above, produced by
+`build.sh` (esbuild via bun). It is checked in so that `cargo build` never
+depends on Node/bun — the Rust crate `include_str!`s it directly. It carries an
+attribution banner at its head. Do not edit it by hand; regenerate via
+`build.sh` after updating `vendor/`.
+
+The bundle fixes `browserName='chromium'` at InjectedScript construction time
+(see `src/injected.rs`); Playwright's WebKit/Firefox runtime branches are thus
+dead-at-runtime. We vendor the package whole rather than hand-pruning, to keep
+upstream upgrades tractable.
+
+Modifications
+-------------
+The vendored `.ts` sources are unmodified from upstream. The only transformation
+is the esbuild bundling step in `build.sh` (path-alias resolution mirroring
+Playwright's tsconfig `paths`, CSS-as-text loader, IIFE wrapping with a global
+name). A copy of the Apache-2.0 license text accompanies the repository.

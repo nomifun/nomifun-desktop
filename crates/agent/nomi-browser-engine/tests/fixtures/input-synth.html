@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Input synthesis (B5)</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  /* 定位到确定区域，content quad 中点稳定（虽 B5 走真实 getContentQuads，非硬编码点）。 */
+  #field { position: fixed; left: 40px; top: 40px; width: 240px; height: 32px; }
+  #toggle { position: fixed; left: 40px; top: 120px; width: 200px; height: 40px; }
+</style>
+</head>
+<body>
+  <h1>Input synth</h1>
+  <!-- 文本输入：dispatch_click 聚焦 → insert_text 写入 → 读回 value 验证。 -->
+  <label>Name <input id="field" type="text"></label>
+  <!-- 按钮：点击改自身文案，验证 dispatch_click 真分发到元素。 -->
+  <button id="toggle">Not clicked</button>
+  <script>
+    document.getElementById('toggle').addEventListener('click', function () {
+      this.textContent = 'Clicked';
+    });
+  </script>
+</body>
+</html>

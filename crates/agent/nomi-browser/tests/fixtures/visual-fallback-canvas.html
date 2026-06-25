@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Visual Fallback Canvas Test</title>
+  <style>
+    body { margin: 0; padding: 0; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- A canvas-only page with NO accessible button in the DOM.
+       The "button" is drawn purely as pixels on the canvas.
+       DOM/aria anchoring WILL FAIL for this element (no accessible tree entry).
+       This exercises the visual fallback path. -->
+  <canvas id="c" width="400" height="300"></canvas>
+  <div id="click-result" style="display:none;"></div>
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    // Draw a "Submit" button at (150, 120) with size (100, 40).
+    const btnX = 150, btnY = 120, btnW = 100, btnH = 40;
+
+    function drawButton() {
+      ctx.fillStyle = '#4CAF50';
+      ctx.fillRect(btnX, btnY, btnW, btnH);
+      ctx.fillStyle = 'white';
+      ctx.font = '16px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Submit', btnX + btnW / 2, btnY + btnH / 2);
+    }
+    drawButton();
+
+    // Listen for clicks on the canvas — if within the button bounds, record it.
+    canvas.addEventListener('click', function(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      if (x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH) {
+        document.getElementById('click-result').textContent = 'canvas-button-clicked';
+        document.getElementById('click-result').style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>

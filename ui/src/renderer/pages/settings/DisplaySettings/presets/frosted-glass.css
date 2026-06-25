@@ -1,0 +1,455 @@
+/* ============================================================================
+ * 冰晶幻境 Frosted Glass
+ *
+ * 设计意图：Apple 视觉语言的毛玻璃高级感。亮色以薰衣草雾 #f3f0fa 为底，body 铺一层
+ * 极淡的紫罗兰→冰蓝固定氛围渐变；侧栏/面板/弹层用半透明白 + backdrop-filter 玻璃化，
+ * 1px 半透明内描边 + 柔和大阴影勾出玻璃边缘。主色紫罗兰 #6c5ce7（刻意偏紫，
+ * 与 default 主题的近白底+蓝主色拉开辨识度）。
+ * 暗色换成石墨紫黑 #15141f 底 + 深色玻璃 rgba(32,30,48,0.68)，主色提亮至 #9d8cff。
+ * fill / 边框全系列走半透明白/紫，让下层渐变透出来——玻璃必须有东西可透。
+ * 侧栏整面 blur 16px saturate 1.3（控制合成成本），弹层/模态框 blur 20px。
+ *
+ * Design intent: Apple-style frosted glass. Light mode sits on lavender mist
+ * #f3f0fa with a fixed violet→ice-blue ambient gradient on body; panels,
+ * sider and popups are translucent white glass (sider blur 16px saturate 1.3
+ * for compositing cost, popups/modals blur 20px) with a 1px translucent inner
+ * stroke and soft large shadows. Primary is violet #6c5ce7 — deliberately
+ * purple-shifted so the preset thumbnail reads apart from the default theme's
+ * near-white + blue. Dark mode swaps to graphite violet-black #15141f with
+ * dark glass rgba(32,30,48,0.68) and a lifted primary #9d8cff.
+ * Fills and borders are translucent throughout so the gradient beneath
+ * stays visible — glass only reads as glass when something shows through.
+ * ========================================================================== */
+
+/* ===== Light / 亮色 ===== */
+:root,
+body {
+  /* ---- A. 主色 Primary ---- */
+  --color-primary: #6c5ce7;
+  --primary: #6c5ce7;
+  --color-primary-light-1: #8678ed;
+  --color-primary-light-2: #a195f2;
+  --color-primary-light-3: #c1b8f7;
+  --color-primary-light-4: #e1dcfb;
+  --color-primary-dark-1: #5443c6;
+  --primary-rgb: 108, 92, 231;
+
+  /* ---- A. 品牌 Brand ---- */
+  --brand: #7d6fd0;
+  --brand-light: #f0edfb;
+  --brand-hover: #b3a8ea;
+  --color-brand-fill: #7d6fd0;
+  --color-brand-bg: #f0edfb;
+
+  /* ---- A. 品牌色阶 AOU（1 浅 → 10 深） ---- */
+  --aou-1: #f0edfb;
+  --aou-2: #e4dff8;
+  --aou-3: #cfc7f1;
+  --aou-4: #b3a8ea;
+  --aou-5: #9789dd;
+  --aou-6: #7d6fd0;
+  --aou-7: #6356b2;
+  --aou-8: #4a3f8c;
+  --aou-9: #332b62;
+  --aou-10: #1b1639;
+
+  /* ---- A+B. 背景 Background（薰衣草雾底，面板半透明玻璃） ---- */
+  --bg-base: #fbfafe;
+  --color-bg-1: #f3f0fa;
+  --bg-1: #f3f0fa;
+  --color-bg-2: rgba(250, 247, 255, 0.78);
+  --bg-2: rgba(250, 247, 255, 0.78);
+  --color-bg-3: rgba(101, 88, 164, 0.16);
+  --bg-3: rgba(101, 88, 164, 0.16);
+  --color-bg-4: rgba(101, 88, 164, 0.28);
+  --bg-4: rgba(101, 88, 164, 0.28);
+  --bg-5: #a8a3cc;
+  --bg-6: #837eab;
+  --bg-8: #524d78;
+  --bg-9: #26233c;
+  --bg-10: #120f25;
+  --color-bg-5: rgba(255, 255, 255, 0.92);
+  --color-bg-popup: rgba(253, 251, 255, 0.92);
+  --color-bg-white: #ffffff;
+
+  /* ---- A. 交互状态 Interactive ---- */
+  --bg-hover: rgba(108, 92, 231, 0.07);
+  --bg-active: rgba(108, 92, 231, 0.13);
+
+  /* ---- A+B. 填充 Fill（半透明保持玻璃通透） ---- */
+  --fill: rgba(255, 255, 255, 0.64);
+  --color-fill: rgba(255, 255, 255, 0.64);
+  --fill-0: rgba(255, 255, 255, 0.9);
+  --fill-white-to-black: #ffffff;
+  --dialog-fill-0: rgba(255, 255, 255, 0.92);
+  --inverse: #ffffff;
+  --color-fill-1: rgba(30, 27, 51, 0.04);
+  --color-fill-2: rgba(108, 92, 231, 0.1);
+  --color-fill-3: rgba(108, 92, 231, 0.18);
+  --color-fill-4: rgba(108, 92, 231, 0.24);
+
+  /* ---- A+B. 文字 Text ---- */
+  --color-text-1: #1e1b33;
+  --text-primary: #1e1b33;
+  --color-text-2: #4c486e;
+  --text-secondary: #443f66;
+  --color-text-3: #5d5a78;
+  --color-text-4: #aca8c8;
+  --text-disabled: #b9b6d2;
+  --text-0: #16142b;
+  --text-white: #ffffff;
+
+  /* ---- A+B. 边框 Border（半透明紫灰细线） ---- */
+  --color-border: rgba(98, 88, 164, 0.2);
+  --color-border-1: rgba(98, 88, 164, 0.12);
+  --color-border-2: rgba(98, 88, 164, 0.2);
+  --color-border-3: rgba(98, 88, 164, 0.32);
+  --color-border-4: rgba(98, 88, 164, 0.48);
+  --border-base: rgba(98, 88, 164, 0.2);
+  --border-light: rgba(98, 88, 164, 0.12);
+  --border-special: rgba(98, 88, 164, 0.26);
+
+  /* ---- A. 语义 Semantic ---- */
+  --success: #00a854;
+  --warning: #ff7d00;
+  --danger: #f53f3f;
+  --info: #6c5ce7;
+
+  /* ---- A. 组件 Components ---- */
+  --message-user-bg: rgba(118, 103, 232, 0.13);
+  --message-tips-bg: rgba(118, 103, 232, 0.07);
+  --workspace-btn-bg: rgba(255, 255, 255, 0.74);
+  --color-guid-agent-bar: rgba(118, 103, 232, 0.12);
+  --sider-section-title-color: #5d5a78;
+
+  /* ---- A. 终端 Terminal（画布恒深） ---- */
+  --terminal-surface-bg: #171526;
+  --terminal-border: rgba(30, 27, 51, 0.18);
+
+  /* ---- B. Arco 主色阶 primary-1..7（RGB 三元组，浅 → 深） ---- */
+  --primary-1: 239, 236, 253;
+  --primary-2: 222, 217, 251;
+  --primary-3: 189, 180, 246;
+  --primary-4: 157, 145, 241;
+  --primary-5: 129, 114, 236;
+  --primary-6: 108, 92, 231;
+  --primary-7: 84, 67, 198;
+
+  /* ---- B. Arco 次级按钮 Secondary ---- */
+  --color-secondary: rgba(108, 92, 231, 0.12);
+  --color-secondary-hover: rgba(108, 92, 231, 0.18);
+  --color-secondary-active: rgba(108, 92, 231, 0.25);
+  --color-secondary-disabled: rgba(108, 92, 231, 0.04);
+
+  /* ---- B. Arco 杂项 Misc ---- */
+  --color-tooltip-bg: rgba(38, 35, 60, 0.92);
+  --color-mask-bg: rgba(18, 16, 38, 0.45);
+  --color-spin-layer-bg: rgba(255, 255, 255, 0.72);
+  --color-menu-light-bg: rgba(250, 247, 255, 0.88);
+  --color-menu-dark-bg: #262244;
+}
+
+/* ===== Dark / 暗色（必须在亮色块之后） ===== */
+[data-theme='dark'],
+[data-theme='dark'] body {
+  /* ---- A. 主色 Primary（提亮的冰紫） ---- */
+  --color-primary: #9d8cff;
+  --primary: #9d8cff;
+  --color-primary-light-1: #b1a3ff;
+  --color-primary-light-2: #c5baff;
+  --color-primary-light-3: #d9d2ff;
+  --color-primary-light-4: #ece8ff;
+  --color-primary-dark-1: #8270f2;
+  --primary-rgb: 157, 140, 255;
+
+  /* ---- A. 品牌 Brand ---- */
+  --brand: #8f86c6;
+  --brand-light: #2d2a4a;
+  --brand-hover: #575288;
+  --color-brand-fill: #8f86c6;
+  --color-brand-bg: #2d2a4a;
+
+  /* ---- A. 品牌色阶 AOU（暗色反转：1 深 → 10 浅） ---- */
+  --aou-1: #1f1d33;
+  --aou-2: #2d2a4a;
+  --aou-3: #3f3b66;
+  --aou-4: #575288;
+  --aou-5: #716ca8;
+  --aou-6: #8f86c6;
+  --aou-7: #aba6d9;
+  --aou-8: #c6c2e8;
+  --aou-9: #dedcf4;
+  --aou-10: #f0effb;
+
+  /* ---- A+B. 背景 Background（石墨紫黑底 + 深色玻璃） ---- */
+  --bg-base: #111018;
+  --color-bg-1: #15141f;
+  --bg-1: #15141f;
+  --color-bg-2: rgba(32, 30, 48, 0.68);
+  --bg-2: rgba(32, 30, 48, 0.68);
+  --color-bg-3: rgba(255, 255, 255, 0.09);
+  --bg-3: rgba(255, 255, 255, 0.09);
+  --color-bg-4: rgba(255, 255, 255, 0.14);
+  --bg-4: rgba(255, 255, 255, 0.14);
+  --bg-5: #3d3a58;
+  --bg-6: #5a567c;
+  --bg-8: #8985ab;
+  --bg-9: #c6c3e0;
+  --bg-10: #e9e8f5;
+  --color-bg-5: rgba(42, 40, 64, 0.92);
+  --color-bg-popup: rgba(36, 34, 56, 0.9);
+  --color-bg-white: #252338;
+
+  /* ---- A. 交互状态 Interactive ---- */
+  --bg-hover: rgba(157, 140, 255, 0.08);
+  --bg-active: rgba(157, 140, 255, 0.14);
+
+  /* ---- A+B. 填充 Fill（半透明白 / 紫光） ---- */
+  --fill: rgba(255, 255, 255, 0.07);
+  --color-fill: rgba(255, 255, 255, 0.07);
+  --fill-0: rgba(255, 255, 255, 0.1);
+  --fill-white-to-black: #000000;
+  --dialog-fill-0: rgba(38, 36, 58, 0.9);
+  --inverse: #ffffff;
+  --color-fill-1: rgba(255, 255, 255, 0.04);
+  --color-fill-2: rgba(255, 255, 255, 0.08);
+  --color-fill-3: rgba(157, 140, 255, 0.24);
+  --color-fill-4: rgba(157, 140, 255, 0.32);
+
+  /* ---- A+B. 文字 Text ---- */
+  --color-text-1: #f1f0fa;
+  --text-primary: #f1f0fa;
+  --color-text-2: #bcb8d8;
+  --text-secondary: #c9c5e2;
+  --color-text-3: #938eb4;
+  --color-text-4: #615d80;
+  --text-disabled: #615d80;
+  --text-0: #f6f5fc;
+  --text-white: #ffffff;
+
+  /* ---- A+B. 边框 Border（半透明白细线） ---- */
+  --color-border: rgba(255, 255, 255, 0.1);
+  --color-border-1: rgba(255, 255, 255, 0.06);
+  --color-border-2: rgba(255, 255, 255, 0.1);
+  --color-border-3: rgba(255, 255, 255, 0.16);
+  --color-border-4: rgba(255, 255, 255, 0.24);
+  --border-base: rgba(255, 255, 255, 0.1);
+  --border-light: rgba(255, 255, 255, 0.06);
+  --border-special: rgba(255, 255, 255, 0.14);
+
+  /* ---- A. 语义 Semantic ---- */
+  --success: #2ed15e;
+  --warning: #ff9a2e;
+  --danger: #f76560;
+  --info: #9d8cff;
+
+  /* ---- A. 组件 Components ---- */
+  --message-user-bg: rgba(157, 140, 255, 0.16);
+  --message-tips-bg: rgba(157, 140, 255, 0.09);
+  --workspace-btn-bg: rgba(255, 255, 255, 0.08);
+  --color-guid-agent-bar: rgba(157, 140, 255, 0.14);
+  --sider-section-title-color: #a09ac4;
+
+  /* ---- A. 终端 Terminal（画布恒深） ---- */
+  --terminal-surface-bg: #13121d;
+  --terminal-border: rgba(255, 255, 255, 0.08);
+
+  /* ---- B. Arco 主色阶 primary-1..7（RGB 三元组，暗色反转：深 → 浅） ---- */
+  --primary-1: 46, 41, 84;
+  --primary-2: 63, 56, 118;
+  --primary-3: 86, 76, 160;
+  --primary-4: 113, 100, 202;
+  --primary-5: 134, 120, 232;
+  --primary-6: 157, 140, 255;
+  --primary-7: 181, 168, 255;
+
+  /* ---- B. Arco 次级按钮 Secondary ---- */
+  --color-secondary: rgba(157, 140, 255, 0.13);
+  --color-secondary-hover: rgba(157, 140, 255, 0.2);
+  --color-secondary-active: rgba(157, 140, 255, 0.28);
+  --color-secondary-disabled: rgba(157, 140, 255, 0.05);
+
+  /* ---- B. Arco 杂项 Misc ---- */
+  --color-tooltip-bg: rgba(51, 48, 78, 0.95);
+  --color-mask-bg: rgba(7, 6, 14, 0.55);
+  --color-spin-layer-bg: rgba(21, 20, 31, 0.72);
+  --color-menu-light-bg: rgba(32, 30, 48, 0.82);
+  --color-menu-dark-bg: #0f0e1a;
+}
+
+/* ============================================================================
+ * 签名点缀 Signature touches（仅外观：背景/描边/阴影/圆角/backdrop-filter）
+ * ========================================================================== */
+
+/* 点缀 1：body 氛围渐变 —— 玻璃下层的紫罗兰→冰蓝光，固定不随滚动 */
+body {
+  background-color: #f3f0fa;
+  background-image:
+    radial-gradient(1200px 800px at 8% -8%, rgba(140, 108, 255, 0.16), transparent 60%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(94, 182, 255, 0.12), transparent 55%),
+    radial-gradient(900px 900px at 50% 115%, rgba(118, 103, 232, 0.1), transparent 60%),
+    linear-gradient(160deg, #f1ecfb 0%, #f3f0fa 45%, #eef2fc 100%);
+  background-attachment: fixed;
+}
+
+[data-theme='dark'] body {
+  background-color: #15141f;
+  background-image:
+    radial-gradient(1100px 750px at 10% -10%, rgba(140, 108, 255, 0.16), transparent 60%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(64, 140, 255, 0.09), transparent 55%),
+    radial-gradient(900px 900px at 50% 118%, rgba(157, 140, 255, 0.08), transparent 60%),
+    linear-gradient(160deg, #181528 0%, #15141f 50%, #141226 100%);
+  background-attachment: fixed;
+}
+
+/* 点缀 2：侧边栏玻璃化 —— 半透明白 + 高斯模糊 + 1px 内描边（inset 阴影实现，不动布局）
+ * 整面常驻元素，blur 16px / saturate 1.3 控制合成成本（弹层短命可用 20px） */
+.layout-sider {
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.58),
+    inset -1px 0 0 rgba(101, 88, 164, 0.16),
+    8px 0 40px rgba(108, 92, 231, 0.08);
+}
+
+[data-theme='dark'] .layout-sider {
+  background: rgba(32, 30, 48, 0.66);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    inset -1px 0 0 rgba(255, 255, 255, 0.06),
+    8px 0 40px rgba(0, 0, 0, 0.35);
+}
+
+/* 点缀 3：下拉/弹层/悬浮信息卡玻璃化（正文承载面优先保证清晰） */
+.arco-select-popup,
+.arco-dropdown-menu,
+.arco-popover-content {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(250, 247, 255, 0.88) 100%);
+  backdrop-filter: blur(22px) saturate(1.45);
+  -webkit-backdrop-filter: blur(22px) saturate(1.45);
+  border: 1px solid rgba(98, 88, 164, 0.22);
+  border-radius: 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 18px 52px rgba(44, 38, 96, 0.2),
+    0 2px 12px rgba(44, 38, 96, 0.08);
+}
+
+[data-theme='dark'] .arco-select-popup,
+[data-theme='dark'] .arco-dropdown-menu,
+[data-theme='dark'] .arco-popover-content {
+  background: linear-gradient(180deg, rgba(42, 39, 66, 0.94) 0%, rgba(30, 28, 48, 0.9) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 18px 52px rgba(0, 0, 0, 0.54),
+    0 2px 12px rgba(0, 0, 0, 0.28);
+}
+
+/* 点缀 4：模态框 / 抽屉玻璃化 —— 透出氛围渐变，但主体保持可读 */
+.arco-modal,
+.arco-drawer {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(22px) saturate(1.45);
+  -webkit-backdrop-filter: blur(22px) saturate(1.45);
+  border: 1px solid rgba(98, 88, 164, 0.18);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 24px 64px rgba(44, 38, 96, 0.24);
+}
+
+[data-theme='dark'] .arco-modal,
+[data-theme='dark'] .arco-drawer {
+  background: rgba(34, 32, 54, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+/* 点缀 5：会话顶部能力按钮小冰面，增加层次但不改变控件尺寸。 */
+.chat-layout-header--glass .arco-btn-secondary {
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(98, 88, 164, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 4px 14px rgba(44, 38, 96, 0.07);
+}
+
+.chat-layout-header--glass .arco-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 7px 20px rgba(44, 38, 96, 0.12);
+}
+
+[data-theme='dark'] .chat-layout-header--glass .arco-btn-secondary {
+  background: rgba(49, 45, 76, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+[data-theme='dark'] .chat-layout-header--glass .arco-btn-secondary:hover {
+  background: rgba(59, 54, 92, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 7px 20px rgba(0, 0, 0, 0.36);
+}
+
+/* 点缀 6：Tooltip / Toast / 搜索弹窗同步提高玻璃底密度。 */
+.arco-tooltip-content {
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(18, 16, 38, 0.28);
+}
+
+.arco-message {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  border: 1px solid rgba(98, 88, 164, 0.16);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    0 12px 34px rgba(44, 38, 96, 0.16);
+}
+
+[data-theme='dark'] .arco-message {
+  background: rgba(34, 32, 54, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 34px rgba(0, 0, 0, 0.5);
+}
+
+.conversation-search-modal {
+  --conversation-search-mask-bg: rgba(18, 16, 38, 0.14);
+  --conversation-search-panel-bg: rgba(253, 251, 255, 0.9);
+  --conversation-search-panel-inner-bg: rgba(255, 255, 255, 0.94);
+  --conversation-search-panel-border: rgba(98, 88, 164, 0.2);
+  --conversation-search-panel-shadow: 0 22px 56px rgba(44, 38, 96, 0.2);
+  --conversation-search-panel-outline: rgba(255, 255, 255, 0.68);
+  --conversation-search-surface-bg: rgba(250, 247, 255, 0.88);
+  --conversation-search-input-bg: rgba(255, 255, 255, 0.96);
+  --conversation-search-hover-bg: rgba(108, 92, 231, 0.12);
+}
+
+[data-theme='dark'] .conversation-search-modal,
+body[arco-theme='dark'] .conversation-search-modal {
+  --conversation-search-mask-bg: rgba(7, 6, 14, 0.52);
+  --conversation-search-panel-bg: rgba(36, 34, 56, 0.9);
+  --conversation-search-panel-inner-bg: rgba(42, 39, 66, 0.92);
+  --conversation-search-panel-border: rgba(255, 255, 255, 0.1);
+  --conversation-search-panel-shadow: 0 24px 58px rgba(0, 0, 0, 0.52);
+  --conversation-search-panel-outline: rgba(255, 255, 255, 0.08);
+  --conversation-search-surface-bg: rgba(32, 30, 48, 0.82);
+  --conversation-search-input-bg: rgba(46, 43, 70, 0.92);
+  --conversation-search-hover-bg: rgba(157, 140, 255, 0.18);
+}

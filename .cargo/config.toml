@@ -1,0 +1,50 @@
+# China crates.io mirror (rsproxy.cn) — added to unblock builds behind the slow
+# upstream crates.io index/CDN. Source replacement is transparent: package
+# identities and Cargo.lock entries remain crates-io, so existing target/ build
+# artifacts stay valid and are not rebuilt. Safe to remove if building elsewhere.
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+
+# Use the toolchain-bundled LLD linker on Windows MSVC — linking dominates
+# incremental build time in this 27-crate workspace and LLD is several times
+# faster than link.exe. rust-lld.exe ships with every rustup toolchain, so
+# this is safe across all dev machines. NOTE: changing the linker invalidates
+# cargo's fingerprints once (first build after pulling this does a full
+# rebuild); subsequent builds get the speedup.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+# Route intermediate artifacts (deps/.fingerprint/incremental — the high-churn
+# bulk of build output) into a ".noindex" directory: that suffix is macOS
+# Spotlight's per-directory opt-out, so mds stops re-indexing artifacts on
+# every rebuild (~3 CPU-seconds each, measured). Final binaries still land in
+# target/, so no tool or script path changes. On Windows/Linux it is just a
+# directory name; cargo older than the build-dir stabilization ignores the key
+# and falls back to target/. Stale artifacts in build.noindex are pruned by
+# the self-cleaning preflight (scripts/prune-build.mjs) that runs at the
+# start of every dev/build/test entry point. NOTE: first build after pulling
+# this rebuilds intermediates into the new location — run `cargo clean` once
+# to reclaim the orphaned old target/ contents.
+[build]
+build-dir = "{workspace-root}/build.noindex"
+
+# Enlarge rustc's compilation-thread stack. The release `tauri build` embeds the
+# entire frontend `ui/dist` (~34 MB, hundreds of files) into the `nomifun-desktop`
+# binary via `tauri::generate_context!`, then optimizes it at opt-level=3. That
+# codegen overflows rustc's default 8 MB thread stack and the compiler dies on its
+# guard page WITHOUT a diagnostic — surfacing as a non-deterministic native crash
+# (STATUS_STACK_BUFFER_OVERRUN 0xc0000409 / STATUS_ACCESS_VIOLATION 0xc0000005).
+# Plain `cargo build` (dev) is unaffected because it serves assets from the dev
+# server and embeds nothing. 64 MB is already verified-sufficient; 128 MB leaves
+# headroom as the frontend grows (the stack is lazily committed, so the ceiling
+# costs only address space, never RAM). Applies to every build path — dev, test,
+# `tauri build`, CI — so the failure cannot regress on a machine that forgets it.
+[env]
+RUST_MIN_STACK = "134217728"
+
