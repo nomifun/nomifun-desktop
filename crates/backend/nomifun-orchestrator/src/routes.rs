@@ -235,16 +235,26 @@ async fn pause_run(
     Ok(Json(ApiResponse::success()))
 }
 
-/// Resume a `paused` run: `paused` → `running`, then `engine.start` (idempotent
-/// stop-then-start) so a loop that idled out or exited is respawned; a still-alive
-/// paused loop is simply replaced and resumes filling.
+/// Resume a `paused` run: `paused` → `running`. A paused run loop stays ALIVE
+/// (it idles on the paused gate, re-reading the run status each tick), so once
+/// the service flips the status back to `running` the loop self-resumes filling
+/// on its next iteration — no engine restart is needed. We therefore only
+/// `engine.start` when the loop is NOT already running (i.e. it actually exited,
+/// e.g. after a process restart / boot before `resume_persisted_runs` re-armed
+/// it). **Critically, an unconditional `engine.start` would `stop()` first,
+/// cancelling every in-flight worker conversation — destroying the live work
+/// that pause was meant to let finish (at cap=1 that is the standard pause
+/// state). The `!is_running` gate avoids that destructive restart.**
 async fn resume_run(
     State(state): State<OrchestratorRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.run_service.resume(&id).await?;
-    state.engine.start(id);
+    // Alive paused loop self-resumes; only (re)start if it actually exited.
+    if !state.engine.is_running(&id) {
+        state.engine.start(id);
+    }
     Ok(Json(ApiResponse::success()))
 }
 
@@ -280,17 +290,18 @@ async fn reassign_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{RunEngine, RunEngineDeps};
+    use crate::engine::{ConversationCanceller, RunEngine, RunEngineDeps};
     use crate::events::OrchestratorRunEventEmitter;
     use crate::plan::PlanProducer;
     use crate::run_service::RunService;
     use crate::service::{FleetService, WorkspaceService};
-    use crate::worker::{MockWorkerRunner, WorkerRunner};
+    use crate::worker::{MockWorkerRunner, WorkerOutcome, WorkerRunner};
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::Request;
     use nomifun_api_types::{
         CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest, FleetMember, FleetMemberInput,
-        PlannedDag, WebSocketMessage,
+        PlannedDag, PlannedTask, WebSocketMessage,
     };
     use nomifun_common::AppError;
     use nomifun_db::{
@@ -298,8 +309,12 @@ mod tests {
         init_database_memory,
     };
     use nomifun_realtime::EventBroadcaster;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use std::sync::Arc;
     use tower::ServiceExt; // for `oneshot`
+
 
     /// No-op broadcaster: the router-builds test never asserts the event trail.
     struct NoopBroadcaster;
@@ -494,5 +509,271 @@ mod tests {
             .await
             .expect("request");
         assert_ne!(resp.status(), StatusCode::OK);
+    }
+
+    // -------------------------------------------------------------------------
+    // P3b Task 1 (bug guard): `POST .../resume` must NOT cancel an in-flight
+    // worker. At cap=1, pausing a run with one live worker is the standard pause
+    // state; the buggy resume_run called `engine.start` UNCONDITIONALLY, whose
+    // `stop()` cancels every in-flight worker conversation — destroying the live
+    // work that pause was meant to let finish. This test hits the REAL resume
+    // route handler, so it is RED before the `!is_running` gate and GREEN after.
+    // -------------------------------------------------------------------------
+
+    /// Single independent task DAG (one task, no deps), pre-assigned to member 0 —
+    /// so at cap=1 there is exactly one in-flight worker when the run is paused.
+    struct SingleTaskPlanProducer;
+    #[async_trait]
+    impl PlanProducer for SingleTaskPlanProducer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            Ok(PlannedDag {
+                tasks: vec![PlannedTask {
+                    title: "solo".to_string(),
+                    spec: "do the work".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                }],
+            })
+        }
+    }
+
+    /// Records every conversation id it was asked to cancel — the test asserts the
+    /// in-flight conv was NEVER passed here across pause→resume.
+    struct RecordingCanceller {
+        cancelled: Arc<Mutex<Vec<i64>>>,
+    }
+    impl RecordingCanceller {
+        fn new() -> Self {
+            Self {
+                cancelled: Arc::new(Mutex::new(vec![])),
+            }
+        }
+        fn handle(&self) -> Arc<Mutex<Vec<i64>>> {
+            self.cancelled.clone()
+        }
+    }
+    #[async_trait]
+    impl ConversationCanceller for RecordingCanceller {
+        async fn cancel(&self, conversation_id: i64) {
+            self.cancelled.lock().unwrap().push(conversation_id);
+        }
+    }
+
+    /// A worker that stamps a distinct conv id via `on_started`, then blocks on a
+    /// shared gate until the test releases it — keeping the worker provably
+    /// in-flight across the pause→resume window.
+    struct GatedWorkerRunner {
+        gate: Arc<tokio::sync::Notify>,
+        next_conv_id: AtomicUsize,
+    }
+    impl GatedWorkerRunner {
+        fn new(gate: Arc<tokio::sync::Notify>) -> Self {
+            Self {
+                gate,
+                next_conv_id: AtomicUsize::new(8000),
+            }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for GatedWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            let conv_id = self.next_conv_id.fetch_add(1, Ordering::SeqCst) as i64;
+            on_started(conv_id);
+            self.gate.notified().await;
+            Ok(WorkerOutcome {
+                conversation_id: conv_id,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_route_does_not_cancel_in_flight_worker() {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let run_repo = Arc::new(SqliteRunRepository::new(pool));
+        let fleet = FleetService::new(fleet_repo.clone());
+        let workspace = WorkspaceService::new(ws_repo.clone());
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(NoopBroadcaster));
+        let planner: Arc<dyn PlanProducer> = Arc::new(SingleTaskPlanProducer);
+        let run_service = Arc::new(RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        ));
+
+        // cap=1, gated worker → the single task is in-flight (blocked on the gate)
+        // when we pause. A RecordingCanceller proves resume does not tear it down.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(GatedWorkerRunner::new(gate.clone()));
+        let canceller = Arc::new(RecordingCanceller::new());
+        let recorded_cancels = canceller.handle();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(60);
+        engine_deps.default_max_parallel = 1;
+        engine_deps.cancel_conversation = canceller;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        // Seed fleet (one member) → workspace → run (cap=1) → plan.
+        let seeded_fleet = fleet
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "resume fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![FleetMemberInput {
+                        agent_id: "agent_a".to_string(),
+                        provider_id: None,
+                        model: None,
+                        role_hint: None,
+                        capability_profile: None,
+                        constraints: None,
+                        sort_order: None,
+                    }],
+                },
+            )
+            .await
+            .expect("fleet");
+        let seeded_ws = workspace
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "resume ws".to_string(),
+                    default_fleet_id: Some(seeded_fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: seeded_ws.id,
+                    goal: "resume must preserve in-flight".to_string(),
+                    fleet_id: seeded_fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+        let run_id = run.id.clone();
+
+        // Keep an engine clone (RunEngine is Clone — cheap Arc internals) so the
+        // test can start the loop directly; the router consumes the original into
+        // state. Pause/resume are then driven through the REAL route handlers.
+        let engine_for_test = engine.clone();
+        let state = OrchestratorRouterState::new(fleet, workspace, run_service.clone(), engine);
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        // The orchestrator has no "start" route (runs start at create/approve/
+        // resume); the run is already planned+`running`, so start its loop here.
+        engine_for_test.start(run_id.clone());
+
+        // Wait until the single task is `running` with its conversation_id stamped.
+        let mut in_flight_conv: Option<i64> = None;
+        for _ in 0..200 {
+            let detail = run_service.get_detail(&run_id).await.expect("detail");
+            in_flight_conv = detail
+                .tasks
+                .iter()
+                .find(|t| t.status == "running")
+                .and_then(|t| t.conversation_id);
+            if in_flight_conv.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let in_flight_conv = in_flight_conv.expect("task running with stamped conv id");
+
+        // Pause via the real route, then resume via the real route — the path the
+        // bug lives in. The pre-fix resume_run calls engine.start unconditionally,
+        // cancelling the in-flight worker.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/orchestrator/runs/{run_id}/pause"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("pause request");
+        assert_eq!(resp.status(), StatusCode::OK, "pause must 200");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/orchestrator/runs/{run_id}/resume"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("resume request");
+        assert_eq!(resp.status(), StatusCode::OK, "resume must 200");
+
+        // Release the gated worker so it finishes, then poll to completion.
+        tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..10 {
+                    gate.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let mut final_status = String::new();
+        for _ in 0..200 {
+            let d = run_service.get_detail(&run_id).await.expect("detail");
+            final_status = d.run.status.clone();
+            if final_status == "completed" || final_status == "failed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(final_status, "completed", "resumed run must complete, not fail");
+
+        let detail = run_service.get_detail(&run_id).await.expect("detail");
+        assert_eq!(
+            detail.tasks[0].status, "done",
+            "the in-flight worker preserved across pause→resume must settle `done`, got {}",
+            detail.tasks[0].status
+        );
+        let cancels = recorded_cancels.lock().unwrap().clone();
+        assert!(
+            !cancels.contains(&in_flight_conv),
+            "resume must NOT cancel the in-flight worker conversation {in_flight_conv}; cancelled={cancels:?}"
+        );
     }
 }
