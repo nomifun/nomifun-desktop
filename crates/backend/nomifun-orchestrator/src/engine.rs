@@ -43,6 +43,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -55,6 +56,31 @@ use tracing::{info, warn};
 
 use crate::events::OrchestratorRunEventEmitter;
 use crate::worker::{WorkerOutcome, WorkerRunner};
+
+/// Cancels an in-flight worker conversation so its turn ends as
+/// `Finish(Cancelled)`. The app injects an implementation that wraps
+/// [`ConversationService::cancel`](nomifun_conversation::ConversationService::cancel)
+/// (stamps `user_cancel` + calls `agent.cancel`; idempotent — a no-op when no
+/// live agent exists). Defined as a trait (not a bare `Fn`) so the impl can be
+/// `async` and the orchestrator crate stays free of a `nomifun-conversation`
+/// dependency (the wiring lives in `build_orchestrator_state`).
+#[async_trait]
+pub trait ConversationCanceller: Send + Sync {
+    /// Cancel the conversation identified by `conversation_id`. Best-effort and
+    /// idempotent: a missing/already-finished conversation is a silent no-op.
+    async fn cancel(&self, conversation_id: i64);
+}
+
+/// A [`ConversationCanceller`] that does nothing — the default for harnesses /
+/// tests that drive the engine without a live conversation layer. Lets
+/// [`RunEngineDeps::new`] stay infallible and keeps the all-mock engine tests
+/// (which never cancel) from having to construct a canceller.
+pub struct NoopConversationCanceller;
+
+#[async_trait]
+impl ConversationCanceller for NoopConversationCanceller {
+    async fn cancel(&self, _conversation_id: i64) {}
+}
 
 /// Hard ceiling on a single worker task's turn.
 pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -77,14 +103,20 @@ pub struct RunEngineDeps {
     /// Resolves a run's workspace → its `workspace_dir`, injected into the worker
     /// conversation `extra` (fixes the P1a `None` stub).
     pub ws_repo: Arc<dyn IOrchWorkspaceRepository>,
-    // (cancel hook is Task 3 — do NOT add it here.)
+    /// Cancels an in-flight worker conversation on `stop` so its turn ends as
+    /// `Finish(Cancelled)` (Task 3). Defaults to [`NoopConversationCanceller`]
+    /// (set [`cancel_conversation`](Self::cancel_conversation) afterward to wire a
+    /// real one — `build_orchestrator_state` injects the `ConversationService`
+    /// wrapper).
+    pub cancel_conversation: Arc<dyn ConversationCanceller>,
 }
 
 impl RunEngineDeps {
     /// Construct with the global default concurrency cap
     /// ([`DEFAULT_MAX_PARALLEL`]); set `default_max_parallel` afterward to
     /// override. `ws_repo` is required (workspace_dir resolution has no sane
-    /// fallback).
+    /// fallback). `cancel_conversation` defaults to a no-op; set it afterward to
+    /// propagate cancellation to in-flight worker conversations.
     pub fn new(
         run_repo: Arc<dyn IRunRepository>,
         worker: Arc<dyn WorkerRunner>,
@@ -98,6 +130,7 @@ impl RunEngineDeps {
             worker_timeout: DEFAULT_WORKER_TIMEOUT,
             default_max_parallel: DEFAULT_MAX_PARALLEL,
             ws_repo,
+            cancel_conversation: Arc::new(NoopConversationCanceller),
         }
     }
 }
@@ -186,15 +219,37 @@ impl RunEngine {
         );
     }
 
-    /// Stop a run's loop: set the cooperative cancel flag and abort the task.
+    /// Stop a run's loop: set the cooperative cancel flag, abort the task, and
+    /// cancel any in-flight worker conversations so their turns end as
+    /// `Finish(Cancelled)`.
+    ///
     /// The loop checks the flag between tasks; the abort covers a long in-flight
-    /// worker await. Persisting `cancelled` is the service's job
-    /// ([`RunService::cancel`](crate::run_service::RunService::cancel)).
+    /// worker await. **Cancel propagation (Task 3):** aborting the loop task drops
+    /// the in-flight worker futures but does NOT stop the underlying agent turns —
+    /// those run on independent runtime tasks. So we additionally find the run's
+    /// `running` tasks (their `conversation_id` was stamped live via `on_started`)
+    /// and cancel each conversation, making the worker's `await_turn` see
+    /// `is_processing` clear and return `ok = false`.
+    ///
+    /// Done on a detached task because `stop` is synchronous (called from the
+    /// cancel route before the persisted [`RunService::cancel`]); the DB query +
+    /// per-conversation cancel are async. We query by THIS run's tasks, so only
+    /// this run's conversations are cancelled. Persisting `cancelled` is the
+    /// service's job ([`RunService::cancel`](crate::run_service::RunService::cancel)).
     pub fn stop(&self, run_id: &str) {
         if let Some((_, handle)) = self.handles.remove(run_id) {
             handle.cancelled.store(true, Ordering::SeqCst);
             handle.join.abort();
         }
+        // Cancel in-flight worker conversations for this run (detached + best
+        // effort). Idempotent: if no task is running / no conversation is stamped
+        // / no live agent exists, the canceller no-ops. Safe to run even when the
+        // loop was not registered (a stale `running` row with no live loop).
+        let deps = self.deps.clone();
+        let run_id = run_id.to_string();
+        tokio::spawn(async move {
+            cancel_in_flight_conversations(&deps, &run_id).await;
+        });
     }
 
     /// Resume every persisted `running` run at boot. The running set (`handles`)
@@ -355,6 +410,45 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
         }
         // Loop again — re-evaluate the ready set (newly unblocked) and the
         // terminal condition.
+    }
+}
+
+/// Cancel every in-flight worker conversation belonging to `run_id`: query the
+/// run's tasks, take those still `running` with a stamped `conversation_id`, and
+/// call [`ConversationCanceller::cancel`] on each. Best-effort: a `list_tasks`
+/// error is logged, not propagated (the run is being torn down regardless).
+///
+/// The DB-query approach (vs. an in-memory in-flight map plumbed through the
+/// `RunHandle`) keeps `stop` decoupled from the loop's internal state: the loop
+/// already stamps `task.conversation_id` live on dispatch (via `on_started`) and
+/// marks the task `running` before pushing its worker future, so a `running` row
+/// with a non-null `conversation_id` is exactly an in-flight worker. Filtering by
+/// `list_tasks(run_id)` guarantees we only touch THIS run's conversations.
+async fn cancel_in_flight_conversations(deps: &Arc<RunEngineDeps>, run_id: &str) {
+    let tasks = match deps.run_repo.list_tasks(run_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(run_id, error = %e, "Run stop: list_tasks failed — cannot cancel in-flight conversations");
+            return;
+        }
+    };
+    let mut cancelled = 0usize;
+    for task in tasks {
+        if task.status != "running" {
+            continue;
+        }
+        let Some(conv_id) = task.conversation_id else {
+            // Running but conversation_id not yet stamped (the on_started detached
+            // stamp lags the `running` mark by a hair). The cooperative cancel flag
+            // + loop abort still stop scheduling; this conversation either never
+            // got created or will be orphaned — acceptable for cancel.
+            continue;
+        };
+        deps.cancel_conversation.cancel(conv_id).await;
+        cancelled += 1;
+    }
+    if cancelled > 0 {
+        info!(run_id, cancelled, "Run stop: cancelled in-flight worker conversations");
     }
 }
 
@@ -1412,5 +1506,199 @@ mod tests {
         assert_eq!(detail.run.status, "completed");
         let peak = worker.max_concurrent.load(Ordering::SeqCst);
         assert_eq!(peak, 2, "absent run cap → default_max_parallel=2 governs (peak=2), got {peak}");
+    }
+
+    // -------------------------------------------------------------------------
+    // P2 Task 3: cancellation propagates to in-flight worker conversations.
+    // -------------------------------------------------------------------------
+
+    /// A canceller that records every conversation id it was asked to cancel, so
+    /// the test can assert the engine propagated `stop` to the in-flight workers.
+    struct RecordingCanceller {
+        cancelled: Arc<Mutex<Vec<i64>>>,
+    }
+    impl RecordingCanceller {
+        fn new() -> Self {
+            Self {
+                cancelled: Arc::new(Mutex::new(vec![])),
+            }
+        }
+        fn handle(&self) -> Arc<Mutex<Vec<i64>>> {
+            self.cancelled.clone()
+        }
+    }
+    #[async_trait]
+    impl ConversationCanceller for RecordingCanceller {
+        async fn cancel(&self, conversation_id: i64) {
+            self.cancelled.lock().unwrap().push(conversation_id);
+        }
+    }
+
+    /// A worker that reports a distinct conversation id per task via `on_started`
+    /// (so the in-flight conv id is observable on the running task row) and then
+    /// blocks for a long delay — long enough for the test to observe the task
+    /// `running` and `stop` the engine while the worker is still in flight.
+    struct LongDelayWorkerRunner {
+        delay: Duration,
+        next_conv_id: AtomicUsize,
+    }
+    impl LongDelayWorkerRunner {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                // Start conv ids at a recognizable base so assertions are clear.
+                next_conv_id: AtomicUsize::new(5000),
+            }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for LongDelayWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            let conv_id = self.next_conv_id.fetch_add(1, Ordering::SeqCst) as i64;
+            on_started(conv_id);
+            // Block for a long time; the test cancels mid-flight.
+            tokio::time::sleep(self.delay).await;
+            Ok(WorkerOutcome {
+                conversation_id: conv_id,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_in_flight_worker_conversations() {
+        // Diamond DAG, cap=2 → A and B run concurrently. A long worker delay keeps
+        // both in flight while we cancel. The engine must, on `stop`, cancel the
+        // in-flight conversations (the conv ids the running tasks carry).
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        let worker = Arc::new(LongDelayWorkerRunner::new(Duration::from_secs(30)));
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let canceller = Arc::new(RecordingCanceller::new());
+        let recorded = canceller.handle();
+
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(60);
+        engine_deps.default_max_parallel = 2;
+        engine_deps.cancel_conversation = canceller;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        // Seed: fleet (one member) → workspace → run (cap=2) → plan.
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "cancel fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "cancel ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "to be cancelled mid-flight".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(2),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+
+        engine.start(run.id.clone());
+
+        // Wait until at least one task is `running` with its conversation_id
+        // stamped (the on_started detached stamp). Bounded ~200×10ms.
+        let mut in_flight_convs: Vec<i64> = vec![];
+        for _ in 0..200 {
+            let detail = run_service.get_detail(&run.id).await.expect("detail");
+            in_flight_convs = detail
+                .tasks
+                .iter()
+                .filter(|t| t.status == "running")
+                .filter_map(|t| t.conversation_id)
+                .collect();
+            if !in_flight_convs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !in_flight_convs.is_empty(),
+            "at least one task must be running with a stamped conversation_id before stop"
+        );
+
+        // Stop the engine → it must cancel the in-flight conversations.
+        engine.stop(&run.id);
+        run_service.cancel(&run.id).await.expect("cancel");
+
+        // The canceller must have received the in-flight conv id(s). `stop`
+        // schedules the cancellation on a detached task (it queries running tasks
+        // then cancels each), so poll for the records to land. Bounded ~200×10ms.
+        let mut got: Vec<i64> = vec![];
+        for _ in 0..200 {
+            got = recorded.lock().unwrap().clone();
+            if !got.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !got.is_empty(),
+            "stop must cancel the in-flight worker conversation(s); none recorded"
+        );
+        // Every recorded cancel must be one of the in-flight conv ids (this run's).
+        for c in &got {
+            assert!(
+                in_flight_convs.contains(c),
+                "cancelled conv {c} must be an in-flight conv of THIS run, in-flight={in_flight_convs:?}"
+            );
+        }
+
+        // Run persisted as cancelled.
+        let detail = run_service.get_detail(&run.id).await.expect("detail");
+        assert_eq!(detail.run.status, "cancelled", "run persisted as cancelled");
     }
 }

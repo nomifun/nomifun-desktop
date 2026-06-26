@@ -47,9 +47,9 @@ use nomifun_db::{
     SqliteFleetRepository, SqliteOrchWorkspaceRepository, SqliteRunRepository, init_database_memory,
 };
 use nomifun_orchestrator::{
-    FleetService, MockWorkerRunner, OrchestratorRunEventEmitter, OrchestratorRouterState,
-    PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerRunner, WorkspaceService,
-    orchestrator_routes,
+    ConversationCanceller, FleetService, MockWorkerRunner, OrchestratorRunEventEmitter,
+    OrchestratorRouterState, PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerOutcome,
+    WorkerRunner, WorkspaceService, orchestrator_routes,
 };
 use nomifun_realtime::EventBroadcaster;
 
@@ -335,6 +335,265 @@ async fn run_cancel_through_route_persists_cancelled() {
 
     let resp = app
         .clone()
+        .oneshot(get(&format!("/api/orchestrator/runs/{run_id}")))
+        .await
+        .expect("get run request");
+    let json = body_json(resp).await;
+    assert_eq!(json["data"]["run"]["status"], "cancelled", "run persisted as cancelled");
+}
+
+// ----------------------------------------------------------------------------
+// P2: parallel run completion + cancel propagation to in-flight workers, through
+// the real route↔RunService↔RunEngine seam (mock planner/worker/canceller).
+// ----------------------------------------------------------------------------
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A diamond DAG: A,B independent → C depends on both. With cap≥2 the engine
+/// runs A and B concurrently, so two workers are in flight at once — the shape a
+/// cancel-mid-run test needs.
+struct DiamondPlanProducer;
+
+#[async_trait]
+impl PlanProducer for DiamondPlanProducer {
+    async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+        Ok(PlannedDag {
+            tasks: vec![
+                PlannedTask {
+                    title: "A".to_string(),
+                    spec: "do A".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                },
+                PlannedTask {
+                    title: "B".to_string(),
+                    spec: "do B".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                },
+                PlannedTask {
+                    title: "C".to_string(),
+                    spec: "do C".to_string(),
+                    task_profile: None,
+                    depends_on: vec![0, 1],
+                    member_index: Some(0),
+                    rationale: None,
+                },
+            ],
+        })
+    }
+}
+
+/// Records every conversation id the engine asked to cancel, so the test can
+/// assert cancel propagated to the in-flight workers (the app's production
+/// canceller wraps `ConversationService::cancel`; here we record instead).
+struct RecordingCanceller {
+    cancelled: Arc<Mutex<Vec<i64>>>,
+}
+#[async_trait]
+impl ConversationCanceller for RecordingCanceller {
+    async fn cancel(&self, conversation_id: i64) {
+        self.cancelled.lock().unwrap().push(conversation_id);
+    }
+}
+
+/// A worker that reports a distinct conversation id per task (via `on_started`,
+/// so the running task row carries it) then blocks for a long delay — keeping
+/// workers in flight while the test cancels.
+struct LongDelayWorkerRunner {
+    delay: Duration,
+    next_conv_id: AtomicUsize,
+}
+#[async_trait]
+impl WorkerRunner for LongDelayWorkerRunner {
+    async fn run(
+        &self,
+        _member: &FleetMember,
+        _workspace_dir: Option<&str>,
+        _run_id: &str,
+        task_id: &str,
+        _brief: &str,
+        _task_spec: &str,
+        _timeout: Duration,
+        on_started: Box<dyn FnOnce(i64) + Send>,
+    ) -> Result<WorkerOutcome, AppError> {
+        let conv_id = self.next_conv_id.fetch_add(1, Ordering::SeqCst) as i64;
+        on_started(conv_id);
+        tokio::time::sleep(self.delay).await;
+        Ok(WorkerOutcome {
+            conversation_id: conv_id,
+            text: Some(format!("output of {task_id}")),
+            ok: true,
+        })
+    }
+}
+
+/// Build a test state over a fresh in-memory DB whose engine has cap=2, a diamond
+/// planner, a long-delay worker (so workers stay in-flight), and the given
+/// recording canceller wired into `RunEngineDeps` — the same `cancel_conversation`
+/// seam `build_orchestrator_state` injects in production.
+async fn build_cancel_state(canceller: Arc<dyn ConversationCanceller>) -> OrchestratorRouterState {
+    let db = init_database_memory().await.expect("db init");
+    let pool = db.pool().clone();
+    let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+    let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+    let run_repo = Arc::new(SqliteRunRepository::new(pool));
+
+    let fleet = FleetService::new(fleet_repo.clone());
+    let workspace = WorkspaceService::new(ws_repo.clone());
+    let emitter = OrchestratorRunEventEmitter::new(Arc::new(NoopBroadcaster));
+    let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+
+    let run_service = Arc::new(RunService::new(
+        run_repo.clone(),
+        fleet_repo,
+        ws_repo.clone(),
+        planner,
+        emitter.clone(),
+    ));
+    let worker: Arc<dyn WorkerRunner> = Arc::new(LongDelayWorkerRunner {
+        delay: Duration::from_secs(30),
+        next_conv_id: AtomicUsize::new(6000),
+    });
+    let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo);
+    engine_deps.worker_timeout = Duration::from_secs(60);
+    engine_deps.default_max_parallel = 2;
+    engine_deps.cancel_conversation = canceller;
+    let engine = RunEngine::new(Arc::new(engine_deps));
+
+    OrchestratorRouterState::new(fleet, workspace, run_service, engine)
+}
+
+/// Seed a single-member fleet + a workspace via the state's services. Returns
+/// (fleet_id, workspace_id).
+async fn seed_fleet_and_ws(state: &OrchestratorRouterState, prefix: &str) -> (String, String) {
+    let fleet = state
+        .fleet
+        .create(
+            "u1",
+            CreateFleetRequest {
+                name: format!("{prefix} fleet"),
+                description: None,
+                max_parallel: None,
+                members: vec![FleetMemberInput {
+                    agent_id: "agent_a".to_string(),
+                    provider_id: Some("prov_x".to_string()),
+                    model: Some("claude-opus-4-8".to_string()),
+                    role_hint: None,
+                    capability_profile: None,
+                    constraints: None,
+                    sort_order: None,
+                }],
+            },
+        )
+        .await
+        .expect("seed fleet");
+    let ws = state
+        .workspace
+        .create(
+            "u1",
+            CreateWorkspaceRequest {
+                name: format!("{prefix} ws"),
+                default_fleet_id: Some(fleet.id.clone()),
+                workspace_dir: None,
+            },
+        )
+        .await
+        .expect("seed workspace");
+    (fleet.id, ws.id)
+}
+
+/// Cancelling a run mid-flight (through the route) cancels the in-flight worker
+/// conversations: the recording canceller receives the conv ids the running tasks
+/// carry, and the run persists `cancelled`.
+#[tokio::test]
+async fn run_cancel_propagates_to_in_flight_worker_conversations() {
+    let cancelled = Arc::new(Mutex::new(Vec::<i64>::new()));
+    let canceller: Arc<dyn ConversationCanceller> = Arc::new(RecordingCanceller {
+        cancelled: cancelled.clone(),
+    });
+    let state = build_cancel_state(canceller).await;
+    let (fleet_id, ws_id) = seed_fleet_and_ws(&state, "cancel-prop").await;
+
+    // Create + plan + start the run directly so we can observe the running tasks
+    // before cancelling. (The route's create_run also starts the engine, but
+    // creating directly keeps the run id in hand.)
+    let run = state
+        .run_service
+        .create(
+            "u1",
+            CreateRunRequest {
+                workspace_id: ws_id,
+                goal: "cancel mid-flight".to_string(),
+                fleet_id,
+                autonomy: None,
+                max_parallel: Some(2),
+            },
+        )
+        .await
+        .expect("seed run");
+    let run_id = run.id.clone();
+    state.run_service.plan(&run_id).await.expect("plan");
+    state.engine.start(run_id.clone());
+
+    // Wait until a task is running with a stamped conversation_id (the in-flight
+    // workers). Bounded ~200×10ms.
+    let mut in_flight: Vec<i64> = vec![];
+    for _ in 0..200 {
+        let detail = state.run_service.get_detail(&run_id).await.expect("detail");
+        in_flight = detail
+            .tasks
+            .iter()
+            .filter(|t| t.status == "running")
+            .filter_map(|t| t.conversation_id)
+            .collect();
+        if !in_flight.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !in_flight.is_empty(),
+        "at least one worker must be in flight (running + conv stamped) before cancel"
+    );
+
+    // Cancel through the route: it calls engine.stop (→ cancel in-flight) then
+    // run_service.cancel (→ persist cancelled).
+    let app = router(state);
+    let resp = app
+        .clone()
+        .oneshot(post(&format!("/api/orchestrator/runs/{run_id}/cancel"), serde_json::json!({})))
+        .await
+        .expect("cancel run request");
+    assert_eq!(resp.status(), StatusCode::OK, "cancel should be 200");
+
+    // The canceller (detached in stop) must record the in-flight conv id(s).
+    let mut got: Vec<i64> = vec![];
+    for _ in 0..200 {
+        got = cancelled.lock().unwrap().clone();
+        if !got.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !got.is_empty(),
+        "cancel must propagate to the in-flight worker conversation(s); none recorded"
+    );
+    for c in &got {
+        assert!(
+            in_flight.contains(c),
+            "cancelled conv {c} must be one of this run's in-flight convs {in_flight:?}"
+        );
+    }
+
+    // Run persisted cancelled.
+    let resp = app
         .oneshot(get(&format!("/api/orchestrator/runs/{run_id}")))
         .await
         .expect("get run request");
