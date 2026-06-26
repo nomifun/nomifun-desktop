@@ -340,6 +340,51 @@ impl IRunRepository for SqliteRunRepository {
         })
     }
 
+    async fn set_assignment(
+        &self,
+        p: CreateAssignmentParams,
+    ) -> Result<OrchAssignmentRow, sqlx::Error> {
+        // Upsert = delete-by-task + create. A task carries at most one effective
+        // assignment; an override cleanly replaces it (rather than stacking rows,
+        // which `get_assignment_for_task`'s "latest" semantics would otherwise
+        // mask). Done in a transaction so a reader never observes the gap between
+        // the delete and the insert.
+        let id = generate_prefixed_id("asg");
+        let now = now_ms();
+        let locked: i64 = if p.locked { 1 } else { 0 };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM orch_assignments WHERE task_id = ?")
+            .bind(&p.task_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO orch_assignments (\
+                id, task_id, member_id, score, rationale, source, locked, created_at\
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&p.task_id)
+        .bind(&p.member_id)
+        .bind(p.score)
+        .bind(&p.rationale)
+        .bind(&p.source)
+        .bind(locked)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(OrchAssignmentRow {
+            id,
+            task_id: p.task_id,
+            member_id: p.member_id,
+            score: p.score,
+            rationale: p.rationale,
+            source: p.source,
+            locked,
+            created_at: now,
+        })
+    }
+
     async fn list_assignments(&self, run_id: &str) -> Result<Vec<OrchAssignmentRow>, sqlx::Error> {
         let rows = sqlx::query_as::<_, OrchAssignmentRow>(
             "SELECT a.* FROM orch_assignments a \

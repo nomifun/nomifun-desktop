@@ -211,12 +211,27 @@ pub struct TaskProfile {
 }
 
 /// A run plus its full task DAG: tasks, dependency edges, and assignments.
+/// `fleet_members` is the run's frozen fleet snapshot (decoded from the run row's
+/// `fleet_snapshot` JSON) so the UI can render assignment/reassign choices against
+/// the exact members the run was created with.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunDetail {
     pub run: Run,
     pub tasks: Vec<RunTask>,
     pub deps: Vec<RunTaskDep>,
     pub assignments: Vec<Assignment>,
+    pub fleet_members: Vec<FleetMember>,
+}
+
+/// Override (or lock) the member assigned to a task. `member_id` references a
+/// member in the run's `fleet_snapshot`. `locked` defaults to `true` (an explicit
+/// human override should survive re-planning); pass `false` to override without
+/// locking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReassignRequest {
+    pub member_id: String,
+    #[serde(default)]
+    pub locked: Option<bool>,
 }
 
 /// Create (and kick off) an orchestration run within a workspace against a fleet.
@@ -505,6 +520,16 @@ mod tests {
                 source: "auto".to_string(),
                 locked: false,
             }],
+            fleet_members: vec![FleetMember {
+                id: "fm_1".to_string(),
+                agent_id: "agent_a".to_string(),
+                provider_id: None,
+                model: None,
+                role_hint: None,
+                capability_profile: None,
+                constraints: None,
+                sort_order: 0,
+            }],
         };
 
         let json = serde_json::to_string(&detail).expect("serialize");
@@ -561,5 +586,29 @@ mod tests {
         assert_eq!(asg.rationale.as_deref(), Some("best at research"));
         assert_eq!(asg.source, "auto");
         assert!(!asg.locked);
+
+        // Fleet members snapshot.
+        assert_eq!(back.fleet_members.len(), 1);
+        assert_eq!(back.fleet_members[0].id, "fm_1");
+        assert_eq!(back.fleet_members[0].agent_id, "agent_a");
+    }
+
+    #[test]
+    fn reassign_request_locked_defaults_absent() {
+        // Explicit value round-trips.
+        let req = ReassignRequest {
+            member_id: "fm_2".to_string(),
+            locked: Some(false),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let back: ReassignRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.member_id, "fm_2");
+        assert_eq!(back.locked, Some(false));
+
+        // `locked` absent => None (the service decides the default, i.e. true).
+        let minimal: ReassignRequest =
+            serde_json::from_str(r#"{"member_id":"fm_9"}"#).expect("deserialize minimal");
+        assert_eq!(minimal.member_id, "fm_9");
+        assert_eq!(minimal.locked, None);
     }
 }
