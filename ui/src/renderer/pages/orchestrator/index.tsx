@@ -4,19 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import classNames from 'classnames';
 import { History, PeopleTopCard, Workbench } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
+import AppLoader from '@/renderer/components/layout/AppLoader';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
+import type { TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
 import WorkspaceList from './WorkspaceList';
 import FleetManager from './FleetManager';
 import RunHistory from './RunHistory';
+import WorkerTranscriptPanel from './RunDetail/WorkerTranscriptPanel';
+import MobileRunSummary from './RunDetail/MobileRunSummary';
+
+// The DAG canvas pulls in react-flow (heavy) and is only mounted when a run is
+// open, so it is split into its own chunk and loaded on demand.
+const DagCanvas = React.lazy(() => import('./RunDetail/DagCanvas'));
 
 type Section = 'workspace' | 'fleet' | 'run-history';
 
@@ -38,8 +46,12 @@ interface SectionDef {
  * to `?section=` (default `fleet`). On mobile the left sidebar collapses to a
  * horizontal segmented bar above the content.
  *
- * The fleet section renders a temporary placeholder; Task 12 replaces it with
- * the real `<FleetManager/>` (drop-in: swap the `section === 'fleet'` branch).
+ * Master-detail: opening a run sets `?run=<id>` (mirroring the requirements
+ * WorkspacePage `?req=` pattern). While `?run=` is set the right pane is taken
+ * over full-bleed by the interactive {@link DagCanvas} (lazy-loaded react-flow),
+ * regardless of the active section; closing removes `?run=` (a non-replacing
+ * navigation, so browser-back closes the canvas). On mobile the canvas is too
+ * awkward to use, so a read-only {@link MobileRunSummary} is shown instead.
  */
 const OrchestratorPage: React.FC = () => {
   const { t } = useTranslation();
@@ -70,6 +82,47 @@ const OrchestratorPage: React.FC = () => {
     [searchParams, setSearchParams]
   );
 
+  // ── Master-detail: `?run=<id>` drives the full-bleed DAG canvas ────────────
+  const runParam = searchParams.get('run');
+  const selectedRunId = runParam && runParam !== '' ? runParam : undefined;
+
+  // Opening a run also switches the active section to run-history so the rail
+  // highlights the right tab. replace:false so browser-back closes the canvas.
+  const openRun = useCallback(
+    (id: string) => {
+      setSection('run-history');
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          p.set('section', 'run-history');
+          p.set('run', id);
+          return p;
+        },
+        { replace: false }
+      );
+    },
+    [setSearchParams]
+  );
+
+  const closeRun = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        p.delete('run');
+        return p;
+      },
+      { replace: false }
+    );
+  }, [setSearchParams]);
+
+  // The clicked DAG node's task → opens the worker transcript drawer (Task 5).
+  const [selectedTask, setSelectedTask] = useState<TRunTask | null>(null);
+
+  // Closing the run also dismisses any open transcript drawer.
+  useEffect(() => {
+    if (!selectedRunId) setSelectedTask(null);
+  }, [selectedRunId]);
+
   const resize = useResizableSplit({
     unit: 'px',
     defaultWidth: 248,
@@ -96,21 +149,29 @@ const OrchestratorPage: React.FC = () => {
     <>
       {section === 'workspace' && <WorkspaceList />}
       {section === 'fleet' && <FleetManager />}
-      {section === 'run-history' && <RunHistory />}
+      {section === 'run-history' && <RunHistory onOpenRun={openRun} />}
     </>
   );
 
-  // Mobile: horizontal segmented nav above the content (no left sidebar).
+  // Mobile: horizontal segmented nav above the content (no left sidebar). When a
+  // run is open we replace the section content with a read-only run summary
+  // (the interactive DAG canvas is intentionally not mounted on mobile).
   if (isMobile) {
     const segmentedItems: SegmentedTabItem[] = sections.map((s) => ({ key: s.key, label: s.label, icon: s.icon }));
     return (
       <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
         <div className='text-20px font-600 text-t-primary leading-tight'>{t('orchestrator.title')}</div>
         <div className='mt-4px mb-14px text-12px leading-16px text-t-tertiary'>{t('orchestrator.subtitle')}</div>
-        <div className='mb-16px'>
-          <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
-        </div>
-        {content}
+        {selectedRunId ? (
+          <MobileRunSummary runId={selectedRunId} onBack={closeRun} />
+        ) : (
+          <>
+            <div className='mb-16px'>
+              <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
+            </div>
+            {content}
+          </>
+        )}
       </div>
     );
   }
@@ -165,9 +226,28 @@ const OrchestratorPage: React.FC = () => {
           })}
         </div>
       </ContentSider>
-      <div className='flex-1 min-w-0 min-h-0 overflow-y-auto' role='tabpanel' aria-label={t('orchestrator.title')} ref={paneRef}>
-        <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX)}>{content}</div>
-      </div>
+      {selectedRunId ? (
+        // Full-bleed: the DAG canvas owns the entire pane (react-flow needs an
+        // explicitly-sized, non-scrolling parent — every level keeps min-h-0).
+        // It opts OUT of the centered max-w-1100px wrapper used by the sections.
+        <div
+          className='flex-1 min-w-0 min-h-0 overflow-hidden'
+          role='tabpanel'
+          aria-label={t('orchestrator.run.title')}
+        >
+          <Suspense fallback={<AppLoader />}>
+            <DagCanvas runId={selectedRunId} onBack={closeRun} onOpenTask={setSelectedTask} />
+          </Suspense>
+        </div>
+      ) : (
+        <div className='flex-1 min-w-0 min-h-0 overflow-y-auto' role='tabpanel' aria-label={t('orchestrator.title')} ref={paneRef}>
+          <div className={classNames('mx-auto w-full max-w-1100px box-border py-32px', panePadX)}>{content}</div>
+        </div>
+      )}
+
+      {/* Worker transcript drawer (Task 5) — always mounted, visible when a task
+          node is clicked in the canvas. */}
+      <WorkerTranscriptPanel task={selectedTask} onClose={() => setSelectedTask(null)} />
     </div>
   );
 };
