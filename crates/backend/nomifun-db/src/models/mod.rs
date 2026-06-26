@@ -15,6 +15,7 @@ mod knowledge;
 mod mcp_server;
 mod message;
 mod oauth_token;
+mod orchestrator;
 mod provider;
 mod remote_agent;
 mod requirement;
@@ -50,6 +51,10 @@ pub use knowledge::{
 pub use mcp_server::McpServerRow;
 pub use message::MessageRow;
 pub use oauth_token::OAuthTokenRow;
+pub use orchestrator::{
+    FleetMemberRow, FleetRow, OrchAssignmentRow, OrchRunRow, OrchRunTaskDepRow, OrchRunTaskRow,
+    OrchWorkspaceRow,
+};
 pub use provider::Provider;
 pub use remote_agent::RemoteAgentRow;
 pub use requirement::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
