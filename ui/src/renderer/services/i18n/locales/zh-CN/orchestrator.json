@@ -99,11 +99,6 @@
       "high": "高成本"
     }
   },
-  "runHistory": {
-    "title": "Run 历史",
-    "emptyTitle": "Run 执行即将上线（P1）",
-    "emptyDesc": "编排执行记录将在后续版本中展示。"
-  },
   "run": {
     "title": "Run 历史",
     "subtitle": "选择工作间，查看其编排执行记录",
