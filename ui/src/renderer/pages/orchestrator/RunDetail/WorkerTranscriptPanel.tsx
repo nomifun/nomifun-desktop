@@ -6,8 +6,8 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Drawer, Select, Spin, Switch } from '@arco-design/web-react';
-import { Comment } from '@icon-park/react';
+import { Drawer, Input, Select, Spin, Switch } from '@arco-design/web-react';
+import { Comment, Send } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAssignment, TFleetMember } from '@/common/types/orchestrator/orchestratorTypes';
@@ -51,10 +51,20 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [steerText, setSteerText] = useState('');
+  const [steering, setSteering] = useState(false);
 
   const task = open?.task ?? null;
   const assignment = open?.assignment ?? null;
   const conversationId = task?.conversation_id;
+  // Steer is only meaningful for a task actively running on a worker with a live
+  // conversation to inject into.
+  const canSteer = task?.status === 'running' && conversationId !== undefined;
+
+  // Reset the steer draft whenever the inspected task changes.
+  useEffect(() => {
+    setSteerText('');
+  }, [task?.id]);
 
   useEffect(() => {
     if (!task || conversationId === undefined) {
@@ -100,6 +110,29 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
       message.error(t('orchestrator.run.assign.reassignError', { error: String(e) }));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Inject a steering message into the running worker's live conversation. On
+  // success we clear the draft; no refetch is needed (the transcript stream
+  // surfaces the injected turn on its own).
+  const sendSteer = async () => {
+    if (!open || !canSteer) return;
+    const text = steerText.trim();
+    if (!text) return;
+    setSteering(true);
+    try {
+      await ipcBridge.orchestrator.runs.steer.invoke({
+        run_id: open.runId,
+        task_id: open.task.id,
+        updates: { text },
+      });
+      message.success(t('orchestrator.run.steer.sent'));
+      setSteerText('');
+    } catch (e) {
+      message.error(t('orchestrator.run.steer.error', { error: String(e) }));
+    } finally {
+      setSteering(false);
     }
   };
 
@@ -217,6 +250,54 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
             <TeamChatView conversation={conversation} hideSendBox agent_name={task?.title} />
           ) : null}
         </div>
+
+        {/* ── Steer (mid-turn inject), only for a running task with a live conv ── */}
+        {canSteer && (
+          <div
+            className='mt-12px shrink-0 rd-12px p-12px'
+            style={{ background: 'var(--bg-2)', border: '1px solid var(--border-base)' }}
+          >
+            <div className='text-11px font-600 uppercase tracking-wide text-t-tertiary'>
+              {t('orchestrator.run.steer.title')}
+            </div>
+            <div className='mt-3px text-11px leading-15px text-t-tertiary'>{t('orchestrator.run.steer.hint')}</div>
+            <div className='mt-8px flex items-center gap-8px'>
+              <Input
+                className='flex-1'
+                size='small'
+                allowClear
+                disabled={steering}
+                value={steerText}
+                placeholder={t('orchestrator.run.steer.placeholder')}
+                onChange={(v: string) => setSteerText(v)}
+                onPressEnter={() => void sendSteer()}
+              />
+              <div
+                role='button'
+                tabIndex={0}
+                aria-label={t('orchestrator.run.steer.send')}
+                aria-disabled={steering || steerText.trim().length === 0}
+                onClick={steering || steerText.trim().length === 0 ? undefined : () => void sendSteer()}
+                onKeyDown={(e) => {
+                  if ((e.key === 'Enter' || e.key === ' ') && !steering && steerText.trim().length > 0) {
+                    e.preventDefault();
+                    void sendSteer();
+                  }
+                }}
+                className='flex h-28px shrink-0 cursor-pointer items-center gap-4px rd-8px px-10px text-12px font-500 text-white transition-opacity hover:opacity-90'
+                style={{
+                  background: 'rgb(var(--primary-6))',
+                  ...(steering || steerText.trim().length === 0
+                    ? { opacity: 0.5, pointerEvents: 'none' as const }
+                    : {}),
+                }}
+              >
+                <Send theme='outline' size='13' strokeWidth={3} />
+                <span>{t('orchestrator.run.steer.send')}</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </Drawer>
   );

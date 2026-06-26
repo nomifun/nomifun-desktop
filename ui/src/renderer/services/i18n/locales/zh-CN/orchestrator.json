@@ -139,6 +139,8 @@
       "completed": "已完成",
       "failed": "已失败",
       "cancelled": "已取消",
+      "paused": "已暂停",
+      "awaiting_plan_approval": "待批准计划",
       "unknown": "未知"
     },
     "detail": {
@@ -149,6 +151,15 @@
       "cancelConfirmCancel": "取消",
       "cancelOk": "Run 已终止",
       "cancelError": "终止 Run 失败：{{error}}",
+      "approvePlan": "批准计划",
+      "approveOk": "计划已批准，开始执行",
+      "approveError": "批准计划失败：{{error}}",
+      "pause": "暂停",
+      "pauseOk": "Run 已暂停",
+      "pauseError": "暂停 Run 失败：{{error}}",
+      "resume": "继续",
+      "resumeOk": "Run 已继续",
+      "resumeError": "继续 Run 失败：{{error}}",
       "loadError": "加载 Run 详情失败",
       "planningTitle": "正在规划任务…",
       "planningDesc": "编队正在拆解目标并生成任务图，稍候即可看到节点。",
@@ -181,6 +192,14 @@
     "transcript": {
       "notStarted": "该任务尚未开始",
       "noConversation": "暂无对话记录，待有 worker 接手该任务后将在此处实时显示。"
+    },
+    "steer": {
+      "title": "插话引导",
+      "hint": "向正在执行该任务的 worker 实时插入一条引导消息。",
+      "placeholder": "输入要插入的引导内容…",
+      "send": "发送",
+      "sent": "已发送引导消息",
+      "error": "发送引导消息失败：{{error}}"
     }
   }
 }

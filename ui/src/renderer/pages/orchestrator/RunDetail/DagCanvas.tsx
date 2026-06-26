@@ -61,7 +61,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
   const [message, ctx] = useArcoMessage();
-  const [cancelling, setCancelling] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   // Mirror the global data-theme attribute (light/dark) for react-flow internals
   // whose colors are JS props (MiniMap mask, Background dots) and cannot read CSS
@@ -180,14 +180,54 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
   }, [detail?.tasks]);
 
   const handleCancel = async () => {
-    setCancelling(true);
+    setBusy(true);
     try {
       await ipcBridge.orchestrator.runs.cancel.invoke({ id: runId });
       message.success(t('orchestrator.run.detail.cancelOk'));
+      await refetch();
     } catch (e) {
       message.error(t('orchestrator.run.detail.cancelError', { error: String(e) }));
     } finally {
-      setCancelling(false);
+      setBusy(false);
+    }
+  };
+
+  const handleApprove = async () => {
+    setBusy(true);
+    try {
+      await ipcBridge.orchestrator.runs.approve.invoke({ id: runId });
+      message.success(t('orchestrator.run.detail.approveOk'));
+      await refetch();
+    } catch (e) {
+      message.error(t('orchestrator.run.detail.approveError', { error: String(e) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePause = async () => {
+    setBusy(true);
+    try {
+      await ipcBridge.orchestrator.runs.pause.invoke({ id: runId });
+      message.success(t('orchestrator.run.detail.pauseOk'));
+      await refetch();
+    } catch (e) {
+      message.error(t('orchestrator.run.detail.pauseError', { error: String(e) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setBusy(true);
+    try {
+      await ipcBridge.orchestrator.runs.resume.invoke({ id: runId });
+      message.success(t('orchestrator.run.detail.resumeOk'));
+      await refetch();
+    } catch (e) {
+      message.error(t('orchestrator.run.detail.resumeError', { error: String(e) }));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -224,7 +264,10 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
         total={total}
         onBack={onBack}
         onCancel={() => void handleCancel()}
-        cancelling={cancelling}
+        onApprove={() => void handleApprove()}
+        onPause={() => void handlePause()}
+        onResume={() => void handleResume()}
+        busy={busy}
       />
 
       <div className='flex-1 min-h-0'>

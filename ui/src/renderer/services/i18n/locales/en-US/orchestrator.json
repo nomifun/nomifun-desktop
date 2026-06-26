@@ -139,6 +139,8 @@
       "completed": "Completed",
       "failed": "Failed",
       "cancelled": "Cancelled",
+      "paused": "Paused",
+      "awaiting_plan_approval": "Awaiting plan approval",
       "unknown": "Unknown"
     },
     "detail": {
@@ -149,6 +151,15 @@
       "cancelConfirmCancel": "Keep running",
       "cancelOk": "Run stopped",
       "cancelError": "Failed to stop run: {{error}}",
+      "approvePlan": "Approve plan",
+      "approveOk": "Plan approved — execution started",
+      "approveError": "Failed to approve plan: {{error}}",
+      "pause": "Pause",
+      "pauseOk": "Run paused",
+      "pauseError": "Failed to pause run: {{error}}",
+      "resume": "Resume",
+      "resumeOk": "Run resumed",
+      "resumeError": "Failed to resume run: {{error}}",
       "loadError": "Failed to load run detail",
       "planningTitle": "Planning tasks…",
       "planningDesc": "The fleet is breaking the goal into a task graph — nodes will appear shortly.",
@@ -181,6 +192,14 @@
     "transcript": {
       "notStarted": "This task hasn’t started yet",
       "noConversation": "There’s no transcript to show — it will appear here once a worker picks up this task."
+    },
+    "steer": {
+      "title": "Steer",
+      "hint": "Inject a steering message into the worker currently running this task.",
+      "placeholder": "Type a steering message to inject…",
+      "send": "Send",
+      "sent": "Steering message sent",
+      "error": "Failed to send steering message: {{error}}"
     }
   }
 }
