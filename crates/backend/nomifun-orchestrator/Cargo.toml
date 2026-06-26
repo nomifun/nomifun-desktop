@@ -10,6 +10,7 @@ nomifun-api-types.workspace = true
 nomifun-auth.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-conversation.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

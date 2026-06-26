@@ -19,6 +19,7 @@ pub mod plan;
 pub mod routes;
 pub mod service;
 pub mod state;
+pub mod worker;
 
 pub use error::OrchestratorError;
 pub use events::OrchestratorRunEventEmitter;
@@ -26,3 +27,4 @@ pub use plan::{LlmPlanProducer, PlanProducer};
 pub use routes::orchestrator_routes;
 pub use service::{FleetService, WorkspaceService};
 pub use state::OrchestratorRouterState;
+pub use worker::{ConversationWorkerRunner, MockWorkerRunner, WorkerOutcome, WorkerRunner};
