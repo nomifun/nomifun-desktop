@@ -109,6 +109,10 @@
     "emptyDesc": "Click “New Run” to give the fleet a goal and let them collaborate inside the workspace.",
     "loadError": "Failed to load runs",
     "untitledGoal": "(No goal)",
+    "mobile": {
+      "tasksLabel": "Tasks",
+      "noTasks": "The fleet is breaking the goal into tasks — they will appear here shortly."
+    },
     "modal": {
       "title": "New Run",
       "workspace": "Workspace",

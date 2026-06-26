@@ -2054,6 +2054,8 @@ export type I18nKey =
   | 'orchestrator.run.emptyDesc'
   | 'orchestrator.run.emptyTitle'
   | 'orchestrator.run.loadError'
+  | 'orchestrator.run.mobile.noTasks'
+  | 'orchestrator.run.mobile.tasksLabel'
   | 'orchestrator.run.modal.autonomy'
   | 'orchestrator.run.modal.autonomyAutonomous'
   | 'orchestrator.run.modal.autonomyInteractive'
