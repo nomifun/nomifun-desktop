@@ -163,6 +163,10 @@
         "blocked": "Blocked",
         "cancelled": "Cancelled"
       }
+    },
+    "transcript": {
+      "notStarted": "This task hasn’t started yet",
+      "noConversation": "There’s no transcript to show — it will appear here once a worker picks up this task."
     }
   }
 }
