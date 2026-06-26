@@ -44,6 +44,12 @@ pub use repository::{
     SqliteTagSettingRepository, SqliteTeamRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TTL_MS,
 };
+// Orchestration (智能编排) repository traits + sqlite impls + params.
+pub use repository::{
+    CreateFleetParams, CreateOrchWorkspaceParams, IFleetRepository, IOrchWorkspaceRepository,
+    NewFleetMember, SqliteFleetRepository, SqliteOrchWorkspaceRepository, UpdateFleetParams,
+    UpdateOrchWorkspaceParams,
+};
 
 // Re-export sqlx (and its pool type) for downstream crates that run ad-hoc
 // queries against the pool without declaring their own sqlx dependency
