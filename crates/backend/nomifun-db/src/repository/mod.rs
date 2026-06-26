@@ -14,6 +14,7 @@ pub mod knowledge;
 pub mod mcp_server;
 pub mod oauth_token;
 pub mod orch_fleet;
+pub mod orch_run;
 pub mod orch_workspace;
 pub mod provider;
 pub mod remote_agent;
@@ -35,6 +36,7 @@ mod sqlite_knowledge;
 mod sqlite_mcp_server;
 mod sqlite_oauth_token;
 mod sqlite_orch_fleet;
+mod sqlite_orch_run;
 mod sqlite_orch_workspace;
 mod sqlite_provider;
 mod sqlite_remote_agent;
@@ -67,6 +69,10 @@ pub use knowledge::IKnowledgeRepository;
 pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use orch_fleet::{CreateFleetParams, IFleetRepository, NewFleetMember, UpdateFleetParams};
+pub use orch_run::{
+    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, UpdateRunParams,
+    UpdateTaskParams,
+};
 pub use orch_workspace::{
     CreateOrchWorkspaceParams, IOrchWorkspaceRepository, UpdateOrchWorkspaceParams,
 };
@@ -90,6 +96,7 @@ pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
 pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
 pub use sqlite_orch_fleet::SqliteFleetRepository;
+pub use sqlite_orch_run::SqliteRunRepository;
 pub use sqlite_orch_workspace::SqliteOrchWorkspaceRepository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_remote_agent::SqliteRemoteAgentRepository;

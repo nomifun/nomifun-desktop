@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use nomifun_common::now_ms;
 use nomifun_db::models::{MailboxMessageRow, TeamAgentRow, TeamRow, TeamTaskRow};
+use nomifun_db::UpdateTeamTaskParams as UpdateTaskParams;
 use nomifun_db::{
-    DbError, ITeamRepository, SqliteTeamRepository, UpdateTaskParams, UpdateTeamParams, init_database_memory,
+    DbError, ITeamRepository, SqliteTeamRepository, UpdateTeamParams, init_database_memory,
 };
 
 /// Builds a repo over an in-memory DB seeded with a conversation so the

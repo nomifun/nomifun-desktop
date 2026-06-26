@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use nomifun_common::{generate_prefixed_id, now_ms};
 use nomifun_db::ITeamRepository;
-use nomifun_db::UpdateTaskParams;
+use nomifun_db::UpdateTeamTaskParams as UpdateTaskParams;
 use nomifun_db::models::TeamTaskRow;
 use tracing::debug;
 

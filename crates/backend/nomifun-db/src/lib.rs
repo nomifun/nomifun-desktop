@@ -23,7 +23,13 @@ pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
-pub use repository::team::{UpdateTaskParams, UpdateTeamAgentParams, UpdateTeamParams};
+// `team` is the legacy engine (removed in orchestrator P5). Its
+// `UpdateTaskParams` is re-exported under the disambiguated name
+// `UpdateTeamTaskParams` so the going-forward root `UpdateTaskParams` is the
+// orchestrator one (below).
+pub use repository::team::{
+    UpdateTaskParams as UpdateTeamTaskParams, UpdateTeamAgentParams, UpdateTeamParams,
+};
 pub use repository::{
     CreateAcpSessionParams, CreateTerminalParams, GLOBAL_CAP, IAcpSessionRepository,
     IAgentMetadataRepository, IAssistantOverrideRepository, IAssistantRepository,
@@ -46,9 +52,10 @@ pub use repository::{
 };
 // Orchestration (智能编排) repository traits + sqlite impls + params.
 pub use repository::{
-    CreateFleetParams, CreateOrchWorkspaceParams, IFleetRepository, IOrchWorkspaceRepository,
-    NewFleetMember, SqliteFleetRepository, SqliteOrchWorkspaceRepository, UpdateFleetParams,
-    UpdateOrchWorkspaceParams,
+    CreateAssignmentParams, CreateFleetParams, CreateOrchWorkspaceParams, CreateRunParams,
+    CreateTaskParams, IFleetRepository, IOrchWorkspaceRepository, IRunRepository, NewFleetMember,
+    SqliteFleetRepository, SqliteOrchWorkspaceRepository, SqliteRunRepository, UpdateFleetParams,
+    UpdateOrchWorkspaceParams, UpdateRunParams, UpdateTaskParams,
 };
 
 // Re-export sqlx (and its pool type) for downstream crates that run ad-hoc
