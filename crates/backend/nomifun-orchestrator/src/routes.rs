@@ -11,11 +11,11 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use nomifun_api_types::{
-    ApiResponse, CreateFleetRequest, CreateWorkspaceRequest, Fleet, OrchWorkspace,
-    UpdateFleetRequest, UpdateWorkspaceRequest,
+    ApiResponse, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest, Fleet, OrchWorkspace,
+    Run, RunDetail, UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -40,6 +40,13 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
             "/api/orchestrator/workspaces/{id}",
             get(get_workspace).put(update_workspace).delete(delete_workspace),
         )
+        .route("/api/orchestrator/runs", post(create_run))
+        .route(
+            "/api/orchestrator/workspaces/{ws}/runs",
+            get(list_workspace_runs),
+        )
+        .route("/api/orchestrator/runs/{id}", get(get_run))
+        .route("/api/orchestrator/runs/{id}/cancel", post(cancel_run))
         .with_state(state)
 }
 
@@ -135,6 +142,55 @@ async fn delete_workspace(
     Ok(Json(ApiResponse::success()))
 }
 
+// ── Runs ─────────────────────────────────────────────────────────────────────
+
+/// Create a run, then plan it, then hand it to the engine. The three steps are
+/// deliberately separate (Task 6 contract): `create` parks the run in `planning`,
+/// `plan` decomposes the goal + flips it to `running`, and `engine.start` spawns
+/// the (synchronous, fire-and-forget) execution loop. If planning fails, the
+/// error is surfaced — the run already exists in `planning` and can be re-planned
+/// later, but the caller learns the goal could not be decomposed.
+async fn create_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    body: Result<Json<CreateRunRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ApiResponse<Run>>), AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let run = state.run_service.create(&user.id, req).await?;
+    state.run_service.plan(&run.id).await?;
+    // `start` is synchronous (spawns the loop internally) — do not await.
+    state.engine.start(run.id.clone());
+    Ok((StatusCode::CREATED, Json(ApiResponse::ok(run))))
+}
+
+async fn list_workspace_runs(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(ws): Path<String>,
+) -> Result<Json<ApiResponse<Vec<Run>>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.run_service.list(&ws).await?)))
+}
+
+async fn get_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<RunDetail>>, AppError> {
+    Ok(Json(ApiResponse::ok(state.run_service.get_detail(&id).await?)))
+}
+
+/// Cancel a run: stop the engine loop (cooperative cancel + abort) then persist
+/// the `cancelled` status. `stop` is synchronous; `cancel` persists + emits.
+async fn cancel_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.engine.stop(&id);
+    state.run_service.cancel(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +202,10 @@ mod tests {
     use crate::worker::{MockWorkerRunner, WorkerRunner};
     use axum::body::Body;
     use axum::http::Request;
-    use nomifun_api_types::{FleetMember, PlannedDag, WebSocketMessage};
+    use nomifun_api_types::{
+        CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest, FleetMember, FleetMemberInput,
+        PlannedDag, WebSocketMessage,
+    };
     use nomifun_common::AppError;
     use nomifun_db::{
         SqliteFleetRepository, SqliteOrchWorkspaceRepository, SqliteRunRepository,
@@ -176,6 +235,15 @@ mod tests {
     }
 
     async fn build_state() -> OrchestratorRouterState {
+        build_state_with_run().await.0
+    }
+
+    /// Build a fully-wired state AND seed one run (workspace + single-member fleet
+    /// + a run parked in `planning`). Returns the state and the seeded run id so a
+    /// oneshot can hit `GET /api/orchestrator/runs/{id}` against a real row. We
+    /// build the services over the same repos the state holds so the seeded data
+    /// is visible to the handlers.
+    async fn build_state_with_run() -> (OrchestratorRouterState, String) {
         let db = init_database_memory().await.expect("db init");
         let pool = db.pool().clone();
         let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
@@ -194,7 +262,55 @@ mod tests {
         ));
         let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(1, "x"));
         let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo, worker, emitter)));
-        OrchestratorRouterState::new(fleet, workspace, run_service, engine)
+
+        // Seed: fleet (one member) → workspace → run (parked in `planning`).
+        let seeded_fleet = fleet
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "smoke fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![FleetMemberInput {
+                        agent_id: "agent_a".to_string(),
+                        provider_id: None,
+                        model: None,
+                        role_hint: None,
+                        capability_profile: None,
+                        constraints: None,
+                        sort_order: None,
+                    }],
+                },
+            )
+            .await
+            .expect("seed fleet");
+        let seeded_ws = workspace
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "smoke ws".to_string(),
+                    default_fleet_id: Some(seeded_fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("seed workspace");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: seeded_ws.id,
+                    goal: "smoke goal".to_string(),
+                    fleet_id: seeded_fleet.id,
+                    autonomy: None,
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("seed run");
+
+        let state = OrchestratorRouterState::new(fleet, workspace, run_service, engine);
+        (state, run.id)
     }
 
     /// The router builds without panicking.
@@ -241,6 +357,51 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/orchestrator/fleets")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_ne!(resp.status(), StatusCode::OK);
+    }
+
+    /// `GET /api/orchestrator/runs/{id}` returns 200 for a seeded run once a
+    /// `CurrentUser` extension is present. This exercises the new run route end to
+    /// end through the router (path extraction → RunService::get_detail → 200) and
+    /// confirms the route is actually mounted — before the route existed axum would
+    /// have routed this to a 404. (Full HTTP behavior is covered by Task 9.)
+    #[tokio::test]
+    async fn get_run_returns_ok_with_user() {
+        let (state, run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// The `GET /api/orchestrator/runs/{id}` route still requires the
+    /// `CurrentUser` extension — without it the handler cannot run (axum returns a
+    /// non-200). Guards that the run route was not wired without auth.
+    #[tokio::test]
+    async fn get_run_without_user_is_not_ok() {
+        let (state, run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
                     .body(Body::empty())
                     .unwrap(),
             )
