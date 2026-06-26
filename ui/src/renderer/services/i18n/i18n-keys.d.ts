@@ -260,6 +260,7 @@ export type I18nKey =
   | 'common.send'
   | 'common.settings'
   | 'common.show'
+  | 'common.siderNav.orchestrator'
   | 'common.siderSection.automation'
   | 'common.siderSection.common'
   | 'common.siderSection.data'
