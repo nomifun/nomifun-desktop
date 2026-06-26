@@ -41,7 +41,6 @@
       "noModel": "No model configured",
       "unknownAgent": "Unknown agent",
       "maxParallelHint": "Max concurrent tasks",
-      "menu": "More actions",
       "delete": "Delete fleet",
       "deleteConfirm": "Delete the fleet “{{name}}”? This cannot be undone."
     },
