@@ -163,7 +163,9 @@ impl RunService {
     }
 
     /// Plan a run: decompose the goal into a task DAG, persist tasks + deps +
-    /// assignments, emit `planUpdated`, and flip the run to `running`.
+    /// assignments, emit `planUpdated`, then apply the **autonomy gate** — an
+    /// `interactive` run parks at `awaiting_plan_approval` (a human approves the
+    /// plan before any worker dispatches); every other level flips to `running`.
     ///
     /// Edges are persisted AFTER all tasks are created so the planned `depends_on`
     /// indices can be resolved to the minted task ids. A planned task with no
@@ -309,12 +311,22 @@ impl RunService {
 
         self.emitter.emit_run_plan_updated(run_id);
 
-        // Flip to running so the engine may pick it up.
+        // Autonomy gate: `interactive` runs park at `awaiting_plan_approval` for a
+        // human to confirm the plan before any worker dispatches (the human-in-the-
+        // loop sits at the PLAN gate, not per-worker — workers always run yolo). All
+        // other autonomy levels (`autonomous` / `supervised`) flip straight to
+        // `running` so the engine may pick the run up. The route reads `run.autonomy`
+        // to decide whether to `engine.start` (interactive: NOT until `approve_plan`).
+        let next_status = if run.autonomy == "interactive" {
+            "awaiting_plan_approval"
+        } else {
+            "running"
+        };
         self.run_repo
             .update_run(
                 run_id,
                 UpdateRunParams {
-                    status: Some("running".to_string()),
+                    status: Some(next_status.to_string()),
                     summary: None,
                     lead_conv_id: None,
                     total_tokens: None,
@@ -322,7 +334,71 @@ impl RunService {
             )
             .await
             .map_err(OrchestratorError::from)?;
-        self.emitter.emit_run_status(run_id, "running");
+        self.emitter.emit_run_status(run_id, next_status);
+        Ok(())
+    }
+
+    /// Approve an `interactive` run's plan: `awaiting_plan_approval` → `running`
+    /// + emit. The caller (route) then `engine.start`s the loop — `approve_plan`
+    /// only mutates persisted state, mirroring how `create`/`plan` leave engine
+    /// lifecycle to the route. A run not in `awaiting_plan_approval` is a 400
+    /// (you cannot approve a plan that is already running / not awaiting approval).
+    pub async fn approve_plan(&self, run_id: &str) -> Result<(), AppError> {
+        self.transition(run_id, &["awaiting_plan_approval"], "running").await
+    }
+
+    /// Pause a `running` run: `running` → `paused` + emit. The engine's persistent
+    /// loop keeps running but stops filling new workers (it re-reads the run status
+    /// each iteration); any in-flight workers run to completion. Pause does NOT
+    /// cancel in-flight work (that is `cancel`). A run not `running` is a 400.
+    pub async fn pause(&self, run_id: &str) -> Result<(), AppError> {
+        self.transition(run_id, &["running"], "paused").await
+    }
+
+    /// Resume a `paused` run: `paused` → `running` + emit. The caller (route) then
+    /// `engine.start`s the loop (idempotent stop-then-start): if the loop was still
+    /// alive idling on the paused gate it resumes filling on its next iteration; if
+    /// it had exited, `start` respawns it. A run not `paused` is a 400.
+    pub async fn resume(&self, run_id: &str) -> Result<(), AppError> {
+        self.transition(run_id, &["paused"], "running").await
+    }
+
+    /// Shared status-transition helper for the run lifecycle controls
+    /// (`approve_plan` / `pause` / `resume`): load the run (clean 404), require its
+    /// current status to be one of `from` (else a 400 that names the actual state),
+    /// then persist `to` + emit `run.statusChanged`.
+    async fn transition(
+        &self,
+        run_id: &str,
+        from: &[&str],
+        to: &str,
+    ) -> Result<(), AppError> {
+        let run = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+        if !from.contains(&run.status.as_str()) {
+            return Err(OrchestratorError::BadRequest(format!(
+                "run {run_id} is `{}`, cannot transition to `{to}` (expected one of {from:?})",
+                run.status
+            ))
+            .into());
+        }
+        self.run_repo
+            .update_run(
+                run_id,
+                UpdateRunParams {
+                    status: Some(to.to_string()),
+                    summary: None,
+                    lead_conv_id: None,
+                    total_tokens: None,
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+        self.emitter.emit_run_status(run_id, to);
         Ok(())
     }
 
@@ -1014,5 +1090,160 @@ mod tests {
             .await
             .expect_err("unknown member must error");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // -------------------------------------------------------------------------
+    // P3b: autonomy gate (plan's next-status decision) + pause/resume/approve.
+    // -------------------------------------------------------------------------
+
+    /// Build a harness with an explicit `autonomy` on the created run (the default
+    /// harness leaves autonomy None → "supervised"). Returns (svc, run_id).
+    async fn harness_with_autonomy(autonomy: &str) -> (RunService, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(NoopBroadcaster));
+        let planner: Arc<dyn PlanProducer> =
+            Arc::new(FixedPlanProducer::new(single_task_dag(None, Some(coding_profile()))));
+        let svc = RunService::new(
+            run_repo,
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter,
+        );
+        let fleet = FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "auto fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![member_input("agent_a", &["coding"], "high", "standard")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "auto ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "do the thing".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: Some(autonomy.to_string()),
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run create");
+        (svc, run.id)
+    }
+
+    // (a) An `interactive` run parks at `awaiting_plan_approval` after plan (NOT
+    // running), and `approve_plan` flips it to `running`.
+    #[tokio::test]
+    async fn interactive_run_parks_then_approves_to_running() {
+        let (svc, run_id) = harness_with_autonomy("interactive").await;
+        svc.plan(&run_id).await.expect("plan");
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(
+            detail.run.status, "awaiting_plan_approval",
+            "interactive run must park at awaiting_plan_approval after plan"
+        );
+
+        svc.approve_plan(&run_id).await.expect("approve");
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.run.status, "running", "approve flips to running");
+    }
+
+    // A `supervised` (default) / `autonomous` run flips straight to `running`
+    // after plan (no approval gate).
+    #[tokio::test]
+    async fn non_interactive_run_is_running_after_plan() {
+        for autonomy in ["supervised", "autonomous"] {
+            let (svc, run_id) = harness_with_autonomy(autonomy).await;
+            svc.plan(&run_id).await.expect("plan");
+            let detail = svc.get_detail(&run_id).await.expect("detail");
+            assert_eq!(detail.run.status, "running", "{autonomy} run runs after plan");
+        }
+    }
+
+    // approve_plan rejects a run that is NOT awaiting approval (e.g. already
+    // running) with a 400.
+    #[tokio::test]
+    async fn approve_plan_rejects_non_awaiting_run() {
+        let (svc, run_id) = harness_with_autonomy("supervised").await;
+        svc.plan(&run_id).await.expect("plan"); // → running
+        let err = svc.approve_plan(&run_id).await.expect_err("must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // (b) pause: running → paused; resume: paused → running. Each emits.
+    #[tokio::test]
+    async fn pause_then_resume_round_trips_status() {
+        let (svc, run_id) = harness_with_autonomy("supervised").await;
+        svc.plan(&run_id).await.expect("plan"); // → running
+
+        svc.pause(&run_id).await.expect("pause");
+        assert_eq!(
+            svc.get_detail(&run_id).await.unwrap().run.status,
+            "paused",
+            "pause sets paused"
+        );
+
+        svc.resume(&run_id).await.expect("resume");
+        assert_eq!(
+            svc.get_detail(&run_id).await.unwrap().run.status,
+            "running",
+            "resume sets running"
+        );
+    }
+
+    // pause rejects a run that is not running (e.g. still planning); resume
+    // rejects a run that is not paused. Both 400.
+    #[tokio::test]
+    async fn pause_resume_reject_wrong_state() {
+        let (svc, run_id) = harness_with_autonomy("supervised").await;
+        // Before plan the run is `planning` — pause must reject.
+        let err = svc.pause(&run_id).await.expect_err("pause on planning must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        svc.plan(&run_id).await.expect("plan"); // → running
+        // running is not paused — resume must reject.
+        let err = svc.resume(&run_id).await.expect_err("resume on running must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // The lifecycle controls 404 on a missing run.
+    #[tokio::test]
+    async fn lifecycle_controls_404_on_missing_run() {
+        let (svc, _run_id) = harness_with_autonomy("supervised").await;
+        let missing = "run_does_not_exist";
+        assert!(
+            matches!(svc.approve_plan(missing).await, Err(AppError::NotFound(_))),
+            "approve_plan must 404 on missing run"
+        );
+        assert!(
+            matches!(svc.pause(missing).await, Err(AppError::NotFound(_))),
+            "pause must 404 on missing run"
+        );
+        assert!(
+            matches!(svc.resume(missing).await, Err(AppError::NotFound(_))),
+            "resume must 404 on missing run"
+        );
     }
 }

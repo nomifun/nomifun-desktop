@@ -234,6 +234,13 @@ pub struct ReassignRequest {
     pub locked: Option<bool>,
 }
 
+/// Steer (mid-turn inject) a message into a running task's worker conversation.
+/// `text` is sent into the live turn via `ConversationService::steer_message`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SteerRequest {
+    pub text: String,
+}
+
 /// Create (and kick off) an orchestration run within a workspace against a fleet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRunRequest {

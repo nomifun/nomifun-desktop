@@ -40,8 +40,9 @@ use nomifun_office::{
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
 use nomifun_orchestrator::{
-    ConversationCanceller, ConversationWorkerRunner, LlmPlanProducer, OrchestratorRouterState,
-    OrchestratorRunEventEmitter, PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerRunner,
+    ConversationCanceller, ConversationSteerer, ConversationWorkerRunner, LlmPlanProducer,
+    OrchestratorRouterState, OrchestratorRunEventEmitter, PlanProducer, RunEngine, RunEngineDeps,
+    RunService, WorkerRunner,
 };
 use nomifun_companion::CompanionRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
@@ -914,7 +915,41 @@ impl ConversationCanceller for OrchestratorConversationCanceller {
     }
 }
 
-/// Build the `OrchestratorRouterState` (智能编排: fleet + workspace CRUD + the Run
+/// Wraps [`ConversationService::steer_message`] so the [`RunEngine`] can mid-turn
+/// inject a supervisor message into an in-flight worker conversation (P3b). Holds
+/// a (cloned) `ConversationService` + the shared `worker_task_manager`; runs as
+/// [`nomifun_auth::SYSTEM_USER_ID`] (the user the worker creates conversations
+/// as). `steer_message` injects into the live Nomi turn when one exists, else
+/// falls back to a fresh send; a non-Nomi engine that cannot steer surfaces as an
+/// error (the engine maps it to a 400). We discard the returned message id — the
+/// caller only needs success/failure.
+struct OrchestratorConversationSteerer {
+    conv: ConversationService,
+    task_manager: Arc<dyn IWorkerTaskManager>,
+}
+
+#[async_trait::async_trait]
+impl ConversationSteerer for OrchestratorConversationSteerer {
+    async fn steer(&self, conversation_id: i64, text: &str) -> Result<(), nomifun_common::AppError> {
+        self.conv
+            .steer_message(
+                nomifun_auth::SYSTEM_USER_ID,
+                &conversation_id.to_string(),
+                nomifun_api_types::SendMessageRequest {
+                    content: text.to_owned(),
+                    files: vec![],
+                    inject_skills: vec![],
+                    hidden: false,
+                    origin: Some("orchestrator".to_owned()),
+                    channel_platform: None,
+                },
+                &self.task_manager,
+            )
+            .await
+            .map(|_msg_id| ())
+    }
+}
+
 /// control-plane). P0 needed no AppServices singleton; P1a adds the Run
 /// [`RunService`] (create/plan/inspect/cancel) + [`RunEngine`] (serial execution
 /// loop). The fleet/workspace repos + the run repo are root-re-exported from
@@ -978,6 +1013,14 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
             conv: conv_service.clone(),
             task_manager: services.worker_task_manager.clone(),
         });
+    // Steer hook (P3b): a second clone of the ConversationService lets the engine
+    // mid-turn inject a supervisor message into an in-flight worker conversation
+    // (`steer_message`). Clone BEFORE moving the original into the worker.
+    let steer_conversation: Arc<dyn ConversationSteerer> =
+        Arc::new(OrchestratorConversationSteerer {
+            conv: conv_service.clone(),
+            task_manager: services.worker_task_manager.clone(),
+        });
     let worker: Arc<dyn WorkerRunner> = Arc::new(ConversationWorkerRunner::new(
         conv_service,
         services.worker_task_manager.clone(),
@@ -1025,6 +1068,7 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
     ));
     let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo);
     engine_deps.cancel_conversation = cancel_conversation;
+    engine_deps.steer_conversation = steer_conversation;
     let engine = RunEngine::new(Arc::new(engine_deps));
     // Boot-resume: every persisted `running` run resumes its execution loop from
     // boot (the running set is in-memory but run status is persisted), so a run
