@@ -235,7 +235,7 @@
   "startOnBootUnsupported": "Available only in packaged macOS and Windows apps.",
   "startOnBootUpdateFailed": "Failed to update start on boot setting",
   "keepAwake": "Keep Awake",
-  "keepAwakeDesc": "When on, Nomi keeps your Mac awake and the screen on while the lid is open, so scheduled tasks run on time. Closing the lid still sleeps it and pauses tasks — unless it's plugged in with an external display and an external keyboard/mouse (clamshell mode).",
+  "keepAwakeDesc": "When on, Nomi keeps your Mac awake while the lid is open, so scheduled tasks run on time. The display can still turn off normally (saving power and your screen — tasks keep running). Closing the lid still sleeps it and pauses tasks — unless it's plugged in with an external display and an external keyboard/mouse (clamshell mode).",
   "hardwareAcceleration": "Hardware Acceleration",
   "hardwareAccelerationDesc": "Use the GPU to render the UI. Disable if the app crashes on launch or graphics flicker.",
   "hardwareAccelerationAutoDisabled": "Disabled automatically after repeated GPU crashes.",
