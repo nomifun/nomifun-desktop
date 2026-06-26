@@ -5822,6 +5822,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nomifun-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "nomifun-api-types",
+ "nomifun-auth",
+ "nomifun-common",
+ "nomifun-db",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nomifun-public"
 version = "0.1.0"
 dependencies = [
