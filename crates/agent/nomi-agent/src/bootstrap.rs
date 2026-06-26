@@ -430,13 +430,18 @@ impl AgentBootstrap {
         )));
         registry.register(Box::new(
             nomi_tools::write::WriteTool::new(file_cache.clone())
-                .with_write_root(write_root.clone()),
+                .with_write_root(write_root.clone())
+                .with_cwd(Some(cwd_path.to_path_buf())),
         ));
         registry.register(Box::new(
-            nomi_tools::edit::EditTool::new(file_cache.clone()).with_write_root(write_root.clone()),
+            nomi_tools::edit::EditTool::new(file_cache.clone())
+                .with_write_root(write_root.clone())
+                .with_cwd(Some(cwd_path.to_path_buf())),
         ));
         registry.register(Box::new(
-            nomi_tools::apply_patch::ApplyPatchTool::new(file_cache).with_write_root(write_root),
+            nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
+                .with_write_root(write_root)
+                .with_cwd(Some(cwd_path.to_path_buf())),
         ));
         // Experimental `Lsp` code-navigation tool: registered only when at least
         // one language server is configured (default off → no behaviour change).

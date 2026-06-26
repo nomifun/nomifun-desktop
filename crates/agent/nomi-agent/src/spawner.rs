@@ -426,8 +426,8 @@ fn build_tool_registry(
 ) -> ToolRegistry {
     let all_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = vec![
         ("Read", Box::new(ReadTool::new(None, Some(cwd.to_path_buf())))),
-        ("Write", Box::new(WriteTool::new(None))),
-        ("Edit", Box::new(EditTool::new(None))),
+        ("Write", Box::new(WriteTool::new(None).with_cwd(Some(cwd.to_path_buf())))),
+        ("Edit", Box::new(EditTool::new(None).with_cwd(Some(cwd.to_path_buf())))),
         ("Bash", Box::new(BashTool::new(cwd.to_path_buf()))),
         ("Grep", Box::new(GrepTool::new(cwd.to_path_buf()))),
         ("Glob", Box::new(GlobTool::new(cwd.to_path_buf()))),

@@ -21,6 +21,9 @@ pub struct ApplyPatchTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// Optional containment root; when set, patches outside it are rejected.
     write_root: Option<std::path::PathBuf>,
+    /// Session working directory used to resolve relative `file_path` inputs
+    /// (matching ReadTool / Grep / Glob / Bash). `None` = legacy process-cwd.
+    cwd: Option<std::path::PathBuf>,
 }
 
 fn err(msg: impl Into<String>) -> ToolResult {
@@ -36,12 +39,20 @@ impl ApplyPatchTool {
         Self {
             file_cache,
             write_root: None,
+            cwd: None,
         }
     }
 
     /// Restrict patched files to within `root` (design §3.6 write-root containment).
     pub fn with_write_root(mut self, root: Option<std::path::PathBuf>) -> Self {
         self.write_root = root;
+        self
+    }
+
+    /// Resolve relative `file_path` inputs against `cwd` (the session working
+    /// directory), matching ReadTool/Grep/Glob/Bash.
+    pub fn with_cwd(mut self, cwd: Option<std::path::PathBuf>) -> Self {
+        self.cwd = cwd;
         self
     }
 
@@ -99,7 +110,7 @@ impl Tool for ApplyPatchTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file_path": { "type": "string" },
+                            "file_path": { "type": "string", "description": "Path to the file (absolute preferred; a relative path resolves against the session working directory)" },
                             "content": {
                                 "type": "string",
                                 "description": "Full file content. Use to CREATE a new file or replace an existing one whole. Mutually exclusive with `edits`."
@@ -151,6 +162,10 @@ impl Tool for ApplyPatchTool {
             let Some(file_path) = f["file_path"].as_str() else {
                 return err(format!("file #{}: missing file_path", i + 1));
             };
+            // Resolve a relative file_path against the session working directory
+            // (matching ReadTool/Grep/Glob/Bash) before validating/writing.
+            let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+            let file_path = resolved.as_str();
             // Write-root containment (opt-in): reject any file outside the root
             // before validating/writing anything (keeps the all-or-nothing
             // guarantee — a single out-of-root file aborts the whole patch).
@@ -309,6 +324,27 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn apply_patch_resolves_relative_path_against_cwd() {
+        // A relative file_path in a patch must resolve against the injected
+        // workspace cwd, not the process cwd.
+        let workspace = tempdir().unwrap();
+        let rel = "__nomi_reltest_patch__.txt";
+        let tool = ApplyPatchTool::new(None).with_cwd(Some(workspace.path().to_path_buf()));
+        let result = tool
+            .execute(json!({ "files": [{ "file_path": rel, "content": "fresh\n" }] }))
+            .await;
+        assert!(!result.is_error, "relative create should succeed: {}", result.content);
+        assert!(
+            workspace.path().join(rel).exists(),
+            "relative create must land in the workspace, not the process cwd"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(rel)).unwrap(),
+            "fresh\n"
+        );
+    }
 
     #[tokio::test]
     async fn apply_patch_patches_multiple_files_in_one_call() {

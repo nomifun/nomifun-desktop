@@ -71,6 +71,25 @@ pub fn is_within_root(path: &Path, root: &Path) -> bool {
     }
 }
 
+/// Resolve a model-supplied `file_path` for the file-mutating tools
+/// (Write / Edit / ApplyPatch): a relative path is joined onto the session
+/// working directory `cwd` (matching ReadTool / Grep / Glob / Bash); an
+/// absolute path is returned unchanged. `cwd == None` leaves the path as-is, so
+/// relative paths then resolve against the process cwd — the legacy behaviour.
+///
+/// This closes the read/write asymmetry: without it a relative path written by
+/// the model lands against the Tauri process cwd rather than the conversation's
+/// workspace, producing a truthful "Created …" while the file never appears in
+/// the workspace the UI browses.
+pub fn resolve_against_cwd(file_path: &str, cwd: Option<&Path>) -> String {
+    match cwd {
+        Some(cwd) if !Path::new(file_path).is_absolute() => {
+            cwd.join(file_path).to_string_lossy().into_owned()
+        }
+        _ => file_path.to_owned(),
+    }
+}
+
 /// Guard a write to `file_path` against an optional `root`. Returns `Some(error)`
 /// when the write must be rejected, `None` when allowed (no root, or contained).
 pub fn ensure_within_root(file_path: &str, root: Option<&Path>) -> Option<String> {
@@ -141,6 +160,29 @@ mod tests {
             !is_within_root(&via_link, &root),
             "a symlink escaping the root must be rejected (textual check would pass)"
         );
+    }
+
+    #[test]
+    fn resolve_against_cwd_joins_relative_and_keeps_absolute() {
+        // Use real absolute dirs so the test is platform-agnostic (a leading "/"
+        // is NOT absolute on Windows, so hardcoded unix paths would be wrong here).
+        let cwd = std::env::temp_dir();
+        // Relative → joined onto cwd (expected computed with the same join so the
+        // separator is platform-correct).
+        assert_eq!(
+            resolve_against_cwd("notes.txt", Some(&cwd)),
+            cwd.join("notes.txt").to_string_lossy().into_owned()
+        );
+        assert_eq!(
+            resolve_against_cwd("a/b.txt", Some(&cwd)),
+            cwd.join("a/b.txt").to_string_lossy().into_owned()
+        );
+        // Absolute input → returned unchanged.
+        let abs = cwd.join("already_absolute.txt");
+        let abs_str = abs.to_str().unwrap();
+        assert_eq!(resolve_against_cwd(abs_str, Some(&cwd)), abs_str);
+        // No cwd → unchanged (legacy: relative resolves against the process cwd).
+        assert_eq!(resolve_against_cwd("notes.txt", None), "notes.txt");
     }
 
     #[test]

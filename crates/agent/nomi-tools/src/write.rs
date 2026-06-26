@@ -14,6 +14,10 @@ pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// Optional containment root; when set, writes outside it are rejected.
     write_root: Option<std::path::PathBuf>,
+    /// Session working directory used to resolve relative `file_path` inputs
+    /// (matching ReadTool / Grep / Glob / Bash). `None` leaves relative paths
+    /// resolving against the process cwd (legacy behavior).
+    cwd: Option<std::path::PathBuf>,
 }
 
 impl WriteTool {
@@ -30,12 +34,22 @@ impl WriteTool {
         Self {
             file_cache,
             write_root: None,
+            cwd: None,
         }
     }
 
     /// Restrict writes to within `root` (design §3.6 write-root containment).
     pub fn with_write_root(mut self, root: Option<std::path::PathBuf>) -> Self {
         self.write_root = root;
+        self
+    }
+
+    /// Resolve relative `file_path` inputs against `cwd` (the session working
+    /// directory), matching ReadTool/Grep/Glob/Bash. Without this, a relative
+    /// path written by the model lands against the process cwd rather than the
+    /// conversation's workspace.
+    pub fn with_cwd(mut self, cwd: Option<std::path::PathBuf>) -> Self {
+        self.cwd = cwd;
         self
     }
 }
@@ -61,7 +75,7 @@ impl Tool for WriteTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to write"
+                    "description": "Path to the file to write (absolute preferred; a relative path resolves against the session working directory)"
                 },
                 "content": {
                     "type": "string",
@@ -91,6 +105,12 @@ impl Tool for WriteTool {
                 images: Vec::new(),
             };
         };
+
+        // Resolve a relative file_path against the session working directory
+        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use — so a
+        // relative write lands in the conversation workspace, not the process cwd.
+        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+        let file_path = resolved.as_str();
 
         let path = Path::new(file_path);
         let existed = path.exists();
@@ -469,6 +489,54 @@ mod tests {
         assert!(
             mtime2 >= mtime1,
             "cache mtime should update after overwrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_resolves_relative_path_against_cwd() {
+        // The conversation workspace.
+        let workspace = tempdir().unwrap();
+        let tool = WriteTool::new(None).with_cwd(Some(workspace.path().to_path_buf()));
+
+        // A bare relative file name must land INSIDE the workspace, not against
+        // the process cwd (the bug: companion chat reported success but the file
+        // was written to the Tauri launch dir).
+        let rel = "__nomi_reltest_write__.txt";
+        let result = tool
+            .execute(json!({ "file_path": rel, "content": "hello" }))
+            .await;
+        assert!(!result.is_error, "relative write should succeed: {}", result.content);
+
+        let expected = workspace.path().join(rel);
+        assert!(
+            expected.exists(),
+            "relative file_path must resolve against the injected cwd (workspace)"
+        );
+        assert_eq!(std::fs::read_to_string(&expected).unwrap(), "hello");
+        // The success message must echo the resolved (workspace) path.
+        assert!(
+            result.content.contains(&workspace.path().to_string_lossy().into_owned()),
+            "success message should report the resolved path, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn write_absolute_path_unaffected_by_cwd() {
+        // With a cwd set, an ABSOLUTE path must be used verbatim (never joined).
+        let workspace = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let abs = target.path().join("abs.txt");
+        let tool = WriteTool::new(None).with_cwd(Some(workspace.path().to_path_buf()));
+
+        let result = tool
+            .execute(json!({ "file_path": abs.to_str().unwrap(), "content": "x" }))
+            .await;
+        assert!(!result.is_error, "absolute write should succeed: {}", result.content);
+        assert!(abs.exists(), "absolute path must be written as-is");
+        assert!(
+            !workspace.path().join("abs.txt").exists(),
+            "absolute path must NOT be joined onto the cwd"
         );
     }
 
