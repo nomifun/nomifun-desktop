@@ -6,7 +6,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use nomifun_ai_agent::{AgentRouterState, AgentService, RemoteAgentRouterState, RemoteAgentService};
+use nomifun_ai_agent::{
+    AgentRouterState, AgentService, IWorkerTaskManager, RemoteAgentRouterState, RemoteAgentService,
+};
 use nomifun_assistant::{AssistantRouterState, AssistantService, BuiltinAssistantRegistry};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
@@ -38,8 +40,8 @@ use nomifun_office::{
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
 use nomifun_orchestrator::{
-    ConversationWorkerRunner, LlmPlanProducer, OrchestratorRouterState, OrchestratorRunEventEmitter,
-    PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerRunner,
+    ConversationCanceller, ConversationWorkerRunner, LlmPlanProducer, OrchestratorRouterState,
+    OrchestratorRunEventEmitter, PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerRunner,
 };
 use nomifun_companion::CompanionRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
@@ -880,6 +882,38 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
     WebhookRouterState { service }
 }
 
+/// Wraps [`ConversationService::cancel`] so the [`RunEngine`] can end an
+/// in-flight worker conversation when its run is cancelled (P2 Task 3). Holds a
+/// (cloned) `ConversationService` + the shared `worker_task_manager` so a cancel
+/// finds the live agent; runs as [`nomifun_auth::SYSTEM_USER_ID`] (the same user
+/// the worker creates conversations as). Idempotent — a missing/finished
+/// conversation or no live agent is a silent no-op (see `ConversationService::cancel`).
+struct OrchestratorConversationCanceller {
+    conv: ConversationService,
+    task_manager: Arc<dyn IWorkerTaskManager>,
+}
+
+#[async_trait::async_trait]
+impl ConversationCanceller for OrchestratorConversationCanceller {
+    async fn cancel(&self, conversation_id: i64) {
+        if let Err(e) = self
+            .conv
+            .cancel(
+                nomifun_auth::SYSTEM_USER_ID,
+                &conversation_id.to_string(),
+                &self.task_manager,
+            )
+            .await
+        {
+            tracing::warn!(
+                conversation_id,
+                error = %e,
+                "Orchestrator cancel: failed to cancel in-flight worker conversation"
+            );
+        }
+    }
+}
+
 /// Build the `OrchestratorRouterState` (智能编排: fleet + workspace CRUD + the Run
 /// control-plane). P0 needed no AppServices singleton; P1a adds the Run
 /// [`RunService`] (create/plan/inspect/cancel) + [`RunEngine`] (serial execution
@@ -934,6 +968,16 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
     );
+    // Cancel hook (P2 Task 3): clone the ConversationService for a canceller that
+    // ends an in-flight worker conversation on run cancel. `ConversationService`
+    // is `Clone` (Arc internals), so the clone shares the same runtime state /
+    // failover deps as the worker's instance. Clone BEFORE moving the original
+    // into the worker.
+    let cancel_conversation: Arc<dyn ConversationCanceller> =
+        Arc::new(OrchestratorConversationCanceller {
+            conv: conv_service.clone(),
+            task_manager: services.worker_task_manager.clone(),
+        });
     let worker: Arc<dyn WorkerRunner> = Arc::new(ConversationWorkerRunner::new(
         conv_service,
         services.worker_task_manager.clone(),
@@ -979,12 +1023,9 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
         planner,
         emitter.clone(),
     ));
-    let engine = RunEngine::new(Arc::new(RunEngineDeps::new(
-        run_repo.clone(),
-        worker,
-        emitter,
-        ws_repo,
-    )));
+    let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo);
+    engine_deps.cancel_conversation = cancel_conversation;
+    let engine = RunEngine::new(Arc::new(engine_deps));
     // Boot-resume: every persisted `running` run resumes its execution loop from
     // boot (the running set is in-memory but run status is persisted), so a run
     // that was mid-flight when the process restarted keeps going without a
