@@ -5830,6 +5830,7 @@ dependencies = [
  "async-trait",
  "axum",
  "dashmap",
+ "futures",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",

@@ -975,11 +975,16 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
     let run_service = Arc::new(RunService::new(
         run_repo.clone(),
         fleet_repo,
-        ws_repo,
+        ws_repo.clone(),
         planner,
         emitter.clone(),
     ));
-    let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo.clone(), worker, emitter)));
+    let engine = RunEngine::new(Arc::new(RunEngineDeps::new(
+        run_repo.clone(),
+        worker,
+        emitter,
+        ws_repo,
+    )));
     // Boot-resume: every persisted `running` run resumes its execution loop from
     // boot (the running set is in-memory but run status is persisted), so a run
     // that was mid-flight when the process restarted keeps going without a

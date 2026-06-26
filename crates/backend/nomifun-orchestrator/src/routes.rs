@@ -256,12 +256,12 @@ mod tests {
         let run_service = Arc::new(RunService::new(
             run_repo.clone(),
             fleet_repo,
-            ws_repo,
+            ws_repo.clone(),
             planner,
             emitter.clone(),
         ));
         let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(1, "x"));
-        let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo, worker, emitter)));
+        let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo, worker, emitter, ws_repo)));
 
         // Seed: fleet (one member) → workspace → run (parked in `planning`).
         let seeded_fleet = fleet

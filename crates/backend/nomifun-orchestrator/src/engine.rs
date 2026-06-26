@@ -1,5 +1,5 @@
-//! [`RunEngine`]: the串行 (serial) execution loop that drives an orchestration
-//! run's task DAG to completion.
+//! [`RunEngine`]: the **bounded-parallel** execution loop that drives an
+//! orchestration run's task DAG to completion.
 //!
 //! The engine skeleton — the per-run handle registry, the `start` =
 //! stop-then-spawn dance, the generation-guarded [`HandleGuard`] that removes
@@ -7,42 +7,60 @@
 //! is a faithful reduction of `nomifun_requirement::Orchestrator` (see
 //! `crates/backend/nomifun-requirement/src/orchestrator.rs`). The differences
 //! are deliberate: a run is keyed by a single `String` run id (no dual-domain
-//! `(kind, id)`), and the loop is **serial** (P1) — it runs exactly ONE ready
-//! task at a time, never spawning concurrent workers (parallel scheduling is
-//! P2).
+//! `(kind, id)`), and the dispatch loop is **concurrent** (P2) — it runs up to
+//! `cap` ready tasks at a time on overlapping worker conversations (P1a was
+//! serial; P2 lifts the one-at-a-time restriction while keeping dependencies
+//! strict).
 //!
-//! ## Loop termination (no busy-spin)
+//! ## Concurrency model (no busy-spin, dependencies strict)
 //!
-//! `run_loop` exits — it does NOT idle forever — the moment the run reaches a
-//! terminal shape:
-//! - cancelled (the cooperative flag) → break;
-//! - no ready tasks AND every task is `done`/`skipped` → mark the run
-//!   `completed` (with an aggregated summary), emit `run.completed`, break;
-//! - no ready tasks AND some task `failed` → mark `failed`, emit, break;
-//! - no ready tasks AND none of the above (a "stuck" graph that cannot happen in
-//!   a serial loop, but is guarded against) → break to avoid spinning.
+//! In-flight workers are held in a [`futures::stream::FuturesUnordered`]; each
+//! future resolves to `(task_id, Result<WorkerOutcome, AppError>)`. The loop:
 //!
-//! Because the loop is serial, there is never an in-flight worker while the
-//! ready set is empty, so the "empty ready set" checks are conclusive — the loop
-//! can decide the run's fate and exit. It only re-enters the loop body after
-//! actually advancing a task (running it to done/failed), so it cannot spin.
+//! 1. **Cancel check** — cooperative flag set → stop scheduling, break.
+//! 2. **Fill** — while `inflight.len() < cap`, re-query
+//!    [`list_ready_tasks`](nomifun_db::IRunRepository::list_ready_tasks)
+//!    (skipping tasks already in-flight), take up to the free slots, mark each
+//!    `running` + emit, resolve member/workspace/brief, and push a worker future.
+//!    Re-querying every fill means a downstream task is only ever dispatched
+//!    after its blockers have actually reached `done` (which only happens when a
+//!    worker completes and `update_task(done)` runs) — **dependency strictness**.
+//! 3. **Decide / await** —
+//!    - `inflight.is_empty()` (nothing ready AND nothing running) → the task
+//!      statuses are conclusive: all `done`/`skipped` → run `completed` (+
+//!      aggregated summary), any `failed` → run `failed`, otherwise a "stuck"
+//!      graph → break. **break, never spin.**
+//!    - otherwise `await inflight.next()` — the loop parks on the next worker to
+//!      finish; it never re-loops on an unchanged empty-ready state while work is
+//!      in flight. Processing the completion (`done`/`failed` + emit) may unblock
+//!      downstream tasks, so the loop re-fills.
+//!
+//! Because the loop only re-enters its body after either dispatching a task or
+//! awaiting an in-flight completion, it cannot busy-spin.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use nomifun_api_types::FleetMember;
-use nomifun_db::IRunRepository;
+use nomifun_common::AppError;
 use nomifun_db::models::OrchRunTaskRow;
+use nomifun_db::{IOrchWorkspaceRepository, IRunRepository};
 use nomifun_db::{UpdateRunParams, UpdateTaskParams};
 use tracing::{info, warn};
 
 use crate::events::OrchestratorRunEventEmitter;
-use crate::worker::WorkerRunner;
+use crate::worker::{WorkerOutcome, WorkerRunner};
 
 /// Hard ceiling on a single worker task's turn.
 pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Fallback concurrency cap when neither the run nor the fleet snapshot pins one.
+pub const DEFAULT_MAX_PARALLEL: usize = 4;
 
 /// Shared dependencies for all run loops. The `fleet_snapshot` is read off the
 /// run row via `run_repo` (no separate fleet handle is needed at runtime — the
@@ -53,19 +71,33 @@ pub struct RunEngineDeps {
     pub emitter: OrchestratorRunEventEmitter,
     /// Max wall-clock budget for one worker task turn.
     pub worker_timeout: Duration,
+    /// Global fallback concurrency cap, used when a run carries no `max_parallel`
+    /// of its own (which itself captures the fleet's cap at create time).
+    pub default_max_parallel: usize,
+    /// Resolves a run's workspace → its `workspace_dir`, injected into the worker
+    /// conversation `extra` (fixes the P1a `None` stub).
+    pub ws_repo: Arc<dyn IOrchWorkspaceRepository>,
+    // (cancel hook is Task 3 — do NOT add it here.)
 }
 
 impl RunEngineDeps {
+    /// Construct with the global default concurrency cap
+    /// ([`DEFAULT_MAX_PARALLEL`]); set `default_max_parallel` afterward to
+    /// override. `ws_repo` is required (workspace_dir resolution has no sane
+    /// fallback).
     pub fn new(
         run_repo: Arc<dyn IRunRepository>,
         worker: Arc<dyn WorkerRunner>,
         emitter: OrchestratorRunEventEmitter,
+        ws_repo: Arc<dyn IOrchWorkspaceRepository>,
     ) -> Self {
         Self {
             run_repo,
             worker,
             emitter,
             worker_timeout: DEFAULT_WORKER_TIMEOUT,
+            default_max_parallel: DEFAULT_MAX_PARALLEL,
+            ws_repo,
         }
     }
 }
@@ -95,7 +127,7 @@ impl Drop for HandleGuard {
     }
 }
 
-/// Drives per-run serial execution loops.
+/// Drives per-run bounded-parallel execution loops.
 #[derive(Clone)]
 pub struct RunEngine {
     deps: Arc<RunEngineDeps>,
@@ -195,26 +227,100 @@ impl RunEngine {
     }
 }
 
-/// The serial run loop: drive ready tasks one at a time until the run reaches a
-/// terminal state, then settle the run row + emit and exit.
+/// The bounded-parallel run loop: dispatch up to `cap` ready tasks concurrently,
+/// awaiting in-flight workers, until the run reaches a terminal state, then
+/// settle the run row + emit and exit.
 async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicBool>) {
+    // Resolve the run once for cap + workspace; if the run row is unreadable we
+    // cannot drive anything — bail (the handle guard still deregisters).
+    let run = match deps.run_repo.get_run(run_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            warn!(run_id, "Run loop: run not found — exiting");
+            return;
+        }
+        Err(e) => {
+            warn!(run_id, error = %e, "Run loop: get_run failed — exiting");
+            return;
+        }
+    };
+
+    // cap = run.max_parallel (which already captured the fleet's cap at create
+    // time, or is None) → else the global default. Clamp to >= 1 so the loop
+    // always makes progress. The fleet_snapshot layer is intentionally dropped:
+    // run.max_parallel is the run's own materialized copy of it.
+    let cap = run
+        .max_parallel
+        .map(|n| n as usize)
+        .filter(|n| *n > 0)
+        .unwrap_or(deps.default_max_parallel)
+        .max(1);
+
+    // Resolve the run's workspace_dir once — it is stable for the run's lifetime
+    // (the workspace row's dir does not change mid-run in this design).
+    let workspace_dir: Option<String> = deps
+        .ws_repo
+        .get(&run.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|w| w.workspace_dir);
+
+    // In-flight worker futures, each resolving to (task_id, outcome). The set's
+    // length is the live concurrency; we never exceed `cap`.
+    let mut inflight: FuturesUnordered<WorkerFuture> = FuturesUnordered::new();
+    // Tasks currently in-flight — so a re-query of the ready set does not
+    // re-dispatch a task whose worker is still running (list_ready_tasks keys off
+    // persisted status, and a task is marked `running` before its future is
+    // pushed, so this is belt-and-suspenders against a status read race).
+    let mut in_progress: HashSet<String> = HashSet::new();
+
     loop {
+        // (a) Cancelled → stop scheduling. Task 3 adds in-flight cancel
+        // propagation; here we simply stop dispatching and let the loop unwind
+        // (the spawned loop task is also aborted by `stop`).
         if cancelled.load(Ordering::SeqCst) {
             info!(run_id, "Run loop cancelled — exiting");
             break;
         }
 
-        let ready = match deps.run_repo.list_ready_tasks(run_id).await {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(run_id, error = %e, "Run loop: list_ready_tasks failed — exiting");
-                break;
+        // (b) Fill: dispatch ready tasks up to the free slots. Re-query every
+        // fill so completion-driven unblocking is observed. A list error is not
+        // fatal mid-flight (workers may still be running) — log and proceed to
+        // the await branch; the next fill retries.
+        if inflight.len() < cap {
+            match deps.run_repo.list_ready_tasks(run_id).await {
+                Ok(ready) => {
+                    let free = cap - inflight.len();
+                    // Collect the eligible slice first so the `in_progress` filter
+                    // borrow ends before the dispatch loop mutates `in_progress`.
+                    let to_dispatch: Vec<OrchRunTaskRow> = ready
+                        .into_iter()
+                        .filter(|t| !in_progress.contains(&t.id))
+                        .take(free)
+                        .collect();
+                    for task in to_dispatch {
+                        let fut = dispatch_task(&deps, run_id, task, workspace_dir.clone()).await;
+                        if let Some((task_id, fut)) = fut {
+                            in_progress.insert(task_id);
+                            inflight.push(fut);
+                        }
+                        // dispatch_task returning None means the task was already
+                        // failed (e.g. member unresolved) — it is not in-flight,
+                        // and a re-query will not return it (status no longer
+                        // pending), so the loop converges.
+                    }
+                }
+                Err(e) => {
+                    warn!(run_id, error = %e, "Run loop: list_ready_tasks failed — will retry after next completion");
+                }
             }
-        };
+        }
 
-        if ready.is_empty() {
-            // No runnable task. Because the loop is serial there is never an
-            // in-flight worker here, so the task statuses are conclusive.
+        // (c) No in-flight worker AND (above) nothing dispatchable → conclusive
+        // terminal decision. There is no busy-spin here: with zero workers in
+        // flight the task statuses cannot change underneath us.
+        if inflight.is_empty() {
             match deps.run_repo.list_tasks(run_id).await {
                 Ok(tasks) => {
                     let all_terminal = tasks
@@ -222,11 +328,13 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
                         .all(|t| t.status == "done" || t.status == "skipped");
                     let any_failed = tasks.iter().any(|t| t.status == "failed");
                     if !tasks.is_empty() && all_terminal {
-                        finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks))).await;
+                        finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks)))
+                            .await;
                     } else if any_failed {
                         finish_run(&deps, run_id, "failed", None).await;
                     } else {
-                        // Stuck (shouldn't happen serially) — break, never spin.
+                        // Stuck (no ready, no in-flight, not terminal) — break,
+                        // never spin.
                         warn!(
                             run_id,
                             task_count = tasks.len(),
@@ -239,60 +347,131 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
             break;
         }
 
-        // SERIAL: take exactly one ready task per iteration.
-        let task = &ready[0];
-        run_one_task(&deps, run_id, task).await;
-        // Loop again — the just-finished task may have unblocked others.
+        // (d) Park on the next worker to finish (NOT a poll — this awaits). The
+        // completion may unblock downstream tasks, so the loop re-fills.
+        if let Some((task_id, outcome)) = inflight.next().await {
+            in_progress.remove(&task_id);
+            settle_task_outcome(&deps, run_id, &task_id, outcome).await;
+        }
+        // Loop again — re-evaluate the ready set (newly unblocked) and the
+        // terminal condition.
     }
 }
 
-/// Run a single task: resolve its assigned member from the run's fleet snapshot,
-/// compose the brief (role hint + upstream outputs), run the worker, and persist
-/// the outcome. Failure is recorded as `failed` (retry/reassign is P3).
-async fn run_one_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRunTaskRow) {
-    // Resolve the assignment → member from the run's fleet snapshot.
+/// The future a single in-flight worker resolves to: its task id paired with the
+/// worker outcome. Boxed because each closure type differs by captured task id.
+type WorkerFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = (String, Result<WorkerOutcome, AppError>)> + Send>,
+>;
+
+/// Prepare a task for dispatch: resolve its member from the run's fleet snapshot,
+/// mark it `running` + emit, compose the brief, and build the worker future
+/// (which fires `on_started` to stamp `task.conversation_id` live). Returns
+/// `(task_id, future)` to push into the in-flight set, or `None` if the member
+/// could not be resolved (the task is marked `failed` in that case).
+async fn dispatch_task(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    task: OrchRunTaskRow,
+    workspace_dir: Option<String>,
+) -> Option<(String, WorkerFuture)> {
+    // Resolve the assignment → member from the run's fleet snapshot, defaulting
+    // to member[0] when no assignment exists (mirrors P1a's tolerance for an
+    // unassigned task in a single-member fleet).
     let member = match resolve_task_member(deps, run_id, &task.id).await {
         Ok(m) => m,
         Err(reason) => {
             warn!(run_id, task_id = %task.id, reason, "Run loop: cannot resolve member — failing task");
             mark_task_failed(deps, run_id, &task.id, None).await;
-            return;
+            return None;
         }
     };
 
-    // Mark running + emit.
+    // Mark running + emit BEFORE pushing the future, so a concurrent re-query of
+    // list_ready_tasks (keyed on persisted status) never re-dispatches it.
     update_task_status(deps, &task.id, "running").await;
     deps.emitter.emit_task_status(run_id, &task.id, "running");
 
     // Compose the brief: role hint + the task + completed upstream outputs.
     let upstream = collect_upstream_outputs(deps, run_id, &task.id).await;
-    let brief = compose_brief(member.role_hint.as_deref(), task, &upstream);
+    let brief = compose_brief(member.role_hint.as_deref(), &task, &upstream);
 
-    let workspace_dir = current_workspace_dir(deps, run_id).await;
-    let outcome = deps
-        .worker
-        .run(
-            &member,
-            workspace_dir.as_deref(),
-            run_id,
-            &task.id,
-            &brief,
-            &task.spec,
-            deps.worker_timeout,
-            // Task 1 placeholder: the engine stays SERIAL here, so the early
-            // conv_id report is a no-op. Task 2 replaces this with real in-flight
-            // recording + immediate task.conversation_id stamping for cancellation
-            // and the live transcript.
-            Box::new(|_conv_id| {}),
-        )
-        .await;
+    // Clones captured by the worker future + the on_started closure. on_started is
+    // a sync FnOnce(i64); the async task.conversation_id stamp is done in a
+    // detached tokio::spawn (acceptable + simplest — it stamps the id live for the
+    // frontend without blocking the worker turn).
+    let worker = deps.worker.clone();
+    let run_repo_for_started = deps.run_repo.clone();
+    let emitter_for_started = deps.emitter.clone();
+    let run_id_for_started = run_id.to_string();
+    let run_id_for_run = run_id.to_string();
+    let task_id = task.id.clone();
+    let task_id_for_started = task.id.clone();
+    let task_id_for_fut = task.id.clone();
+    let spec = task.spec.clone();
+    let timeout = deps.worker_timeout;
 
+    let fut: WorkerFuture = Box::pin(async move {
+        let on_started: Box<dyn FnOnce(i64) + Send> = Box::new(move |conv_id| {
+            // Stamp task.conversation_id live (detached). Best-effort: the worker
+            // turn proceeds regardless. Also emit so the frontend can attach to
+            // the live transcript as soon as the conversation exists.
+            tokio::spawn(async move {
+                let _ = run_repo_for_started
+                    .update_task(
+                        &task_id_for_started,
+                        UpdateTaskParams {
+                            status: None,
+                            conversation_id: Some(Some(conv_id)),
+                            output_summary: None,
+                            output_files: None,
+                            attempt: None,
+                            tokens: None,
+                            graph_x: None,
+                            graph_y: None,
+                        },
+                    )
+                    .await;
+                emitter_for_started.emit_task_status(
+                    &run_id_for_started,
+                    &task_id_for_started,
+                    "running",
+                );
+            });
+        });
+        let outcome = worker
+            .run(
+                &member,
+                workspace_dir.as_deref(),
+                &run_id_for_run,
+                &task_id_for_fut,
+                &brief,
+                &spec,
+                timeout,
+                on_started,
+            )
+            .await;
+        (task_id_for_fut, outcome)
+    });
+
+    Some((task_id, fut))
+}
+
+/// Settle a finished worker's outcome: `ok` → mark the task `done` with its
+/// conversation id + output summary + emit; otherwise (timeout / no reply /
+/// error) → mark `failed` + emit. Completion is what unblocks downstream tasks.
+async fn settle_task_outcome(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    task_id: &str,
+    outcome: Result<WorkerOutcome, AppError>,
+) {
     match outcome {
         Ok(o) if o.ok => {
             let _ = deps
                 .run_repo
                 .update_task(
-                    &task.id,
+                    task_id,
                     UpdateTaskParams {
                         status: Some("done".to_string()),
                         conversation_id: Some(Some(o.conversation_id)),
@@ -305,21 +484,23 @@ async fn run_one_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRunTas
                     },
                 )
                 .await;
-            deps.emitter.emit_task_status(run_id, &task.id, "done");
+            deps.emitter.emit_task_status(run_id, task_id, "done");
         }
         Ok(o) => {
             // Worker returned but did not produce a final text (timeout / empty).
-            mark_task_failed(deps, run_id, &task.id, Some(o.conversation_id)).await;
+            mark_task_failed(deps, run_id, task_id, Some(o.conversation_id)).await;
         }
         Err(e) => {
-            warn!(run_id, task_id = %task.id, error = %e, "Run loop: worker errored — failing task");
-            mark_task_failed(deps, run_id, &task.id, None).await;
+            warn!(run_id, task_id, error = %e, "Run loop: worker errored — failing task");
+            mark_task_failed(deps, run_id, task_id, None).await;
         }
     }
 }
 
 /// Resolve the member assigned to `task_id` from the run's `fleet_snapshot`.
-/// Returns a short static reason string on failure (for the warn log).
+/// When no assignment exists, default to the snapshot's first member (mirrors
+/// P1a's tolerance for an unassigned task in a single-member fleet). Returns a
+/// short static reason string on failure (for the warn log).
 async fn resolve_task_member(
     deps: &Arc<RunEngineDeps>,
     run_id: &str,
@@ -329,8 +510,7 @@ async fn resolve_task_member(
         .run_repo
         .get_assignment_for_task(task_id)
         .await
-        .map_err(|_| "assignment query failed")?
-        .ok_or("no assignment for task")?;
+        .map_err(|_| "assignment query failed")?;
     let run = deps
         .run_repo
         .get_run(run_id)
@@ -339,10 +519,14 @@ async fn resolve_task_member(
         .ok_or("run not found")?;
     let members: Vec<FleetMember> =
         serde_json::from_str(&run.fleet_snapshot).map_err(|_| "fleet snapshot unparseable")?;
-    members
-        .into_iter()
-        .find(|m| m.id == assignment.member_id)
-        .ok_or("assigned member not in snapshot")
+    match assignment {
+        Some(a) => members
+            .into_iter()
+            .find(|m| m.id == a.member_id)
+            .ok_or("assigned member not in snapshot"),
+        // No assignment → default to member[0] (single-member fleet path).
+        None => members.into_iter().next().ok_or("fleet snapshot empty"),
+    }
 }
 
 /// The completed upstream tasks' output summaries, in task order. Used to inject
@@ -367,15 +551,6 @@ async fn collect_upstream_outputs(
         .filter(|t| blocker_ids.contains(&t.id))
         .filter_map(|t| t.output_summary.map(|s| (t.title, s)))
         .collect()
-}
-
-/// The run's workspace directory, if the run's fleet snapshot carried one. (P1:
-/// the worker workspace is resolved at the app-wiring layer; the engine passes
-/// `None` here — the worker conversation defaults to its own scratch dir. This
-/// hook exists so the assembly can later inject a per-run dir without touching
-/// the loop.)
-async fn current_workspace_dir(_deps: &Arc<RunEngineDeps>, _run_id: &str) -> Option<String> {
-    None
 }
 
 /// Compose the worker's brief: role hint + task title/spec + completed upstream
@@ -615,7 +790,8 @@ mod tests {
         );
 
         let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(777, "task output"));
-        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter);
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
         engine_deps.worker_timeout = Duration::from_secs(5);
         let engine = RunEngine::new(Arc::new(engine_deps));
 
@@ -857,5 +1033,384 @@ mod tests {
         assert!(summary.contains("2/2"));
         assert!(summary.contains("did A"));
         assert!(summary.contains("did B"));
+    }
+
+    // -------------------------------------------------------------------------
+    // P2: bounded-parallel scheduling (concurrency, dependency strictness,
+    // workspace_dir injection). All-mock: a delay-and-counting WorkerRunner +
+    // a diamond DAG (A,B independent → C depends on both).
+    // -------------------------------------------------------------------------
+
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    /// A→C, B→C diamond: task0 (A, no dep), task1 (B, no dep), task2 (C, depends
+    /// on BOTH A and B). With cap≥2, A and B are concurrently dispatchable; C is
+    /// only ready after both finish. Each task pre-assigned to member 0.
+    struct DiamondPlanProducer;
+    #[async_trait]
+    impl PlanProducer for DiamondPlanProducer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            Ok(PlannedDag {
+                tasks: vec![
+                    PlannedTask {
+                        title: "A".to_string(),
+                        spec: "do A".to_string(),
+                        task_profile: None,
+                        depends_on: vec![],
+                        member_index: Some(0),
+                        rationale: None,
+                    },
+                    PlannedTask {
+                        title: "B".to_string(),
+                        spec: "do B".to_string(),
+                        task_profile: None,
+                        depends_on: vec![],
+                        member_index: Some(0),
+                        rationale: None,
+                    },
+                    PlannedTask {
+                        title: "C".to_string(),
+                        spec: "do C".to_string(),
+                        task_profile: None,
+                        depends_on: vec![0, 1],
+                        member_index: Some(0),
+                        rationale: None,
+                    },
+                ],
+            })
+        }
+    }
+
+    /// WorkerRunner that records peak concurrency (a live counter incremented on
+    /// entry / decremented on exit, tracking the max seen), the per-task start
+    /// order, and the `workspace_dir` it was handed. Each call sleeps `delay`
+    /// (after firing `on_started`) to create overlap windows.
+    struct ConcurrencyMockWorkerRunner {
+        delay: Duration,
+        live: AtomicUsize,
+        max_concurrent: AtomicUsize,
+        start_order: Mutex<Vec<String>>,
+        seen_workspace_dir: Mutex<Vec<Option<String>>>,
+    }
+    impl ConcurrencyMockWorkerRunner {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                live: AtomicUsize::new(0),
+                max_concurrent: AtomicUsize::new(0),
+                start_order: Mutex::new(vec![]),
+                seen_workspace_dir: Mutex::new(vec![]),
+            }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for ConcurrencyMockWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            // Record the workspace_dir + start order under the live count bump so
+            // the peak reflects真实 overlap.
+            self.seen_workspace_dir
+                .lock()
+                .unwrap()
+                .push(workspace_dir.map(str::to_string));
+            self.start_order.lock().unwrap().push(task_id.to_string());
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            // Track the max concurrency seen.
+            self.max_concurrent.fetch_max(now, Ordering::SeqCst);
+
+            on_started(900); // arbitrary fixed conv id
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(WorkerOutcome {
+                conversation_id: 900,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+            })
+        }
+    }
+
+    /// Build a harness whose worker is a shared `ConcurrencyMockWorkerRunner`
+    /// (returned alongside) and whose planner is the diamond DAG. `cap` is the
+    /// run's `max_parallel`; `workspace_dir` is seeded onto the workspace row so
+    /// the engine resolves + injects it. Returns (RunService, RunEngine, the mock
+    /// worker for assertions, the seeded run id).
+    async fn diamond_harness(
+        cap: i64,
+        workspace_dir: Option<&str>,
+        delay: Duration,
+    ) -> (
+        RunService,
+        RunEngine,
+        Arc<ConcurrencyMockWorkerRunner>,
+        String,
+    ) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster);
+        let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        let worker = Arc::new(ConcurrencyMockWorkerRunner::new(delay));
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        // Seed: fleet (one member) → workspace (with workspace_dir) → run (cap).
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "diamond fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "diamond ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: workspace_dir.map(str::to_string),
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "build the diamond".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(cap),
+                },
+            )
+            .await
+            .expect("run create");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, worker, run.id)
+    }
+
+    /// Poll get_detail until the run reaches `completed` (bounded). Returns the
+    /// final RunDetail.
+    async fn drive_to_completion(
+        run_service: &RunService,
+        run_id: &str,
+    ) -> nomifun_api_types::RunDetail {
+        for _ in 0..100 {
+            let d = run_service.get_detail(run_id).await.expect("detail");
+            if d.run.status == "completed" || d.run.status == "failed" {
+                return d;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("run did not reach a terminal status within the bounded poll");
+    }
+
+    #[tokio::test]
+    async fn cap_2_runs_independent_tasks_concurrently_then_dependent_last() {
+        // delay=100ms gives a wide overlap window: with cap=2, A and B must run
+        // at the same time (peak concurrency 2); C runs only after both finish.
+        let (svc, engine, worker, run_id) =
+            diamond_harness(2, Some("/tmp/diamond-ws"), Duration::from_millis(100)).await;
+
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+
+        // Run completed, all three tasks done with their worker output.
+        assert_eq!(detail.run.status, "completed", "diamond run must complete");
+        assert_eq!(detail.tasks.len(), 3);
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done", "task {} must be done", t.title);
+            assert_eq!(
+                t.output_summary.as_deref(),
+                Some(format!("output of {}", t.id).as_str()),
+                "task {} output_summary should be the worker text",
+                t.title
+            );
+        }
+        let summary = detail.run.summary.expect("summary set");
+        assert!(summary.contains("3/3"), "summary reflects 3/3 done: {summary}");
+
+        // CONCURRENCY PROOF: peak concurrency reached 2 (A and B overlapped).
+        let peak = worker.max_concurrent.load(Ordering::SeqCst);
+        assert_eq!(peak, 2, "with cap=2, A and B must run concurrently (peak=2), got {peak}");
+
+        // DEPENDENCY STRICTNESS: C started only after both A and B. The first two
+        // starts are A,B (in some order); the third start is C.
+        let order = worker.start_order.lock().unwrap().clone();
+        assert_eq!(order.len(), 3, "all three tasks ran exactly once");
+        let title_of = |id: &str| {
+            detail.tasks.iter().find(|t| t.id == id).map(|t| t.title.clone()).unwrap_or_default()
+        };
+        let titles: Vec<String> = order.iter().map(|id| title_of(id)).collect();
+        assert_eq!(titles[2], "C", "C must be the LAST task to start (after A+B done), got {titles:?}");
+        assert!(
+            (titles[0] == "A" && titles[1] == "B") || (titles[0] == "B" && titles[1] == "A"),
+            "A and B must start before C, got {titles:?}"
+        );
+
+        // WORKSPACE_DIR INJECTION: every worker received the run's workspace_dir.
+        let dirs = worker.seen_workspace_dir.lock().unwrap().clone();
+        assert_eq!(dirs.len(), 3);
+        for d in &dirs {
+            assert_eq!(
+                d.as_deref(),
+                Some("/tmp/diamond-ws"),
+                "worker must receive the run's workspace_dir"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cap_2_total_elapsed_reflects_overlap_not_serial_sum() {
+        // Independent A,B + dependent C, each 100ms. Concurrent (cap=2): A‖B ≈
+        // 100ms, then C ≈ 100ms → ≈200ms total. Serial would be ≈300ms. Assert
+        // the elapsed is comfortably under the serial sum (proves overlap), with
+        // generous headroom for scheduler jitter on a loaded CI box.
+        let (svc, engine, _worker, run_id) =
+            diamond_harness(2, None, Duration::from_millis(100)).await;
+
+        let start = Instant::now();
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(detail.run.status, "completed");
+        assert!(
+            elapsed < Duration::from_millis(290),
+            "A‖B overlap should keep total well under the 300ms serial sum, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_1_serializes_tasks_peak_concurrency_one() {
+        // cap=1 degrades to serial: peak concurrency 1, start order A,B,C
+        // (A and B both ready but only one slot, A first; C last after both).
+        let (svc, engine, worker, run_id) =
+            diamond_harness(1, Some("/tmp/serial-ws"), Duration::from_millis(40)).await;
+
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+
+        assert_eq!(detail.run.status, "completed", "serial run must complete");
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done");
+        }
+        let peak = worker.max_concurrent.load(Ordering::SeqCst);
+        assert_eq!(peak, 1, "with cap=1, no two workers may overlap (peak=1), got {peak}");
+
+        // C is still strictly last; A/B order between them is not constrained.
+        let order = worker.start_order.lock().unwrap().clone();
+        let title_of = |id: &str| {
+            detail.tasks.iter().find(|t| t.id == id).map(|t| t.title.clone()).unwrap_or_default()
+        };
+        let titles: Vec<String> = order.iter().map(|id| title_of(id)).collect();
+        assert_eq!(titles.len(), 3);
+        assert_eq!(titles[2], "C", "C must be last even serially, got {titles:?}");
+    }
+
+    #[tokio::test]
+    async fn cap_defaults_when_run_max_parallel_absent() {
+        // max_parallel=None on the run → engine falls back to default_max_parallel.
+        // With a default of 2 and two independent tasks, A and B overlap (peak 2).
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let worker = Arc::new(ConcurrencyMockWorkerRunner::new(Duration::from_millis(80)));
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.default_max_parallel = 2; // explicit default for the assertion
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "f".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "w".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "g".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: None, // <- forces the default fallback
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+
+        engine.start(run.id.clone());
+        let detail = drive_to_completion(&run_service, &run.id).await;
+        assert_eq!(detail.run.status, "completed");
+        let peak = worker.max_concurrent.load(Ordering::SeqCst);
+        assert_eq!(peak, 2, "absent run cap → default_max_parallel=2 governs (peak=2), got {peak}");
     }
 }
