@@ -1,0 +1,40 @@
+{
+  "title": "智能编排",
+  "subtitle": "编排多智能体编队，在工作间里协同完成任务",
+  "section": {
+    "workspace": "工作间",
+    "fleet": "编队",
+    "runHistory": "Run 历史"
+  },
+  "workspace": {
+    "title": "工作间",
+    "subtitle": "为编队提供独立的工作目录与默认编队",
+    "create": "新建工作间",
+    "empty": "暂无工作间，点击「新建工作间」开始",
+    "loadError": "加载工作间失败",
+    "openMenu": "更多操作",
+    "defaultFleet": "默认编队",
+    "noDefaultFleet": "未设置默认编队",
+    "modal": {
+      "title": "新建工作间",
+      "nameLabel": "名称",
+      "namePlaceholder": "输入工作间名称",
+      "nameRequired": "请输入工作间名称",
+      "defaultFleetLabel": "默认编队（可选）",
+      "defaultFleetPlaceholder": "选择默认编队",
+      "noFleetOption": "不设置",
+      "cancel": "取消",
+      "confirm": "创建",
+      "createOk": "工作间已创建",
+      "createError": "创建工作间失败：{{error}}"
+    }
+  },
+  "fleet": {
+    "placeholder": "编队管理（即将上线）"
+  },
+  "runHistory": {
+    "title": "Run 历史",
+    "emptyTitle": "Run 执行即将上线（P1）",
+    "emptyDesc": "编排执行记录将在后续版本中展示。"
+  }
+}

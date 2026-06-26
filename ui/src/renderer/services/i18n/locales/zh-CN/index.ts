@@ -32,6 +32,7 @@ import knowledge from './knowledge.json';
 import sessionList from './sessionList.json';
 import multiAgent from './multiAgent.json';
 import modelFailover from './modelFailover.json';
+import orchestrator from './orchestrator.json';
 
 export default {
   common,
@@ -63,4 +64,5 @@ export default {
   sessionList,
   multiAgent,
   modelFailover,
+  orchestrator,
 };

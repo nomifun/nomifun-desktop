@@ -1,0 +1,40 @@
+{
+  "title": "Orchestration",
+  "subtitle": "Orchestrate multi-agent fleets and collaborate inside workspaces",
+  "section": {
+    "workspace": "Workspaces",
+    "fleet": "Fleets",
+    "runHistory": "Run History"
+  },
+  "workspace": {
+    "title": "Workspaces",
+    "subtitle": "Give each fleet an isolated working directory and a default fleet",
+    "create": "New Workspace",
+    "empty": "No workspaces yet — click “New Workspace” to start",
+    "loadError": "Failed to load workspaces",
+    "openMenu": "More actions",
+    "defaultFleet": "Default fleet",
+    "noDefaultFleet": "No default fleet",
+    "modal": {
+      "title": "New Workspace",
+      "nameLabel": "Name",
+      "namePlaceholder": "Enter a workspace name",
+      "nameRequired": "Please enter a workspace name",
+      "defaultFleetLabel": "Default fleet (optional)",
+      "defaultFleetPlaceholder": "Select a default fleet",
+      "noFleetOption": "None",
+      "cancel": "Cancel",
+      "confirm": "Create",
+      "createOk": "Workspace created",
+      "createError": "Failed to create workspace: {{error}}"
+    }
+  },
+  "fleet": {
+    "placeholder": "Fleet management (coming soon)"
+  },
+  "runHistory": {
+    "title": "Run History",
+    "emptyTitle": "Run execution coming soon (P1)",
+    "emptyDesc": "Orchestration run records will appear here in a future release."
+  }
+}
