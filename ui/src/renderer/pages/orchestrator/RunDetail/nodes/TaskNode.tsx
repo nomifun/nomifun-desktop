@@ -6,6 +6,7 @@
 
 import React from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
+import { Lock } from '@icon-park/react';
 
 /** Task status → theme-var color + a slow-pulse hint for the running state. */
 export interface TaskStatusMeta {
@@ -49,12 +50,18 @@ export interface TaskNodeData extends Record<string, unknown> {
   title: string;
   status: string;
   statusLabel: string;
-  /** Assigned fleet member id (P1b: raw id; friendly label is a follow-up). */
+  /** Assigned fleet member id (raw uuid — used only for the chip tooltip). */
   memberId?: string;
-  /** Localized "assigned" chip label (member id resolution is a follow-up). */
+  /** Friendly chip label resolved from the run's fleet snapshot:
+   * agent id (+ model). Falls back to a localized "assigned" when the member
+   * can't be resolved against `fleet_members`. */
   chipLabel?: string;
+  /** Logo url for the assigned agent (resolved from agent_id), if any. */
+  memberLogo?: string | null;
   attempt: number;
-  /** Click handler — opens the worker transcript panel (Task 5). */
+  /** Whether this assignment is locked (pinned against auto-routing). */
+  locked?: boolean;
+  /** Click handler — opens the task inspector / transcript panel. */
   onOpen: () => void;
 }
 
@@ -119,15 +126,22 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
         </span>
         {data.chipLabel && (
           <span
-            className='inline-flex max-w-[120px] items-center gap-3px rd-100px px-6px py-2px text-10px leading-none text-t-secondary'
+            className='inline-flex max-w-[150px] items-center gap-3px rd-100px px-6px py-2px text-10px leading-none text-t-secondary'
             style={{ background: 'var(--fill-0)', border: '1px solid var(--border-light)' }}
             title={data.memberId}
           >
-            <span
-              className='size-5px shrink-0 rd-full'
-              style={{ background: 'rgb(var(--primary-6))' }}
-            />
+            {data.memberLogo ? (
+              <img src={data.memberLogo} alt='' className='size-10px shrink-0 object-contain' />
+            ) : (
+              <span
+                className='size-5px shrink-0 rd-full'
+                style={{ background: 'rgb(var(--primary-6))' }}
+              />
+            )}
             <span className='truncate'>{data.chipLabel}</span>
+            {data.locked && (
+              <Lock theme='outline' size='9' strokeWidth={4} className='shrink-0 text-t-tertiary' />
+            )}
           </span>
         )}
         {data.attempt > 1 && (

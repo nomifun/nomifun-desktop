@@ -159,12 +159,15 @@ export type TAssignment = {
   locked: boolean;
 };
 
-/** Full run detail: the run plus its plan (tasks/deps) and assignments. */
+/** Full run detail: the run plus its plan (tasks/deps), assignments, and the
+ * fleet snapshot the run was launched against (so the UI can resolve an
+ * assignment's `member_id` → a friendly agent/model label and offer reassign). */
 export type TRunDetail = {
   run: TRun;
   tasks: TRunTask[];
   deps: TRunTaskDep[];
   assignments: TAssignment[];
+  fleet_members: TFleetMember[];
 };
 
 // ── Request payloads ─────────────────────────────────────────────────────────
@@ -176,4 +179,12 @@ export type TCreateRun = {
   fleet_id: string;
   autonomy?: string;
   max_parallel?: number;
+};
+
+/** Body for `PUT /api/orchestrator/runs/{run_id}/tasks/{task_id}/assignment`.
+ * Reassign a task to a different fleet member and/or lock the assignment so the
+ * orchestrator's auto-router won't override it on the next plan update. */
+export type TReassign = {
+  member_id: string;
+  locked?: boolean;
 };

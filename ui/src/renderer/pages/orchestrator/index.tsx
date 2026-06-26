@@ -15,11 +15,11 @@ import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import type { TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
 import WorkspaceList from './WorkspaceList';
 import FleetManager from './FleetManager';
 import RunHistory from './RunHistory';
 import WorkerTranscriptPanel from './RunDetail/WorkerTranscriptPanel';
+import type { OpenTaskPayload } from './RunDetail/DagCanvas';
 import MobileRunSummary from './RunDetail/MobileRunSummary';
 
 // The DAG canvas pulls in react-flow (heavy) and is only mounted when a run is
@@ -115,8 +115,8 @@ const OrchestratorPage: React.FC = () => {
     );
   }, [setSearchParams]);
 
-  // The clicked DAG node's task → opens the worker transcript drawer (Task 5).
-  const [selectedTask, setSelectedTask] = useState<TRunTask | null>(null);
+  // The clicked DAG node's payload → opens the task inspector / transcript drawer.
+  const [selectedTask, setSelectedTask] = useState<OpenTaskPayload | null>(null);
 
   // Closing the run also dismisses any open transcript drawer.
   useEffect(() => {
@@ -245,9 +245,9 @@ const OrchestratorPage: React.FC = () => {
         </div>
       )}
 
-      {/* Worker transcript drawer (Task 5) — always mounted, visible when a task
-          node is clicked in the canvas. */}
-      <WorkerTranscriptPanel task={selectedTask} onClose={() => setSelectedTask(null)} />
+      {/* Task inspector + worker transcript drawer — always mounted, visible
+          when a task node is clicked in the canvas. */}
+      <WorkerTranscriptPanel open={selectedTask} onClose={() => setSelectedTask(null)} />
     </div>
   );
 };
