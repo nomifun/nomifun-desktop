@@ -9,6 +9,7 @@ const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AssistantSettings = React.lazy(() => import('@renderer/pages/settings/AssistantSettings'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
+const OrchestratorPage = React.lazy(() => import('@renderer/pages/orchestrator'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
@@ -163,6 +164,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route index element={<Navigate to='/guid' replace />} />
           {/* Model Management, Assistant & Skill, and MCP — top-level homepage destinations */}
           <Route path='/models' element={withRouteFallback(ModelHubPage)} />
+          {/* Orchestration (智能编排) — top-level homepage destination */}
+          <Route path='/orchestrator' element={withRouteFallback(OrchestratorPage)} />
           <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
           <Route path='/mcp' element={withRouteFallback(McpPage)} />
           <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />

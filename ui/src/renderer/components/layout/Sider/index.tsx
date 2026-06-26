@@ -21,6 +21,7 @@ import {
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
+  SiderOrchestratorEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -83,6 +84,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   );
 
   const handleConversationClick = () => navTo('/guid');
+  const handleOrchestratorClick = () => navTo('/orchestrator');
   const handleScheduledClick = () => navTo('/scheduled');
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
@@ -169,6 +171,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleConversationClick}
+            />
+            {/* Orchestration (智能编排) */}
+            <SiderOrchestratorEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/orchestrator')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleOrchestratorClick}
             />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
