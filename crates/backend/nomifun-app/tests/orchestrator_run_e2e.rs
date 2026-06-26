@@ -110,12 +110,12 @@ async fn build_run_state() -> OrchestratorRouterState {
     let run_service = Arc::new(RunService::new(
         run_repo.clone(),
         fleet_repo,
-        ws_repo,
+        ws_repo.clone(),
         planner,
         emitter.clone(),
     ));
     let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(4242, "task output"));
-    let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter);
+    let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo);
     engine_deps.worker_timeout = Duration::from_secs(5);
     let engine = RunEngine::new(Arc::new(engine_deps));
 
