@@ -5832,6 +5832,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
+ "nomifun-conversation",
  "nomifun-db",
  "nomifun-realtime",
  "serde_json",
