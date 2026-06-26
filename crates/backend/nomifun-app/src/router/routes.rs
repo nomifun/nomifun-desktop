@@ -121,6 +121,14 @@ pub async fn create_router(services: &AppServices) -> Router {
         client_pref_repo: Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
             services.database.pool().clone(),
         )),
+        // 智能编排 Run control-plane: the SAME router-state instances the REST
+        // routes + the boot-resume use, so a gateway-created run and a UI-created
+        // run act on identical state and the gateway's `start()` registers against
+        // the same in-memory handle map the REST cancel/boot-resume drive.
+        // `RunEngine` is value-Clone (Arc internals); wrap in Arc per Task 7's
+        // field type so the gateway holds the one live instance.
+        orchestrator_run_service: states.orchestrator.run_service.clone(),
+        orchestrator_run_engine: Arc::new(states.orchestrator.engine.clone()),
         // P3-GW1 (route A): per-companion browser tool registry, lives in this
         // (main) process. Feature-gated — `None` would mean "browser tools not
         // available", but when the feature is on we always wire it so remote
