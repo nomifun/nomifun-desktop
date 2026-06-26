@@ -136,6 +136,33 @@
       "failed": "Failed",
       "cancelled": "Cancelled",
       "unknown": "Unknown"
+    },
+    "detail": {
+      "back": "Back",
+      "cancel": "Stop run",
+      "cancelConfirm": "Stop this run? Tasks still executing will be cancelled.",
+      "cancelConfirmOk": "Stop",
+      "cancelConfirmCancel": "Keep running",
+      "cancelOk": "Run stopped",
+      "cancelError": "Failed to stop run: {{error}}",
+      "loadError": "Failed to load run detail",
+      "planningTitle": "Planning tasks…",
+      "planningDesc": "The fleet is breaking the goal into a task graph — nodes will appear shortly.",
+      "untitledTask": "(Untitled task)",
+      "assigned": "Assigned"
+    },
+    "task": {
+      "status": {
+        "pending": "Pending",
+        "running": "Running",
+        "done": "Done",
+        "completed": "Done",
+        "failed": "Failed",
+        "needs_review": "Needs review",
+        "skipped": "Skipped",
+        "blocked": "Blocked",
+        "cancelled": "Cancelled"
+      }
     }
   }
 }

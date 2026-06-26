@@ -136,6 +136,33 @@
       "failed": "已失败",
       "cancelled": "已取消",
       "unknown": "未知"
+    },
+    "detail": {
+      "back": "返回",
+      "cancel": "终止 Run",
+      "cancelConfirm": "确定终止这个 Run 吗？正在执行的任务会被取消。",
+      "cancelConfirmOk": "终止",
+      "cancelConfirmCancel": "取消",
+      "cancelOk": "Run 已终止",
+      "cancelError": "终止 Run 失败：{{error}}",
+      "loadError": "加载 Run 详情失败",
+      "planningTitle": "正在规划任务…",
+      "planningDesc": "编队正在拆解目标并生成任务图，稍候即可看到节点。",
+      "untitledTask": "（未命名任务）",
+      "assigned": "已分派"
+    },
+    "task": {
+      "status": {
+        "pending": "待开始",
+        "running": "执行中",
+        "done": "已完成",
+        "completed": "已完成",
+        "failed": "已失败",
+        "needs_review": "待评审",
+        "skipped": "已跳过",
+        "blocked": "受阻",
+        "cancelled": "已取消"
+      }
     }
   }
 }

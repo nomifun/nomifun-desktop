@@ -1,0 +1,78 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * DagCanvas — react-flow theming + node pulse. We lean on react-flow's own CSS
+ * custom properties so the Controls/MiniMap chrome follows the NomiFun theme,
+ * and keep the brand pulse for running tasks. Theme variables only.
+ */
+
+/* Slow, calm pulse for the running-task status dot + planning placeholder. */
+@keyframes nomi-dag-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+}
+
+.nomi-dag-pulse {
+  animation: nomi-dag-pulse 1.4s ease-in-out infinite;
+}
+
+/* react-flow surface follows the app background. */
+.nomi-dag-flow {
+  background: var(--bg-base);
+}
+
+/* Edge default stroke (overridden inline per-edge, but covers selection paths). */
+.nomi-dag-flow .react-flow__edge-path {
+  stroke: var(--border-base);
+}
+
+/* Controls + MiniMap chrome themed via react-flow's own CSS variables. */
+.nomi-dag-flow .react-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+
+.nomi-dag-flow .react-flow__controls-button {
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border-base);
+  color: var(--text-secondary);
+  fill: var(--text-secondary);
+}
+
+.nomi-dag-flow .react-flow__controls-button:hover {
+  background: var(--bg-hover);
+}
+
+.nomi-dag-flow .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.nomi-dag-flow .react-flow__minimap {
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* Custom node host: react-flow wraps each node in .react-flow__node; we render
+   our own card inside, so strip the default node chrome. */
+.nomi-dag-flow .react-flow__node-task {
+  background: transparent;
+  border: none;
+  padding: 0;
+  width: auto;
+  font-size: inherit;
+}
+
+/* Keep the (non-connectable) handles visually subtle. */
+.nomi-dag-flow .react-flow__handle {
+  cursor: default;
+}
