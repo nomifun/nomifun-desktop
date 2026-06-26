@@ -196,34 +196,93 @@ async fn webui_stop(server: tauri::State<'_, Arc<DesktopServer>>) -> Result<WebU
 /// Managed state holding the active OS sleep-inhibitor assertion (None = sleep allowed).
 struct AwakeState(Mutex<Option<keepawake::KeepAwake>>);
 
-/// 开启/关闭"保持唤醒":开盖状态下阻止系统空闲休眠,并保持屏幕常亮(等价 `caffeinate -di`)。
+/// 获取"保持唤醒"的 OS assertion:仅阻止系统空闲休眠(PreventUserIdleSystemSleep),
+/// **不**阻止显示器空闲关闭 —— 等价 `caffeinate -i`(而非 `-di`)。电脑保持活动时屏幕仍可正常熄屏,
+/// 既省电也避免长时间常亮对屏幕(尤其 OLED)的损耗;熄屏不影响定时任务运行。
+/// `set_keep_awake` 与回归测试共用此单一来源。
+/// Acquire the keep-awake assertion: inhibit system idle sleep only, while letting the display
+/// sleep normally (≈ `caffeinate -i`, not `-di`) — saves power and avoids screen wear, and the
+/// display turning off does NOT pause scheduled tasks. Single source shared with the test.
+fn acquire_keep_awake() -> Result<keepawake::KeepAwake, String> {
+    keepawake::Builder::default()
+        .display(false) // 不持有 PreventUserIdleDisplaySleep:允许显示器空闲关闭(省电 + 护屏)
+        .idle(true) // PreventUserIdleSystemSleep:系统保持唤醒;电池供电时同样生效
+        .sleep(false) // PreventSystemSleep:已废弃 + 电池下被忽略,显式关闭
+        .reason("NomiFun keep-awake enabled")
+        .app_name("NomiFun")
+        .app_reverse_domain("com.nomifun.desktop")
+        .create()
+        .map_err(|e| format!("failed to acquire keep-awake assertion: {e}"))
+}
+
+/// 开启/关闭"保持唤醒":开盖状态下阻止系统空闲休眠,但允许显示器照常熄屏(等价 `caffeinate -i`)。
 /// macOS 硬限制:合盖属于"强制休眠"(forced sleep),任何 IOKit assertion 都拦不住(参见 Apple QA1340);
 /// 合盖仍要运行,只能 clamshell 模式(插电 + 外接显示器 + 外接键鼠)或 root 级 `pmset disablesleep 1`。
-/// 因此这里只用 PreventUserIdleDisplaySleep(display)+ PreventUserIdleSystemSleep(idle),
-/// 不再用 PreventSystemSleep(sleep):它自 macOS 10.9 起已废弃,且电池供电时被系统直接忽略。
-/// Keep-awake: with the lid OPEN, inhibit idle system sleep AND keep the display on (~`caffeinate -di`).
-/// Lid-close is forced sleep that no assertion can block; PreventSystemSleep is dropped (deprecated
-/// since 10.9, and ignored on battery), so it added nothing but a false sense of safety.
+/// 早先还持有 PreventUserIdleDisplaySleep(display=true)强制屏幕常亮,会阻止显示器关闭、徒增屏幕损耗,
+/// 现已去掉;PreventSystemSleep(sleep)自 macOS 10.9 起已废弃且电池下被忽略,同样不用。
+/// Keep-awake: with the lid OPEN, inhibit idle system sleep but let the display sleep (~`caffeinate -i`).
+/// Lid-close is forced sleep that no assertion can block; the old display-on assertion (which blocked
+/// the monitor from turning off) and the deprecated PreventSystemSleep are both gone.
 #[tauri::command]
 fn set_keep_awake(enabled: bool, state: tauri::State<'_, AwakeState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if enabled {
         if guard.is_none() {
-            let handle = keepawake::Builder::default()
-                .display(true) // 屏幕常亮 → 系统亦不空闲休眠;比单纯 idle 更稳、更贴合"保持唤醒"直觉
-                .idle(true) // PreventUserIdleSystemSleep:电池供电时同样生效
-                .sleep(false) // PreventSystemSleep:已废弃 + 电池下被忽略,显式关闭
-                .reason("NomiFun keep-awake enabled")
-                .app_name("NomiFun")
-                .app_reverse_domain("com.nomifun.desktop")
-                .create()
-                .map_err(|e| format!("failed to acquire keep-awake assertion: {e}"))?;
-            *guard = Some(handle);
+            *guard = Some(acquire_keep_awake()?);
         }
     } else {
         *guard = None; // Drop 释放 assertion / Drop releases the assertion.
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod keep_awake_tests {
+    use super::acquire_keep_awake;
+    use std::process::Command;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    /// 回归测试:保持唤醒必须只阻止系统空闲休眠,绝不阻止显示器关闭。
+    /// 用真实 IOKit assertion + `pmset -g assertions` 验证 —— 只看本测试进程(按 pid 过滤)
+    /// 自己持有的 assertion,因此不受同时运行的 App 实例或 `caffeinate` 干扰。
+    /// Regression: keep-awake must hold PreventUserIdleSystemSleep but NOT
+    /// PreventUserIdleDisplaySleep (the latter is what stops the monitor from turning off).
+    #[test]
+    fn holds_system_idle_assertion_but_not_display() {
+        let handle = acquire_keep_awake().expect("acquire keep-awake assertion");
+        let owner = format!("pid {}(", std::process::id());
+
+        // assertion 注册是同步的,但留一点重试余量以防极偶发的可见性延迟。
+        let mut ours: Vec<String> = Vec::new();
+        for _ in 0..10 {
+            let out = Command::new("pmset")
+                .args(["-g", "assertions"])
+                .output()
+                .expect("run `pmset -g assertions`");
+            ours = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| l.contains(&owner))
+                .map(str::to_owned)
+                .collect();
+            if ours.iter().any(|l| l.contains("PreventUserIdleSystemSleep")) {
+                break;
+            }
+            sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            ours.iter().any(|l| l.contains("PreventUserIdleSystemSleep")),
+            "keep-awake should hold PreventUserIdleSystemSleep; our assertions: {ours:?}"
+        );
+        assert!(
+            !ours.iter().any(|l| l.contains("PreventUserIdleDisplaySleep")),
+            "keep-awake must NOT hold PreventUserIdleDisplaySleep (it blocks the display from \
+             turning off); our assertions: {ours:?}"
+        );
+
+        drop(handle);
+    }
 }
 
 /// 关闭=收到托盘的护栏标志。仅在「真正退出」(托盘「退出」/`app.exit`)前置真,届时主窗口的
