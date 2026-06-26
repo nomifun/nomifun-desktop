@@ -163,6 +163,10 @@
         "blocked": "受阻",
         "cancelled": "已取消"
       }
+    },
+    "transcript": {
+      "notStarted": "该任务尚未开始",
+      "noConversation": "暂无对话记录，待有 worker 接手该任务后将在此处实时显示。"
     }
   }
 }

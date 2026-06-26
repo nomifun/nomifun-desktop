@@ -2092,6 +2092,8 @@ export type I18nKey =
   | 'orchestrator.run.task.status.running'
   | 'orchestrator.run.task.status.skipped'
   | 'orchestrator.run.title'
+  | 'orchestrator.run.transcript.noConversation'
+  | 'orchestrator.run.transcript.notStarted'
   | 'orchestrator.run.untitledGoal'
   | 'orchestrator.section.fleet'
   | 'orchestrator.section.runHistory'
