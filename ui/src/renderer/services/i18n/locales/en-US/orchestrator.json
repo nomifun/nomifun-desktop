@@ -99,11 +99,6 @@
       "high": "High cost"
     }
   },
-  "runHistory": {
-    "title": "Run History",
-    "emptyTitle": "Run execution coming soon (P1)",
-    "emptyDesc": "Orchestration run records will appear here in a future release."
-  },
   "run": {
     "title": "Run History",
     "subtitle": "Pick a workspace to review its orchestration run records",
