@@ -41,7 +41,6 @@
       "noModel": "未配置模型",
       "unknownAgent": "未知智能体",
       "maxParallelHint": "最大并发任务数",
-      "menu": "更多操作",
       "delete": "删除编队",
       "deleteConfirm": "确定删除编队「{{name}}」吗？此操作不可撤销。"
     },

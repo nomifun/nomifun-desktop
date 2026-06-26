@@ -6,8 +6,8 @@
 
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Avatar, Dropdown, Menu, Popconfirm, Tooltip } from '@arco-design/web-react';
-import { Delete, More, PeopleTopCard, Split } from '@icon-park/react';
+import { Avatar, Popconfirm, Tooltip } from '@arco-design/web-react';
+import { Delete, PeopleTopCard, Split } from '@icon-park/react';
 import classNames from 'classnames';
 import type { TFleet } from '@/common/types/orchestrator/orchestratorTypes';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
@@ -24,8 +24,8 @@ const MAX_AVATARS = 5;
 
 /**
  * A single fleet card: name + member count, a stacked row of member avatars,
- * model chips, a max-parallel badge, and a quiet corner「⋯」menu carrying a
- * delete with二次确认 (Popconfirm). Clicking the body opens the edit drawer.
+ * model chips, a max-parallel badge, and a quiet corner delete control carrying
+ * a二次确认 (standalone Popconfirm). Clicking the body opens the edit drawer.
  *
  * Mirrors `AgentCard`'s card chrome (rounded, border-2 hairline, bg-2 surface,
  * hover border lift). All colors via theme variables.
@@ -93,41 +93,26 @@ const FleetCard: React.FC<FleetCardProps> = ({ fleet, agentsById, onEdit, onDele
           </div>
         </div>
         <div className='absolute right-10px top-12px' onClick={(e) => e.stopPropagation()}>
-          <Dropdown
-            trigger='click'
-            position='br'
+          <Popconfirm
+            title={t('orchestrator.fleet.card.deleteConfirm', { name: fleet.name })}
+            okText={t('common.delete', { defaultValue: 'Delete' })}
+            cancelText={t('common.cancel', { defaultValue: 'Cancel' })}
+            onOk={onDelete}
             getPopupContainer={() => document.body}
-            droplist={
-              <Menu>
-                <Menu.Item key='delete' className='!p-0'>
-                  <Popconfirm
-                    title={t('orchestrator.fleet.card.deleteConfirm', { name: fleet.name })}
-                    okText={t('common.delete', { defaultValue: 'Delete' })}
-                    cancelText={t('common.cancel', { defaultValue: 'Cancel' })}
-                    onOk={onDelete}
-                    getPopupContainer={() => document.body}
-                  >
-                    <div className='flex items-center gap-7px px-12px py-6px text-13px text-[rgb(var(--danger-6))]'>
-                      <Delete theme='outline' size='14' strokeWidth={3} />
-                      {t('orchestrator.fleet.card.delete')}
-                    </div>
-                  </Popconfirm>
-                </Menu.Item>
-              </Menu>
-            }
           >
             <div
               role='button'
               tabIndex={0}
-              aria-label={t('orchestrator.fleet.card.menu')}
+              aria-label={t('orchestrator.fleet.card.delete')}
+              onClick={(e) => e.stopPropagation()}
               className={classNames(
                 'size-24px rd-7px flex items-center justify-center cursor-pointer transition-colors',
-                'text-t-tertiary opacity-0 group-hover:opacity-100 hover:bg-fill-2 hover:text-t-primary'
+                'text-t-tertiary opacity-0 group-hover:opacity-100 hover:bg-fill-2 hover:text-[rgb(var(--danger-6))]'
               )}
             >
-              <More theme='outline' size='16' strokeWidth={3} />
+              <Delete theme='outline' size='15' strokeWidth={3} />
             </div>
-          </Dropdown>
+          </Popconfirm>
         </div>
       </div>
 

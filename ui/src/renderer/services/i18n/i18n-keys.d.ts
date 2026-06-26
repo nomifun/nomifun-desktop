@@ -1984,7 +1984,6 @@ export type I18nKey =
   | 'orchestrator.fleet.card.deleteConfirm'
   | 'orchestrator.fleet.card.maxParallelHint'
   | 'orchestrator.fleet.card.memberCount'
-  | 'orchestrator.fleet.card.menu'
   | 'orchestrator.fleet.card.noMembers'
   | 'orchestrator.fleet.card.noModel'
   | 'orchestrator.fleet.card.unknownAgent'
