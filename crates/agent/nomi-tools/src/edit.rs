@@ -52,6 +52,9 @@ pub struct EditTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// Optional containment root; when set, edits outside it are rejected.
     write_root: Option<std::path::PathBuf>,
+    /// Session working directory used to resolve relative `file_path` inputs
+    /// (matching ReadTool / Grep / Glob / Bash). `None` = legacy process-cwd.
+    cwd: Option<std::path::PathBuf>,
 }
 
 impl EditTool {
@@ -67,12 +70,20 @@ impl EditTool {
         Self {
             file_cache,
             write_root: None,
+            cwd: None,
         }
     }
 
     /// Restrict edits to within `root` (design §3.6 write-root containment).
     pub fn with_write_root(mut self, root: Option<std::path::PathBuf>) -> Self {
         self.write_root = root;
+        self
+    }
+
+    /// Resolve relative `file_path` inputs against `cwd` (the session working
+    /// directory), matching ReadTool/Grep/Glob/Bash.
+    pub fn with_cwd(mut self, cwd: Option<std::path::PathBuf>) -> Self {
+        self.cwd = cwd;
         self
     }
 }
@@ -105,7 +116,7 @@ impl Tool for EditTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to modify"
+                    "description": "Path to the file to modify (absolute preferred; a relative path resolves against the session working directory)"
                 },
                 "old_string": {
                     "type": "string",
@@ -149,6 +160,11 @@ impl Tool for EditTool {
                 images: Vec::new(),
             };
         };
+
+        // Resolve a relative file_path against the session working directory
+        // (matching ReadTool/Grep/Glob/Bash) before any filesystem use.
+        let resolved = crate::path_guard::resolve_against_cwd(file_path, self.cwd.as_deref());
+        let file_path = resolved.as_str();
 
         // Write-root containment (opt-in): reject edits outside the configured root.
         if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
@@ -333,6 +349,25 @@ mod tests {
     fn simulate_read(cache: &Arc<RwLock<FileStateCache>>, path: &Path) {
         let content = std::fs::read_to_string(path).unwrap_or_default();
         update_cache_after_write(cache, path, &content);
+    }
+
+    #[tokio::test]
+    async fn edit_resolves_relative_path_against_cwd() {
+        // A relative file_path must resolve against the injected workspace cwd,
+        // not the process cwd. Use no cache so the must-read guard is off.
+        let workspace = tempdir().unwrap();
+        let rel = "__nomi_reltest_edit__.txt";
+        std::fs::write(workspace.path().join(rel), "alpha").unwrap();
+        let tool = EditTool::new(None).with_cwd(Some(workspace.path().to_path_buf()));
+        let result = tool
+            .execute(json!({ "file_path": rel, "old_string": "alpha", "new_string": "beta" }))
+            .await;
+        assert!(!result.is_error, "relative edit should succeed: {}", result.content);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(rel)).unwrap(),
+            "beta",
+            "the relative edit must have applied to the workspace file"
+        );
     }
 
     #[tokio::test]
