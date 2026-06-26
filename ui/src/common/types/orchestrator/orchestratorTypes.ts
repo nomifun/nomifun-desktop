@@ -188,3 +188,9 @@ export type TReassign = {
   member_id: string;
   locked?: boolean;
 };
+
+/** Body for `POST /api/orchestrator/runs/{run_id}/tasks/{task_id}/steer`.
+ * Mid-turn inject a steering message into a running task's worker conversation. */
+export type TSteer = {
+  text: string;
+};

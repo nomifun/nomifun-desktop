@@ -93,6 +93,7 @@ import type {
   TReassign,
   TRun,
   TRunDetail,
+  TSteer,
   TUpdateFleet,
   TUpdateWorkspace,
 } from '../types/orchestrator/orchestratorTypes';
@@ -2765,8 +2766,24 @@ export const orchestrator = {
       (p) => `/api/orchestrator/runs/${p.id}/cancel`,
       () => undefined
     ),
+    approve: httpPost<void, { id: string }>(
+      (p) => `/api/orchestrator/runs/${p.id}/approve`,
+      () => undefined
+    ),
+    pause: httpPost<void, { id: string }>(
+      (p) => `/api/orchestrator/runs/${p.id}/pause`,
+      () => undefined
+    ),
+    resume: httpPost<void, { id: string }>(
+      (p) => `/api/orchestrator/runs/${p.id}/resume`,
+      () => undefined
+    ),
     reassign: httpPut<void, { run_id: string; task_id: string; updates: TReassign }>(
       (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/assignment`,
+      (p) => p.updates
+    ),
+    steer: httpPost<void, { run_id: string; task_id: string; updates: TSteer }>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/steer`,
       (p) => p.updates
     ),
   },
