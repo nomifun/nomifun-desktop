@@ -86,12 +86,22 @@ import type {
 } from '../types/team/teamTypes';
 import type {
   TCreateFleet,
+  TCreateRun,
   TCreateWorkspace,
   TFleet,
   TOrchWorkspace,
+  TRun,
+  TRunDetail,
   TUpdateFleet,
   TUpdateWorkspace,
 } from '../types/orchestrator/orchestratorTypes';
+import type {
+  TOrchRunCompletedEvent,
+  TOrchRunPlanUpdatedEvent,
+  TOrchRunStatusEvent,
+  TOrchTaskAssignedEvent,
+  TOrchTaskStatusEvent,
+} from '../types/orchestrator/orchestratorEvents';
 import type {
   AutoUpdateStatus,
   UpdateCheckRequest,
@@ -2743,6 +2753,26 @@ export const orchestrator = {
       (p) => p.updates
     ),
     remove: httpDelete<void, { id: string }>((p) => `/api/orchestrator/workspaces/${p.id}`),
+  },
+  runs: {
+    create: httpPost<TRun, TCreateRun>('/api/orchestrator/runs'),
+    list: httpGet<TRun[], { workspace_id: string }>(
+      (p) => `/api/orchestrator/workspaces/${p.workspace_id}/runs`
+    ),
+    get: httpGet<TRunDetail, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
+    cancel: httpPost<void, { id: string }>(
+      (p) => `/api/orchestrator/runs/${p.id}/cancel`,
+      () => undefined
+    ),
+  },
+  // Realtime WS events from the run engine (OrchestratorRunEventEmitter). Wire
+  // names verbatim from orchestratorEvents.ts.
+  runEvents: {
+    statusChanged: wsEmitter<TOrchRunStatusEvent>('orchestrator.run.statusChanged'),
+    planUpdated: wsEmitter<TOrchRunPlanUpdatedEvent>('orchestrator.run.planUpdated'),
+    completed: wsEmitter<TOrchRunCompletedEvent>('orchestrator.run.completed'),
+    taskStatusChanged: wsEmitter<TOrchTaskStatusEvent>('orchestrator.task.statusChanged'),
+    taskAssigned: wsEmitter<TOrchTaskAssignedEvent>('orchestrator.task.assigned'),
   },
 };
 

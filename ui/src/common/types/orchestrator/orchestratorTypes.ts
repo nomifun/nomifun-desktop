@@ -98,3 +98,82 @@ export type TUpdateWorkspace = {
   name?: string;
   default_fleet_id?: string;
 };
+
+// ── Run engine ───────────────────────────────────────────────────────────────
+
+/** Inferred task profile used by the orchestrator for member routing. */
+export type TTaskProfile = {
+  kind: string;
+  needs_vision: boolean;
+  needs_long_context: boolean;
+  needs_high_reasoning: boolean;
+  bulk: boolean;
+};
+
+/** A persisted orchestration run record. */
+export type TRun = {
+  id: string;
+  workspace_id: string;
+  goal: string;
+  autonomy: string;
+  max_parallel?: number;
+  status: string;
+  summary?: string;
+  lead_conv_id?: number;
+  total_tokens?: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** A single task within a run's plan (DAG node). */
+export type TRunTask = {
+  id: string;
+  run_id: string;
+  title: string;
+  spec: string;
+  task_profile?: TTaskProfile;
+  status: string;
+  conversation_id?: number;
+  output_summary?: string;
+  output_files: string[];
+  attempt: number;
+  tokens?: number;
+  graph_x?: number;
+  graph_y?: number;
+};
+
+/** A dependency edge between two run tasks (blocker → blocked). */
+export type TRunTaskDep = {
+  blocker_task_id: string;
+  blocked_task_id: string;
+};
+
+/** An assignment of a task to a fleet member (worker). */
+export type TAssignment = {
+  id: string;
+  task_id: string;
+  member_id: string;
+  score?: number;
+  rationale?: string;
+  source: string;
+  locked: boolean;
+};
+
+/** Full run detail: the run plus its plan (tasks/deps) and assignments. */
+export type TRunDetail = {
+  run: TRun;
+  tasks: TRunTask[];
+  deps: TRunTaskDep[];
+  assignments: TAssignment[];
+};
+
+// ── Request payloads ─────────────────────────────────────────────────────────
+
+/** Body for `POST /api/orchestrator/runs`. */
+export type TCreateRun = {
+  workspace_id: string;
+  goal: string;
+  fleet_id: string;
+  autonomy?: string;
+  max_parallel?: number;
+};
