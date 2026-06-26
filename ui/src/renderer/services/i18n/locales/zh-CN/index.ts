@@ -30,7 +30,6 @@ import autowork from './autowork.json';
 import nomi from './nomi.json';
 import knowledge from './knowledge.json';
 import sessionList from './sessionList.json';
-import multiAgent from './multiAgent.json';
 import modelFailover from './modelFailover.json';
 import orchestrator from './orchestrator.json';
 
@@ -62,7 +61,6 @@ export default {
   nomi,
   knowledge,
   sessionList,
-  multiAgent,
   modelFailover,
   orchestrator,
 };

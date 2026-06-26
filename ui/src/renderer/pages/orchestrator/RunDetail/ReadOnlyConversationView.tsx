@@ -1,10 +1,15 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { ipcBridge } from '@/common';
 import type { IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import { Spin } from '@arco-design/web-react';
 import React, { Suspense, useCallback } from 'react';
 import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/nomi/useNomiModelSelection';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
-import TeamChatEmptyState from './TeamChatEmptyState';
 
 const AcpChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/acp/AcpChat'));
 const NomiChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/nomi/NomiChat'));
@@ -16,12 +21,11 @@ const RemoteChat = React.lazy(() => import('@/renderer/pages/conversation/platfo
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 /** Nomi sub-component manages model selection state without adding a ChatLayout wrapper */
-const NomiTeamChat: React.FC<{
+const NomiReadOnlyChat: React.FC<{
   conversation: NomiConversation;
-  emptySlot?: React.ReactNode;
   agent_name?: string;
   hideSendBox?: boolean;
-}> = ({ conversation, emptySlot, agent_name, hideSendBox }) => {
+}> = ({ conversation, agent_name, hideSendBox }) => {
   const onSelectModel = useCallback(
     async (_provider: IProvider, modelName: string) => {
       const selected = { ..._provider, use_model: modelName } as TProviderWithModel;
@@ -39,41 +43,26 @@ const NomiTeamChat: React.FC<{
       conversation_id={conversation.id}
       workspace={conversation.extra.workspace}
       modelSelection={modelSelection}
-      emptySlot={emptySlot}
       agent_name={agent_name}
       hideSendBox={hideSendBox}
     />
   );
 };
 
-type TeamChatViewProps = {
+type ReadOnlyConversationViewProps = {
   conversation: TChatConversation;
   hideSendBox?: boolean;
-  /** When set, shows the team greeting empty state */
-  team_id?: string;
   agent_name?: string;
-  agent_icon?: string;
-  isLeader?: boolean;
 };
 
 /**
- * Routes to the correct platform chat component based on conversation type.
- * Does NOT wrap in ChatLayout — that is done by the parent TeamPage.
+ * Routes to the correct platform chat component based on conversation type and
+ * renders it read-only (send box hidden). Used by the orchestrator's worker
+ * transcript drawer to mirror a worker's live conversation record.
+ *
+ * Does NOT wrap in ChatLayout — the parent supplies its own chrome.
  */
-const TeamChatView: React.FC<TeamChatViewProps> = ({
-  conversation,
-  hideSendBox,
-  team_id,
-  agent_name,
-  agent_icon,
-  isLeader,
-}) => {
-  // Single source of truth for the team greeting. Each *Chat simply forwards `emptySlot`
-  // to MessageList; the empty state itself reads team_id / backend / preset info from the
-  // shared SWR-cached conversation record, so none of that needs to flow through props.
-  const emptySlot = team_id ? (
-    <TeamChatEmptyState conversation_id={conversation.id} icon={agent_icon} isLeader={isLeader} />
-  ) : undefined;
+const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ conversation, hideSendBox, agent_name }) => {
   const content = (() => {
     switch (conversation.type) {
       case 'acp':
@@ -87,7 +76,6 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
             session_mode={conversation.extra?.session_mode}
             agent_name={agent_name ?? (conversation.extra as { agent_name?: string })?.agent_name}
             hideSendBox={hideSendBox}
-            emptySlot={emptySlot}
           />
         );
       case 'codex': // Legacy: codex now uses ACP protocol
@@ -100,15 +88,13 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
             initialModelId={(conversation.extra as { current_model_id?: string } | undefined)?.current_model_id}
             agent_name={agent_name ?? (conversation.extra as { agent_name?: string })?.agent_name}
             hideSendBox={hideSendBox}
-            emptySlot={emptySlot}
           />
         );
       case 'nomi':
         return (
-          <NomiTeamChat
+          <NomiReadOnlyChat
             key={conversation.id}
             conversation={conversation as NomiConversation}
-            emptySlot={emptySlot}
             agent_name={agent_name}
             hideSendBox={hideSendBox}
           />
@@ -120,7 +106,6 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             hideSendBox={hideSendBox}
-            emptySlot={emptySlot}
           />
         );
       case 'nanobot':
@@ -130,7 +115,6 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             hideSendBox={hideSendBox}
-            emptySlot={emptySlot}
           />
         );
       case 'remote':
@@ -140,7 +124,6 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             hideSendBox={hideSendBox}
-            emptySlot={emptySlot}
           />
         );
       default:
@@ -151,4 +134,4 @@ const TeamChatView: React.FC<TeamChatViewProps> = ({
   return <Suspense fallback={<Spin loading className='flex flex-1 items-center justify-center' />}>{content}</Suspense>;
 };
 
-export default TeamChatView;
+export default ReadOnlyConversationView;

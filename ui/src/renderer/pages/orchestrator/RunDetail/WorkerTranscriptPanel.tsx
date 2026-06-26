@@ -12,7 +12,7 @@ import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAssignment, TFleetMember } from '@/common/types/orchestrator/orchestratorTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import TeamChatView from '@/renderer/pages/conversation/components/multiAgent/TeamChatView';
+import ReadOnlyConversationView from './ReadOnlyConversationView';
 import type { OpenTaskPayload } from './DagCanvas';
 import { memberLogo, memberShortLabel } from './memberLabel';
 
@@ -39,8 +39,8 @@ const memberOption = (m: TFleetMember, roleLabel: (role: string) => string) => {
  *     it. Changes call `PUT …/assignment` and then refetch the run so the canvas
  *     and this panel reflect the new state.
  *  2. Worker transcript — the live, read-only conversation record (mirrors
- *     SubagentDrawer: TeamChatView with the send box hidden). Shown only once a
- *     worker has picked up the task and a conversation exists.
+ *     SubagentDrawer: ReadOnlyConversationView with the send box hidden). Shown
+ *     only once a worker has picked up the task and a conversation exists.
  *
  * `TRunTask.conversation_id` is already the backend INTEGER id, passed straight
  * through with no conversion (unlike TeamAgent.conversation_id, a string).
@@ -247,7 +247,7 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
           ) : loading ? (
             <Spin loading className='flex flex-1 items-center justify-center' />
           ) : conversation ? (
-            <TeamChatView conversation={conversation} hideSendBox agent_name={task?.title} />
+            <ReadOnlyConversationView conversation={conversation} hideSendBox agent_name={task?.title} />
           ) : null}
         </div>
 
