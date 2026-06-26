@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     BrowserMcpConfig, GatewayMcpConfig, GuideMcpConfig, KnowledgeMcpConfig, KnowledgeMountInfo,
     OpenMcpConfig, RequirementMcpConfig, ComputerMcpConfig,
-    TeamMcpStdioConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +66,6 @@ pub struct AcpBuildExtra {
     pub current_model_id: Option<String>,
     #[serde(default)]
     pub cron_job_id: Option<String>,
-    #[serde(default)]
-    pub team_mcp_stdio_config: Option<TeamMcpStdioConfig>,
     #[serde(default)]
     pub guide_mcp_config: Option<GuideMcpConfig>,
     /// Requirement MCP stdio bridge config. When `Some`, the ACP assembler
@@ -234,8 +231,6 @@ pub struct NomiBuildExtra {
     pub goal: Option<NomiGoalSpec>,
     #[serde(default)]
     pub session_mode: Option<String>,
-    #[serde(default)]
-    pub team_mcp_stdio_config: Option<TeamMcpStdioConfig>,
     #[serde(default)]
     pub guide_mcp_config: Option<GuideMcpConfig>,
     #[serde(default)]

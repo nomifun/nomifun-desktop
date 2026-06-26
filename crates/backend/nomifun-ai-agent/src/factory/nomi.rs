@@ -925,7 +925,7 @@ fn gateway_mcp_to_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::{GuideMcpConfig, TeamMcpStdioConfig};
+    use nomifun_api_types::GuideMcpConfig;
 
     #[test]
     fn resolve_mcp_servers_adds_gateway_when_flag_set() {
@@ -1208,15 +1208,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_ignores_team_and_guide_configs() {
+    fn resolve_mcp_servers_ignores_guide_configs() {
         let overrides = NomiBuildExtra {
-            team_mcp_stdio_config: Some(TeamMcpStdioConfig {
-                team_id: "team-42".into(),
-                port: 9000,
-                token: "tok".into(),
-                slot_id: "slot-1".into(),
-                binary_path: "/usr/bin/backend".into(),
-            }),
             guide_mcp_config: Some(GuideMcpConfig {
                 port: 8000,
                 token: "guide-tok".into(),

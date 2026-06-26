@@ -23,13 +23,6 @@ pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
 pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
-// `team` is the legacy engine (removed in orchestrator P5). Its
-// `UpdateTaskParams` is re-exported under the disambiguated name
-// `UpdateTeamTaskParams` so the going-forward root `UpdateTaskParams` is the
-// orchestrator one (below).
-pub use repository::team::{
-    UpdateTaskParams as UpdateTeamTaskParams, UpdateTeamAgentParams, UpdateTeamParams,
-};
 pub use repository::{
     CreateAcpSessionParams, CreateTerminalParams, GLOBAL_CAP, IAcpSessionRepository,
     IAgentMetadataRepository, IAssistantOverrideRepository, IAssistantRepository,
@@ -38,7 +31,7 @@ pub use repository::{
     IConversationRepository, ICronRepository, IIdmmInterventionRepository, IKnowledgeRepository,
     IMcpServerRepository, IOAuthTokenRepository, IProviderRepository, IRemoteAgentRepository,
     IRequirementRepository, ISettingsRepository, ISkillTagRepository, ITagSettingRepository,
-    ITeamRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
+    ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, PER_TARGET_CAP, PersistedSessionState, SaveRuntimeStateParams,
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantOverrideRepository,
     SqliteAssistantRepository, SqliteAssistantTagRepository, SqliteAttachmentRepository,
@@ -47,7 +40,7 @@ pub use repository::{
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
     SqliteOAuthTokenRepository, SqliteProviderRepository, SqliteRemoteAgentRepository,
     SqliteRequirementRepository, SqliteSettingsRepository, SqliteSkillTagRepository,
-    SqliteTagSettingRepository, SqliteTeamRepository, SqliteTerminalRepository,
+    SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TTL_MS,
 };
 // Orchestration (智能编排) repository traits + sqlite impls + params.
