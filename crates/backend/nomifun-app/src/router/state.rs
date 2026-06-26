@@ -38,8 +38,8 @@ use nomifun_office::{
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
 use nomifun_orchestrator::{
-    ConversationWorkerRunner, OrchestratorRouterState, OrchestratorRunEventEmitter, PlanProducer,
-    RunEngine, RunEngineDeps, RunService, WorkerRunner,
+    ConversationWorkerRunner, LlmPlanProducer, OrchestratorRouterState, OrchestratorRunEventEmitter,
+    PlanProducer, RunEngine, RunEngineDeps, RunService, WorkerRunner,
 };
 use nomifun_companion::CompanionRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
@@ -888,11 +888,10 @@ pub fn build_webhook_state(services: &AppServices) -> WebhookRouterState {
 /// `ConversationWorkerRunner` built from a fresh `ConversationService` (the same
 /// recipe `build_cron_state` / `build_requirement_state` use).
 ///
-/// NOTE(Task 9): the [`PlanProducer`] is wired here as a placeholder that errors
-/// at plan time — selecting the real "lead" model + building an `LlmPlanProducer`
-/// (and resuming persisted `running` runs at boot) is Task 9's app-integration
-/// job. Fleet/workspace CRUD and run create/inspect/cancel are fully functional
-/// with this placeholder; only `plan()` is gated until Task 9 supplies the lead.
+/// Task 9 (app integration): the [`PlanProducer`] is a real [`LlmPlanProducer`]
+/// (lead resolved at plan time — see the LEAD CHOICE note inline), the worker is
+/// the production [`ConversationWorkerRunner`], and every persisted `running` run
+/// resumes its loop at boot via [`RunEngine::resume_persisted_runs`].
 pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterState {
     let pool = services.database.pool().clone();
     let fleet_repo: Arc<dyn nomifun_db::IFleetRepository> =
@@ -928,14 +927,50 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
         acp_session_repo,
     )
     .with_runtime_state(services.conversation_runtime_state.clone());
+    // A worker turn runs the same nomi send loop as a plain conversation, so wire
+    // the failover deps here too — parity with build_requirement_state's
+    // ConversationService (the seam self-gates on AgentType::Nomi).
+    conv_service.with_failover_deps(
+        Arc::new(SqliteProviderRepository::new(pool.clone())),
+        Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
+    );
     let worker: Arc<dyn WorkerRunner> = Arc::new(ConversationWorkerRunner::new(
         conv_service,
         services.worker_task_manager.clone(),
-        "system_default_user".to_string(),
+        nomifun_auth::SYSTEM_USER_ID.to_string(),
     ));
 
-    // Placeholder planner (Task 9 replaces with a real LlmPlanProducer).
-    let planner: Arc<dyn PlanProducer> = Arc::new(UnwiredPlanProducer);
+    // Planner: a production LlmPlanProducer making one structured one-shot call
+    // against a "lead" model to decompose the goal into a task DAG. The lead is
+    // resolved against the live provider repo at `plan()` time via
+    // `resolve_provider_config`, so the provider/encryption_key/workspace are
+    // captured here (mirroring the IDMM sidecar's LiveCompleter recipe).
+    //
+    // LEAD CHOICE (P1): `build_orchestrator_state` is synchronous (it returns the
+    // state, not a future), so we do not query the provider table here to pick a
+    // concrete lead. Instead the lead is a deferred placeholder (empty
+    // provider_id/model). On a machine with NO provider configured (CI / a fresh
+    // install), `resolve_provider_config` errors at plan time → `RunService::plan`
+    // surfaces it → `POST /runs` returns the error; the run row stays in
+    // `planning` and is re-plannable once a provider exists. On a configured
+    // machine the operator's provider drives planning. The full multi-task
+    // planning path is validated by the real-machine acceptance run with a
+    // configured provider; CI proves the route+engine seam with the mock stack in
+    // `tests/orchestrator_run_e2e.rs`. Selecting a real lead from the run's fleet
+    // snapshot (members already carry provider+model) is a natural follow-up.
+    let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
+    let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
+    let lead = nomifun_common::ProviderWithModel {
+        provider_id: String::new(),
+        model: String::new(),
+        use_model: None,
+    };
+    let planner: Arc<dyn PlanProducer> = Arc::new(LlmPlanProducer::new(
+        provider_repo,
+        encryption_key,
+        services.work_dir.clone(),
+        lead,
+    ));
 
     let run_service = Arc::new(RunService::new(
         run_repo.clone(),
@@ -944,26 +979,14 @@ pub fn build_orchestrator_state(services: &AppServices) -> OrchestratorRouterSta
         planner,
         emitter.clone(),
     ));
-    let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo, worker, emitter)));
+    let engine = RunEngine::new(Arc::new(RunEngineDeps::new(run_repo.clone(), worker, emitter)));
+    // Boot-resume: every persisted `running` run resumes its execution loop from
+    // boot (the running set is in-memory but run status is persisted), so a run
+    // that was mid-flight when the process restarted keeps going without a
+    // foreground visit. Detached + best-effort, mirroring the requirement
+    // orchestrator's `resume_persisted_bindings`.
+    engine.resume_persisted_runs(run_repo);
     OrchestratorRouterState::new(fleet, workspace, run_service, engine)
-}
-
-/// Placeholder [`PlanProducer`] until Task 9 wires the real lead-model planner.
-/// Erroring (rather than returning a fake DAG) makes a premature `plan()` call
-/// fail loudly instead of silently producing a degenerate run.
-struct UnwiredPlanProducer;
-
-#[async_trait::async_trait]
-impl PlanProducer for UnwiredPlanProducer {
-    async fn produce(
-        &self,
-        _goal: &str,
-        _members: &[nomifun_api_types::FleetMember],
-    ) -> Result<nomifun_api_types::PlannedDag, nomifun_common::AppError> {
-        Err(nomifun_common::AppError::Internal(
-            "orchestrator planner not yet wired (Task 9)".to_string(),
-        ))
-    }
 }
 
 /// **P3-X2**: build the `SecretRouterState` (browser-use credential CRUD).
