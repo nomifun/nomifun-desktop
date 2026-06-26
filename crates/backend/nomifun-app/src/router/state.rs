@@ -52,7 +52,6 @@ use nomifun_system::{
     ClientPrefService, ConnectionTestRouterState, ConnectionTestService, ModelFetchService, ProtocolDetectionService,
     ProviderService, SettingsService, SystemRouterState, VersionCheckService,
 };
-use nomifun_team::{TeamRouterState, TeamSessionService};
 use nomifun_terminal::TerminalRouterState;
 use nomifun_webhook::WebhookRouterState;
 
@@ -78,7 +77,6 @@ pub struct ModuleStates {
     pub hub: HubRouterState,
     pub skill: SkillRouterState,
     pub channel: ChannelRouterState,
-    pub team: TeamRouterState,
     pub cron: CronRouterState,
     pub requirement: RequirementRouterState,
     pub idmm: IdmmRouterState,
@@ -174,17 +172,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let (channel_state, channel_components) = build_channel_state(services, ext_state.registry.clone()).await;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
-    let backend_binary_path = Arc::new(
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.canonicalize().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("nomicore")),
-    );
-    tracing::info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: backend binary path resolved"
-    );
-
     let pool = services.database.pool().clone();
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
     let encryption_key = derive_encryption_key(&services.jwt_secret_raw);
@@ -222,12 +209,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         hub: hub_state,
         skill: skill_state,
         channel: channel_state,
-        team: build_team_state(
-            services,
-            Some(cron.cron_service.clone()),
-            backend_binary_path.clone(),
-            services.guide_mcp_config.clone(),
-        ),
         cron,
         requirement: requirement_state,
         idmm: idmm_state,
@@ -684,69 +665,6 @@ pub async fn build_channel_state(
     };
 
     (state, components)
-}
-
-/// Build the default `TeamRouterState` from application services.
-///
-/// `backend_binary_path` is resolved once in `build_module_states` via
-/// `std::env::current_exe()` and cloned into each builder that needs it,
-/// per `docs/teams/phase1/interface-contracts.md` §10.
-pub fn build_team_state(
-    services: &AppServices,
-    cron_service: Option<Arc<nomifun_cron::service::CronService>>,
-    backend_binary_path: Arc<std::path::PathBuf>,
-    guide_mcp_config: Option<nomifun_api_types::GuideMcpConfig>,
-) -> TeamRouterState {
-    let pool = services.database.pool().clone();
-    let team_repo: Arc<dyn nomifun_db::ITeamRepository> = Arc::new(nomifun_db::SqliteTeamRepository::new(pool.clone()));
-    let conv_repo: Arc<dyn nomifun_db::IConversationRepository> =
-        Arc::new(SqliteConversationRepository::new(pool.clone()));
-    let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
-        Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
-    let acp_session_repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(pool));
-    let skill_resolver = Arc::new(nomifun_conversation::skill_resolver::ExtensionSkillResolver::new(
-        services.skill_paths.clone(),
-    ));
-    let conv_service = ConversationService::new(
-        services.work_dir.clone(),
-        services.event_bus.clone(),
-        skill_resolver,
-        services.worker_task_manager.clone(),
-        conv_repo,
-        agent_metadata_repo,
-        acp_session_repo,
-    )
-    .with_runtime_state(services.conversation_runtime_state.clone());
-    conv_service.with_mcp_server_repo(Arc::new(nomifun_db::SqliteMcpServerRepository::new(
-        services.database.pool().clone(),
-    )));
-    if let Some(hook) = services.task_manager_delete_hook.clone() {
-        conv_service.with_delete_hook(hook);
-    }
-    if let Some(cron_service) = cron_service {
-        conv_service.with_delete_hook(cron_service.clone());
-        conv_service.with_cron_service(Some(cron_service));
-    }
-    // Phase 3 (review #7): a team leader nomi turn runs the same send loop as a
-    // plain conversation, so wire the failover deps here too — parity with the
-    // other 5 ConversationService construction sites. The seam self-gates on
-    // AgentType::Nomi (review #9), so this is a no-op for ACP team leaders and
-    // only enables failover for nomi-engine ones.
-    conv_service.with_failover_deps(
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        Arc::new(SqliteClientPreferenceRepository::new(services.database.pool().clone())),
-    );
-    let service = TeamSessionService::new(
-        team_repo,
-        Arc::new(SqliteAgentMetadataRepository::new(services.database.pool().clone())),
-        Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
-        conv_service,
-        services.event_bus.clone(),
-        services.worker_task_manager.clone(),
-        backend_binary_path,
-        guide_mcp_config,
-    );
-    TeamRouterState { service }
 }
 
 /// Build the default `TerminalRouterState` from application services.

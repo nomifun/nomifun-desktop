@@ -32,7 +32,6 @@ use nomifun_realtime::{WsHandlerState, ws_upgrade_handler};
 use nomifun_requirement::requirement_routes;
 use nomifun_shell::shell_routes;
 use nomifun_system::{connection_test_routes, system_routes};
-use nomifun_team::team_routes;
 use nomifun_terminal::terminal_routes;
 use nomifun_webhook::webhook_routes;
 
@@ -346,10 +345,6 @@ pub fn create_router_with_all_state(
     let channel_authenticated = channel_routes(states.channel)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
-    // Team routes protected by auth middleware
-    let team_authenticated = team_routes(states.team)
-        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
-
     // Cron routes protected by auth middleware
     let cron_authenticated = cron_routes(states.cron)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -469,7 +464,6 @@ pub fn create_router_with_all_state(
         .merge(hub_authenticated)
         .merge(skill_authenticated)
         .merge(channel_authenticated)
-        .merge(team_authenticated)
         .merge(cron_authenticated)
         .merge(requirement_authenticated)
         .merge(idmm_authenticated)
