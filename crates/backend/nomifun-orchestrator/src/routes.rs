@@ -11,11 +11,11 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 
 use nomifun_api_types::{
     ApiResponse, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest, Fleet, OrchWorkspace,
-    Run, RunDetail, UpdateFleetRequest, UpdateWorkspaceRequest,
+    ReassignRequest, Run, RunDetail, UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -47,6 +47,10 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
         )
         .route("/api/orchestrator/runs/{id}", get(get_run))
         .route("/api/orchestrator/runs/{id}/cancel", post(cancel_run))
+        .route(
+            "/api/orchestrator/runs/{run_id}/tasks/{task_id}/assignment",
+            put(reassign_task),
+        )
         .with_state(state)
 }
 
@@ -188,6 +192,21 @@ async fn cancel_run(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.engine.stop(&id);
     state.run_service.cancel(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Override (or lock) the member assigned to a task. The reassign path: upserts
+/// the task's assignment to the requested member with `source = "override"`,
+/// `locked = req.locked.unwrap_or(true)`. The service validates the run/task
+/// exist and the member is in the run's fleet snapshot.
+async fn reassign_task(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((run_id, task_id)): Path<(String, String)>,
+    body: Result<Json<ReassignRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.run_service.reassign(&run_id, &task_id, req).await?;
     Ok(Json(ApiResponse::success()))
 }
 

@@ -125,6 +125,15 @@ pub trait IRunRepository: Send + Sync {
         p: CreateAssignmentParams,
     ) -> Result<OrchAssignmentRow, sqlx::Error>;
 
+    /// Replace a task's assignment (override/lock path). Deletes any existing
+    /// assignment rows for the task, then inserts a fresh one with the given
+    /// member/source/locked. Used by `reassign` — a human override is a clean
+    /// single-assignment replacement, not an additive row. Returns the new row.
+    async fn set_assignment(
+        &self,
+        p: CreateAssignmentParams,
+    ) -> Result<OrchAssignmentRow, sqlx::Error>;
+
     /// Return all assignments for tasks belonging to a run.
     async fn list_assignments(&self, run_id: &str) -> Result<Vec<OrchAssignmentRow>, sqlx::Error>;
 

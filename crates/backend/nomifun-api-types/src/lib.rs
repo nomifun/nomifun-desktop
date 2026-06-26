@@ -147,8 +147,8 @@ pub use office::{
 pub use orchestrator::{
     Assignment, CapabilityProfile, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest,
     Fleet, FleetMember, FleetMemberInput, MemberConstraints, OrchWorkspace, PlannedDag,
-    PlannedTask, Run, RunDetail, RunTask, RunTaskDep, TaskProfile, UpdateFleetRequest,
-    UpdateWorkspaceRequest,
+    PlannedTask, ReassignRequest, Run, RunDetail, RunTask, RunTaskDep, TaskProfile,
+    UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,
