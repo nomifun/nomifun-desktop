@@ -18,3 +18,4 @@ async-trait.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 sqlx = { workspace = true }
+tower = { workspace = true, features = ["util"] }

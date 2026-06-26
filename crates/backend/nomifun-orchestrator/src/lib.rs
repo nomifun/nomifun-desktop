@@ -6,16 +6,17 @@
 //! - [`WorkspaceService`] — CRUD over per-user orchestration workspaces (Row↔DTO
 //!   mapping; the DTO omits the internal `user_id` / `context` columns).
 //! - [`OrchestratorError`] — service-layer error mapped into `AppError`.
-//! - [`OrchestratorRouterState`] — router state shell (`fleet` + `workspace`),
-//!   consumed by routes in Task 7.
-//!
-//! Routes (`orchestrator_routes`) are intentionally NOT exported yet — they
-//! arrive in Task 7.
+//! - [`OrchestratorRouterState`] — router state (`fleet` + `workspace`).
+//! - [`orchestrator_routes`] — the axum router mounting the fleet/workspace CRUD
+//!   endpoints. Auth is layered externally in nomifun-app, so handlers safely
+//!   extract `CurrentUser`.
 
 pub mod error;
+pub mod routes;
 pub mod service;
 pub mod state;
 
 pub use error::OrchestratorError;
+pub use routes::orchestrator_routes;
 pub use service::{FleetService, WorkspaceService};
 pub use state::OrchestratorRouterState;
