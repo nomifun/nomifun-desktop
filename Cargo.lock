@@ -5695,6 +5695,7 @@ dependencies = [
  "nomifun-idmm",
  "nomifun-knowledge",
  "nomifun-mcp",
+ "nomifun-orchestrator",
  "nomifun-requirement",
  "nomifun-secret",
  "nomifun-shell",
