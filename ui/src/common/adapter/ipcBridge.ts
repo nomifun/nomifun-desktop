@@ -74,17 +74,6 @@ import type {
 } from '../types/provider/providerApi';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
-  ITeamAgentRemovedEvent,
-  ITeamAgentRenamedEvent,
-  ITeamAgentSpawnedEvent,
-  ITeamAgentStatusEvent,
-  ITeamCreatedEvent,
-  ITeamListChangedEvent,
-  ITeamTeammateMessageEvent,
-  TTeam,
-  TeamAgent,
-} from '../types/team/teamTypes';
-import type {
   TCreateFleet,
   TCreateRun,
   TCreateWorkspace,
@@ -127,14 +116,6 @@ import {
   wsMappedEmitter,
 } from './httpBridge';
 import { fromApiSearchResult, type ApiMessageSearchItem } from './searchMapper';
-import type { IAddTeamAgentParams, ICreateTeamParams } from './teamMapper';
-import {
-  fromBackendAgent,
-  fromBackendTeam,
-  fromBackendTeamList,
-  fromBackendTeamOptional,
-  toBackendAgent,
-} from './teamMapper';
 import { fromBackendCompareResult, type RawCompareResult } from './fileSnapshotMapper';
 import {
   absoluteToRelativePath,
@@ -2182,63 +2163,6 @@ export const hub = {
   checkUpdates: httpPost<{ name: string }[], void>('/api/hub/check-updates'),
   update: httpPost<void, { name: string }>('/api/hub/update'),
   onStateChanged: wsEmitter<{ name: string; status: HubExtensionStatus; error?: string }>('hub.state-changed'),
-};
-
-// ---------------------------------------------------------------------------
-// Team Mode API — routed to /api/teams/*
-// ---------------------------------------------------------------------------
-
-export type { IAddTeamAgentParams, ICreateTeamParams } from './teamMapper';
-
-export const team = {
-  create: withResponseMap(
-    httpPost<TTeam, ICreateTeamParams>('/api/teams', (p) => ({
-      name: p.name,
-      agents: p.agents.map(toBackendAgent),
-      ...(p.workspace ? { workspace: p.workspace } : {}),
-    })),
-    fromBackendTeam
-  ),
-  list: withResponseMap(
-    httpGet<TTeam[], { user_id: string }>((p) => `/api/teams?user_id=${encodeURIComponent(p.user_id)}`),
-    fromBackendTeamList
-  ),
-  get: withResponseMap(
-    httpGet<TTeam | null, { id: string }>((p) => `/api/teams/${p.id}`),
-    fromBackendTeamOptional
-  ),
-  remove: httpDelete<void, { id: string }>((p) => `/api/teams/${p.id}`),
-  addAgent: withResponseMap(
-    httpPost<TeamAgent, IAddTeamAgentParams>(
-      (p) => `/api/teams/${p.team_id}/agents`,
-      (p) => toBackendAgent(p.agent)
-    ),
-    fromBackendAgent
-  ),
-  removeAgent: httpDelete<void, { team_id: string; slot_id: string }>(
-    (p) => `/api/teams/${p.team_id}/agents/${p.slot_id}`
-  ),
-  stop: httpDelete<void, { team_id: string }>((p) => `/api/teams/${p.team_id}/session`),
-  ensureSession: httpPost<void, { team_id: string }>((p) => `/api/teams/${p.team_id}/session`),
-  renameAgent: httpPatch<void, { team_id: string; slot_id: string; new_name: string }>(
-    (p) => `/api/teams/${p.team_id}/agents/${p.slot_id}/name`,
-    (p) => ({ name: p.new_name })
-  ),
-  renameTeam: httpPatch<void, { id: string; name: string }>(
-    (p) => `/api/teams/${p.id}/name`,
-    (p) => ({ name: p.name })
-  ),
-  setSessionMode: httpPost<void, { team_id: string; session_mode: string }>(
-    (p) => `/api/teams/${p.team_id}/session-mode`,
-    (p) => ({ session_mode: p.session_mode })
-  ),
-  agentStatusChanged: wsEmitter<ITeamAgentStatusEvent>('team.agent.status'),
-  agentSpawned: wsEmitter<ITeamAgentSpawnedEvent>('team.agent.spawned'),
-  agentRemoved: wsEmitter<ITeamAgentRemovedEvent>('team.agent.removed'),
-  agentRenamed: wsEmitter<ITeamAgentRenamedEvent>('team.agent.renamed'),
-  listChanged: wsEmitter<ITeamListChangedEvent>('team.list-changed'),
-  created: wsEmitter<ITeamCreatedEvent>('team.created'),
-  teammateMessage: wsEmitter<ITeamTeammateMessageEvent>('team.teammate.message'),
 };
 
 // ── Requirements Platform (需求平台) ─────────────────────────────────

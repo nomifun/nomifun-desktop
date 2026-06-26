@@ -6,7 +6,6 @@
  */
 
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
-import type { TMultiAgentConfig } from '@/renderer/pages/conversation/components/multiAgent/multiAgentConfig';
 import { storage } from '@/platform';
 
 // 系统配置存储
@@ -265,9 +264,6 @@ export type TChatConversation =
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
           cron_job_id?: string;
-          /** Session-level multi-agent collaboration config (spec §6). Config
-           * only — the runtime team-ensure is gated elsewhere. */
-          multi_agent?: TMultiAgentConfig;
         }
       >,
       'model'
@@ -298,8 +294,6 @@ export type TChatConversation =
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
           cron_job_id?: string;
-          /** Session-level multi-agent collaboration config (spec §6). */
-          multi_agent?: TMultiAgentConfig;
         }
       >,
       'model'
@@ -346,8 +340,6 @@ export type TChatConversation =
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
           cron_job_id?: string;
-          /** Session-level multi-agent collaboration config (spec §6). */
-          multi_agent?: TMultiAgentConfig;
         }
       >,
       'model'
@@ -397,8 +389,6 @@ export type TChatConversation =
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
           cron_job_id?: string;
-          /** Session-level multi-agent collaboration config (spec §6). */
-          multi_agent?: TMultiAgentConfig;
         }
       >,
       'model'
@@ -426,8 +416,6 @@ export type TChatConversation =
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
           cron_job_id?: string;
-          /** Session-level multi-agent collaboration config (spec §6). */
-          multi_agent?: TMultiAgentConfig;
         }
       >,
       'model'
@@ -469,8 +457,6 @@ export type TChatConversation =
         last_token_usage?: TokenUsageData;
         /** Cron job ID that spawned this conversation */
         cron_job_id?: string;
-        /** Session-level multi-agent collaboration config (spec §6). */
-        multi_agent?: TMultiAgentConfig;
       }
     >;
 
