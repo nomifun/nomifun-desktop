@@ -82,11 +82,46 @@ impl ConversationCanceller for NoopConversationCanceller {
     async fn cancel(&self, _conversation_id: i64) {}
 }
 
+/// Steers (mid-turn injects) a message into an in-flight worker conversation so
+/// the supervisor can nudge a running task without restarting it. The app injects
+/// an implementation wrapping
+/// [`ConversationService::steer_message`](nomifun_conversation::ConversationService::steer_message)
+/// (Nomi-only mid-turn injection; falls back to a fresh send when no live turn
+/// exists). Defined as a trait (not a bare `Fn`) so the impl can be `async` and
+/// the orchestrator crate stays free of a `nomifun-conversation` dependency (the
+/// wiring lives in `build_orchestrator_state`, exactly like
+/// [`ConversationCanceller`]).
+#[async_trait]
+pub trait ConversationSteerer: Send + Sync {
+    /// Inject `text` into the conversation identified by `conversation_id`.
+    /// Returns an error when the injection cannot be performed (e.g. a non-Nomi
+    /// engine that does not support steering); the engine maps that to a 400.
+    async fn steer(&self, conversation_id: i64, text: &str) -> Result<(), AppError>;
+}
+
+/// A [`ConversationSteerer`] that always errors — the default for harnesses /
+/// tests that drive the engine without a live conversation layer. Keeps
+/// [`RunEngineDeps::new`] infallible; the app overrides it with a real steerer.
+pub struct NoopConversationSteerer;
+
+#[async_trait]
+impl ConversationSteerer for NoopConversationSteerer {
+    async fn steer(&self, _conversation_id: i64, _text: &str) -> Result<(), AppError> {
+        Err(AppError::BadRequest("steering is not wired in this engine".to_owned()))
+    }
+}
+
 /// Hard ceiling on a single worker task's turn.
 pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Fallback concurrency cap when neither the run nor the fleet snapshot pins one.
 pub const DEFAULT_MAX_PARALLEL: usize = 4;
+
+/// How long the run loop idles (between paused-status re-checks) when the run is
+/// `paused` and has no in-flight workers. A bounded sleep — NOT a busy-spin: the
+/// loop yields the runtime each tick, then re-reads the status so a `resume` is
+/// observed within ~one interval.
+const PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Shared dependencies for all run loops. The `fleet_snapshot` is read off the
 /// run row via `run_repo` (no separate fleet handle is needed at runtime — the
@@ -109,6 +144,10 @@ pub struct RunEngineDeps {
     /// real one — `build_orchestrator_state` injects the `ConversationService`
     /// wrapper).
     pub cancel_conversation: Arc<dyn ConversationCanceller>,
+    /// Steers (mid-turn injects) a message into an in-flight worker conversation
+    /// (P3b). Defaults to [`NoopConversationSteerer`] (which errors); the app sets
+    /// a real one wrapping `ConversationService::steer_message`.
+    pub steer_conversation: Arc<dyn ConversationSteerer>,
 }
 
 impl RunEngineDeps {
@@ -131,6 +170,7 @@ impl RunEngineDeps {
             default_max_parallel: DEFAULT_MAX_PARALLEL,
             ws_repo,
             cancel_conversation: Arc::new(NoopConversationCanceller),
+            steer_conversation: Arc::new(NoopConversationSteerer),
         }
     }
 }
@@ -280,6 +320,60 @@ impl RunEngine {
             }
         });
     }
+
+    /// Steer (mid-turn inject) a message into the worker conversation of a task
+    /// (P3b). The task must belong to `run_id` and carry a stamped
+    /// `conversation_id` (i.e. its worker is — or was — live); we then delegate to
+    /// the injected [`ConversationSteerer`]. Steering does NOT change the run's
+    /// status (it nudges a running worker, it does not pause/resume/cancel).
+    ///
+    /// Lives on the engine (not [`RunService`](crate::run_service::RunService))
+    /// because the conversation layer is reachable here via `steer_conversation`
+    /// — exactly the seam [`ConversationCanceller`] uses for cancel. Guards:
+    /// - run / task not found → `NotFound` (404);
+    /// - task not in `run_id` → `NotFound` (404);
+    /// - task has no `conversation_id` (never dispatched) → `BadRequest` (400);
+    /// - a non-Nomi engine that cannot steer → the steerer's `BadRequest` (400).
+    pub async fn steer_task(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        text: &str,
+    ) -> Result<(), AppError> {
+        if text.trim().is_empty() {
+            return Err(AppError::BadRequest("steer text must not be empty".to_owned()));
+        }
+        // Confirm the run exists (clean 404 vs. a confusing task-only error).
+        if self
+            .deps
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("orchestrator database error: {e}")))?
+            .is_none()
+        {
+            return Err(AppError::NotFound(format!("run {run_id}")));
+        }
+        // The task must exist and belong to this run.
+        let task = self
+            .deps
+            .run_repo
+            .get_task(task_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("orchestrator database error: {e}")))?
+            .ok_or_else(|| AppError::NotFound(format!("task {task_id}")))?;
+        if task.run_id != run_id {
+            return Err(AppError::NotFound(format!("task {task_id} in run {run_id}")));
+        }
+        // A stamped conversation_id means the task's worker is (or was) live; with
+        // no conversation there is nothing to steer.
+        let Some(conv_id) = task.conversation_id else {
+            return Err(AppError::BadRequest(format!(
+                "task {task_id} has no worker conversation to steer (not dispatched yet)"
+            )));
+        };
+        self.deps.steer_conversation.steer(conv_id, text).await
+    }
 }
 
 /// The bounded-parallel run loop: dispatch up to `cap` ready tasks concurrently,
@@ -339,11 +433,24 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
             break;
         }
 
-        // (b) Fill: dispatch ready tasks up to the free slots. Re-query every
-        // fill so completion-driven unblocking is observed. A list error is not
-        // fatal mid-flight (workers may still be running) — log and proceed to
-        // the await branch; the next fill retries.
-        if inflight.len() < cap {
+        // (a') Paused gate (P3b): re-read the persisted run status each iteration.
+        // When `paused` the loop must NOT dispatch new workers — but it keeps
+        // processing any in-flight workers to completion (pause ≠ cancel). With
+        // no in-flight work it idle-waits (a short sleep, NOT a busy-spin) and
+        // re-checks, so a `resume` (status → `running`) is observed on the next
+        // iteration and filling resumes. A read error is treated as not-paused
+        // (fail-open: better to keep driving than to wedge on a transient error).
+        let paused = matches!(
+            deps.run_repo.get_run(run_id).await,
+            Ok(Some(r)) if r.status == "paused"
+        );
+
+        // (b) Fill: dispatch ready tasks up to the free slots — SKIPPED while
+        // paused (no new workers dispatch). Re-query every fill so completion-
+        // driven unblocking is observed. A list error is not fatal mid-flight
+        // (workers may still be running) — log and proceed to the await branch;
+        // the next fill retries.
+        if !paused && inflight.len() < cap {
             match deps.run_repo.list_ready_tasks(run_id).await {
                 Ok(ready) => {
                     let free = cap - inflight.len();
@@ -372,10 +479,20 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
             }
         }
 
-        // (c) No in-flight worker AND (above) nothing dispatchable → conclusive
-        // terminal decision. There is no busy-spin here: with zero workers in
-        // flight the task statuses cannot change underneath us.
+        // (c) No in-flight worker → either idle on the paused gate OR make the
+        // conclusive terminal decision.
         if inflight.is_empty() {
+            if paused {
+                // Paused with nothing in flight: idle-wait (NOT a busy-spin — the
+                // sleep yields the runtime) then re-loop to re-read the status. We
+                // must NOT declare the run complete/stuck here: a paused run with
+                // pending tasks is intentionally idle, not terminal. Cancel is
+                // re-checked at the top of the loop, so a `stop` still breaks out.
+                tokio::time::sleep(PAUSE_POLL_INTERVAL).await;
+                continue;
+            }
+            // Not paused: the task statuses are conclusive (with zero workers in
+            // flight they cannot change underneath us — no busy-spin).
             match deps.run_repo.list_tasks(run_id).await {
                 Ok(tasks) => {
                     let all_terminal = tasks
@@ -1700,5 +1817,398 @@ mod tests {
         // Run persisted as cancelled.
         let detail = run_service.get_detail(&run.id).await.expect("detail");
         assert_eq!(detail.run.status, "cancelled", "run persisted as cancelled");
+    }
+
+    // -------------------------------------------------------------------------
+    // P3b: pause freezes new dispatch (in-flight finishes), resume completes.
+    // -------------------------------------------------------------------------
+
+    /// Records the conversation ids it was asked to steer (P3b steer test).
+    struct RecordingSteerer {
+        steered: Arc<Mutex<Vec<(i64, String)>>>,
+        /// When true, `steer` errors (simulates a non-Nomi engine that cannot steer).
+        fail: bool,
+    }
+    impl RecordingSteerer {
+        fn new() -> Self {
+            Self {
+                steered: Arc::new(Mutex::new(vec![])),
+                fail: false,
+            }
+        }
+        fn handle(&self) -> Arc<Mutex<Vec<(i64, String)>>> {
+            self.steered.clone()
+        }
+    }
+    #[async_trait]
+    impl ConversationSteerer for RecordingSteerer {
+        async fn steer(&self, conversation_id: i64, text: &str) -> Result<(), AppError> {
+            if self.fail {
+                return Err(AppError::BadRequest("steer_unsupported".to_owned()));
+            }
+            self.steered.lock().unwrap().push((conversation_id, text.to_owned()));
+            Ok(())
+        }
+    }
+
+    /// A worker that records its per-task start count + the live concurrency, then
+    /// sleeps `delay`. Used by the pause test to observe that no NEW worker starts
+    /// while the run is paused (the start count freezes).
+    struct CountingWorkerRunner {
+        delay: Duration,
+        started: AtomicUsize,
+        live: AtomicUsize,
+        max_concurrent: AtomicUsize,
+    }
+    impl CountingWorkerRunner {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                started: AtomicUsize::new(0),
+                live: AtomicUsize::new(0),
+                max_concurrent: AtomicUsize::new(0),
+            }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for CountingWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_concurrent.fetch_max(now, Ordering::SeqCst);
+            on_started(900);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(WorkerOutcome {
+                conversation_id: 900,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn pause_freezes_new_dispatch_then_resume_completes() {
+        // Diamond DAG, cap=1 → tasks run one at a time. After the FIRST task
+        // starts, pause the run: the engine must NOT dispatch the next independent
+        // task (start count frozen at 1) while the in-flight one finishes. After
+        // resume, the remaining tasks dispatch and the run completes.
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        // 60ms delay per task gives a window to pause after task 1 starts.
+        let worker = Arc::new(CountingWorkerRunner::new(Duration::from_millis(60)));
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.default_max_parallel = 1;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "pause fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "pause ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "pause me".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None, // supervised → running after plan
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+
+        engine.start(run.id.clone());
+
+        // Wait until the FIRST worker has started, then pause immediately.
+        for _ in 0..200 {
+            if worker.started.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(worker.started.load(Ordering::SeqCst) >= 1, "first worker must start");
+        run_service.pause(&run.id).await.expect("pause");
+
+        // While paused, the in-flight worker finishes but NO new worker dispatches.
+        // Wait well past the in-flight worker's delay (+ a couple pause-poll ticks)
+        // and assert the start count did not grow past 1.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let started_while_paused = worker.started.load(Ordering::SeqCst);
+        assert_eq!(
+            started_while_paused, 1,
+            "paused run must not dispatch a new worker (started={started_while_paused})"
+        );
+        // The run must still be paused (NOT completed/failed — the engine did not
+        // declare a terminal state while paused with pending tasks).
+        assert_eq!(
+            run_service.get_detail(&run.id).await.unwrap().run.status,
+            "paused",
+            "run stays paused (not terminal) while idle with pending tasks"
+        );
+        // Peak concurrency never exceeded the cap.
+        assert_eq!(worker.max_concurrent.load(Ordering::SeqCst), 1);
+
+        // Resume → the loop resumes filling and the run completes (all 3 tasks).
+        run_service.resume(&run.id).await.expect("resume");
+        engine.start(run.id.clone()); // idempotent restart (route does this on resume)
+        let detail = drive_to_completion(&run_service, &run.id).await;
+        assert_eq!(detail.run.status, "completed", "resumed run completes");
+        assert_eq!(worker.started.load(Ordering::SeqCst), 3, "all 3 tasks eventually run");
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done", "task {} done after resume", t.title);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // P3b: steer_task injects into the running task's conversation; guards.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn steer_task_injects_into_running_worker_conversation() {
+        // A long-delay worker keeps a task running with a stamped conversation_id;
+        // steer_task must call the steerer with THAT conv id + the text.
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        let worker = Arc::new(LongDelayWorkerRunner::new(Duration::from_secs(30)));
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let steerer = Arc::new(RecordingSteerer::new());
+        let recorded = steerer.handle();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(60);
+        engine_deps.default_max_parallel = 1;
+        engine_deps.steer_conversation = steerer;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "steer fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "steer ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "steer me".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+        engine.start(run.id.clone());
+
+        // Wait for a task to be running with a stamped conversation_id.
+        let mut running_task: Option<(String, i64)> = None;
+        for _ in 0..200 {
+            let detail = run_service.get_detail(&run.id).await.expect("detail");
+            running_task = detail
+                .tasks
+                .iter()
+                .find(|t| t.status == "running")
+                .and_then(|t| t.conversation_id.map(|c| (t.id.clone(), c)));
+            if running_task.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (task_id, conv_id) = running_task.expect("a running task with conv_id");
+
+        // Steer the running task → the steerer records (conv_id, text).
+        engine
+            .steer_task(&run.id, &task_id, "focus on the auth module")
+            .await
+            .expect("steer ok");
+        let got = recorded.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "steer must call the steerer exactly once");
+        assert_eq!(got[0].0, conv_id, "steered the running task's conversation");
+        assert_eq!(got[0].1, "focus on the auth module");
+
+        // Steering did NOT change the run status (still running).
+        assert_eq!(
+            run_service.get_detail(&run.id).await.unwrap().run.status,
+            "running",
+            "steer does not change run status"
+        );
+
+        engine.stop(&run.id);
+    }
+
+    #[tokio::test]
+    async fn steer_task_guards_no_conversation_and_unknown_ids() {
+        // A run whose only task is `pending` (engine never started) → the task has
+        // no conversation_id → steer is a BadRequest. Unknown run / task → NotFound.
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(1, "x"));
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.steer_conversation = Arc::new(RecordingSteerer::new());
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "guard fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "guard ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "guard me".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+        // Do NOT start the engine: tasks stay `pending` with no conversation_id.
+        let detail = run_service.get_detail(&run.id).await.expect("detail");
+        let pending_task = detail.tasks[0].id.clone();
+
+        // No conversation → BadRequest.
+        let err = engine
+            .steer_task(&run.id, &pending_task, "hello")
+            .await
+            .expect_err("no-conv steer must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // Empty text → BadRequest.
+        let err = engine
+            .steer_task(&run.id, &pending_task, "   ")
+            .await
+            .expect_err("empty text must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // Unknown run → NotFound.
+        let err = engine
+            .steer_task("run_missing", &pending_task, "hi")
+            .await
+            .expect_err("unknown run must 404");
+        assert!(matches!(err, AppError::NotFound(_)), "got: {err:?}");
+
+        // Unknown task (valid run) → NotFound.
+        let err = engine
+            .steer_task(&run.id, "rtask_missing", "hi")
+            .await
+            .expect_err("unknown task must 404");
+        assert!(matches!(err, AppError::NotFound(_)), "got: {err:?}");
     }
 }

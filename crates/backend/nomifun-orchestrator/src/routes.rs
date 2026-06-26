@@ -15,7 +15,7 @@ use axum::routing::{get, post, put};
 
 use nomifun_api_types::{
     ApiResponse, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest, Fleet, OrchWorkspace,
-    ReassignRequest, Run, RunDetail, UpdateFleetRequest, UpdateWorkspaceRequest,
+    ReassignRequest, Run, RunDetail, SteerRequest, UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -47,6 +47,13 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
         )
         .route("/api/orchestrator/runs/{id}", get(get_run))
         .route("/api/orchestrator/runs/{id}/cancel", post(cancel_run))
+        .route("/api/orchestrator/runs/{id}/approve", post(approve_run))
+        .route("/api/orchestrator/runs/{id}/pause", post(pause_run))
+        .route("/api/orchestrator/runs/{id}/resume", post(resume_run))
+        .route(
+            "/api/orchestrator/runs/{run_id}/tasks/{task_id}/steer",
+            post(steer_task),
+        )
         .route(
             "/api/orchestrator/runs/{run_id}/tasks/{task_id}/assignment",
             put(reassign_task),
@@ -148,12 +155,16 @@ async fn delete_workspace(
 
 // ── Runs ─────────────────────────────────────────────────────────────────────
 
-/// Create a run, then plan it, then hand it to the engine. The three steps are
-/// deliberately separate (Task 6 contract): `create` parks the run in `planning`,
-/// `plan` decomposes the goal + flips it to `running`, and `engine.start` spawns
-/// the (synchronous, fire-and-forget) execution loop. If planning fails, the
-/// error is surfaced — the run already exists in `planning` and can be re-planned
-/// later, but the caller learns the goal could not be decomposed.
+/// Create a run, then plan it, then (unless interactive) hand it to the engine.
+/// The steps are deliberately separate (Task 6 contract): `create` parks the run
+/// in `planning`, `plan` decomposes the goal + applies the **autonomy gate**
+/// (`interactive` → `awaiting_plan_approval`; else → `running`), and
+/// `engine.start` spawns the (synchronous, fire-and-forget) execution loop.
+///
+/// **Autonomy gate (P3b):** an `interactive` run must NOT start until a human
+/// approves the plan (`POST .../approve`), so we skip `engine.start` here for it.
+/// All other levels start immediately. If planning fails, the error is surfaced —
+/// the run already exists in `planning` and can be re-planned later.
 async fn create_run(
     State(state): State<OrchestratorRouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -162,8 +173,12 @@ async fn create_run(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let run = state.run_service.create(&user.id, req).await?;
     state.run_service.plan(&run.id).await?;
+    // `interactive` parks at `awaiting_plan_approval` — do NOT start the engine
+    // until the plan is approved. All other autonomy levels start immediately.
     // `start` is synchronous (spawns the loop internally) — do not await.
-    state.engine.start(run.id.clone());
+    if run.autonomy != "interactive" {
+        state.engine.start(run.id.clone());
+    }
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(run))))
 }
 
@@ -192,6 +207,58 @@ async fn cancel_run(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.engine.stop(&id);
     state.run_service.cancel(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Approve an `interactive` run's plan: `awaiting_plan_approval` → `running`,
+/// then start the engine. Mirrors `create_run`'s start step — the service mutates
+/// status + emits, the route owns the engine lifecycle.
+async fn approve_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.run_service.approve_plan(&id).await?;
+    state.engine.start(id);
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Pause a `running` run: `running` → `paused`. The engine's persistent loop
+/// observes the paused status and stops dispatching new workers (in-flight
+/// workers run to completion). No engine call needed — the loop self-gates.
+async fn pause_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.run_service.pause(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Resume a `paused` run: `paused` → `running`, then `engine.start` (idempotent
+/// stop-then-start) so a loop that idled out or exited is respawned; a still-alive
+/// paused loop is simply replaced and resumes filling.
+async fn resume_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.run_service.resume(&id).await?;
+    state.engine.start(id);
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Steer (mid-turn inject) a message into a running task's worker conversation.
+/// The engine validates the run/task + a stamped `conversation_id` and delegates
+/// to `ConversationService::steer_message`. Does NOT change run status.
+async fn steer_task(
+    State(state): State<OrchestratorRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path((run_id, task_id)): Path<(String, String)>,
+    body: Result<Json<SteerRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.engine.steer_task(&run_id, &task_id, &req.text).await?;
     Ok(Json(ApiResponse::success()))
 }
 
