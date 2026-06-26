@@ -1,6 +1,7 @@
 use nomifun_common::now_ms;
 use nomifun_db::models::{MailboxMessageRow, TeamAgentRow, TeamRow, TeamTaskRow};
-use nomifun_db::{DbError, ITeamRepository, UpdateTaskParams, UpdateTeamAgentParams, UpdateTeamParams};
+use nomifun_db::UpdateTeamTaskParams as UpdateTaskParams;
+use nomifun_db::{DbError, ITeamRepository, UpdateTeamAgentParams, UpdateTeamParams};
 use std::sync::Mutex;
 
 /// In-memory backing store for [`MockTeamRepo`].
