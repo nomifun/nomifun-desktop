@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, type Edge } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -12,10 +12,11 @@ import './dag-canvas.css';
 import { Branch } from '@icon-park/react';
 import { Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
-import type { TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
+import type { TAssignment, TFleetMember, TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useRunLive } from '../useRunLive';
 import { layoutDag } from './layoutDag';
+import { memberLogo, memberShortLabel } from './memberLabel';
 import RunDetailHeader from './RunDetailHeader';
 import TaskNode, { taskStatusMeta, type TaskFlowNode } from './nodes/TaskNode';
 
@@ -25,10 +26,22 @@ const NODE_TYPES = { task: TaskNode } as const;
 /** Statuses that count as "done" for the aggregate progress pill. */
 const DONE_STATUSES = new Set(['done', 'completed', 'skipped', 'cancelled']);
 
+/** Payload handed up when a DAG node is clicked — everything the task inspector
+ * needs to show the assignment rationale and offer reassign/lock, without the
+ * panel having to re-fetch the run. `refetch` re-pulls the run detail so the
+ * canvas + inspector reflect a reassignment immediately. */
+export interface OpenTaskPayload {
+  task: TRunTask;
+  assignment: TAssignment | null;
+  fleetMembers: TFleetMember[];
+  runId: string;
+  refetch: () => Promise<void>;
+}
+
 interface DagCanvasProps {
   runId: string;
   onBack: () => void;
-  onOpenTask: (task: TRunTask) => void;
+  onOpenTask: (payload: OpenTaskPayload) => void;
 }
 
 /**
@@ -46,7 +59,7 @@ interface DagCanvasProps {
  */
 const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
   const { t } = useTranslation();
-  const { detail, loading } = useRunLive(runId);
+  const { detail, loading, refetch } = useRunLive(runId);
   const [message, ctx] = useArcoMessage();
   const [cancelling, setCancelling] = useState(false);
 
@@ -74,12 +87,34 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
     [theme]
   );
 
-  // task_id → assignment member id (for the node chip).
-  const memberByTask = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const a of detail?.assignments ?? []) map.set(a.task_id, a.member_id);
+  // task_id → assignment (for the node chip + the inspector).
+  const assignmentByTask = useMemo(() => {
+    const map = new Map<string, TAssignment>();
+    for (const a of detail?.assignments ?? []) map.set(a.task_id, a);
     return map;
   }, [detail?.assignments]);
+
+  // member_id → fleet member (the run's fleet snapshot) for friendly labels.
+  const memberById = useMemo(() => {
+    const map = new Map<string, TFleetMember>();
+    for (const m of detail?.fleet_members ?? []) map.set(m.id, m);
+    return map;
+  }, [detail?.fleet_members]);
+
+  const fleetMembers = useMemo(() => detail?.fleet_members ?? [], [detail?.fleet_members]);
+
+  const handleOpenTask = useCallback(
+    (task: TRunTask) => {
+      onOpenTask({
+        task,
+        assignment: assignmentByTask.get(task.id) ?? null,
+        fleetMembers,
+        runId,
+        refetch,
+      });
+    },
+    [onOpenTask, assignmentByTask, fleetMembers, runId, refetch]
+  );
 
   const nodes = useMemo<TaskFlowNode[]>(() => {
     const tasks = detail?.tasks ?? [];
@@ -91,7 +126,11 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
         task.graph_x != null && task.graph_y != null
           ? { x: task.graph_x, y: task.graph_y }
           : (fallback[task.id] ?? { x: 0, y: 0 });
-      const memberId = memberByTask.get(task.id);
+      const assignment = assignmentByTask.get(task.id);
+      const member = assignment ? memberById.get(assignment.member_id) : undefined;
+      // Friendly label from the fleet snapshot; fall back to the localized
+      // "assigned" pill if the member can't be resolved (still better than a uuid).
+      const friendly = memberShortLabel(member);
       return {
         id: task.id,
         type: 'task',
@@ -102,14 +141,16 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
           statusLabel: t(`orchestrator.run.task.status.${task.status}`, {
             defaultValue: t('orchestrator.run.status.unknown'),
           }),
-          memberId,
-          chipLabel: memberId ? t('orchestrator.run.detail.assigned') : undefined,
+          memberId: assignment?.member_id,
+          chipLabel: assignment ? (friendly ?? t('orchestrator.run.detail.assigned')) : undefined,
+          memberLogo: memberLogo(member),
+          locked: assignment?.locked ?? false,
           attempt: task.attempt,
-          onOpen: () => onOpenTask(task),
+          onOpen: () => handleOpenTask(task),
         },
       };
     });
-  }, [detail?.tasks, detail?.deps, memberByTask, onOpenTask, t]);
+  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t]);
 
   const edges = useMemo<Edge[]>(() => {
     const tasks = detail?.tasks ?? [];

@@ -90,6 +90,7 @@ import type {
   TCreateWorkspace,
   TFleet,
   TOrchWorkspace,
+  TReassign,
   TRun,
   TRunDetail,
   TUpdateFleet,
@@ -2763,6 +2764,10 @@ export const orchestrator = {
     cancel: httpPost<void, { id: string }>(
       (p) => `/api/orchestrator/runs/${p.id}/cancel`,
       () => undefined
+    ),
+    reassign: httpPut<void, { run_id: string; task_id: string; updates: TReassign }>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/assignment`,
+      (p) => p.updates
     ),
   },
   // Realtime WS events from the run engine (OrchestratorRunEventEmitter). Wire

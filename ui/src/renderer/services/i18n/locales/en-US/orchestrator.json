@@ -155,6 +155,16 @@
       "untitledTask": "(Untitled task)",
       "assigned": "Assigned"
     },
+    "assign": {
+      "rationaleTitle": "Why this member",
+      "noRationale": "No assignment rationale yet.",
+      "score": "Match {{score}}",
+      "reassign": "Reassign to another member",
+      "reassignSuccess": "Assignment updated",
+      "reassignError": "Failed to update assignment: {{error}}",
+      "locked": "Lock assignment",
+      "lockedHint": "When locked, the orchestrator won't auto-reassign this task on the next planning pass."
+    },
     "task": {
       "status": {
         "pending": "Pending",

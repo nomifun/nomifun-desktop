@@ -155,6 +155,16 @@
       "untitledTask": "（未命名任务）",
       "assigned": "已分派"
     },
+    "assign": {
+      "rationaleTitle": "为何分派给它",
+      "noRationale": "暂无分派说明。",
+      "score": "匹配度 {{score}}",
+      "reassign": "改派给其他成员",
+      "reassignSuccess": "已更新分派",
+      "reassignError": "更新分派失败：{{error}}",
+      "locked": "锁定分派",
+      "lockedHint": "锁定后，编排器不会在后续重新规划时自动改派该任务。"
+    },
     "task": {
       "status": {
         "pending": "待开始",
