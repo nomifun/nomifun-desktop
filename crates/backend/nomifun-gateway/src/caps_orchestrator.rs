@@ -11,18 +11,20 @@
 //!   spawns (or restarts) the loop that drives ready tasks to completion.
 //!
 //! `nomi_run_create` performs the create → plan → (conditionally) start
-//! choreography so a single tool call sets up a run from the calling conversation.
-//! As of the conversation-native redesign (P1) it takes ONLY `{goal, autonomy?}`
-//! and pulls everything else — `work_dir`, `model_range`, `lead_conv_id` — from
-//! the CALLING conversation's `extra` (the "orchestration lead" context), then
-//! drives the workspace-less
-//! [`create_adhoc`](nomifun_orchestrator::RunService::create_adhoc) path. As of
-//! P6 Task 1 the lead path defaults autonomy to **`interactive`**: the run parks
-//! at `awaiting_plan_approval` and the engine is NOT started until the user
-//! approves the plan (the tool returns that status + a relay message for the
-//! 主管). Other autonomy levels start immediately. The two read tools project the
-//! rich `RunDetail` down to a compact, LLM-friendly shape (run status + per-task
-//! title/status, and on result the per-task `output_summary`).
+//! choreography so a single tool call sets up a run from EXPLICIT params. As of
+//! the orchestration-Tab redesign (P1) the lead-conversation concept is GONE: the
+//! tool takes `{goal, work_dir?, model_range?, autonomy?}` directly — it no longer
+//! reads the calling conversation's `extra`, and no longer writes a run id back to
+//! any conversation. `model_range` defaults to `Auto` (expanded HERE to every
+//! enabled `(provider, model)` pair); `work_dir` defaults to `None` (a temp dir);
+//! `autonomy` defaults to **`supervised`** — an MCP/agent caller auto-runs (it has
+//! no orchestration Tab to approve a plan from). An explicit `autonomy:
+//! "interactive"` still parks the run at `awaiting_plan_approval` and returns a
+//! relay message for the 主管 instead of starting. It drives the workspace-less
+//! [`create_adhoc`](nomifun_orchestrator::RunService::create_adhoc) path with
+//! `lead_conv_id: None`. The two read tools project the rich `RunDetail` down to a
+//! compact, LLM-friendly shape (run status + per-task title/status, and on result
+//! the per-task `output_summary`).
 //!
 //! ## `ModelRange::Auto` expansion (Task 3 decision)
 //! `RunService::create_adhoc` rejects an unexpanded `Auto` — it has no provider
@@ -37,8 +39,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CreateAdhocRunRequest, FleetMember, ModelRange, ModelRef, RunDetail, UpdateConversationRequest,
-    derive_capability,
+    CreateAdhocRunRequest, FleetMember, ModelRange, ModelRef, RunDetail, derive_capability,
 };
 use nomifun_common::generate_prefixed_id;
 use schemars::JsonSchema;
@@ -50,33 +51,44 @@ use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::{ok, require_user};
 use crate::tools_provider::{ProviderSummary, load_provider_summaries};
 
-/// Orchestration is a DESKTOP master-agent feature: the "lead" conversation that
-/// drives a run lives on a local trusted desktop session (it carries the
-/// `model_range` / `work_dir` context `nomi_run_create` reads). External callers
-/// (the network Remote front door, `Surface::Remote`) are NOT orchestration leads
-/// and must not create or inspect runs — `nomi_run_status` / `nomi_run_result`
-/// take a bare `run_id` with no ownership predicate, so advertising/dispatching
-/// them externally would let one companion's token read ANY run's status/output.
-/// Hard-deny the whole domain on Remote so it is neither advertised (filtered out
-/// of `tool_specs`) NOR dispatchable (a guessed call is Denied, not just hidden),
-/// while staying fully available on the trusted Desktop surface where the lead
-/// runs. (Mirrors the per-surface `deny_on` curation used elsewhere.)
+/// Orchestration is a DESKTOP master-agent feature. External callers (the network
+/// Remote front door, `Surface::Remote`) must not create or inspect runs:
+/// `nomi_run_status` / `nomi_run_result` take a bare `run_id` with no ownership
+/// predicate, so advertising/dispatching them externally would let one companion's
+/// token read ANY run's status/output, and `nomi_run_create` is a write that
+/// synthesizes a fleet from this desktop's providers. Hard-deny the whole domain
+/// on Remote so it is neither advertised (filtered out of `tool_specs`) NOR
+/// dispatchable (a guessed call is Denied, not just hidden), while staying fully
+/// available on the trusted Desktop surface. (Mirrors the per-surface `deny_on`
+/// curation used elsewhere.)
 const ORCHESTRATOR_DENY_SURFACES: &[Surface] = &[Surface::Remote];
 
 // ── param structs (single source: schema + runtime) ──────────────────────
 
-/// Create and kick off an orchestration run from the calling conversation's
-/// context. The conversation must be an orchestration "lead" (its `extra` carries
-/// a `model_range`); `work_dir` / `lead_conv_id` / `model_range` are read from
-/// there, so the tool only needs the goal (and, optionally, an autonomy override).
+/// Create and kick off an orchestration run from EXPLICIT params (the
+/// lead-conversation concept is gone): the goal plus optional `work_dir`,
+/// `model_range`, and `autonomy`. Nothing is read from or written back to the
+/// calling conversation.
 #[derive(Deserialize, JsonSchema)]
 struct RunCreateParams {
     /// The high-level goal to decompose into tasks and execute.
     goal: String,
-    /// Autonomy mode: "interactive" (the default for conversation-native runs —
-    /// the run parks at `awaiting_plan_approval` for the user to approve the plan
-    /// in the 编排面板 before any worker runs), "supervised", or "autonomous".
-    /// Omit for the interactive default.
+    /// Working directory the run + its workers execute in. Omit for a temporary
+    /// directory (no persistent workspace).
+    #[serde(default)]
+    work_dir: Option<String>,
+    /// The model range to synthesize the fleet from, tagged by `mode`:
+    /// `{"mode":"single","model":{"provider_id":..,"model":..}}`,
+    /// `{"mode":"range","models":[{"provider_id":..,"model":..}, ..]}`, or
+    /// `{"mode":"auto"}`. Omit (or pass `auto`) to use every enabled model on
+    /// this desktop (expanded server-side).
+    #[serde(default)]
+    model_range: Option<Value>,
+    /// Autonomy mode: "supervised" (the default — the run plans then runs without
+    /// a human gate, since an MCP/agent caller has no orchestration Tab to approve
+    /// from), "interactive" (parks at `awaiting_plan_approval` and returns a relay
+    /// message instead of starting), or "autonomous". Omit for the supervised
+    /// default.
     #[serde(default)]
     autonomy: Option<String>,
 }
@@ -103,17 +115,12 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
-    if ctx.conversation_id.is_empty() {
-        return json!({ "error": "missing caller conversation identity (NOMI_GW_MCP_CONVERSATION_ID)" });
-    }
 
-    // 1. Read the calling ("lead") conversation's context.
-    let conv = match deps.conversation_service.get(&user, &ctx.conversation_id).await {
-        Ok(c) => c,
-        Err(e) => return json!({ "error": e.to_string() }),
-    };
-    let (work_dir, model_range) = match parse_lead_extra(&conv.extra) {
-        Ok(pair) => pair,
+    // 1. Resolve the explicit model range. Omitted ⇒ `Auto`; a present value is
+    //    parsed from the tagged JSON (a malformed tag is a clean error, not a
+    //    panic — mirrors the old lead-extra tolerant parse).
+    let model_range = match resolve_model_range(p.model_range) {
+        Ok(r) => r,
         Err(e) => return e,
     };
 
@@ -148,37 +155,24 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     //    a run with just the bare model members is still valid.
     let role_members = build_assistant_members(&deps, &summaries, &range_pairs).await;
 
-    let lead_conv_id = ctx.conversation_id.parse::<i64>().ok();
-    let req = CreateAdhocRunRequest {
-        goal: p.goal,
-        work_dir,
-        model_range,
-        pinned_roles: vec![],
-        role_members,
-        // Conversation-native lead runs default to `interactive` (P6 Task 1): the
-        // 主管 proposes the team + DAG and the run parks at
-        // `awaiting_plan_approval` for the user to approve in the 编排面板. An
-        // explicit autonomy arg overrides this; `create_adhoc`'s own default
-        // (supervised) is NOT used here.
-        autonomy: Some(lead_autonomy(p.autonomy)),
-        // Serial loop (P1): parallelism is not yet a gateway-exposed knob.
-        max_parallel: None,
-        lead_conv_id,
-    };
+    // Build the ad-hoc request from the EXPLICIT params (no lead conversation):
+    // work_dir straight from the arg, autonomy passed through so an omitted value
+    // falls to `create_adhoc`'s own `supervised` default, lead_conv_id = None.
+    let req = build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members);
 
-    // 3. Create: synthesize the fleet from the model range + park in `planning`.
+    // 4. Create: synthesize the fleet from the model range + park in `planning`.
     let run = match deps.orchestrator_run_service.create_adhoc(&user, req).await {
         Ok(run) => run,
         Err(e) => return json!({ "error": e.to_string() }),
     };
-    // 4. Plan: decompose the goal → task DAG + assignments, then apply the
-    //    autonomy gate. An `interactive` run (the conversation-native default)
-    //    parks at `awaiting_plan_approval`; every other level flips to `running`.
+    // 5. Plan: decompose the goal → task DAG + assignments, then apply the
+    //    autonomy gate. An `interactive` run parks at `awaiting_plan_approval`;
+    //    every other level (incl. the supervised default) flips to `running`.
     if let Err(e) = deps.orchestrator_run_service.plan(&run.id).await {
         return json!({ "error": format!("run {} created but planning failed: {e}", run.id) });
     }
 
-    // 5. Read the post-plan detail ONCE: it tells us the resulting status (did the
+    // 6. Read the post-plan detail ONCE: it tells us the resulting status (did the
     //    autonomy gate park the run?) and the planned task count (for the relay
     //    message). The run exists (we just created + planned it); a read error is
     //    non-fatal — we fall back to the create-time status and an empty task list.
@@ -188,43 +182,19 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     };
     let awaiting = is_awaiting_approval(&status);
 
-    // 6. Start the execution loop ONLY when the run is not awaiting approval. An
-    //    `interactive` run must NOT auto-start — it waits for the user to approve
-    //    the plan in the 编排面板 (the `approve` route then starts the engine).
-    //    All other autonomy levels start immediately (idempotent; restarts any
-    //    existing loop).
+    // 7. Start the execution loop ONLY when the run is not awaiting approval. An
+    //    explicit `interactive` run must NOT auto-start — it waits for the user to
+    //    approve the plan (the `approve` route then starts the engine). All other
+    //    autonomy levels (incl. the supervised default) start immediately
+    //    (idempotent; restarts any existing loop).
     if !awaiting {
         deps.orchestrator_run_engine.start(run.id.clone());
     }
 
-    // 7. Write the run id back into the lead conversation's `extra` so the
-    //    frontend DAG can locate this run later (P2). `ConversationService::update`
-    //    MERGES `extra` (top-level keys overwritten, others preserved), so this
-    //    does not clobber `workspace` / `model_range` / etc. Best-effort: a
-    //    write-back failure is logged but does not fail the (already-created) run.
-    let update = UpdateConversationRequest {
-        name: None,
-        pinned: None,
-        model: None,
-        extra: Some(json!({ "orchestrator_run_id": run.id })),
-    };
-    if let Err(e) = deps
-        .conversation_service
-        .update(&user, &ctx.conversation_id, update, &deps.task_manager)
-        .await
-    {
-        tracing::warn!(
-            run_id = %run.id,
-            lead_conv_id = %ctx.conversation_id,
-            error = %e,
-            "failed to write orchestrator_run_id back to lead conversation extra"
-        );
-    }
-
-    // 8. Return. When the run parked at `awaiting_plan_approval`, include a
-    //    `message` instructing the 主管 to relay to the user that a team for
-    //    `task_count` subtasks was drafted and is pending approval in the 编排面板.
-    //    Otherwise (the run is running) return the bare run id + status.
+    // 8. Return. When the run parked at `awaiting_plan_approval` (explicit
+    //    interactive), include a `message` instructing the 主管 to relay to the
+    //    user that a team for `task_count` subtasks was drafted and is pending
+    //    approval. Otherwise (the run is running) return the bare run id + status.
     if awaiting {
         ok(json!({
             "run_id": run.id,
@@ -237,38 +207,56 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     }
 }
 
-// ── lead-conversation context parsing + Auto expansion ────────────────────
+// ── explicit-param resolution + Auto expansion ────────────────────────────
 
-/// Read the run's `work_dir` + `model_range` out of a lead conversation's `extra`.
+/// Resolve the explicit `model_range` arg into a [`ModelRange`].
 ///
-/// - `work_dir` ← `extra.workspace` (string, optional → `None` when absent/empty).
-/// - `model_range` ← `extra.model_range` (the tagged [`ModelRange`] JSON). Absent
-///   or unparseable ⇒ a clear error: this conversation is not an orchestration
-///   lead (it never picked a model range), so it cannot drive a run.
+/// - Omitted (`None`) ⇒ [`ModelRange::Auto`] — "use every enabled model" (the
+///   handler expands it to a concrete `Range` via [`expand_auto_range`]).
+/// - Present ⇒ parsed from the tagged JSON. An unparseable value (bad/absent
+///   `mode` tag) is a clean error, not a panic.
 ///
 /// `Auto` is returned verbatim here — its expansion to a concrete `Range` needs
 /// provider access and happens in [`expand_auto_range`] at the handler.
-fn parse_lead_extra(extra: &Value) -> Result<(Option<String>, ModelRange), Value> {
-    let work_dir = extra
-        .get("workspace")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
-    let model_range: ModelRange = match extra.get("model_range") {
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+fn resolve_model_range(model_range: Option<Value>) -> Result<ModelRange, Value> {
+    match model_range {
+        None => Ok(ModelRange::Auto),
+        Some(v) => serde_json::from_value(v).map_err(|e| {
             json!({
-                "error": format!("this conversation's model_range is malformed ({e}); it cannot drive an orchestration run")
+                "error": format!("model_range is malformed ({e}); expected one of mode=single|range|auto")
             })
-        })?,
-        None => {
-            return Err(json!({
-                "error": "this conversation is not an orchestration lead: it has no model_range in its context. Start the run from a conversation configured with a model range (single / range / auto)."
-            }));
-        }
-    };
-    Ok((work_dir, model_range))
+        }),
+    }
+}
+
+/// Build the [`CreateAdhocRunRequest`] from the EXPLICIT params (no lead
+/// conversation). `work_dir` comes straight from the arg; `autonomy` is passed
+/// through untouched so an omitted value falls to `create_adhoc`'s own
+/// `supervised` default; `lead_conv_id` is always `None` (the lead concept is
+/// gone — no run id is written back to any conversation). The model range is
+/// already expanded (no `Auto`) and the role members already built.
+fn build_adhoc_request(
+    goal: String,
+    work_dir: Option<String>,
+    model_range: ModelRange,
+    autonomy: Option<String>,
+    role_members: Vec<FleetMember>,
+) -> CreateAdhocRunRequest {
+    CreateAdhocRunRequest {
+        goal,
+        work_dir,
+        model_range,
+        pinned_roles: vec![],
+        role_members,
+        // Pass the explicit arg through: omitted ⇒ `create_adhoc` applies its own
+        // `supervised` default (an MCP/agent caller has no Tab to approve from);
+        // an explicit `interactive` still parks at `awaiting_plan_approval`.
+        autonomy,
+        // Serial loop (P1): parallelism is not yet a gateway-exposed knob.
+        max_parallel: None,
+        // No lead conversation — explicit-param runs are not bound to a chat.
+        lead_conv_id: None,
+    }
 }
 
 /// Expand `ModelRange::Auto` into a concrete `Range` of every ENABLED provider ×
@@ -294,26 +282,7 @@ fn expand_auto_range(summaries: &[ProviderSummary]) -> Result<ModelRange, Value>
     Ok(ModelRange::Range { models })
 }
 
-// ── interactive default + awaiting-approval relay (P6 Task 1) ──────────────
-
-/// The autonomy a conversation-native ("lead") run uses. Decision (P6 Task 1):
-/// multi-agent runs created from a conversation default to **`interactive`** —
-/// the 主管 proposes the team + task DAG and the run parks at
-/// `awaiting_plan_approval` for the user to approve in the 编排面板 before any
-/// worker dispatches. An EXPLICIT autonomy override (a non-blank tool arg) is
-/// honored verbatim (trimmed); an omitted or blank value falls back to the
-/// interactive default.
-///
-/// NOTE: this is the LEAD-path default only. `RunService::create_adhoc`'s own
-/// `DEFAULT_AUTONOMY` stays `"supervised"` (other callers / the e2e rely on it);
-/// the interactive default is applied HERE, at the caps layer, so only the
-/// conversation-native lead path goes interactive by default.
-fn lead_autonomy(autonomy: Option<String>) -> String {
-    autonomy
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| "interactive".to_string())
-}
+// ── awaiting-approval relay (explicit interactive path) ────────────────────
 
 /// Whether a run status means "parked, waiting for the user to approve the plan".
 /// The choreography must NOT `engine.start` such a run — it waits for `approve`.
@@ -561,13 +530,14 @@ fn project_result(detail: &RunDetail) -> Value {
 
 /// Register the orchestration-domain capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
-    // 1. Create + kick off a run (write). Desktop-only: deny on Remote (an
-    //    external caller is never an orchestration lead).
+    // 1. Create + kick off a run (write). Desktop-only: deny on Remote (the reads
+    //    take a bare run_id with no ownership predicate, so the whole domain is
+    //    Desktop-only).
     out.push(Capability::new::<RunCreateParams, _, _>(
         CapabilityMeta::new(
             "nomi_run_create",
             "orchestrator",
-            "Create an orchestration run from THIS conversation's context: decompose the goal into a task DAG over the conversation's chosen model range and propose a team to execute it. Only works in an orchestration-lead conversation (one with a model_range). Defaults to interactive: the run parks awaiting your plan approval in the 编排面板 (returns status `awaiting_plan_approval` + a message to relay to the user) rather than auto-running. Returns the run id and status.",
+            "Create and run an orchestration job from a goal: decompose it into a task DAG over a model range and propose a team to execute it. Params: goal (required), work_dir (optional dir; omit for a temp dir), model_range (optional; {mode:single|range|auto} — omit for all enabled models), autonomy (optional; defaults to `supervised` = plan then run automatically; pass `interactive` to park at `awaiting_plan_approval` and get a relay message instead). Returns the run id and status.",
             DangerTier::Write,
         )
         .deny_on(ORCHESTRATOR_DENY_SURFACES),
@@ -616,19 +586,24 @@ mod tests {
         }
     }
 
-    // ── parse_lead_extra: reads work_dir + model_range from a lead conv's extra ──
+    // ── resolve_model_range: explicit arg → ModelRange (omitted ⇒ Auto) ──────
 
     #[test]
-    fn parse_lead_extra_reads_workspace_and_range() {
-        let extra = json!({
-            "workspace": "/x/proj",
-            "model_range": {"mode": "range", "models": [
-                {"provider_id": "p1", "model": "m1"},
-                {"provider_id": "p2", "model": "m2"}
-            ]}
-        });
-        let (work_dir, range) = parse_lead_extra(&extra).expect("parses");
-        assert_eq!(work_dir.as_deref(), Some("/x/proj"));
+    fn resolve_model_range_omitted_is_auto() {
+        // No model_range arg ⇒ Auto (the handler then expands it to every enabled
+        // model). This is the "无 conversation_service.get" default path: the range
+        // comes from the (absent) param, NOT from a calling conversation's extra.
+        let range = resolve_model_range(None).expect("omitted → Auto");
+        assert!(matches!(range, ModelRange::Auto), "omitted model_range → Auto");
+    }
+
+    #[test]
+    fn resolve_model_range_explicit_range_passes_through() {
+        let v = json!({"mode": "range", "models": [
+            {"provider_id": "p1", "model": "m1"},
+            {"provider_id": "p2", "model": "m2"}
+        ]});
+        let range = resolve_model_range(Some(v)).expect("parses explicit range");
         match range {
             ModelRange::Range { models } => {
                 assert_eq!(models.len(), 2);
@@ -640,46 +615,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_lead_extra_single_range_and_no_workspace() {
-        // No `workspace` key → work_dir None; single model range parses.
-        let extra = json!({
-            "model_range": {"mode": "single", "model": {"provider_id": "ps", "model": "ms"}}
-        });
-        let (work_dir, range) = parse_lead_extra(&extra).expect("parses");
-        assert!(work_dir.is_none(), "absent workspace → None");
+    fn resolve_model_range_explicit_single_passes_through() {
+        let v = json!({"mode": "single", "model": {"provider_id": "ps", "model": "ms"}});
+        let range = resolve_model_range(Some(v)).expect("parses single");
         assert!(matches!(range, ModelRange::Single { .. }));
     }
 
     #[test]
-    fn parse_lead_extra_blank_workspace_is_none() {
-        let extra = json!({
-            "workspace": "   ",
-            "model_range": {"mode": "auto"}
-        });
-        let (work_dir, range) = parse_lead_extra(&extra).expect("parses");
-        assert!(work_dir.is_none(), "blank workspace → None");
-        assert!(matches!(range, ModelRange::Auto), "auto returned verbatim");
+    fn resolve_model_range_explicit_auto_is_auto() {
+        let v = json!({"mode": "auto"});
+        let range = resolve_model_range(Some(v)).expect("parses auto");
+        assert!(matches!(range, ModelRange::Auto), "explicit auto returned verbatim");
     }
 
     #[test]
-    fn parse_lead_extra_missing_model_range_is_clean_error() {
-        // A conversation that never picked a model range is not a lead → clean error.
-        let extra = json!({ "workspace": "/x" });
-        let err = parse_lead_extra(&extra).expect_err("must error without model_range");
-        let msg = err["error"].as_str().unwrap_or("");
-        assert!(
-            msg.contains("not an orchestration lead"),
-            "error must explain the conversation is not a lead, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_lead_extra_malformed_model_range_is_clean_error() {
+    fn resolve_model_range_malformed_is_clean_error() {
         // Present but unparseable (bad tag) → a clear "malformed" error, not a panic.
-        let extra = json!({ "model_range": {"mode": "nonsense"} });
-        let err = parse_lead_extra(&extra).expect_err("must error on malformed range");
+        let v = json!({"mode": "nonsense"});
+        let err = resolve_model_range(Some(v)).expect_err("must error on malformed range");
         let msg = err["error"].as_str().unwrap_or("");
         assert!(msg.contains("malformed"), "got: {msg}");
+    }
+
+    // ── build_adhoc_request: EXPLICIT params → CreateAdhocRunRequest (no lead) ──
+
+    #[test]
+    fn build_adhoc_request_uses_explicit_params_and_no_lead_conv() {
+        // The explicit-param contract: goal/work_dir/model_range/autonomy/role_members
+        // map straight onto the request, lead_conv_id is ALWAYS None (the lead
+        // concept is gone — no run id is written back to any conversation).
+        let range = ModelRange::Range {
+            models: vec![ModelRef { provider_id: "p1".into(), model: "m1".into() }],
+        };
+        let req = build_adhoc_request(
+            "ship it".into(),
+            Some("/tmp/proj".into()),
+            range,
+            Some("supervised".into()),
+            vec![],
+        );
+        assert_eq!(req.goal, "ship it");
+        assert_eq!(req.work_dir.as_deref(), Some("/tmp/proj"));
+        assert!(matches!(req.model_range, ModelRange::Range { .. }), "explicit range preserved");
+        assert_eq!(req.autonomy.as_deref(), Some("supervised"), "autonomy passed through");
+        assert!(req.lead_conv_id.is_none(), "lead_conv_id must be None (no lead conversation)");
+        assert!(req.pinned_roles.is_empty());
+        assert!(req.max_parallel.is_none());
+    }
+
+    #[test]
+    fn build_adhoc_request_omitted_autonomy_defers_to_service_default() {
+        // Omitted autonomy ⇒ None passed through, so create_adhoc applies its own
+        // `supervised` default (an MCP/agent caller has no Tab to approve from).
+        let req = build_adhoc_request(
+            "goal".into(),
+            None,
+            ModelRange::Range { models: vec![] },
+            None,
+            vec![],
+        );
+        assert!(req.autonomy.is_none(), "omitted autonomy → None (service default applies)");
+        assert!(req.work_dir.is_none(), "omitted work_dir → None (temp dir)");
+        assert!(req.lead_conv_id.is_none());
     }
 
     // ── expand_auto_range: Auto → concrete Range of enabled (provider, model) ──
@@ -719,8 +716,8 @@ mod tests {
     }
 
     /// The three orchestration tools are registered and visible on the Desktop
-    /// surface (the trusted surface where the lead runs; all are Read/Write —
-    /// never hard-denied there), with names within the 42-char style budget.
+    /// surface (the trusted surface; all are Read/Write — never hard-denied there),
+    /// with names within the 42-char style budget.
     #[test]
     fn orchestrator_tools_registered_and_visible_on_desktop() {
         let reg = Registry::global();
@@ -742,8 +739,8 @@ mod tests {
     }
 
     /// The orchestration domain is DESKTOP-only: it must NOT be advertised or
-    /// dispatchable on the external Remote front door (a Remote companion is never
-    /// an orchestration lead, and the reads take a bare run_id with no ownership
+    /// dispatchable on the external Remote front door (the reads take a bare run_id
+    /// with no ownership
     /// predicate). `deny_on(Remote)` makes the tools invisible to `tool_specs`
     /// (advertisement) AND yields `Decision::Deny` at dispatch (a guessed call is
     /// denied, not just hidden) — while staying available on Desktop.
@@ -851,24 +848,7 @@ mod tests {
         assert!(members[0].system_prompt.is_none(), "blank persona → None");
     }
 
-    // ── P6 Task 1: conversation-native runs default to `interactive` ──────────
-
-    // The conversation-native lead path (nomi_run_create) defaults autonomy to
-    // `interactive` when the caller omits it — so the 主管's plan parks at
-    // `awaiting_plan_approval` for the user to approve in the 编排面板, rather
-    // than auto-starting. An EXPLICIT autonomy override is honored verbatim;
-    // a blank/whitespace value is treated as absent → the interactive default.
-    #[test]
-    fn lead_autonomy_defaults_to_interactive() {
-        // Omitted → interactive (the conversation-native default).
-        assert_eq!(lead_autonomy(None), "interactive", "omitted autonomy → interactive");
-        // Blank/whitespace → treated as absent → interactive.
-        assert_eq!(lead_autonomy(Some("   ".to_string())), "interactive", "blank → interactive");
-        // Explicit overrides are honored verbatim (trimmed).
-        assert_eq!(lead_autonomy(Some("supervised".to_string())), "supervised");
-        assert_eq!(lead_autonomy(Some("autonomous".to_string())), "autonomous");
-        assert_eq!(lead_autonomy(Some(" interactive ".to_string())), "interactive", "trimmed");
-    }
+    // ── awaiting-approval relay (explicit interactive path) ──────────────────
 
     // When a run parks at `awaiting_plan_approval`, the tool return must carry the
     // awaiting status AND a 主管-facing message instructing it to tell the user a
