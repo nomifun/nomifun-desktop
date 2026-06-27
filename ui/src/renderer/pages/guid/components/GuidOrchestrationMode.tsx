@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { iconColors } from '@/renderer/styles/colors';
+import SegmentedTabs from '@/renderer/components/base/SegmentedTabs';
 import type { GuidModelSelectionMode } from '../hooks/useGuidModelSelection';
-import { Radio, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import { Robot } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import styles from '../index.module.css';
 
 type GuidOrchestrationModeProps = {
   /** Active tri-state mode (single / auto / range). */
@@ -28,34 +27,30 @@ type GuidOrchestrationModeProps = {
  * the single source of truth for `selectionMode`; the dropdown body stays
  * mode-aware but no longer carries its own switch.
  *
+ * Uses the shared {@link SegmentedTabs} pill control (soft `bg-fill-2` track,
+ * subtle `primary-1` tint on the active segment) so it reads as a tasteful,
+ * theme-aware toggle rather than a loud full-saturation fill. auto / range both
+ * mean "multi-agent orchestration is ON" and carry a Robot glyph so the active
+ * state communicates the intent at a glance.
+ *
  * Rendered by GuidPage only when the active agent is Nomi.
  */
 const GuidOrchestrationMode: React.FC<GuidOrchestrationModeProps> = ({ selectionMode, setSelectionMode }) => {
   const { t } = useTranslation();
 
-  // auto / range both mean "multi-agent orchestration is ON" — give a subtle
-  // primary tint + Robot glyph so the active state reads at a glance.
-  const orchestrationOn = selectionMode !== 'single';
-
   return (
     <Tooltip content={t('guid.orchestration.tooltip')} position='top'>
-      <div className={`${styles.orchestrationMode} ${orchestrationOn ? styles.orchestrationModeOn : ''}`}>
-        {orchestrationOn ? (
-          <Robot theme='outline' size='13' fill={iconColors.brand} className={styles.orchestrationModeIcon} />
-        ) : (
-          <span className={styles.orchestrationModeLabel}>{t('guid.orchestration.label')}</span>
-        )}
-        <Radio.Group
-          type='button'
-          size='small'
-          value={selectionMode}
-          onChange={(mode: GuidModelSelectionMode) => setSelectionMode(mode)}
-        >
-          <Radio value='single'>{t('guid.orchestration.modeSingle')}</Radio>
-          <Radio value='auto'>{t('guid.orchestration.modeAuto')}</Radio>
-          <Radio value='range'>{t('guid.orchestration.modeRange')}</Radio>
-        </Radio.Group>
-      </div>
+      <SegmentedTabs
+        size='sm'
+        className='mr-4px'
+        activeKey={selectionMode}
+        onChange={(key) => setSelectionMode(key as GuidModelSelectionMode)}
+        items={[
+          { key: 'single', label: t('guid.orchestration.modeSingle') },
+          { key: 'auto', label: t('guid.orchestration.modeAuto'), icon: <Robot theme='outline' size='13' /> },
+          { key: 'range', label: t('guid.orchestration.modeRange'), icon: <Robot theme='outline' size='13' /> },
+        ]}
+      />
     </Tooltip>
   );
 };
