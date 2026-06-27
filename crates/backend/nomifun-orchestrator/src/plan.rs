@@ -149,11 +149,12 @@ const PLAN_SYSTEM: &str = "You are a planning supervisor for a multi-agent fleet
 Decompose the user's GOAL into an executable task DAG and output ONLY a single JSON object — \
 no prose, no explanation, no markdown fences. \
 The JSON object MUST have exactly this shape:\n\
-{\"tasks\":[{\"title\":string,\"spec\":string,\"task_profile\":{\"kind\":string,\"needs_vision\":bool,\"needs_long_context\":bool,\"needs_high_reasoning\":bool,\"bulk\":bool}?,\"depends_on\":[int],\"member_index\":int?,\"rationale\":string?}]}\n\
+{\"tasks\":[{\"title\":string,\"spec\":string,\"role\":string,\"task_profile\":{\"kind\":string,\"needs_vision\":bool,\"needs_long_context\":bool,\"needs_high_reasoning\":bool,\"bulk\":bool}?,\"depends_on\":[int],\"member_index\":int?,\"rationale\":string?}]}\n\
 Rules:\n\
 - \"depends_on\" lists the 0-based indices of EARLIER tasks (smaller index) this task depends on; the graph MUST be acyclic.\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
 - Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
+- \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable assistants. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
 - \"task_profile\", \"member_index\" and \"rationale\" are optional.\n\
 - \"title\" is a short imperative label; \"spec\" is the full instruction the worker agent will execute.\n\
 - Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged.\n\
@@ -338,6 +339,7 @@ fn fallback_dag(goal: &str) -> PlannedDag {
             depends_on: vec![],
             member_index: Some(0),
             rationale: Some("fallback: planner output unparseable".to_string()),
+            role: None,
         }],
     }
 }
@@ -374,6 +376,7 @@ mod tests {
                         depends_on: vec![],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                     PlannedTask {
                         title: "Synthesize".to_string(),
@@ -382,6 +385,7 @@ mod tests {
                         depends_on: vec![0],
                         member_index: Some(1),
                         rationale: None,
+                        role: None,
                     },
                 ],
             })
@@ -534,6 +538,26 @@ mod tests {
         let prompt = build_plan_user_prompt("Solo goal", &[], &DescriptionMap::new());
         assert!(prompt.contains("Solo goal"));
         assert!(prompt.contains("none"));
+    }
+
+    // (P5 Task 1, d) The planner must be INSTRUCTED to emit a short Chinese role
+    // per task. The instruction lives in the system prompt's JSON schema + rules;
+    // assert both the `role` key in the schema and a rule naming example roles, so
+    // the LLM actually produces it (otherwise nothing precipitates downstream).
+    #[test]
+    fn plan_system_instructs_role_per_task() {
+        // The JSON shape the model is told to return includes "role".
+        assert!(
+            PLAN_SYSTEM.contains("\"role\""),
+            "PLAN_SYSTEM JSON schema must include the role field: {PLAN_SYSTEM}"
+        );
+        // A rule names short Chinese example roles so the model emits sensible ones.
+        for kw in ["规划", "前端", "后端", "测试", "设计"] {
+            assert!(
+                PLAN_SYSTEM.contains(kw),
+                "PLAN_SYSTEM should mention example role '{kw}': {PLAN_SYSTEM}"
+            );
+        }
     }
 
     // (a) build_plan_user_prompt surfaces a member's model description in the

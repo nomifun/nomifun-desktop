@@ -264,6 +264,7 @@ impl RunService {
                     status: "pending".to_string(),
                     graph_x: None,
                     graph_y: None,
+                    role: planned.role.clone(),
                 })
                 .await
                 .map_err(OrchestratorError::from)?;
@@ -778,6 +779,7 @@ fn task_row_to_dto(row: OrchRunTaskRow) -> RunTask {
         tokens: row.tokens,
         graph_x: row.graph_x,
         graph_y: row.graph_y,
+        role: row.role,
     }
 }
 
@@ -980,6 +982,7 @@ mod tests {
                 depends_on: vec![],
                 member_index,
                 rationale: None,
+                role: None,
             }],
         }
     }
@@ -1868,5 +1871,54 @@ mod tests {
             .expect("bare range member present");
         assert_eq!(bare.provider_id.as_deref(), Some("p1"));
         assert!(bare.system_prompt.is_none(), "bare member has no persona");
+    }
+
+    // (P5 Task 1, c) plan() persists each planned task's `role` onto the task row,
+    // so a later precipitation UI can read the roles a run used. A planned task
+    // without a role stays NULL (back-compat).
+    #[tokio::test]
+    async fn plan_persists_task_role() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        // Two tasks: one carries a role, one leaves it absent.
+        let dag = PlannedDag {
+            tasks: vec![
+                PlannedTask {
+                    title: "前端任务".to_string(),
+                    spec: "实现页面".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: Some("前端".to_string()),
+                },
+                PlannedTask {
+                    title: "无角色任务".to_string(),
+                    spec: "做点别的".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                },
+            ],
+        };
+        let (svc, _repo, _snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.tasks.len(), 2);
+        let fe = detail
+            .tasks
+            .iter()
+            .find(|t| t.title == "前端任务")
+            .expect("frontend task present");
+        assert_eq!(fe.role.as_deref(), Some("前端"), "planned role must be persisted");
+        let none_task = detail
+            .tasks
+            .iter()
+            .find(|t| t.title == "无角色任务")
+            .expect("roleless task present");
+        assert_eq!(none_task.role, None, "absent role stays NULL");
     }
 }

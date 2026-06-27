@@ -83,6 +83,9 @@ pub struct OrchRunTaskRow {
     pub tokens: Option<i64>,
     pub graph_x: Option<f64>,
     pub graph_y: Option<f64>,
+    /// Short Chinese role the planner named for this task (P5 沉淀捕获, 迁移 022).
+    /// Nullable: tasks planned before this column exist read back as `None`.
+    pub role: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -204,5 +207,27 @@ mod tests {
                 .unwrap();
         assert_eq!(ws_id.as_deref(), Some("ws_keep"), "existing workspace_id preserved");
         assert!(work_dir.is_none(), "new work_dir defaults to NULL");
+    }
+
+    /// 迁移 022：orch_run_tasks 加 `role` 列(可空)。沉淀捕获用：规划为每个任务
+    /// 命名的角色名持久于此。
+    #[tokio::test]
+    async fn migration_022_adds_role_to_orch_run_tasks() {
+        let db = init_database_memory()
+            .await
+            .expect("db init runs all migrations");
+        let pool = db.pool();
+
+        let cols: Vec<(String, i64)> =
+            sqlx::query_as("SELECT name, \"notnull\" FROM pragma_table_info('orch_run_tasks')")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+
+        let role = cols
+            .iter()
+            .find(|(n, _)| n == "role")
+            .expect("orch_run_tasks should have a role column");
+        assert_eq!(role.1, 0, "role should be nullable (notnull==0)");
     }
 }

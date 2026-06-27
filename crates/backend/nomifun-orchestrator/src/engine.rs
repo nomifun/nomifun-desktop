@@ -959,6 +959,7 @@ mod tests {
                         depends_on: vec![],
                         member_index: Some(0),
                         rationale: Some("first".to_string()),
+                        role: None,
                     },
                     PlannedTask {
                         title: "B".to_string(),
@@ -967,6 +968,7 @@ mod tests {
                         depends_on: vec![0],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                     PlannedTask {
                         title: "C".to_string(),
@@ -975,6 +977,7 @@ mod tests {
                         depends_on: vec![1],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                 ],
             })
@@ -1219,6 +1222,7 @@ mod tests {
             tokens: None,
             graph_x: None,
             graph_y: None,
+            role: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1246,6 +1250,7 @@ mod tests {
             tokens: None,
             graph_x: None,
             graph_y: None,
+            role: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1288,6 +1293,7 @@ mod tests {
                         depends_on: vec![],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                     PlannedTask {
                         title: "B".to_string(),
@@ -1296,6 +1302,7 @@ mod tests {
                         depends_on: vec![],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                     PlannedTask {
                         title: "C".to_string(),
@@ -1304,6 +1311,7 @@ mod tests {
                         depends_on: vec![0, 1],
                         member_index: Some(0),
                         rationale: None,
+                        role: None,
                     },
                 ],
             })

@@ -538,6 +538,7 @@ mod tests {
                     depends_on: vec![],
                     member_index: Some(0),
                     rationale: None,
+                    role: None,
                 }],
             })
         }

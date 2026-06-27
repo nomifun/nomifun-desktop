@@ -76,6 +76,7 @@ impl PlanProducer for ChainPlanProducer {
                     depends_on: vec![],
                     member_index: Some(0),
                     rationale: Some("first".to_string()),
+                    role: None,
                 },
                 PlannedTask {
                     title: "Synthesize".to_string(),
@@ -84,6 +85,7 @@ impl PlanProducer for ChainPlanProducer {
                     depends_on: vec![0],
                     member_index: Some(0),
                     rationale: None,
+                    role: None,
                 },
             ],
         })
@@ -367,6 +369,7 @@ impl PlanProducer for DiamondPlanProducer {
                     depends_on: vec![],
                     member_index: Some(0),
                     rationale: None,
+                    role: None,
                 },
                 PlannedTask {
                     title: "B".to_string(),
@@ -375,6 +378,7 @@ impl PlanProducer for DiamondPlanProducer {
                     depends_on: vec![],
                     member_index: Some(0),
                     rationale: None,
+                    role: None,
                 },
                 PlannedTask {
                     title: "C".to_string(),
@@ -383,6 +387,7 @@ impl PlanProducer for DiamondPlanProducer {
                     depends_on: vec![0, 1],
                     member_index: Some(0),
                     rationale: None,
+                    role: None,
                 },
             ],
         })
