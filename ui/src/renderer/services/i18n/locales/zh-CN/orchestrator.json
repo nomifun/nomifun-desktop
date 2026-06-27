@@ -1,6 +1,16 @@
 {
   "title": "智能编排",
   "subtitle": "在这里复盘由会话发起的多智能体 Run",
+  "tab": {
+    "newRun": "新建 Run",
+    "listTitle": "我的 Run",
+    "listEmpty": "还没有 Run，点上方「新建 Run」开始吧",
+    "listLoadError": "加载 Run 失败"
+  },
+  "empty": {
+    "title": "选择一个 Run 开始",
+    "desc": "从左侧选择一个 Run 查看其任务图与执行详情，或点击「新建 Run」发起一次多智能体编排。"
+  },
   "status": {
     "planning": "主管规划中…",
     "idle": "尚未拆分 · 提交需求后主管将编排",

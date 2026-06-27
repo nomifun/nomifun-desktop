@@ -1,6 +1,16 @@
 {
   "title": "Orchestration",
   "subtitle": "Review the multi-agent runs you started from conversations",
+  "tab": {
+    "newRun": "New run",
+    "listTitle": "My runs",
+    "listEmpty": "No runs yet — click “New run” above to start one",
+    "listLoadError": "Failed to load runs"
+  },
+  "empty": {
+    "title": "Select a run to begin",
+    "desc": "Pick a run on the left to see its task graph and execution detail, or click “New run” to kick off a multi-agent orchestration."
+  },
   "status": {
     "planning": "Lead is planning…",
     "idle": "Not yet decomposed · the lead will orchestrate once you send a goal",
