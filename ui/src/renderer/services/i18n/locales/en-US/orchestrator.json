@@ -11,19 +11,6 @@
     "title": "Select a run to begin",
     "desc": "Pick a run on the left to see its task graph and execution detail, or click “New run” to kick off a multi-agent orchestration."
   },
-  "status": {
-    "planning": "Lead is planning…",
-    "idle": "Not yet decomposed · the lead will orchestrate once you send a goal",
-    "error": "No usable model configured · the lead could not run",
-    "awaiting": "{{count}} task(s) planned · awaiting approval",
-    "running": "Agents collaborating · {{done}}/{{total}} done",
-    "paused": "Orchestration paused",
-    "completed": "Orchestration complete · {{count}} task(s)",
-    "failed": "Orchestration failed",
-    "cancelled": "Orchestration cancelled",
-    "reviewApprove": "Review & approve",
-    "configureModel": "Configure model"
-  },
   "composer": {
     "title": "New run",
     "subtitle": "Describe the goal, pick the models and roles, and let a multi-agent fleet run it for you.",
@@ -81,7 +68,6 @@
     "emptyDesc": "Give a multi-agent team a goal inside a conversation to start a run — it will show up here for review afterwards.",
     "loadError": "Failed to load runs",
     "untitledGoal": "(No goal)",
-    "dagTab": "Orchestration",
     "mobile": {
       "tasksLabel": "Tasks",
       "noTasks": "The fleet is breaking the goal into tasks — they will appear here shortly."

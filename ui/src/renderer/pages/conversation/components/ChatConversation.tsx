@@ -28,7 +28,6 @@ import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelection
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import NomiChat from '../platforms/nomi/NomiChat';
-import OrchestrationStatusStrip from '@/renderer/pages/orchestrator/RunDetail/OrchestrationStatusStrip';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 // import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
@@ -184,7 +183,6 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
 
   return (
     <ChatLayout {...chatLayoutProps} conversation_id={conversation.id}>
-      <OrchestrationStatusStrip conversation={conversation} />
       <NomiChat
         conversation_id={conversation.id}
         workspace={conversation.extra.workspace}

@@ -11,19 +11,6 @@
     "title": "选择一个 Run 开始",
     "desc": "从左侧选择一个 Run 查看其任务图与执行详情，或点击「新建 Run」发起一次多智能体编排。"
   },
-  "status": {
-    "planning": "主管规划中…",
-    "idle": "尚未拆分 · 提交需求后主管将编排",
-    "error": "未配置可用模型 · 主管未能运行",
-    "awaiting": "已拟定 {{count}} 个任务 · 待批准",
-    "running": "多智能体协作中 · {{done}}/{{total}} 完成",
-    "paused": "编排已暂停",
-    "completed": "编排完成 · 共 {{count}} 个任务",
-    "failed": "编排失败",
-    "cancelled": "编排已取消",
-    "reviewApprove": "查看并批准",
-    "configureModel": "去配置模型"
-  },
   "composer": {
     "title": "新建 Run",
     "subtitle": "描述目标，挑选模型与角色，让多智能体编队替你执行。",
@@ -81,7 +68,6 @@
     "emptyDesc": "在会话中向多智能体下达目标即可发起一个 Run，之后会在这里留下复盘记录。",
     "loadError": "加载 Run 失败",
     "untitledGoal": "（未填写目标）",
-    "dagTab": "编排",
     "mobile": {
       "tasksLabel": "任务",
       "noTasks": "编队正在把目标拆解为任务，稍后会显示在这里。"
