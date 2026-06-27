@@ -15,8 +15,8 @@ use axum::routing::{get, post, put};
 
 use nomifun_api_types::{
     ApiResponse, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest,
-    Fleet, OrchWorkspace, ReassignRequest, Run, RunDetail, SteerRequest, UpdateFleetRequest,
-    UpdateWorkspaceRequest,
+    Fleet, OrchWorkspace, ReassignRequest, Run, RunDetail, RunRenameRequest, SteerRequest,
+    UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -53,7 +53,10 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
             "/api/orchestrator/workspaces/{ws}/runs",
             get(list_workspace_runs),
         )
-        .route("/api/orchestrator/runs/{id}", get(get_run))
+        .route(
+            "/api/orchestrator/runs/{id}",
+            get(get_run).delete(delete_run).patch(rename_run),
+        )
         .route("/api/orchestrator/runs/{id}/cancel", post(cancel_run))
         .route("/api/orchestrator/runs/{id}/approve", post(approve_run))
         .route("/api/orchestrator/runs/{id}/pause", post(pause_run))
@@ -264,6 +267,34 @@ async fn cancel_run(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.engine.stop(&id);
     state.run_service.cancel(&id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Delete a run (owner-scoped). Stop the engine loop FIRST (mirrors `cancel_run`'s
+/// `engine.stop` → service ordering) so a live loop is cooperatively cancelled
+/// before the row + its tasks/deps/assignments cascade out from under it, then
+/// delete. The service enforces ownership (404 missing / 403 not-owned) and the
+/// schema's `ON DELETE CASCADE` FKs sweep out the whole aggregate.
+async fn delete_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.engine.stop(&id);
+    state.run_service.delete(&user.id, &id).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Rename a run = change its goal (owner-scoped). Body is a [`RunRenameRequest`];
+/// the service enforces ownership (404/403) and rejects a blank goal (400).
+async fn rename_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<RunRenameRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.run_service.rename(&user.id, &id, &req.goal).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -705,6 +736,108 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/orchestrator/runs/adhoc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_ne!(resp.status(), StatusCode::OK);
+    }
+
+    // -------------------------------------------------------------------------
+    // P1 Task 1: DELETE /runs/{id} (delete) + PATCH /runs/{id} (rename) routes.
+    // Mirror the seeded-run smoke pattern: with the CurrentUser layer the owner
+    // hits the route end to end (200/OK), and without the layer the handler
+    // cannot run (axum 0.8 MissingExtension → non-200) — guarding the new routes
+    // were mounted UNDER auth, never as public routes.
+    // -------------------------------------------------------------------------
+
+    /// `DELETE /api/orchestrator/runs/{id}` returns 200 for the owner of a seeded
+    /// run (auth extract → engine.stop → RunService::delete → 200) and confirms
+    /// the route is mounted (before it existed axum would 404/405 this).
+    #[tokio::test]
+    async fn delete_run_returns_ok_with_user() {
+        let (state, run_id) = build_state_with_run().await; // run owned by "u1"
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `DELETE /api/orchestrator/runs/{id}` still requires the `CurrentUser`
+    /// extension — without it the handler cannot run (non-200). Guards the delete
+    /// route was not wired as a public route.
+    #[tokio::test]
+    async fn delete_run_without_user_is_not_ok() {
+        let (state, run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_ne!(resp.status(), StatusCode::OK);
+    }
+
+    /// `PATCH /api/orchestrator/runs/{id}` with a `RenameRequest` body returns 200
+    /// for the owner (auth extract → RunService::rename → 200) and confirms the
+    /// PATCH method is mounted on the `/runs/{id}` path.
+    #[tokio::test]
+    async fn rename_run_returns_ok_with_user() {
+        let (state, run_id) = build_state_with_run().await; // run owned by "u1"
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        let body = serde_json::json!({ "goal": "重命名后的目标" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `PATCH /api/orchestrator/runs/{id}` still requires the `CurrentUser`
+    /// extension — without it the handler cannot run (non-200). Guards the rename
+    /// route was not wired as a public route.
+    #[tokio::test]
+    async fn rename_run_without_user_is_not_ok() {
+        let (state, run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state);
+
+        let body = serde_json::json!({ "goal": "x" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/orchestrator/runs/{run_id}"))
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),

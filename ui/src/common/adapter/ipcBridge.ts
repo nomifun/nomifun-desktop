@@ -2665,6 +2665,15 @@ export const orchestrator = {
     // shape verbatim, so no mapBody is needed.
     createAdhoc: httpPost<TRun, TCreateAdhocRun>('/api/orchestrator/runs/adhoc'),
     get: httpGet<TRunDetail, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
+    // Delete a run (owner-scoped). The backend stops any live engine loop first,
+    // then deletes the row — the schema's ON DELETE CASCADE FKs sweep out the
+    // run's tasks/deps/assignments. 403 if the run is owned by another user.
+    remove: httpDelete<void, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
+    // Rename a run = change its goal (owner-scoped, PATCH). Body is { goal }.
+    rename: httpPatch<void, { id: string; goal: string }>(
+      (p) => `/api/orchestrator/runs/${p.id}`,
+      (p) => ({ goal: p.goal })
+    ),
     cancel: httpPost<void, { id: string }>(
       (p) => `/api/orchestrator/runs/${p.id}/cancel`,
       () => undefined
