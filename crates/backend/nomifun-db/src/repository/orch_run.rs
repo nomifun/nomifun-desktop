@@ -41,6 +41,8 @@ pub struct CreateTaskParams {
     pub status: String,
     pub graph_x: Option<f64>,
     pub graph_y: Option<f64>,
+    /// Short Chinese role the planner named for this task (P5 沉淀捕获). Nullable.
+    pub role: Option<String>,
 }
 
 /// Parameters for a partial task update. `None` = leave the column unchanged.

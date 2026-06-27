@@ -281,6 +281,10 @@ pub struct RunTask {
     pub tokens: Option<i64>,
     pub graph_x: Option<f64>,
     pub graph_y: Option<f64>,
+    /// Short Chinese role the planner named for this task (P5 沉淀捕获). `None`
+    /// for tasks planned before this column existed.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// A blocker→blocked edge in the task DAG. Mirrors `OrchRunTaskDepRow`.
@@ -428,6 +432,12 @@ pub struct PlannedTask {
     pub member_index: Option<usize>,
     #[serde(default)]
     pub rationale: Option<String>,
+    /// Short Chinese role the planner named for this task (e.g. 规划/前端/后端/
+    /// 测试/设计/文档). Persisted onto the task (P5 沉淀捕获) so a later UI can
+    /// distill the roles a run used into reusable assistants. `#[serde(default)]`
+    /// so old plans without it deserialize to `None`.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// The planned task DAG: the PlanProducer output / `nomi_run_plan` input.
@@ -557,6 +567,7 @@ mod tests {
                     depends_on: vec![],
                     member_index: None,
                     rationale: Some("breadth-first collection".to_string()),
+                    role: Some("调研".to_string()),
                 },
                 PlannedTask {
                     title: "Synthesize report".to_string(),
@@ -565,6 +576,7 @@ mod tests {
                     depends_on: vec![0],
                     member_index: Some(1),
                     rationale: None,
+                    role: None,
                 },
             ],
         };
@@ -576,6 +588,7 @@ mod tests {
         assert_eq!(back.tasks[0].title, "Gather sources");
         assert!(back.tasks[0].depends_on.is_empty());
         assert_eq!(back.tasks[0].member_index, None);
+        assert_eq!(back.tasks[0].role.as_deref(), Some("调研"));
         let profile = back.tasks[0].task_profile.as_ref().expect("profile");
         assert_eq!(profile.kind, "research");
         assert!(profile.needs_long_context);
@@ -587,6 +600,7 @@ mod tests {
         assert_eq!(back.tasks[1].member_index, Some(1));
         assert!(back.tasks[1].task_profile.is_none());
         assert_eq!(back.tasks[1].rationale, None);
+        assert_eq!(back.tasks[1].role, None);
     }
 
     #[test]
@@ -726,6 +740,7 @@ mod tests {
                     tokens: Some(1234),
                     graph_x: Some(10.5),
                     graph_y: Some(20.0),
+                    role: Some("研究".to_string()),
                 },
                 RunTask {
                     id: "task_2".to_string(),
@@ -741,6 +756,7 @@ mod tests {
                     tokens: None,
                     graph_x: None,
                     graph_y: None,
+                    role: None,
                 },
             ],
             deps: vec![RunTaskDep {
@@ -953,8 +969,7 @@ mod tests {
     /// `derive_capability` maps tag/description keywords to strengths and applies
     /// the conservative baseline for everything else.
     #[test]
-    fn derive_capability_maps_keywords_and_baseline() {
-        // Scenario tag "coding-help" + description mentioning research → both
+    fn derive_capability_maps_keywords_and_baseline() {        // Scenario tag "coding-help" + description mentioning research → both
         // strengths picked up; tools=true because the assistant has skills.
         let prof = derive_capability(
             &["developer".to_string()],
@@ -976,5 +991,31 @@ mod tests {
         assert!(bare.strengths.is_empty());
         assert!(!bare.tools, "no skills → tools false");
         assert_eq!(bare.reasoning, "medium");
+    }
+
+    // ── P5 Task 1: PlannedTask.role (沉淀捕获) ──
+
+    /// A `PlannedTask` carrying a `role` deserializes it; an old plan JSON without
+    /// `role` defaults it to `None` (back-compat: existing plans must keep parsing).
+    #[test]
+    fn planned_task_role_deserializes_and_defaults() {
+        // Present → Some.
+        let with_role: PlannedTask = serde_json::from_str(
+            r#"{"title":"做前端","spec":"实现页面","role":"前端"}"#,
+        )
+        .expect("planned task with role parses");
+        assert_eq!(with_role.role.as_deref(), Some("前端"));
+
+        // Absent → None (serde default).
+        let no_role: PlannedTask = serde_json::from_str(
+            r#"{"title":"做前端","spec":"实现页面"}"#,
+        )
+        .expect("planned task without role parses");
+        assert_eq!(no_role.role, None, "absent role defaults to None");
+
+        // Round-trips through JSON unchanged.
+        let json = serde_json::to_string(&with_role).expect("serialize");
+        let back: PlannedTask = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.role.as_deref(), Some("前端"));
     }
 }
