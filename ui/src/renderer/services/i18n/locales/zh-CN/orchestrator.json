@@ -1,6 +1,6 @@
 {
   "title": "智能编排",
-  "subtitle": "在这里复盘由会话发起的多智能体 Run",
+  "subtitle": "发起并编排多智能体，可视化跟进每个 agent 的工作与状态",
   "tab": {
     "newRun": "新建 Run",
     "listTitle": "我的 Run",

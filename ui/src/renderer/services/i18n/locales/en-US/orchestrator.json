@@ -1,6 +1,6 @@
 {
   "title": "Orchestration",
-  "subtitle": "Review the multi-agent runs you started from conversations",
+  "subtitle": "Launch and orchestrate multi-agent runs — track each agent's work and status",
   "tab": {
     "newRun": "New run",
     "listTitle": "My runs",
