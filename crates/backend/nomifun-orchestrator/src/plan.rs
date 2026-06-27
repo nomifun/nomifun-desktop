@@ -12,6 +12,7 @@
 //! fallback DAG built from the goal — so the Run engine always has something
 //! executable.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,12 +21,21 @@ use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_messag
 use nomifun_api_types::{FleetMember, PlannedDag, PlannedTask};
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_db::IProviderRepository;
+use nomifun_db::models::Provider;
 
 /// How many tokens the planner may use for its one-shot DAG completion.
 const PLAN_MAX_TOKENS: u32 = 4096;
 
 /// Max length of the fallback task title derived from the goal.
 const FALLBACK_TITLE_LEN: usize = 60;
+
+/// Per-model user-authored descriptions, keyed by `(provider_id, model)`.
+///
+/// Built from the providers' `model_descriptions` JSON (Task 1) and threaded
+/// into the planning prompt so the lead model can pick the best-matching model
+/// per task. A missing key means "no description" (rendered as `-`).
+type DescriptionMap = HashMap<(String, String), String>;
+
 
 /// Produces a task DAG from a goal. The Run engine consumes the result.
 #[async_trait]
@@ -111,7 +121,21 @@ impl PlanProducer for LlmPlanProducer {
         )
         .await?;
 
-        let user = build_plan_user_prompt(goal, members);
+        // Build the (provider_id, model) → description map so the prompt can
+        // surface each member's user-authored model description. Fetch every
+        // provider once via `list()` (cheaper than N `find_by_id` calls and the
+        // member set is small), then decode each provider's `model_descriptions`
+        // JSON fail-soft. A repo error here MUST NOT fail the plan — descriptions
+        // are an optimization, so degrade to an empty map (all `desc=-`).
+        let descriptions = match self.provider_repo.list().await {
+            Ok(providers) => build_description_map(&providers, members),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to list providers for plan descriptions; planning without them");
+                DescriptionMap::new()
+            }
+        };
+
+        let user = build_plan_user_prompt(goal, members, &descriptions);
         let raw = one_shot_completion(&cfg, PLAN_SYSTEM, vec![user_message(user)], PLAN_MAX_TOKENS).await?;
 
         // parse_plan is fail-soft: a bad/empty reply degrades to a single-task DAG
@@ -129,17 +153,80 @@ The JSON object MUST have exactly this shape:\n\
 Rules:\n\
 - \"depends_on\" lists the 0-based indices of EARLIER tasks (smaller index) this task depends on; the graph MUST be acyclic.\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
+- Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
 - \"task_profile\", \"member_index\" and \"rationale\" are optional.\n\
 - \"title\" is a short imperative label; \"spec\" is the full instruction the worker agent will execute.\n\
 - Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged.\n\
 Output the JSON object and nothing else.";
 
+/// Build the `(provider_id, model) → description` map for the prompt.
+///
+/// For each distinct `provider_id` referenced by a member, decode that
+/// provider's `model_descriptions` JSON (`{model_id: description}`) and record
+/// the description for every `(provider_id, model)` a member actually uses.
+///
+/// **Fail-soft on every axis** — descriptions are an optimization, never a hard
+/// dependency:
+/// - a provider with no row, `model_descriptions == None`, or the Task-1 default
+///   `"{}"` contributes nothing;
+/// - a malformed `model_descriptions` JSON is skipped (no entries) with a warn,
+///   not propagated as an error;
+/// - a blank/whitespace-only description is dropped (treated as "no description").
+fn build_description_map(providers: &[Provider], members: &[FleetMember]) -> DescriptionMap {
+    // Index providers by id for O(1) lookup as we walk the members.
+    let by_id: HashMap<&str, &Provider> = providers.iter().map(|p| (p.id.as_str(), p)).collect();
+
+    // Decode each referenced provider's model_descriptions once, fail-soft.
+    let mut decoded: HashMap<&str, HashMap<String, String>> = HashMap::new();
+    let mut out = DescriptionMap::new();
+
+    for m in members {
+        let (Some(pid), Some(model)) = (m.provider_id.as_deref(), m.model.as_deref()) else {
+            continue;
+        };
+        if pid.is_empty() || model.is_empty() {
+            continue;
+        }
+
+        // Lazily decode this provider's descriptions JSON the first time we see it.
+        let table = decoded.entry(pid).or_insert_with(|| {
+            let Some(provider) = by_id.get(pid) else {
+                return HashMap::new();
+            };
+            let raw = provider.model_descriptions.as_deref().unwrap_or("{}");
+            match serde_json::from_str::<HashMap<String, String>>(raw) {
+                Ok(map) => map,
+                Err(err) => {
+                    tracing::warn!(
+                        provider_id = pid,
+                        error = %err,
+                        "provider model_descriptions is not a JSON object; ignoring"
+                    );
+                    HashMap::new()
+                }
+            }
+        });
+
+        if let Some(desc) = table.get(model) {
+            let trimmed = desc.trim();
+            if !trimmed.is_empty() {
+                out.insert((pid.to_string(), model.to_string()), trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Build the user message: the goal plus a compact member roster.
-fn build_plan_user_prompt(goal: &str, members: &[FleetMember]) -> String {
+fn build_plan_user_prompt(
+    goal: &str,
+    members: &[FleetMember],
+    descriptions: &DescriptionMap,
+) -> String {
     let mut out = String::new();
     out.push_str("GOAL:\n");
     out.push_str(goal);
-    out.push_str("\n\nMEMBERS (index, agent_id, role_hint, strengths):\n");
+    out.push_str("\n\nMEMBERS (index, agent_id, role_hint, strengths, desc):\n");
     if members.is_empty() {
         out.push_str("(none — plan without pre-assigning member_index)\n");
     } else {
@@ -151,7 +238,18 @@ fn build_plan_user_prompt(goal: &str, members: &[FleetMember]) -> String {
                 .map(|p| p.strengths.join("/"))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "-".to_string());
-            out.push_str(&format!("{i}. {} | role={role} | strengths={strengths}\n", m.agent_id));
+            // Look up the member's model description; missing → the "-" sentinel.
+            let desc = match (m.provider_id.as_deref(), m.model.as_deref()) {
+                (Some(pid), Some(model)) => descriptions
+                    .get(&(pid.to_string(), model.to_string()))
+                    .map(String::as_str)
+                    .unwrap_or("-"),
+                _ => "-",
+            };
+            out.push_str(&format!(
+                "{i}. {} | role={role} | strengths={strengths} | desc={desc}\n",
+                m.agent_id
+            ));
         }
     }
     out.push_str("\nReturn ONLY the JSON task DAG.");
@@ -411,18 +509,38 @@ mod tests {
             constraints: None,
             sort_order: 0,
         };
-        let prompt = build_plan_user_prompt("Research X", &[member]);
+        let prompt = build_plan_user_prompt("Research X", &[member], &DescriptionMap::new());
         assert!(prompt.contains("Research X"));
         assert!(prompt.contains("0. agent_research"));
         assert!(prompt.contains("role=researcher"));
         assert!(prompt.contains("search/synthesis"));
+        // No description available for this member → desc column is the "-" sentinel.
+        assert!(prompt.contains("desc=-"), "missing-description members get desc=-: {prompt}");
     }
 
     #[test]
     fn build_plan_user_prompt_handles_no_members() {
-        let prompt = build_plan_user_prompt("Solo goal", &[]);
+        let prompt = build_plan_user_prompt("Solo goal", &[], &DescriptionMap::new());
         assert!(prompt.contains("Solo goal"));
         assert!(prompt.contains("none"));
+    }
+
+    // (a) build_plan_user_prompt surfaces a member's model description in the
+    // desc= column when the (provider_id, model) → description map carries one,
+    // so the planner can read it and pick the best-matching model.
+    #[test]
+    fn build_plan_user_prompt_includes_model_description() {
+        let member = member_with(Some("prov_x"), Some("model-x"));
+        let mut descriptions = DescriptionMap::new();
+        descriptions.insert(
+            ("prov_x".to_string(), "model-x".to_string()),
+            "擅长前端与可视化".to_string(),
+        );
+        let prompt = build_plan_user_prompt("Build a UI", &[member], &descriptions);
+        assert!(
+            prompt.contains("desc=擅长前端与可视化"),
+            "description must surface in the desc= column: {prompt}"
+        );
     }
 
     /// Build a minimal `FleetMember` carrying the given provider/model.
@@ -488,5 +606,86 @@ mod tests {
         assert_eq!(lead.provider_id, "fallback_prov");
         assert_eq!(lead.model, "fallback_model");
         assert_eq!(lead.use_model.as_deref(), Some("fallback_use"));
+    }
+
+    /// Build a minimal `Provider` row carrying the given `model_descriptions`
+    /// JSON (the only field `build_description_map` reads, besides `id`).
+    fn provider_with_descriptions(id: &str, model_descriptions: Option<&str>) -> Provider {
+        Provider {
+            id: id.to_string(),
+            platform: "openai".to_string(),
+            name: "p".to_string(),
+            base_url: String::new(),
+            api_key_encrypted: String::new(),
+            models: "[]".to_string(),
+            enabled: true,
+            capabilities: "[]".to_string(),
+            context_limit: None,
+            model_protocols: None,
+            model_descriptions: model_descriptions.map(str::to_string),
+            model_enabled: None,
+            model_health: None,
+            bedrock_config: None,
+            is_full_url: false,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    // build_description_map decodes each provider's model_descriptions JSON and
+    // keys the result by (provider_id, model) for the members that reference it.
+    #[test]
+    fn build_description_map_keys_by_provider_and_model() {
+        let providers = vec![provider_with_descriptions(
+            "prov_a",
+            Some(r#"{"model-a":"擅长前端","model-b":"擅长后端"}"#),
+        )];
+        let members = vec![
+            member_with(Some("prov_a"), Some("model-a")),
+            member_with(Some("prov_a"), Some("model-b")),
+        ];
+        let map = build_description_map(&providers, &members);
+        assert_eq!(
+            map.get(&("prov_a".to_string(), "model-a".to_string())).map(String::as_str),
+            Some("擅长前端")
+        );
+        assert_eq!(
+            map.get(&("prov_a".to_string(), "model-b".to_string())).map(String::as_str),
+            Some("擅长后端")
+        );
+    }
+
+    // An unset model_descriptions (Task 1 stores the default as `Some("{}")`) and
+    // an absent model entry both yield "no description" (no map entry) — not an error.
+    #[test]
+    fn build_description_map_treats_empty_object_as_no_description() {
+        let providers = vec![
+            provider_with_descriptions("prov_empty", Some("{}")),
+            provider_with_descriptions("prov_partial", Some(r#"{"other-model":"x"}"#)),
+        ];
+        let members = vec![
+            member_with(Some("prov_empty"), Some("model-a")),
+            member_with(Some("prov_partial"), Some("model-a")),
+        ];
+        let map = build_description_map(&providers, &members);
+        assert!(map.is_empty(), "no member matched a description entry: {map:?}");
+    }
+
+    // A blank description string is dropped (treated as "no description"), and a
+    // malformed model_descriptions JSON is fail-soft (no entries, no panic/error).
+    #[test]
+    fn build_description_map_is_fail_soft_on_bad_json_and_blank() {
+        let providers = vec![
+            provider_with_descriptions("prov_bad", Some("not json at all")),
+            provider_with_descriptions("prov_blank", Some(r#"{"model-a":"   "}"#)),
+            provider_with_descriptions("prov_none", None),
+        ];
+        let members = vec![
+            member_with(Some("prov_bad"), Some("model-a")),
+            member_with(Some("prov_blank"), Some("model-a")),
+            member_with(Some("prov_none"), Some("model-a")),
+        ];
+        let map = build_description_map(&providers, &members);
+        assert!(map.is_empty(), "bad/blank/absent descriptions yield no entries: {map:?}");
     }
 }
