@@ -109,6 +109,7 @@
     "emptyDesc": "点击「新建 Run」，为编队下达目标，让它们在工作间里协同完成任务。",
     "loadError": "加载 Run 失败",
     "untitledGoal": "（未填写目标）",
+    "dagTab": "编排",
     "mobile": {
       "tasksLabel": "任务",
       "noTasks": "编队正在把目标拆解为任务，稍后会显示在这里。"

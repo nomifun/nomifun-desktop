@@ -42,6 +42,13 @@ interface DagCanvasProps {
   runId: string;
   onBack: () => void;
   onOpenTask: (payload: OpenTaskPayload) => void;
+  /**
+   * Embedded mode — the canvas lives inside a conversation's workspace rail tab
+   * (no master-detail to return to), so the header's back button is suppressed
+   * while the run controls (cancel/approve/pause/resume) are kept. The standalone
+   * orchestrator page omits this prop, so its back button still renders.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -57,7 +64,7 @@ interface DagCanvasProps {
  * `data-theme` attribute into `colorMode` + resolved colors via a MutationObserver
  * (template: MermaidBlock).
  */
-const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
+const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedded }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
   const [message, ctx] = useArcoMessage();
@@ -262,6 +269,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask }) => {
         run={detail.run}
         done={done}
         total={total}
+        embedded={embedded}
         onBack={onBack}
         onCancel={() => void handleCancel()}
         onApprove={() => void handleApprove()}

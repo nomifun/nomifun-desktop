@@ -7,10 +7,14 @@
 
 import type { TChatConversation } from '@/common/config/storage';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import React from 'react';
+import React, { Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import ChatWorkspace from '../Workspace';
 import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
+
+// The orchestration DAG tab pulls in react-flow (heavy) and is only rendered
+// for a lead conversation with a run, so it is split into its own chunk.
+const DagRailTab = React.lazy(() => import('@/renderer/pages/orchestrator/RunDetail/DagRailTab'));
 
 const ChatSlider: React.FC<{
   conversation?: TChatConversation;
@@ -44,6 +48,16 @@ const ChatSlider: React.FC<{
       ></ChatWorkspace>
     );
   } else if (conversation?.type === 'nomi' && conversation.extra?.workspace) {
+    // A "lead" orchestrator conversation carries its run id on `extra`
+    // (untyped — read via a narrow cast). When present, append a 「编排」rail tab
+    // that embeds the run's DAG canvas + worker transcript drawer.
+    const orchestratorExtra = conversation.extra as
+      | { orchestrator_role?: string; orchestrator_run_id?: string }
+      | undefined;
+    const leadRunId =
+      orchestratorExtra?.orchestrator_role === 'lead' && orchestratorExtra.orchestrator_run_id
+        ? orchestratorExtra.orchestrator_run_id
+        : undefined;
     workspaceNode = (
       <ChatWorkspace
         conversation_id={conversation.id}
@@ -59,6 +73,19 @@ const ChatSlider: React.FC<{
             title: t('conversation.sessionMetrics.tab'),
             content: <NomiSessionMetricsPanel conversation={conversation} />,
           },
+          ...(leadRunId
+            ? [
+                {
+                  key: 'orchestrator-dag',
+                  title: t('orchestrator.run.dagTab'),
+                  content: (
+                    <Suspense fallback={null}>
+                      <DagRailTab runId={leadRunId} />
+                    </Suspense>
+                  ),
+                },
+              ]
+            : []),
         ]}
       ></ChatWorkspace>
     );
