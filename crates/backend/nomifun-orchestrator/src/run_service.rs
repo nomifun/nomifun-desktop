@@ -419,6 +419,7 @@ impl RunService {
                     summary: None,
                     lead_conv_id: None,
                     total_tokens: None,
+                    goal: None,
                 },
             )
             .await
@@ -483,6 +484,7 @@ impl RunService {
                     summary: None,
                     lead_conv_id: None,
                     total_tokens: None,
+                    goal: None,
                 },
             )
             .await
@@ -572,6 +574,7 @@ impl RunService {
                     summary: None,
                     lead_conv_id: None,
                     total_tokens: None,
+                    goal: None,
                 },
             )
             .await
@@ -579,6 +582,71 @@ impl RunService {
         self.emitter.emit_run_status(run_id, "cancelled");
         self.emitter.emit_run_completed(run_id, "cancelled");
         Ok(())
+    }
+
+    /// Delete a run (owner-scoped). Loads the run for a clean 404 (missing) /
+    /// 403 (owned by another user — destructive, so ownership IS enforced here,
+    /// unlike the read/lifecycle handlers), then deletes the row. The schema's
+    /// `ON DELETE CASCADE` FKs sweep out the run's tasks → deps + assignments, so
+    /// no manual child cleanup is needed. The route stops the engine loop FIRST
+    /// (mirrors `cancel`'s `engine.stop` → service ordering) so a live loop is
+    /// cooperatively cancelled before the rows vanish from under it.
+    pub async fn delete(&self, user_id: &str, run_id: &str) -> Result<(), AppError> {
+        self.owned_run(user_id, run_id).await?;
+        self.run_repo
+            .delete_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?;
+        // The run is gone; surface a terminal "removed" signal on the bus so any
+        // live subscriber drops it (reuse the completed channel with a removed
+        // status — the run row no longer exists to query).
+        self.emitter.emit_run_completed(run_id, "removed");
+        Ok(())
+    }
+
+    /// Rename a run = change its goal (owner-scoped). Loads the run for a clean
+    /// 404/403, rejects a blank goal (a run goal is `NOT NULL` and must not be
+    /// empty — same rule as `create`), then updates only the `goal` column and
+    /// emits a plan-updated signal so subscribers refresh the run header.
+    pub async fn rename(&self, user_id: &str, run_id: &str, goal: &str) -> Result<(), AppError> {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            return Err(OrchestratorError::BadRequest("goal must not be empty".into()).into());
+        }
+        self.owned_run(user_id, run_id).await?;
+        self.run_repo
+            .update_run(
+                run_id,
+                UpdateRunParams {
+                    status: None,
+                    summary: None,
+                    lead_conv_id: None,
+                    total_tokens: None,
+                    goal: Some(goal.to_string()),
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+        self.emitter.emit_run_plan_updated(run_id);
+        Ok(())
+    }
+
+    /// Load a run and enforce caller ownership: a missing run is a clean 404, a
+    /// run owned by another user is a 403. Returns the row on success. Ownership
+    /// reads `OrchRunRow.user_id` (deliberately NOT surfaced on the `Run` DTO),
+    /// so the check must use the row, not `get_detail`. Used by the destructive /
+    /// mutating run controls (`delete` / `rename`).
+    async fn owned_run(&self, user_id: &str, run_id: &str) -> Result<OrchRunRow, AppError> {
+        let row = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+        if row.user_id != user_id {
+            return Err(AppError::Forbidden(format!("run {run_id} is not owned by you")));
+        }
+        Ok(row)
     }
 
     /// Load the chosen fleet's members as DTOs (decoding JSON columns fail-soft).
@@ -1934,5 +2002,127 @@ mod tests {
             .find(|t| t.title == "无角色任务")
             .expect("roleless task present");
         assert_eq!(none_task.role, None, "absent role stays NULL");
+    }
+
+    // -------------------------------------------------------------------------
+    // P1 Task 1: Run delete (owner-scoped, cascade) + rename (owner-scoped goal).
+    // -------------------------------------------------------------------------
+
+    // delete: the owner can delete a run; the whole aggregate (tasks + deps +
+    // assignments) cascades out and `get_detail` then 404s.
+    #[tokio::test]
+    async fn delete_removes_run_and_cascades_for_owner() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        // Two tasks so there is a dep edge + two assignments to cascade.
+        let dag = PlannedDag {
+            tasks: vec![
+                PlannedTask {
+                    title: "A".to_string(),
+                    spec: "a".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                },
+                PlannedTask {
+                    title: "B".to_string(),
+                    spec: "b".to_string(),
+                    task_profile: None,
+                    depends_on: vec![0],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                },
+            ],
+        };
+        let (svc, _repo, _snapshot, run_id) = harness(members, dag).await;
+        svc.plan(&run_id).await.expect("plan");
+
+        // Pre-condition: tasks + deps + assignments exist.
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 2);
+        assert_eq!(before.deps.len(), 1);
+        assert_eq!(before.assignments.len(), 2);
+
+        // Owner deletes → ok.
+        svc.delete("u1", &run_id).await.expect("owner delete");
+
+        // The run is gone (get_detail 404s) — the cascade is asserted at the repo
+        // layer; here we prove the service path removed the row.
+        assert!(
+            matches!(svc.get_detail(&run_id).await, Err(AppError::NotFound(_))),
+            "deleted run must 404 on get_detail"
+        );
+    }
+
+    // delete: a non-owner is rejected with 403 (Forbidden) and the run survives.
+    #[tokio::test]
+    async fn delete_cross_user_is_forbidden() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let dag = single_task_dag(Some(0), None);
+        let (svc, _repo, _snapshot, run_id) = harness(members, dag).await; // owned by u1
+        svc.plan(&run_id).await.expect("plan");
+
+        let err = svc.delete("intruder", &run_id).await.expect_err("cross-user delete must reject");
+        assert!(matches!(err, AppError::Forbidden(_)), "cross-user delete is 403, got: {err:?}");
+
+        // The run is untouched.
+        assert!(svc.get_detail(&run_id).await.is_ok(), "non-owner delete must not remove the run");
+    }
+
+    // delete: a missing run 404s.
+    #[tokio::test]
+    async fn delete_missing_run_is_not_found() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let (svc, _repo, _snapshot, _run_id) = harness(members, single_task_dag(None, None)).await;
+        let err = svc.delete("u1", "run_missing").await.expect_err("missing run must 404");
+        assert!(matches!(err, AppError::NotFound(_)), "got: {err:?}");
+    }
+
+    // rename: the owner can change a run's goal; get_detail reflects the new goal.
+    #[tokio::test]
+    async fn rename_updates_goal_for_owner() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let (svc, _repo, _snapshot, run_id) = harness(members, single_task_dag(None, None)).await;
+        // Sanity: the harness seeds goal "do the thing".
+        assert_eq!(svc.get_detail(&run_id).await.unwrap().run.goal, "do the thing");
+
+        svc.rename("u1", &run_id, "全新目标").await.expect("owner rename");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.run.goal, "全新目标", "goal rewritten by rename");
+    }
+
+    // rename: a non-owner is rejected with 403 and the goal is unchanged.
+    #[tokio::test]
+    async fn rename_cross_user_is_forbidden() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let (svc, _repo, _snapshot, run_id) = harness(members, single_task_dag(None, None)).await;
+
+        let err = svc
+            .rename("intruder", &run_id, "盗改目标")
+            .await
+            .expect_err("cross-user rename must reject");
+        assert!(matches!(err, AppError::Forbidden(_)), "cross-user rename is 403, got: {err:?}");
+
+        assert_eq!(
+            svc.get_detail(&run_id).await.unwrap().run.goal,
+            "do the thing",
+            "non-owner rename must not change the goal"
+        );
+    }
+
+    // rename: an empty goal is a 400 (a run goal must not be blank); a missing run 404s.
+    #[tokio::test]
+    async fn rename_rejects_empty_goal_and_missing_run() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let (svc, _repo, _snapshot, run_id) = harness(members, single_task_dag(None, None)).await;
+
+        let err = svc.rename("u1", &run_id, "   ").await.expect_err("empty goal must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "empty goal is 400, got: {err:?}");
+
+        let err = svc.rename("u1", "run_missing", "x").await.expect_err("missing run must 404");
+        assert!(matches!(err, AppError::NotFound(_)), "got: {err:?}");
     }
 }

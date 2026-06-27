@@ -901,6 +901,7 @@ async fn finish_run(deps: &Arc<RunEngineDeps>, run_id: &str, status: &str, summa
                 summary: summary.map(Some),
                 lead_conv_id: None,
                 total_tokens: None,
+                goal: None,
             },
         )
         .await

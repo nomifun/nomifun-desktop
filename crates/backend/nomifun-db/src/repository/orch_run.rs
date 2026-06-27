@@ -28,6 +28,9 @@ pub struct UpdateRunParams {
     pub summary: Option<Option<String>>,
     pub lead_conv_id: Option<Option<i64>>,
     pub total_tokens: Option<Option<i64>>,
+    /// Run goal (rename). `goal` is a plain `NOT NULL` column, so it uses the
+    /// single-`Option` skip/set encoding: `None` = skip, `Some(v)` = set `v`.
+    pub goal: Option<String>,
 }
 
 /// Parameters for creating a task within a run. `id` is minted
@@ -101,6 +104,14 @@ pub trait IRunRepository: Send + Sync {
     /// Apply a partial run update (see [`UpdateRunParams`]). No-op when every
     /// field is `None`. Bumps `updated_at` whenever any column changes.
     async fn update_run(&self, id: &str, p: UpdateRunParams) -> Result<(), sqlx::Error>;
+
+    /// Delete a run. The schema's `ON DELETE CASCADE` foreign keys (migration
+    /// 018) sweep the whole aggregate out with it: the run's tasks
+    /// (`orch_run_tasks.run_id`) and, via the task ids, that run's dependency
+    /// edges (`orch_run_task_deps`) and assignments (`orch_assignments`). One
+    /// `DELETE FROM orch_runs WHERE id = ?` is enough; no manual child cleanup.
+    /// Requires `PRAGMA foreign_keys=ON` on the connection (the project default).
+    async fn delete_run(&self, id: &str) -> Result<(), sqlx::Error>;
 
     // --- tasks ---
 

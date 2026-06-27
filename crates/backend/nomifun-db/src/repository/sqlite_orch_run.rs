@@ -122,6 +122,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.total_tokens.is_some() {
             sets.push("total_tokens = ?");
         }
+        if p.goal.is_some() {
+            sets.push("goal = ?");
+        }
         if sets.is_empty() {
             return Ok(());
         }
@@ -141,9 +144,23 @@ impl IRunRepository for SqliteRunRepository {
         if let Some(total_tokens) = &p.total_tokens {
             q = q.bind(total_tokens);
         }
+        if let Some(goal) = &p.goal {
+            q = q.bind(goal);
+        }
         q = q.bind(now_ms());
         q = q.bind(id);
         q.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn delete_run(&self, id: &str) -> Result<(), sqlx::Error> {
+        // One statement: the `ON DELETE CASCADE` FKs (migration 018) sweep out
+        // the run's tasks → deps + assignments. Requires PRAGMA foreign_keys=ON
+        // on the connection (project default).
+        sqlx::query("DELETE FROM orch_runs WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -586,6 +603,7 @@ mod tests {
                 summary: Some(Some("进行中".into())),
                 lead_conv_id: Some(Some(42)),
                 total_tokens: None,
+                goal: None,
             },
         )
         .await
@@ -763,5 +781,154 @@ mod tests {
         let b_runs = repo.list_runs_by_user("user_b").await.unwrap();
         assert_eq!(b_runs.len(), 1);
         assert_eq!(b_runs[0].id, b_run.id);
+    }
+
+    // P1 Task 1: delete_run removes the run AND cascades (FK ON DELETE CASCADE)
+    // to its tasks → deps + assignments. We seed a full aggregate (run + 2 tasks
+    // + 1 dep edge + 2 assignments), assert it all exists, delete the run, then
+    // assert the run, its tasks, its dep edges, and its assignments are ALL gone.
+    // (This proves PRAGMA foreign_keys=ON is active on the connection — without it
+    // the children would orphan rather than cascade.) A second, untouched run's
+    // rows must survive (delete is scoped to the target run).
+    #[tokio::test]
+    async fn delete_run_cascades_tasks_deps_assignments() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+
+        // Target run with a 2-task chain (A→B), each carrying an assignment.
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id.clone()),
+                user_id: "u1".into(),
+                goal: "to be deleted".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let mk = |title: &str| CreateTaskParams {
+            run_id: run.id.clone(),
+            title: title.into(),
+            spec: "s".into(),
+            task_profile: None,
+            status: "pending".into(),
+            graph_x: None,
+            graph_y: None,
+            role: None,
+        };
+        let a = repo.create_task(mk("A")).await.unwrap();
+        let b = repo.create_task(mk("B")).await.unwrap();
+        repo.add_dep(&a.id, &b.id).await.unwrap();
+        for t in [&a, &b] {
+            repo.create_assignment(CreateAssignmentParams {
+                task_id: t.id.clone(),
+                member_id: "fmem_x".into(),
+                score: None,
+                rationale: None,
+                source: "auto".into(),
+                locked: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        // A second run that must NOT be touched by deleting the first.
+        let survivor = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "survivor".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let s_task = repo
+            .create_task(CreateTaskParams {
+                run_id: survivor.id.clone(),
+                title: "S".into(),
+                spec: "s".into(),
+                task_profile: None,
+                status: "pending".into(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+            })
+            .await
+            .unwrap();
+
+        // Pre-condition: the full aggregate is present.
+        assert!(repo.get_run(&run.id).await.unwrap().is_some());
+        assert_eq!(repo.list_tasks(&run.id).await.unwrap().len(), 2);
+        assert_eq!(repo.list_deps(&run.id).await.unwrap().len(), 1);
+        assert_eq!(repo.list_assignments(&run.id).await.unwrap().len(), 2);
+
+        // Delete the run → one statement, FK cascade does the rest.
+        repo.delete_run(&run.id).await.unwrap();
+
+        // The run and EVERY descendant row are gone.
+        assert!(repo.get_run(&run.id).await.unwrap().is_none(), "run row deleted");
+        assert!(repo.list_tasks(&run.id).await.unwrap().is_empty(), "tasks cascaded");
+        assert!(repo.list_deps(&run.id).await.unwrap().is_empty(), "deps cascaded");
+        assert!(
+            repo.list_assignments(&run.id).await.unwrap().is_empty(),
+            "assignments cascaded"
+        );
+        // The dep + assignment rows are gone at the row level too (the task FK
+        // cascade reached them, not just the run-scoped list query).
+        assert!(repo.get_task(&a.id).await.unwrap().is_none(), "task A row gone");
+        assert!(repo.get_assignment_for_task(&a.id).await.unwrap().is_none(), "assignment A gone");
+
+        // The untouched run survived intact.
+        assert!(repo.get_run(&survivor.id).await.unwrap().is_some(), "survivor run kept");
+        assert!(repo.get_task(&s_task.id).await.unwrap().is_some(), "survivor task kept");
+    }
+
+    // P1 Task 1: update_run with `goal: Some(v)` rewrites the run goal (rename),
+    // leaving the other columns untouched (goal=None skips the column).
+    #[tokio::test]
+    async fn update_run_sets_goal() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "old goal".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+
+        repo.update_run(
+            &run.id,
+            UpdateRunParams {
+                status: None,
+                summary: None,
+                lead_conv_id: None,
+                total_tokens: None,
+                goal: Some("new goal".into()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let refreshed = repo.get_run(&run.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.goal, "new goal", "goal rewritten");
+        assert_eq!(refreshed.status, "planning", "status untouched (goal-only update)");
     }
 }
