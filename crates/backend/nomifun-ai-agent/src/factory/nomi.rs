@@ -131,6 +131,18 @@ pub(super) async fn build(
         knowledge_write_enabled,
     );
 
+    // Orchestration lead (会话 entry "auto/range" models → extra.orchestrator_role
+    // == "lead"): prepend the server-authored 编排主管 system prompt so the
+    // conversation decomposes complex requirements via `nomi_run_create`. Composed
+    // LAST so the 主管 prompt leads, with the full preset/persona/knowledge prompt
+    // preserved after the separator. Tool availability is NOT granted here — the
+    // orchestration tools ride the independently-gated desktop gateway; a
+    // client-supplied role can only shape the prompt, never self-authorize tools.
+    overrides.system_prompt = compose_lead_prompt(
+        overrides.system_prompt.take(),
+        overrides.orchestrator_role.as_deref(),
+    );
+
     if !extra_mcp_servers.is_empty() {
         info!(
             conversation_id = %ctx.conversation_id,
@@ -485,6 +497,36 @@ fn append_knowledge_context(
         (base, None) => base,
         (None, section) => section,
     }
+}
+
+/// Server-authored 编排主管 (orchestration lead) system prompt. Injected when a
+/// conversation carries `extra.orchestrator_role == "lead"` (会话 entry with
+/// "auto/range" models selected). The available-model range and working
+/// directory are supplied to the orchestration tools at runtime, so the prompt
+/// instructs the lead not to ask for them. Kept as a `const` so the composition
+/// is unit-testable without standing up the async factory.
+pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。对复杂、可拆分为多个并行/有依赖子任务的需求：调用工具 `nomi_run_create(goal)` 把需求拆成任务 DAG 并行执行（模型范围与工作目录会自动取用），随后用 `nomi_run_status`/`nomi_run_result` 跟进并向用户汇报进展与产出。不要询问 workspace 或 fleet——它们已不存在。";
+
+/// Compose the 主管 system prompt onto whatever base prompt the assembly has
+/// produced (preset rules + companion persona + knowledge context), when the
+/// conversation is the orchestration lead.
+///
+/// - `role == Some("lead")`: prepend [`LEAD_ORCHESTRATOR_PROMPT`], then the base
+///   (if any) after a blank-line separator. Composition, NOT replacement — no
+///   preset/persona/knowledge content is discarded.
+/// - any other role (or `None`): return `base` unchanged (no 主管 injection).
+///
+/// Pure and side-effect-free so the lead path is testable in isolation.
+pub(crate) fn compose_lead_prompt(base: Option<String>, role: Option<&str>) -> Option<String> {
+    if role != Some("lead") {
+        return base;
+    }
+    Some(match base {
+        Some(existing) if !existing.is_empty() => {
+            format!("{LEAD_ORCHESTRATOR_PROMPT}\n\n{existing}")
+        }
+        _ => LEAD_ORCHESTRATOR_PROMPT.to_owned(),
+    })
 }
 
 /// Map Nomi DB platform name to the nomi provider identifier.
@@ -1414,6 +1456,56 @@ mod tests {
         }
 
         assert_eq!(overrides.system_prompt.as_deref(), Some("Be concise."));
+    }
+
+    #[test]
+    fn compose_lead_prompt_prepends_supervisor_prompt_for_lead() {
+        // lead role → 主管 prompt is prepended and composed with the existing
+        // base (preset/persona/knowledge), not discarded.
+        let composed =
+            compose_lead_prompt(Some("Be concise.".to_owned()), Some("lead")).expect("some prompt");
+        assert!(
+            composed.contains("编排主管"),
+            "lead prompt must carry the distinctive 主管 marker: {composed}"
+        );
+        assert!(
+            composed.contains("nomi_run_create"),
+            "lead prompt must name the orchestration tool: {composed}"
+        );
+        // Composition, not replacement: the provided base survives.
+        assert!(
+            composed.contains("Be concise."),
+            "existing base prompt must be preserved: {composed}"
+        );
+        // The 主管 prompt comes first, then the base after a separator.
+        let idx_lead = composed.find("编排主管").unwrap();
+        let idx_base = composed.find("Be concise.").unwrap();
+        assert!(idx_lead < idx_base, "主管 prompt must precede the base");
+    }
+
+    #[test]
+    fn compose_lead_prompt_with_no_base_is_just_supervisor_prompt() {
+        let composed = compose_lead_prompt(None, Some("lead")).expect("some prompt");
+        assert!(composed.contains("编排主管"));
+        assert_eq!(composed, LEAD_ORCHESTRATOR_PROMPT);
+    }
+
+    #[test]
+    fn compose_lead_prompt_non_lead_is_passthrough() {
+        // Non-lead role (None / other) returns the base verbatim — no 主管 prompt.
+        assert_eq!(
+            compose_lead_prompt(Some("Be concise.".to_owned()), None),
+            Some("Be concise.".to_owned())
+        );
+        let other = compose_lead_prompt(Some("Be concise.".to_owned()), Some("member"));
+        assert_eq!(other.as_deref(), Some("Be concise."));
+        assert!(
+            !other.unwrap().contains("编排主管"),
+            "non-lead must NOT carry the 主管 prompt"
+        );
+        // Non-lead with no base stays None (no injection).
+        assert_eq!(compose_lead_prompt(None, None), None);
+        assert_eq!(compose_lead_prompt(None, Some("member")), None);
     }
 
     #[test]
