@@ -21,6 +21,7 @@ use nomifun_api_types::{
 use nomifun_common::{AgentType, AppError};
 use nomifun_db::{
     IClientPreferenceRepository, IMcpServerRepository, IProviderRepository, IRemoteAgentRepository,
+    ISettingsRepository,
 };
 
 use crate::agent_task::AgentInstance;
@@ -114,6 +115,14 @@ pub struct AgentFactoryDeps {
     /// Read live per session so toggling the setting affects new sessions without
     /// a restart.
     pub client_prefs: Option<Arc<dyn IClientPreferenceRepository>>,
+    /// System-settings repo for reading the app UI language at session-build
+    /// time. Companion-owned sessions (local 桌面伙伴 chat + IM channel master)
+    /// get a reply-language directive built from `SystemSettings.language` so the
+    /// companion answers in the app's language instead of a hardcoded one.
+    /// `Option` so tests can omit it (then the "en-US" default applies). Read live
+    /// per build (mirrors `client_prefs`) so switching the language takes effect on
+    /// the next agent (re)build.
+    pub settings_repo: Option<Arc<dyn ISettingsRepository>>,
     /// User-configured MCP servers repository. Used by ACP factory to
     /// inject enabled servers into `session/new` (ELECTRON-1JG fix).
     /// `None` for tests/composition paths that do not need MCP injection.
