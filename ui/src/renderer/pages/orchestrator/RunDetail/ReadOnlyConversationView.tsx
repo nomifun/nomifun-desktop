@@ -10,6 +10,7 @@ import { Spin } from '@arco-design/web-react';
 import React, { Suspense, useCallback } from 'react';
 import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/nomi/useNomiModelSelection';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import { PreviewProvider } from '@/renderer/pages/conversation/Preview';
 
 const AcpChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/acp/AcpChat'));
 const NomiChat = React.lazy(() => import('@/renderer/pages/conversation/platforms/nomi/NomiChat'));
@@ -60,7 +61,15 @@ type ReadOnlyConversationViewProps = {
  * renders it read-only (send box hidden). Used by the orchestrator's worker
  * transcript drawer to mirror a worker's live conversation record.
  *
- * Does NOT wrap in ChatLayout — the parent supplies its own chrome.
+ * Does NOT wrap in ChatLayout — the parent supplies its own chrome. It DOES,
+ * however, mount its OWN {@link PreviewProvider}: the platform chat's
+ * `MessageList` (via `useAutoPreviewOfficeFiles`) calls `usePreviewContext()`,
+ * which throws when no provider is in scope. The orchestrator renders this view
+ * inside an Arco `Drawer` without a `ChatLayout`, so without this self-contained
+ * provider clicking a DAG node crashed the window. We use a dedicated namespace
+ * and `subscribeGlobalOpen={false}` so this read-only viewer never persists into
+ * the main conversation's preview bucket nor steals agent-driven global preview
+ * opens (mirrors the terminal surface's per-surface provider convention).
  */
 const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ conversation, hideSendBox, agent_name }) => {
   const content = (() => {
@@ -131,7 +140,11 @@ const ReadOnlyConversationView: React.FC<ReadOnlyConversationViewProps> = ({ con
     }
   })();
 
-  return <Suspense fallback={<Spin loading className='flex flex-1 items-center justify-center' />}>{content}</Suspense>;
+  return (
+    <PreviewProvider persistNamespace='orchestrator-transcript' subscribeGlobalOpen={false}>
+      <Suspense fallback={<Spin loading className='flex flex-1 items-center justify-center' />}>{content}</Suspense>
+    </PreviewProvider>
+  );
 };
 
 export default ReadOnlyConversationView;
