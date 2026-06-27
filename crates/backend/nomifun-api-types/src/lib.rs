@@ -144,10 +144,10 @@ pub use office::{
     StartPreviewRequest, StopPreviewRequest,
 };
 pub use orchestrator::{
-    Assignment, CapabilityProfile, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest,
-    Fleet, FleetMember, FleetMemberInput, MemberConstraints, OrchWorkspace, PlannedDag,
-    PlannedTask, ReassignRequest, Run, RunDetail, RunTask, RunTaskDep, SteerRequest, TaskProfile,
-    UpdateFleetRequest, UpdateWorkspaceRequest,
+    Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,
+    CreateWorkspaceRequest, Fleet, FleetMember, FleetMemberInput, MemberConstraints, ModelRange,
+    ModelRef, OrchWorkspace, PlannedDag, PlannedTask, ReassignRequest, Run, RunDetail, RunTask,
+    RunTaskDep, SteerRequest, TaskProfile, UpdateFleetRequest, UpdateWorkspaceRequest,
 };
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,

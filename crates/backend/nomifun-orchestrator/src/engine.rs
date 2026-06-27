@@ -406,14 +406,27 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
         .max(1);
 
     // Resolve the run's workspace_dir once — it is stable for the run's lifetime
-    // (the workspace row's dir does not change mid-run in this design).
-    let workspace_dir: Option<String> = deps
-        .ws_repo
-        .get(&run.workspace_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|w| w.workspace_dir);
+    // (the workspace row's dir does not change mid-run in this design). An ad-hoc
+    // (workspace-less) run carries its own `work_dir`, which takes precedence;
+    // otherwise fall back to the owning workspace's dir. A run with neither has no
+    // cwd (workers run in their default location).
+    let workspace_dir: Option<String> = if let Some(wd) = run
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(wd.to_string())
+    } else if let Some(ws_id) = run.workspace_id.as_deref() {
+        deps.ws_repo
+            .get(ws_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|w| w.workspace_dir)
+    } else {
+        None
+    };
 
     // In-flight worker futures, each resolving to (task_id, outcome). The set's
     // length is the live concurrency; we never exceed `cap`.
