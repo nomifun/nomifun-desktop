@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Drawer, Input, Select, Spin, Switch } from '@arco-design/web-react';
+import { Drawer, Input, Select, Spin, Switch, Tooltip } from '@arco-design/web-react';
 import { Comment, Send } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
@@ -15,6 +15,7 @@ import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import ReadOnlyConversationView from './ReadOnlyConversationView';
 import type { OpenTaskPayload } from './DagCanvas';
 import { memberLogo, memberShortLabel } from './memberLabel';
+import { taskStatusMeta } from './nodes/TaskNode';
 
 type WorkerTranscriptPanelProps = {
   /** The clicked DAG node's payload (task + assignment + fleet snapshot + refetch).
@@ -23,6 +24,9 @@ type WorkerTranscriptPanelProps = {
   onClose: () => void;
 };
 
+/** Longest persona preview shown inline; the rest lives behind a tooltip. */
+const PERSONA_PREVIEW_LEN = 140;
+
 /** One reassign Select option: friendly agent/model label + role hint, plus a logo. */
 const memberOption = (m: TFleetMember, roleLabel: (role: string) => string) => {
   const label = memberShortLabel(m) ?? m.id;
@@ -30,17 +34,30 @@ const memberOption = (m: TFleetMember, roleLabel: (role: string) => string) => {
   return { member: m, label, role, logo: memberLogo(m) };
 };
 
+/** A single label→value row in the config block (label muted-left, value right). */
+const ConfigRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div className='flex items-start gap-12px'>
+    <span className='w-44px shrink-0 pt-1px text-12px font-500 leading-18px text-t-tertiary'>{label}</span>
+    <div className='min-w-0 flex-1 text-12px leading-18px text-t-primary'>{children}</div>
+  </div>
+);
+
 /**
- * Side drawer for one orchestration task. Two stacked sections:
+ * Side drawer for one orchestration task. Stacked sections, top → bottom:
  *
- *  1. Assignment inspector — WHY the task was routed to its member (the
- *     orchestrator's `rationale`), plus controls to **reassign** it to another
- *     fleet member and **lock** the assignment so the auto-router won't override
- *     it. Changes call `PUT …/assignment` and then refetch the run so the canvas
- *     and this panel reflect the new state.
+ *  1. Agent config — WHO is on this task and HOW it's set up: role, model,
+ *     persona (truncated), skills, live status, plus the WHY (rationale) and the
+ *     management controls to **reassign** the task to another fleet member and
+ *     **lock** the assignment against the auto-router. Reassign/lock call
+ *     `PUT …/assignment` then refetch so the canvas + panel resync.
  *  2. Worker transcript — the live, read-only conversation record (mirrors
  *     SubagentDrawer: ReadOnlyConversationView with the send box hidden). Shown
  *     only once a worker has picked up the task and a conversation exists.
+ *  3. Steer — mid-turn inject into a running worker's live conversation.
+ *
+ * Data comes straight off `OpenTaskPayload` (task + assignment + the run's fleet
+ * snapshot, already enriched with description/system_prompt/enabled_skills in
+ * P4), so the panel never re-fetches the run to render config.
  *
  * `TRunTask.conversation_id` is already the backend INTEGER id, passed straight
  * through with no conversion (unlike TeamAgent.conversation_id, a string).
@@ -139,6 +156,31 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
   const fleetMembers = open?.fleetMembers ?? [];
   const currentMember = assignment ? fleetMembers.find((m) => m.id === assignment.member_id) : undefined;
 
+  // ── Config values (planner role wins over the member's static role_hint) ────
+  const emptyDash = t('orchestrator.run.detail.config.empty');
+  const roleText = task?.role?.trim()
+    ? roleLabel(task.role)
+    : currentMember?.role_hint
+      ? roleLabel(currentMember.role_hint)
+      : emptyDash;
+
+  const modelName = currentMember?.model?.trim();
+  const providerName = currentMember?.provider_id?.trim();
+
+  const persona = currentMember?.system_prompt?.trim() ?? '';
+  const personaTruncated = persona.length > PERSONA_PREVIEW_LEN;
+  const personaPreview = personaTruncated ? `${persona.slice(0, PERSONA_PREVIEW_LEN)}…` : persona;
+
+  const enabledSkills = currentMember?.enabled_skills ?? [];
+  const disabledBuiltinCount = currentMember?.disabled_builtin_skills?.length ?? 0;
+
+  const statusMeta = task ? taskStatusMeta(task.status) : null;
+  const statusLabel = task
+    ? t(`orchestrator.run.task.status.${task.status}` as 'orchestrator.run.task.status.pending', {
+        defaultValue: t('orchestrator.run.status.unknown'),
+      })
+    : '';
+
   return (
     <Drawer
       width={560}
@@ -149,86 +191,180 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
     >
       {ctx}
       <div className='flex flex-col h-full overflow-hidden'>
-        {/* ── Assignment inspector ─────────────────────────────────────────── */}
-        {assignment && (
+        {/* ── Agent config (who / what / status) + management controls ───────── */}
+        {task && (
           <div
             className='mb-12px shrink-0 rd-12px p-12px'
             style={{ background: 'var(--bg-2)', border: '1px solid var(--border-base)' }}
           >
-            {/* Rationale: "why this member" */}
-            <div className='text-11px font-600 uppercase tracking-wide text-t-tertiary'>
-              {t('orchestrator.run.assign.rationaleTitle')}
-            </div>
-            <div className='mt-4px text-13px leading-19px text-t-primary'>
-              {assignment.rationale?.trim() || t('orchestrator.run.assign.noRationale')}
-            </div>
-            {currentMember && (
-              <div className='mt-6px flex items-center gap-6px text-12px text-t-secondary'>
-                {memberLogo(currentMember) ? (
-                  <img src={memberLogo(currentMember) ?? ''} alt='' className='size-14px shrink-0 object-contain' />
-                ) : null}
-                <span className='truncate'>{memberShortLabel(currentMember) ?? currentMember.id}</span>
-                {typeof assignment.score === 'number' && (
-                  <span className='shrink-0 text-t-tertiary'>
-                    {t('orchestrator.run.assign.score', { score: assignment.score.toFixed(2) })}
+            <div className='mb-8px flex items-center gap-8px'>
+              <span className='text-11px font-600 uppercase tracking-wide text-t-tertiary'>
+                {t('orchestrator.run.detail.config.title')}
+              </span>
+              {currentMember && (
+                <span className='inline-flex min-w-0 items-center gap-5px'>
+                  {memberLogo(currentMember) ? (
+                    <img src={memberLogo(currentMember) ?? ''} alt='' className='size-13px shrink-0 object-contain' />
+                  ) : null}
+                  <span className='truncate text-11px text-t-secondary'>
+                    {memberShortLabel(currentMember) ?? currentMember.id}
                   </span>
+                </span>
+              )}
+            </div>
+
+            <div className='flex flex-col gap-7px'>
+              {/* 角色 */}
+              <ConfigRow label={t('orchestrator.run.detail.config.role')}>
+                <span className='font-500'>{roleText}</span>
+              </ConfigRow>
+
+              {/* 模型 */}
+              <ConfigRow label={t('orchestrator.run.detail.config.model')}>
+                {modelName || providerName ? (
+                  <span className='inline-flex flex-wrap items-baseline gap-x-6px gap-y-2px'>
+                    <span className='font-500'>{modelName ?? t('orchestrator.run.detail.config.modelNone')}</span>
+                    {providerName && <span className='text-11px text-t-tertiary'>· {providerName}</span>}
+                  </span>
+                ) : (
+                  <span className='text-t-tertiary'>{emptyDash}</span>
                 )}
+              </ConfigRow>
+
+              {/* 人设 — preview + tooltip for the full text (only if present) */}
+              {persona && (
+                <ConfigRow label={t('orchestrator.run.detail.config.persona')}>
+                  {personaTruncated ? (
+                    <Tooltip
+                      position='left'
+                      content={
+                        <span className='block max-h-280px max-w-360px overflow-auto whitespace-pre-wrap text-12px leading-18px'>
+                          {persona}
+                        </span>
+                      }
+                    >
+                      <span className='cursor-help leading-18px text-t-secondary underline-offset-2 decoration-dotted hover:underline'>
+                        {personaPreview}
+                      </span>
+                    </Tooltip>
+                  ) : (
+                    <span className='leading-18px text-t-secondary'>{personaPreview}</span>
+                  )}
+                </ConfigRow>
+              )}
+
+              {/* 技能 — small chips */}
+              <ConfigRow label={t('orchestrator.run.detail.config.skills')}>
+                {enabledSkills.length > 0 ? (
+                  <div className='flex flex-col gap-4px'>
+                    <div className='flex flex-wrap gap-4px'>
+                      {enabledSkills.map((skill) => (
+                        <span
+                          key={skill}
+                          className='inline-flex max-w-180px items-center rd-100px px-7px py-2px text-10px leading-none text-t-secondary'
+                          style={{ background: 'var(--fill-0)', border: '1px solid var(--border-light)' }}
+                          title={skill}
+                        >
+                          <span className='truncate'>{skill}</span>
+                        </span>
+                      ))}
+                    </div>
+                    {disabledBuiltinCount > 0 && (
+                      <span className='text-10px leading-none text-t-tertiary'>
+                        {t('orchestrator.run.detail.config.disabledBuiltin', { count: disabledBuiltinCount })}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <span className='text-t-tertiary'>{t('orchestrator.run.detail.config.skillsNone')}</span>
+                )}
+              </ConfigRow>
+
+              {/* 状态 — reuse the canvas status color mapping */}
+              <ConfigRow label={t('orchestrator.run.detail.config.status')}>
+                <span className='inline-flex items-center gap-5px'>
+                  <span
+                    className={`size-8px shrink-0 rd-full ${statusMeta?.pulse ? 'nomi-dag-pulse' : ''}`}
+                    style={{ background: statusMeta?.color ?? 'var(--bg-6)' }}
+                  />
+                  <span className='font-500' style={{ color: statusMeta?.color ?? 'var(--text-2)' }}>
+                    {statusLabel}
+                  </span>
+                </span>
+              </ConfigRow>
+            </div>
+
+            {/* Rationale + reassign + lock (management) — only with an assignment */}
+            {assignment && (
+              <div className='mt-12px border-t border-t-base pt-12px'>
+                <div className='text-11px font-600 uppercase tracking-wide text-t-tertiary'>
+                  {t('orchestrator.run.assign.rationaleTitle')}
+                </div>
+                <div className='mt-4px text-12px leading-18px text-t-secondary'>
+                  {assignment.rationale?.trim() || t('orchestrator.run.assign.noRationale')}
+                  {typeof assignment.score === 'number' && (
+                    <span className='ml-6px text-t-tertiary'>
+                      {t('orchestrator.run.assign.score', { score: assignment.score.toFixed(2) })}
+                    </span>
+                  )}
+                </div>
+
+                <div className='mt-10px flex flex-col gap-8px'>
+                  <div>
+                    <div className='mb-4px text-11px font-500 text-t-tertiary'>
+                      {t('orchestrator.run.assign.reassign')}
+                    </div>
+                    <Select
+                      className='w-full'
+                      size='small'
+                      disabled={saving}
+                      value={assignment.member_id}
+                      onChange={(memberId: string) => void applyReassign(memberId, assignment.locked)}
+                      showSearch
+                      filterOption={(input, option) => {
+                        const id = (option as React.ReactElement<{ value?: string }>)?.props?.value;
+                        const m = fleetMembers.find((fm) => fm.id === id);
+                        const text = `${m?.agent_id ?? ''} ${m?.model ?? ''} ${m?.role_hint ?? ''}`.toLowerCase();
+                        return text.includes(input.toLowerCase());
+                      }}
+                    >
+                      {fleetMembers.map((m) => {
+                        const opt = memberOption(m, roleLabel);
+                        return (
+                          <Select.Option key={m.id} value={m.id}>
+                            <span className='flex items-center gap-8px'>
+                              <span className='size-16px shrink-0 flex items-center justify-center'>
+                                {opt.logo ? (
+                                  <img src={opt.logo} alt='' className='size-16px object-contain' />
+                                ) : (
+                                  <span className='text-12px leading-none'>🤖</span>
+                                )}
+                              </span>
+                              <span className='truncate'>{opt.label}</span>
+                              {opt.role && <span className='shrink-0 text-t-tertiary text-11px'>· {opt.role}</span>}
+                            </span>
+                          </Select.Option>
+                        );
+                      })}
+                    </Select>
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <div className='flex flex-col'>
+                      <span className='text-12px font-500 text-t-primary'>{t('orchestrator.run.assign.locked')}</span>
+                      <span className='text-11px leading-15px text-t-tertiary'>
+                        {t('orchestrator.run.assign.lockedHint')}
+                      </span>
+                    </div>
+                    <Switch
+                      size='small'
+                      disabled={saving}
+                      checked={assignment.locked}
+                      onChange={(locked: boolean) => void applyReassign(assignment.member_id, locked)}
+                    />
+                  </div>
+                </div>
               </div>
             )}
-
-            {/* Reassign + lock controls */}
-            <div className='mt-12px flex flex-col gap-8px'>
-              <div>
-                <div className='mb-4px text-11px font-500 text-t-tertiary'>
-                  {t('orchestrator.run.assign.reassign')}
-                </div>
-                <Select
-                  className='w-full'
-                  size='small'
-                  disabled={saving}
-                  value={assignment.member_id}
-                  onChange={(memberId: string) => void applyReassign(memberId, assignment.locked)}
-                  showSearch
-                  filterOption={(input, option) => {
-                    const id = (option as React.ReactElement<{ value?: string }>)?.props?.value;
-                    const m = fleetMembers.find((fm) => fm.id === id);
-                    const text = `${m?.agent_id ?? ''} ${m?.model ?? ''} ${m?.role_hint ?? ''}`.toLowerCase();
-                    return text.includes(input.toLowerCase());
-                  }}
-                >
-                  {fleetMembers.map((m) => {
-                    const opt = memberOption(m, roleLabel);
-                    return (
-                      <Select.Option key={m.id} value={m.id}>
-                        <span className='flex items-center gap-8px'>
-                          <span className='size-16px shrink-0 flex items-center justify-center'>
-                            {opt.logo ? (
-                              <img src={opt.logo} alt='' className='size-16px object-contain' />
-                            ) : (
-                              <span className='text-12px leading-none'>🤖</span>
-                            )}
-                          </span>
-                          <span className='truncate'>{opt.label}</span>
-                          {opt.role && <span className='shrink-0 text-t-tertiary text-11px'>· {opt.role}</span>}
-                        </span>
-                      </Select.Option>
-                    );
-                  })}
-                </Select>
-              </div>
-              <div className='flex items-center justify-between'>
-                <div className='flex flex-col'>
-                  <span className='text-12px font-500 text-t-primary'>{t('orchestrator.run.assign.locked')}</span>
-                  <span className='text-11px leading-15px text-t-tertiary'>{t('orchestrator.run.assign.lockedHint')}</span>
-                </div>
-                <Switch
-                  size='small'
-                  disabled={saving}
-                  checked={assignment.locked}
-                  onChange={(locked: boolean) => void applyReassign(assignment.member_id, locked)}
-                />
-              </div>
-            </div>
           </div>
         )}
 

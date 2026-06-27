@@ -65,7 +65,19 @@
       "planningTitle": "Planning tasks…",
       "planningDesc": "The fleet is breaking the goal into a task graph — nodes will appear shortly.",
       "untitledTask": "(Untitled task)",
-      "assigned": "Assigned"
+      "assigned": "Assigned",
+      "config": {
+        "title": "Configuration",
+        "role": "Role",
+        "model": "Model",
+        "modelNone": "No model set",
+        "persona": "Persona",
+        "skills": "Skills",
+        "skillsNone": "No extra skills",
+        "disabledBuiltin": "{{count}} built-in skill(s) disabled",
+        "status": "Status",
+        "empty": "—"
+      }
     },
     "assign": {
       "rationaleTitle": "Why this member",
