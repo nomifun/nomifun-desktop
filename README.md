@@ -81,6 +81,10 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 <div align="center">
 
 <p>
+  🎬 <b>Intro video:</b> <a href="https://youtu.be/gEDo5H0H0Pg">https://youtu.be/gEDo5H0H0Pg</a>
+</p>
+
+<p>
   <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun desktop workbench with conversation, companion, and project metrics" width="100%">
   <br/><sub><b>Desktop workbench: conversation, companion, and live session metrics</b></sub>
 </p>

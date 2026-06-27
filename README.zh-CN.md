@@ -81,6 +81,10 @@
 <div align="center">
 
 <p>
+  🎬 <b>宣传视频：</b><a href="https://youtu.be/gEDo5H0H0Pg">https://youtu.be/gEDo5H0H0Pg</a>
+</p>
+
+<p>
   <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 桌面工作台，会话、桌面伙伴与项目指标同屏展示" width="100%">
   <br/><sub><b>桌面工作台：会话、伙伴与实时会话指标</b></sub>
 </p>
