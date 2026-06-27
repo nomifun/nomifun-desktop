@@ -19,6 +19,7 @@ import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
+import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
 import QuickActionButtons from './components/QuickActionButtons';
 import SummonDrawer from './components/SummonDrawer';
@@ -666,6 +667,8 @@ const GuidPage: React.FC = () => {
               />
             }
           />
+
+          <GuidResourceCards />
 
           {/* Editor host (modals + example prompts + fallback notice) */}
           <GuidAssistantEditorHost
