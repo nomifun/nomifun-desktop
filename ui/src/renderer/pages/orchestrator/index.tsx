@@ -132,7 +132,7 @@ const RunListRail: React.FC<{
   const { runs, isLoading, error } = useMyRuns();
 
   return (
-    <div className='flex size-full min-h-0 w-300px shrink-0 flex-col border-r border-r-base bg-1'>
+    <div className='flex h-full min-h-0 w-300px shrink-0 flex-col border-r border-r-base bg-1'>
       {/* Header + new-run button */}
       <div className='shrink-0 px-16px pt-16px pb-12px'>
         <div className='text-15px font-600 leading-tight text-t-primary'>{t('orchestrator.title')}</div>
