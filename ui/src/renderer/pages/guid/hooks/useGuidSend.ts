@@ -6,6 +6,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import type { ICreateConversationParams } from '@/common/adapter/ipcBridge';
 import type { IMcpServer, TProviderWithModel } from '@/common/config/storage';
 import { buildAgentConversationParams } from '@/common/utils/buildAgentConversationParams';
 import { toSessionMcpServer } from '@/renderer/hooks/mcp/catalog';
@@ -17,6 +18,7 @@ import { type TFunction } from 'i18next';
 import type { NavigateFunction } from 'react-router-dom';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
+import type { GuidModelSelectionMode } from './useGuidModelSelection';
 
 export type GuidSendDeps = {
   // Input state
@@ -38,6 +40,10 @@ export type GuidSendDeps = {
   selectedAcpModel: string | null;
   currentAcpCachedModelInfo: AcpModelInfo | null;
   current_model: TProviderWithModel | undefined;
+  /** Tri-state model selection from the 会话 entry (single / auto / range). */
+  selectionMode: GuidModelSelectionMode;
+  /** Models chosen in `range` mode; the lead's synthetic fleet. */
+  selectedRange: TProviderWithModel[];
 
   // Agent helpers
   findAgentByKey: (key: string) => AvailableAgent | undefined;
@@ -102,6 +108,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAcpModel,
     currentAcpCachedModelInfo,
     current_model,
+    selectionMode,
+    selectedRange,
     findAgentByKey,
     getEffectiveAgentType,
     resolvePresetRulesAndSkills,
@@ -271,6 +279,27 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         Message.warning(t('conversation.noModelConfigured'));
         return;
       }
+
+      // Orchestration tri-state: `auto`/`range` arm the conversation as an
+      // orchestration lead. `single` keeps today's behavior verbatim (no lead
+      // markers, the user-picked session mode). The `model_range` shape mirrors
+      // the backend `ModelRange` serde (tag `mode`, snake_case variants,
+      // `{provider_id, model}` refs) so the lead's `nomi_run_create` parses it.
+      const isOrchestrationLead = selectionMode === 'auto' || selectionMode === 'range';
+      if (selectionMode === 'range' && selectedRange.length === 0) {
+        Message.warning(t('guid.modelSelector.rangeEmpty'));
+        return;
+      }
+      const modelRange: NonNullable<ICreateConversationParams['extra']['model_range']> | undefined =
+        selectionMode === 'auto'
+          ? { mode: 'auto' }
+          : selectionMode === 'range'
+            ? { mode: 'range', models: selectedRange.map((m) => ({ provider_id: m.id, model: m.use_model })) }
+            : { mode: 'single', model: { provider_id: current_model.id, model: current_model.use_model } };
+      // The lead always runs in autonomous (yolo) mode — it must fan out and
+      // confirm without per-step human approval.
+      const nomiSessionMode = isOrchestrationLead ? 'yolo' : selectedMode;
+
       try {
         const conversation = await ipcBridge.conversation.create.invoke({
           type: 'nomi',
@@ -289,7 +318,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
             // the global MCP repository at runtime.
             selected_session_mcp_servers: selectedAllSessionMcpServers,
             preset_assistant_id,
-            session_mode: selectedMode,
+            session_mode: nomiSessionMode,
+            ...(isOrchestrationLead ? { orchestrator_role: 'lead' as const, model_range: modelRange } : {}),
           },
         });
 
@@ -412,6 +442,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedAcpModel,
     currentAcpCachedModelInfo,
     current_model,
+    selectionMode,
+    selectedRange,
     findAgentByKey,
     getEffectiveAgentType,
     resolvePresetRulesAndSkills,
