@@ -65,7 +65,19 @@
       "planningTitle": "正在规划任务…",
       "planningDesc": "编队正在拆解目标并生成任务图，稍候即可看到节点。",
       "untitledTask": "（未命名任务）",
-      "assigned": "已分派"
+      "assigned": "已分派",
+      "config": {
+        "title": "配置",
+        "role": "角色",
+        "model": "模型",
+        "modelNone": "未指定模型",
+        "persona": "人设",
+        "skills": "技能",
+        "skillsNone": "无附加技能",
+        "disabledBuiltin": "已禁用 {{count}} 项内置技能",
+        "status": "状态",
+        "empty": "—"
+      }
     },
     "assign": {
       "rationaleTitle": "为何分派给它",
