@@ -21,6 +21,18 @@ pub struct Fleet {
 
 /// One member of a fleet: an agent reference plus its routing hints, capability
 /// profile, and constraints.
+///
+/// **Enrichment (P4 Task 2).** The trailing four fields carry an assistant's
+/// resolved persona into the run's self-contained fleet snapshot, so the
+/// orchestrator engine/worker never need an assistant-crate dependency: they
+/// read everything from the snapshot. All four are `#[serde(default)]` so old
+/// snapshots (and bare model-range members) deserialize unchanged:
+/// - `description` — the role/model description fed to the description-driven
+///   planner (P3). Set for both assistant-backed AND bare model members.
+/// - `system_prompt` — the assistant's persona/rule text; the worker uses it as
+///   `preset_rules` (consumed in Task 3). `None` for bare model members.
+/// - `enabled_skills` / `disabled_builtin_skills` — the assistant's skill set;
+///   the worker applies them (Task 3). Empty for bare model members.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetMember {
     pub id: String,
@@ -31,6 +43,20 @@ pub struct FleetMember {
     pub capability_profile: Option<CapabilityProfile>,
     pub constraints: Option<MemberConstraints>,
     pub sort_order: i64,
+    /// Role/model description → fed to the planner (P3). Additive: P3 still
+    /// builds its own description map from the provider rows, so this never
+    /// breaks `produce`.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Assistant persona (rule text); the worker uses it as `preset_rules`.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Assistant skills the worker enables.
+    #[serde(default)]
+    pub enabled_skills: Vec<String>,
+    /// Assistant's disabled built-in skills.
+    #[serde(default)]
+    pub disabled_builtin_skills: Vec<String>,
 }
 
 /// Declarative capability profile used to route tasks to a member.
@@ -50,6 +76,78 @@ pub struct MemberConstraints {
     pub max_concurrency: Option<i64>,
     pub cost_tier: Option<String>,
     pub allowed_task_kinds: Option<Vec<String>>,
+}
+
+/// Derive a conservative [`CapabilityProfile`] for an assistant-backed member
+/// from its tags + description (P4 Task 2).
+///
+/// This is intentionally light: the description-driven LLM planner reading
+/// `FleetMember::description` is the PRIMARY routing signal — the profile only
+/// supplies the Router's hard-filter / tie-break baseline. So:
+/// - `strengths` is seeded from keyword hits across the tags + description
+///   (deduped, lowercased), giving the Router a small discriminating signal
+///   when one exists; an empty `strengths` is fine (the planner still routes by
+///   description).
+/// - everything else is the neutral baseline: `reasoning = "medium"`,
+///   `cost_tier = speed_tier = "standard"`, `tools = true` when the assistant
+///   has skills (it can call them) else `false`, `modalities = []` (no
+///   over-claiming of vision — the hard filter must not falsely admit a member
+///   for a vision task it cannot do).
+pub fn derive_capability(
+    audience_tags: &[String],
+    scenario_tags: &[String],
+    description: Option<&str>,
+    has_skills: bool,
+) -> CapabilityProfile {
+    // Keyword → canonical strength. Matched case-insensitively as substrings
+    // against each tag and the description. Kept small + conservative.
+    const KEYWORDS: &[(&str, &str)] = &[
+        ("cod", "coding"),
+        ("program", "coding"),
+        ("develop", "coding"),
+        ("write", "writing"),
+        ("writ", "writing"),
+        ("文案", "writing"),
+        ("research", "research"),
+        ("调研", "research"),
+        ("search", "research"),
+        ("analy", "analysis"),
+        ("分析", "analysis"),
+        ("data", "analysis"),
+        ("design", "design"),
+        ("设计", "design"),
+        ("translat", "translation"),
+        ("翻译", "translation"),
+        ("plan", "planning"),
+        ("规划", "planning"),
+        ("vision", "vision"),
+        ("image", "vision"),
+        ("视觉", "vision"),
+    ];
+
+    let mut haystacks: Vec<String> = Vec::new();
+    for t in audience_tags.iter().chain(scenario_tags.iter()) {
+        haystacks.push(t.to_lowercase());
+    }
+    if let Some(d) = description {
+        haystacks.push(d.to_lowercase());
+    }
+
+    let mut strengths: Vec<String> = Vec::new();
+    for (needle, strength) in KEYWORDS {
+        if haystacks.iter().any(|h| h.contains(needle)) && !strengths.iter().any(|s| s == strength) {
+            strengths.push((*strength).to_string());
+        }
+    }
+
+    CapabilityProfile {
+        strengths,
+        modalities: Vec::new(),
+        tools: has_skills,
+        reasoning: "medium".to_string(),
+        cost_tier: "standard".to_string(),
+        speed_tier: "standard".to_string(),
+    }
 }
 
 /// An orchestration workspace: a named scope with an optional default fleet and
@@ -294,6 +392,15 @@ pub struct CreateAdhocRunRequest {
     /// Reserved for P4 (role pinning). Parsed but ignored in P1.
     #[serde(default)]
     pub pinned_roles: Vec<String>,
+    /// Pre-constructed role members (P4 Task 2): the caps_orchestrator layer
+    /// resolves each ENABLED assistant into an enriched [`FleetMember`]
+    /// (persona/skills/model folded in) and passes them here. `RunService`
+    /// merges these with the bare model-range members (dedup by
+    /// `(provider_id, model, agent_id)`) into the run's fleet snapshot.
+    /// Defaults empty so existing callers (and the workspace path) are
+    /// unaffected.
+    #[serde(default)]
+    pub role_members: Vec<FleetMember>,
     #[serde(default)]
     pub autonomy: Option<String>,
     #[serde(default)]
@@ -553,6 +660,7 @@ mod tests {
                 ],
             },
             pinned_roles: vec!["lead".to_string()],
+            role_members: vec![],
             autonomy: Some("supervised".to_string()),
             max_parallel: Some(3),
             lead_conv_id: Some(77),
@@ -657,6 +765,10 @@ mod tests {
                 capability_profile: None,
                 constraints: None,
                 sort_order: 0,
+                description: None,
+                system_prompt: None,
+                enabled_skills: vec![],
+                disabled_builtin_skills: vec![],
             }],
         };
 
@@ -738,5 +850,131 @@ mod tests {
             serde_json::from_str(r#"{"member_id":"fm_9"}"#).expect("deserialize minimal");
         assert_eq!(minimal.member_id, "fm_9");
         assert_eq!(minimal.locked, None);
+    }
+
+    // ── P4 Task 2: FleetMember enrichment + role_members + derive_capability ──
+
+    /// An OLD fleet snapshot JSON (no `description` / `system_prompt` /
+    /// `enabled_skills` / `disabled_builtin_skills`) must still deserialize, with
+    /// the four enrichment fields taking their serde defaults. This is the
+    /// back-compat invariant: existing persisted runs must keep loading.
+    #[test]
+    fn fleet_member_old_snapshot_deserializes_with_defaults() {
+        let old = r#"{
+            "id": "fm_1",
+            "agent_id": "",
+            "provider_id": "p1",
+            "model": "m1",
+            "role_hint": null,
+            "capability_profile": null,
+            "constraints": null,
+            "sort_order": 0
+        }"#;
+        let m: FleetMember = serde_json::from_str(old).expect("old snapshot must deserialize");
+        assert_eq!(m.id, "fm_1");
+        assert_eq!(m.provider_id.as_deref(), Some("p1"));
+        // The four enrichment fields default.
+        assert_eq!(m.description, None);
+        assert_eq!(m.system_prompt, None);
+        assert!(m.enabled_skills.is_empty());
+        assert!(m.disabled_builtin_skills.is_empty());
+    }
+
+    /// A fully-enriched member round-trips through JSON unchanged.
+    #[test]
+    fn fleet_member_enriched_round_trips() {
+        let m = FleetMember {
+            id: "rmbr_1".to_string(),
+            agent_id: "asst_research".to_string(),
+            provider_id: Some("p1".to_string()),
+            model: Some("m1".to_string()),
+            role_hint: Some("研究员".to_string()),
+            capability_profile: None,
+            constraints: None,
+            sort_order: 0,
+            description: Some("善于多源调研".to_string()),
+            system_prompt: Some("你是一名严谨的研究员".to_string()),
+            enabled_skills: vec!["web_search".to_string()],
+            disabled_builtin_skills: vec!["browser".to_string()],
+        };
+        let json = serde_json::to_string(&m).expect("serialize");
+        let back: FleetMember = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.agent_id, "asst_research");
+        assert_eq!(back.role_hint.as_deref(), Some("研究员"));
+        assert_eq!(back.description.as_deref(), Some("善于多源调研"));
+        assert_eq!(back.system_prompt.as_deref(), Some("你是一名严谨的研究员"));
+        assert_eq!(back.enabled_skills, vec!["web_search"]);
+        assert_eq!(back.disabled_builtin_skills, vec!["browser"]);
+    }
+
+    /// `CreateAdhocRunRequest::role_members` defaults to empty when absent (the
+    /// existing minimal payload must keep parsing) and carries enriched members
+    /// when present.
+    #[test]
+    fn create_adhoc_role_members_default_and_round_trip() {
+        // Absent → empty (back-compat with the P1 minimal payload).
+        let minimal: CreateAdhocRunRequest = serde_json::from_str(
+            r#"{"goal":"g","model_range":{"mode":"single","model":{"provider_id":"p","model":"m"}}}"#,
+        )
+        .expect("minimal still parses");
+        assert!(minimal.role_members.is_empty(), "role_members defaults empty");
+
+        // Present → carried through.
+        let req = CreateAdhocRunRequest {
+            goal: "g".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Single { model: ModelRef { provider_id: "p".to_string(), model: "m".to_string() } },
+            pinned_roles: vec![],
+            role_members: vec![FleetMember {
+                id: "rmbr_x".to_string(),
+                agent_id: "asst_x".to_string(),
+                provider_id: Some("p".to_string()),
+                model: Some("m".to_string()),
+                role_hint: Some("X".to_string()),
+                capability_profile: None,
+                constraints: None,
+                sort_order: 0,
+                description: Some("d".to_string()),
+                system_prompt: Some("persona".to_string()),
+                enabled_skills: vec!["s".to_string()],
+                disabled_builtin_skills: vec![],
+            }],
+            autonomy: None,
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let back: CreateAdhocRunRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.role_members.len(), 1);
+        assert_eq!(back.role_members[0].agent_id, "asst_x");
+        assert_eq!(back.role_members[0].system_prompt.as_deref(), Some("persona"));
+    }
+
+    /// `derive_capability` maps tag/description keywords to strengths and applies
+    /// the conservative baseline for everything else.
+    #[test]
+    fn derive_capability_maps_keywords_and_baseline() {
+        // Scenario tag "coding-help" + description mentioning research → both
+        // strengths picked up; tools=true because the assistant has skills.
+        let prof = derive_capability(
+            &["developer".to_string()],
+            &["coding-help".to_string()],
+            Some("Great at research and 分析 tasks"),
+            true,
+        );
+        assert!(prof.strengths.contains(&"coding".to_string()), "coding from tags: {:?}", prof.strengths);
+        assert!(prof.strengths.contains(&"research".to_string()), "research from desc: {:?}", prof.strengths);
+        assert!(prof.strengths.contains(&"analysis".to_string()), "analysis (分析) from desc: {:?}", prof.strengths);
+        assert!(prof.tools, "has skills → tools true");
+        assert_eq!(prof.reasoning, "medium");
+        assert_eq!(prof.cost_tier, "standard");
+        assert_eq!(prof.speed_tier, "standard");
+        assert!(prof.modalities.is_empty(), "no over-claimed modalities");
+
+        // No keywords + no skills → empty strengths, tools false, still baseline.
+        let bare = derive_capability(&[], &[], None, false);
+        assert!(bare.strengths.is_empty());
+        assert!(!bare.tools, "no skills → tools false");
+        assert_eq!(bare.reasoning, "medium");
     }
 }

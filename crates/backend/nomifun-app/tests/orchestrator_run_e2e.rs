@@ -719,6 +719,7 @@ async fn adhoc_run_from_model_range_completes_through_engine() {
                     ],
                 },
                 pinned_roles: vec![],
+                role_members: vec![],
                 autonomy: Some("autonomous".to_string()),
                 max_parallel: None,
                 lead_conv_id: Some(909),

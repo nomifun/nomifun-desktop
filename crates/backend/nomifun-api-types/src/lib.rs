@@ -148,6 +148,7 @@ pub use orchestrator::{
     CreateWorkspaceRequest, Fleet, FleetMember, FleetMemberInput, MemberConstraints, ModelRange,
     ModelRef, OrchWorkspace, PlannedDag, PlannedTask, ReassignRequest, Run, RunDetail, RunTask,
     RunTaskDep, SteerRequest, TaskProfile, UpdateFleetRequest, UpdateWorkspaceRequest,
+    derive_capability,
 };
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,

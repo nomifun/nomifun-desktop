@@ -128,6 +128,11 @@ pub async fn create_router(services: &AppServices) -> Router {
         // field type so the gateway holds the one live instance.
         orchestrator_run_service: states.orchestrator.run_service.clone(),
         orchestrator_run_engine: Arc::new(states.orchestrator.engine.clone()),
+        // 助手 (assistants): the SAME service instance the `/api/assistants` routes
+        // use, so the caps_orchestrator layer reads the exact assistants (+ their
+        // enabled/override state) the UI shows when folding them into a run's fleet
+        // snapshot (P4 Task 2).
+        assistant_service: states.assistant.service.clone(),
         // P3-GW1 (route A): per-companion browser tool registry, lives in this
         // (main) process. Feature-gated — `None` would mean "browser tools not
         // available", but when the feature is on we always wire it so remote

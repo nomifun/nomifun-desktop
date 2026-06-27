@@ -508,6 +508,10 @@ mod tests {
             }),
             constraints: None,
             sort_order: 0,
+            description: None,
+            system_prompt: None,
+            enabled_skills: Vec::new(),
+            disabled_builtin_skills: Vec::new(),
         };
         let prompt = build_plan_user_prompt("Research X", &[member], &DescriptionMap::new());
         assert!(prompt.contains("Research X"));
@@ -554,6 +558,10 @@ mod tests {
             capability_profile: None,
             constraints: None,
             sort_order: 0,
+            description: None,
+            system_prompt: None,
+            enabled_skills: Vec::new(),
+            disabled_builtin_skills: Vec::new(),
         }
     }
 

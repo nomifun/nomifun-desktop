@@ -72,6 +72,12 @@ fn member_row_to_dto(row: FleetMemberRow) -> FleetMember {
         capability_profile,
         constraints,
         sort_order: row.sort_order,
+        // Persisted fleet rows carry no enriched persona (enrichment is folded
+        // in at ad-hoc create time, not stored in `fleets`); default the fields.
+        description: None,
+        system_prompt: None,
+        enabled_skills: Vec::new(),
+        disabled_builtin_skills: Vec::new(),
     }
 }
 
