@@ -37,6 +37,12 @@ interface RunDetailHeaderProps {
   onResume: () => void;
   /** While any control action (cancel/approve/pause/resume) is in flight. */
   busy: boolean;
+  /**
+   * Embedded mode — when the header is rendered inside a conversation's
+   * workspace rail tab there is no master-detail to navigate back to, so the
+   * back button is suppressed. Run controls are always kept.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -60,6 +66,7 @@ const RunDetailHeader: React.FC<RunDetailHeaderProps> = ({
   onPause,
   onResume,
   busy,
+  embedded,
 }) => {
   const { t } = useTranslation();
   const meta = RUN_STATUS_META[run.status];
@@ -80,17 +87,19 @@ const RunDetailHeader: React.FC<RunDetailHeaderProps> = ({
 
   return (
     <div className='flex shrink-0 items-center gap-12px border-b border-b-base bg-1 px-16px py-12px'>
-      {/* Back */}
-      <div
-        role='button'
-        tabIndex={0}
-        aria-label={t('orchestrator.run.detail.back')}
-        onClick={onBack}
-        onKeyDown={onKeyActivate(onBack)}
-        className='flex size-30px shrink-0 cursor-pointer items-center justify-center rd-8px text-t-secondary transition-colors hover:bg-fill-2 hover:text-t-primary'
-      >
-        <Left theme='outline' size='18' strokeWidth={3} />
-      </div>
+      {/* Back — suppressed in embedded (rail) mode, which has no detail to return to. */}
+      {!embedded && (
+        <div
+          role='button'
+          tabIndex={0}
+          aria-label={t('orchestrator.run.detail.back')}
+          onClick={onBack}
+          onKeyDown={onKeyActivate(onBack)}
+          className='flex size-30px shrink-0 cursor-pointer items-center justify-center rd-8px text-t-secondary transition-colors hover:bg-fill-2 hover:text-t-primary'
+        >
+          <Left theme='outline' size='18' strokeWidth={3} />
+        </div>
+      )}
 
       {/* Goal + status */}
       <div className='min-w-0 flex-1'>
