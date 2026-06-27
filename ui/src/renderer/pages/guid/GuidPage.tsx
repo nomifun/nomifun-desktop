@@ -512,8 +512,11 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  // Build the model selector node
-  const modelSelectorNode = (
+  // Build the model selector node. Hidden in `auto` orchestration mode — auto
+  // fans the lead out over ALL enabled models, so there is nothing to pick and a
+  // model button would just duplicate the "自动编排" segmented label beside it.
+  const hideModelSelector = isGeminiMode && modelSelection.selectionMode === 'auto';
+  const modelSelectorNode = hideModelSelector ? null : (
     <GuidModelSelector
       isGeminiMode={isGeminiMode}
       modelList={modelSelection.modelList}
