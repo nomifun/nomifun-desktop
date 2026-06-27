@@ -238,14 +238,21 @@ fn build_plan_user_prompt(
                 .map(|p| p.strengths.join("/"))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "-".to_string());
-            // Look up the member's model description; missing → the "-" sentinel.
-            let desc = match (m.provider_id.as_deref(), m.model.as_deref()) {
+            // Description column. PRIMARY source (P4 Task 3, Change 3): the
+            // member's own `description` — Task 2 populates it for assistant-backed
+            // members (the assistant's description) and decorates bare model-range
+            // members that have a provider model description. FALLBACK (P3): the
+            // `(provider_id, model)` → provider-`model_descriptions` map, kept for
+            // bare members whose `description` was not decorated (no provider desc
+            // OR an older snapshot without the field). Missing on both → "-".
+            let member_desc = m.description.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let desc = member_desc.unwrap_or_else(|| match (m.provider_id.as_deref(), m.model.as_deref()) {
                 (Some(pid), Some(model)) => descriptions
                     .get(&(pid.to_string(), model.to_string()))
                     .map(String::as_str)
                     .unwrap_or("-"),
                 _ => "-",
-            };
+            });
             out.push_str(&format!(
                 "{i}. {} | role={role} | strengths={strengths} | desc={desc}\n",
                 m.agent_id
@@ -544,6 +551,58 @@ mod tests {
         assert!(
             prompt.contains("desc=擅长前端与可视化"),
             "description must surface in the desc= column: {prompt}"
+        );
+    }
+
+    // (Change 3) `member.description` is the PRIMARY desc source (Task 2 fills it
+    // for assistant-backed and decorated bare members). It is shown even when the
+    // P3 provider-description map has no entry for the member.
+    #[test]
+    fn build_plan_user_prompt_prefers_member_description() {
+        let mut member = member_with(Some("prov_x"), Some("model-x"));
+        member.description = Some("研究型助手，擅长检索与综述".to_string());
+        // Empty P3 map — member.description alone must drive the desc= column.
+        let prompt = build_plan_user_prompt("Research X", &[member], &DescriptionMap::new());
+        assert!(
+            prompt.contains("desc=研究型助手，擅长检索与综述"),
+            "member.description must surface as the desc= column: {prompt}"
+        );
+    }
+
+    // member.description WINS over the P3 provider-description map when both are
+    // present (the member snapshot is the authoritative source now).
+    #[test]
+    fn build_plan_user_prompt_member_description_overrides_provider_map() {
+        let mut member = member_with(Some("prov_x"), Some("model-x"));
+        member.description = Some("助手自述描述".to_string());
+        let mut descriptions = DescriptionMap::new();
+        descriptions.insert(
+            ("prov_x".to_string(), "model-x".to_string()),
+            "模型卡描述（应被覆盖）".to_string(),
+        );
+        let prompt = build_plan_user_prompt("goal", &[member], &descriptions);
+        assert!(prompt.contains("desc=助手自述描述"), "member.description wins: {prompt}");
+        assert!(
+            !prompt.contains("模型卡描述"),
+            "provider-map desc must not appear when member.description is set: {prompt}"
+        );
+    }
+
+    // A blank member.description falls back to the P3 provider-description map
+    // (so bare members still get the model-card description via the fallback).
+    #[test]
+    fn build_plan_user_prompt_blank_member_description_falls_back_to_provider_map() {
+        let mut member = member_with(Some("prov_x"), Some("model-x"));
+        member.description = Some("   ".to_string()); // whitespace-only → ignored
+        let mut descriptions = DescriptionMap::new();
+        descriptions.insert(
+            ("prov_x".to_string(), "model-x".to_string()),
+            "模型卡描述".to_string(),
+        );
+        let prompt = build_plan_user_prompt("goal", &[member], &descriptions);
+        assert!(
+            prompt.contains("desc=模型卡描述"),
+            "blank member.description must fall back to the provider map: {prompt}"
         );
     }
 

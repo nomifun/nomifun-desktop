@@ -124,7 +124,15 @@ impl WorkerRunner for ConversationWorkerRunner {
             use_model: Some(model),
         };
 
-        let extra = build_worker_extra(run_id, task_id, brief, workspace_dir);
+        let extra = build_worker_extra(
+            run_id,
+            task_id,
+            brief,
+            workspace_dir,
+            member.system_prompt.as_deref(),
+            &member.enabled_skills,
+            &member.disabled_builtin_skills,
+        );
 
         // Create the worker conversation. yolo: unattended orchestrator runs have
         // no approval UI; desktopGateway: full platform tool set. We call create()
@@ -242,14 +250,50 @@ impl ConversationWorkerRunner {
 /// correlation ids + the supervisor brief as `system_prompt`, plus an optional
 /// `workspace`. Split out as a free function so it is unit-testable without a
 /// live ConversationService.
-fn build_worker_extra(run_id: &str, task_id: &str, brief: &str, workspace_dir: Option<&str>) -> Value {
+///
+/// **Persona inheritance (P4 Task 3, Change 1):** when the member is
+/// assistant-backed it carries the assistant's persona/rule text in
+/// `system_prompt` (Task 2 snapshot). We set it as `extra.preset_rules` — the
+/// nomi factory (`factory/nomi.rs`) merges `preset_rules` AFTER `system_prompt`,
+/// yielding `brief\n\npersona`, so the supervisor brief leads and the assistant
+/// persona follows. We deliberately do NOT overwrite `extra.system_prompt`
+/// (that is the brief). A blank/whitespace-only persona is dropped (no key).
+///
+/// **Skills inheritance (P4 Task 3, Change 2):** the worker calls
+/// `ConversationService::create` directly (line above), so the create handler's
+/// skill machinery runs on this `extra`: it consumes the request-only
+/// `preset_enabled_skills` (assistant's enabled skills) and
+/// `exclude_auto_inject_skills` (assistant's disabled builtins), computes the
+/// initial `skills` snapshot via `compute_initial_skills`, and freezes it into
+/// `extra.skills`. So we just forward the assistant's two skill lists here as
+/// the canonical request-only keys; the existing handler does the rest (no
+/// handler/factory changes). Empty lists are emitted as empty arrays — harmless
+/// (the create handler treats them as "no preset / no exclusion").
+fn build_worker_extra(
+    run_id: &str,
+    task_id: &str,
+    brief: &str,
+    workspace_dir: Option<&str>,
+    persona: Option<&str>,
+    enabled_skills: &[String],
+    disabled_builtin_skills: &[String],
+) -> Value {
     let mut extra = json!({
         "session_mode": "yolo",
         "desktopGateway": true,
         "orchestrator_run_id": run_id,
         "orchestrator_task_id": task_id,
         "system_prompt": brief,
+        // Request-only skill-shaping inputs consumed by ConversationService::create:
+        // preset_enabled_skills ∪ (auto_inject − exclude_auto_inject_skills) → extra.skills.
+        // The assistant's enabled/disabled-builtin snapshot rides through verbatim.
+        "preset_enabled_skills": enabled_skills,
+        "exclude_auto_inject_skills": disabled_builtin_skills,
     });
+    // Persona: assistant rule text appended after the brief by the nomi factory.
+    if let Some(persona) = persona.map(str::trim).filter(|s| !s.is_empty()) {
+        extra["preset_rules"] = json!(persona);
+    }
     if let Some(ws) = workspace_dir.map(str::trim).filter(|s| !s.is_empty()) {
         extra["workspace"] = json!(ws);
     }
@@ -421,7 +465,7 @@ mod tests {
 
     #[test]
     fn build_worker_extra_carries_correlation_keys_and_brief() {
-        let extra = build_worker_extra("run_abc", "task_xyz", "you are a worker", None);
+        let extra = build_worker_extra("run_abc", "task_xyz", "you are a worker", None, None, &[], &[]);
         assert_eq!(extra["session_mode"], "yolo");
         assert_eq!(extra["desktopGateway"], true);
         assert_eq!(extra["orchestrator_run_id"], "run_abc");
@@ -429,18 +473,80 @@ mod tests {
         assert_eq!(extra["system_prompt"], "you are a worker");
         // No workspace_dir → key absent (not null).
         assert!(extra.get("workspace").is_none());
+        // No persona → preset_rules key absent (the brief is NOT a persona).
+        assert!(extra.get("preset_rules").is_none());
     }
 
     #[test]
     fn build_worker_extra_includes_trimmed_workspace() {
-        let extra = build_worker_extra("r", "t", "b", Some("  /tmp/ws  "));
+        let extra = build_worker_extra("r", "t", "b", Some("  /tmp/ws  "), None, &[], &[]);
         assert_eq!(extra["workspace"], "/tmp/ws");
     }
 
     #[test]
     fn build_worker_extra_ignores_blank_workspace() {
-        let extra = build_worker_extra("r", "t", "b", Some("   "));
+        let extra = build_worker_extra("r", "t", "b", Some("   "), None, &[], &[]);
         assert!(extra.get("workspace").is_none());
+    }
+
+    // (Change 1) An assistant-backed member's persona is set as `extra.preset_rules`
+    // (NOT system_prompt — that stays the brief). The nomi factory merges
+    // preset_rules after system_prompt → `brief\n\npersona`.
+    #[test]
+    fn build_worker_extra_sets_persona_as_preset_rules_without_touching_brief() {
+        let extra = build_worker_extra(
+            "r",
+            "t",
+            "supervisor brief",
+            None,
+            Some("你是一名严谨的研究员，始终引用来源。"),
+            &[],
+            &[],
+        );
+        // Brief stays as the system_prompt; persona rides as preset_rules.
+        assert_eq!(extra["system_prompt"], "supervisor brief");
+        assert_eq!(extra["preset_rules"], "你是一名严谨的研究员，始终引用来源。");
+    }
+
+    // A blank/whitespace-only persona is dropped — no preset_rules key.
+    #[test]
+    fn build_worker_extra_drops_blank_persona() {
+        let empty = build_worker_extra("r", "t", "b", None, Some(""), &[], &[]);
+        assert!(empty.get("preset_rules").is_none());
+        let blank = build_worker_extra("r", "t", "b", None, Some("   \n  "), &[], &[]);
+        assert!(blank.get("preset_rules").is_none());
+        // Persona is trimmed before being stored.
+        let padded = build_worker_extra("r", "t", "b", None, Some("  persona  "), &[], &[]);
+        assert_eq!(padded["preset_rules"], "persona");
+    }
+
+    // (Change 2) The assistant's enabled/disabled-builtin skill lists ride through
+    // as the request-only keys that ConversationService::create consumes to freeze
+    // the `extra.skills` snapshot (preset_enabled_skills ∪ (auto − exclude)).
+    #[test]
+    fn build_worker_extra_forwards_skill_lists_as_request_only_keys() {
+        let enabled = vec!["web_search".to_string(), "code_run".to_string()];
+        let disabled = vec!["browser".to_string()];
+        let extra = build_worker_extra("r", "t", "b", None, None, &enabled, &disabled);
+        assert_eq!(
+            extra["preset_enabled_skills"],
+            json!(["web_search", "code_run"]),
+            "enabled_skills must surface as preset_enabled_skills for the create handler"
+        );
+        assert_eq!(
+            extra["exclude_auto_inject_skills"],
+            json!(["browser"]),
+            "disabled_builtin_skills must surface as exclude_auto_inject_skills"
+        );
+    }
+
+    // Empty skill lists still emit empty arrays — the create handler treats them
+    // as "no preset / no exclusion" (no behavior change for bare members).
+    #[test]
+    fn build_worker_extra_emits_empty_skill_arrays_when_member_has_none() {
+        let extra = build_worker_extra("r", "t", "b", None, None, &[], &[]);
+        assert_eq!(extra["preset_enabled_skills"], json!([]));
+        assert_eq!(extra["exclude_auto_inject_skills"], json!([]));
     }
 
     #[test]
