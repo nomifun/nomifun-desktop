@@ -14,6 +14,42 @@
     "reviewApprove": "查看并批准",
     "configureModel": "去配置模型"
   },
+  "composer": {
+    "title": "新建 Run",
+    "subtitle": "描述目标，挑选模型与角色，让多智能体编队替你执行。",
+    "goalLabel": "需求",
+    "goalPlaceholder": "想让编队完成什么？尽量写清目标、范围与验收标准…",
+    "goalRequired": "请先填写需求",
+    "workDirLabel": "工作路径",
+    "workDirHint": "可选 · 留空使用默认工作区",
+    "workDirBrowse": "选择文件夹",
+    "workDirClear": "清除工作路径",
+    "modelLabel": "模型范围",
+    "modelRequired": "请至少选择一个模型",
+    "noModels": "尚未配置可用模型 · 请先到模型管理添加并启用模型。",
+    "model": {
+      "single": "单一",
+      "auto": "自动",
+      "range": "范围",
+      "singlePlaceholder": "选择一个模型",
+      "rangePlaceholder": "选择多个模型",
+      "autoHint": "将使用全部 {{count}} 个已启用模型，每个模型生成一名成员。"
+    },
+    "rolesLabel": "钉选角色",
+    "rolesHint": "可选 · 留空则由编队自动组建",
+    "rolesPlaceholder": "从已启用助手中选择角色",
+    "rolesEmpty": "暂无可用助手",
+    "autonomyLabel": "自主级别",
+    "autonomy": {
+      "interactive": "先审批",
+      "supervised": "直跑",
+      "interactiveHint": "编队拟定计划后暂停，待你批准再执行。",
+      "supervisedHint": "批准后自动执行，期间仍可介入。"
+    },
+    "submit": "发起 Run",
+    "cancel": "取消",
+    "createError": "发起 Run 失败：{{error}}"
+  },
   "run": {
     "role": {
       "planner": "规划",
