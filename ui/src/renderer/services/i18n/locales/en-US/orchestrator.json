@@ -14,6 +14,42 @@
     "reviewApprove": "Review & approve",
     "configureModel": "Configure model"
   },
+  "composer": {
+    "title": "New run",
+    "subtitle": "Describe the goal, pick the models and roles, and let a multi-agent fleet run it for you.",
+    "goalLabel": "Requirement",
+    "goalPlaceholder": "What should the fleet accomplish? Spell out the goal, scope and acceptance criteria…",
+    "goalRequired": "Please enter a requirement first",
+    "workDirLabel": "Work path",
+    "workDirHint": "Optional · leave empty to use the default workspace",
+    "workDirBrowse": "Choose folder",
+    "workDirClear": "Clear work path",
+    "modelLabel": "Model range",
+    "modelRequired": "Please select at least one model",
+    "noModels": "No usable model configured · add and enable a model in Model management first.",
+    "model": {
+      "single": "Single",
+      "auto": "Auto",
+      "range": "Range",
+      "singlePlaceholder": "Pick a model",
+      "rangePlaceholder": "Pick multiple models",
+      "autoHint": "Will use all {{count}} enabled model(s), one member synthesized per model."
+    },
+    "rolesLabel": "Pinned roles",
+    "rolesHint": "Optional · leave empty to let the fleet assemble itself",
+    "rolesPlaceholder": "Pick roles from enabled assistants",
+    "rolesEmpty": "No assistants available",
+    "autonomyLabel": "Autonomy",
+    "autonomy": {
+      "interactive": "Review first",
+      "supervised": "Run directly",
+      "interactiveHint": "The fleet pauses after planning and waits for your approval before executing.",
+      "supervisedHint": "Executes automatically once approved — you can still step in."
+    },
+    "submit": "Start run",
+    "cancel": "Cancel",
+    "createError": "Failed to start run: {{error}}"
+  },
   "run": {
     "role": {
       "planner": "Planner",
