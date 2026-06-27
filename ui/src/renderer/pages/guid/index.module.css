@@ -350,6 +350,105 @@
   border-color: #3a3a3a;
 }
 
+.guidResourceCards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.guidResourceCard {
+  min-width: 0;
+  height: 144px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  box-sizing: border-box;
+  text-align: left;
+  font-family: inherit;
+  outline: none;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+button.guidResourceCard {
+  cursor: pointer;
+}
+
+button.guidResourceCard:hover,
+button.guidResourceCard:focus-visible {
+  border-color: rgba(var(--primary-6), 0.32);
+  background: color-mix(in srgb, var(--bg-2) 90%, transparent);
+  box-shadow: 0 10px 26px rgba(var(--primary-6), 0.08);
+  transform: translateY(-1px);
+}
+
+.guidResourceCardHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.guidResourceIcon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: rgb(var(--primary-6));
+  background: rgba(var(--primary-6), 0.08);
+}
+
+.guidResourceTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guidResourceDescription {
+  color: var(--color-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.guidResourceAction {
+  margin-top: auto;
+  color: rgb(var(--primary-6));
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+@media (max-width: 768px) {
+  .guidResourceCards {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-top: 16px;
+  }
+
+  .guidResourceCard {
+    height: auto;
+    min-height: 112px;
+  }
+}
+
 .entryStrip {
   display: flex;
   align-items: center;

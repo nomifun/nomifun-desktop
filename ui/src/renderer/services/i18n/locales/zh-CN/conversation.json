@@ -75,6 +75,17 @@
     "loadingMore": "正在加载更多...",
     "untitled": "未命名会话"
   },
+  "emptyCards": {
+    "docsTitle": "使用介绍文档",
+    "docsDescription": "查看安装、项目、会话、设置和常见工作流说明。",
+    "docsAction": "打开文档",
+    "videoTitle": "宣传视频",
+    "videoDescription": "用一个短视频了解 NomiFun 如何组织你的工作台。",
+    "videoAction": "观看视频",
+    "feedbackTitle": "反馈与社区",
+    "feedbackDescription": "遇到问题、想提建议或参与共建，可以通过官网联系页反馈。",
+    "feedbackAction": "联系我们"
+  },
   "dropdown": {
     "cliAgents": "CLI Agents",
     "presetAssistants": "预设助手"

@@ -75,6 +75,17 @@
     "loadingMore": "Loading more...",
     "untitled": "Untitled conversation"
   },
+  "emptyCards": {
+    "docsTitle": "User Guide",
+    "docsDescription": "Read setup, project, conversation, settings, and common workflow docs.",
+    "docsAction": "Open docs",
+    "videoTitle": "Intro Video",
+    "videoDescription": "Watch a short tour of how NomiFun organizes your workspace.",
+    "videoAction": "Watch video",
+    "feedbackTitle": "Feedback & Community",
+    "feedbackDescription": "Report issues, suggest improvements, or help build NomiFun through the official contact page.",
+    "feedbackAction": "Contact us"
+  },
   "dropdown": {
     "cliAgents": "CLI Agents",
     "presetAssistants": "Preset Assistants"
