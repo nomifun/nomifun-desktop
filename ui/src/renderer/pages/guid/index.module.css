@@ -1299,6 +1299,47 @@
   gap: 4px !important;
 }
 
+/* 可见的「编排模式」段控（单 Agent / 自动编排 / 模型范围）——直接坐在输入条上，
+   与模型选择按钮并排，是 selectionMode 的唯一可视来源。 */
+.orchestrationMode {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 2px 8px 2px 6px;
+  margin-right: 4px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+/* 编排开启时（自动 / 范围）给一抹品牌色提示，明确「多 Agent 编排已开」。 */
+.orchestrationModeOn {
+  background: var(--color-primary-light-1);
+  border-color: rgb(var(--primary-3));
+}
+
+.orchestrationModeLabel {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.orchestrationModeIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  line-height: 0;
+}
+
+/* 段控本体跟随主题：默认透明底，选中态用主色描边，与既有 .sendbox-model-btn 同语言。 */
+.orchestrationMode :global(.arco-radio-group-button) {
+  background: transparent;
+  padding: 1px;
+}
+
 .actionSubmit {
   display: flex;
   align-items: center;
