@@ -84,6 +84,16 @@ impl IRunRepository for SqliteRunRepository {
         Ok(rows)
     }
 
+    async fn list_runs_by_user(&self, user_id: &str) -> Result<Vec<OrchRunRow>, sqlx::Error> {
+        let rows = sqlx::query_as::<_, OrchRunRow>(
+            "SELECT * FROM orch_runs WHERE user_id = ? ORDER BY created_at DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn list_runs_by_status(&self, status: &str) -> Result<Vec<OrchRunRow>, sqlx::Error> {
         let rows = sqlx::query_as::<_, OrchRunRow>(
             "SELECT * FROM orch_runs WHERE status = ? ORDER BY created_at ASC",
@@ -659,5 +669,99 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert!(ready.contains(&c.id), "c ready after both blockers done");
+    }
+
+    // P5 Task 2: list_runs_by_user returns every run owned by the given user
+    // (workspace-backed AND ad-hoc workspace_id=NULL), newest first, and excludes
+    // other users' runs. This is the read path the repurposed orchestrator tab (a
+    // read-only Run-history library) uses — adhoc runs created from conversations
+    // carry workspace_id=NULL and so never surface under the workspace-scoped
+    // `list_runs`; they must surface here.
+    #[tokio::test]
+    async fn list_runs_by_user_includes_adhoc_and_excludes_other_users() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        // A workspace owned by user A (FK target for A's workspace-backed run).
+        let ws_repo = SqliteOrchWorkspaceRepository::new(pool.clone());
+        let ws_a = ws_repo
+            .create(CreateOrchWorkspaceParams {
+                user_id: "user_a".into(),
+                name: "A 的工作区".into(),
+                default_fleet_id: None,
+                workspace_dir: None,
+                context: None,
+            })
+            .await
+            .unwrap()
+            .id;
+        let repo = SqliteRunRepository::new(pool);
+
+        // User A: one workspace-backed run, one ad-hoc run (workspace_id=NULL).
+        let a_ws_run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_a.clone()),
+                user_id: "user_a".into(),
+                goal: "A 工作区 run".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let a_adhoc_run = repo
+            .create_run(CreateRunParams {
+                workspace_id: None, // ad-hoc: created straight from a conversation
+                user_id: "user_a".into(),
+                goal: "A 临时 run".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: Some(7),
+                work_dir: Some("/tmp/a".into()),
+            })
+            .await
+            .unwrap();
+        assert!(a_adhoc_run.workspace_id.is_none(), "adhoc run has no workspace");
+
+        // User B: one run that must NOT appear in A's listing.
+        let b_run = repo
+            .create_run(CreateRunParams {
+                workspace_id: None,
+                user_id: "user_b".into(),
+                goal: "B 的 run".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+
+        let a_runs = repo.list_runs_by_user("user_a").await.unwrap();
+        let a_ids: Vec<&str> = a_runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(a_runs.len(), 2, "A owns exactly two runs (workspace + adhoc)");
+        assert!(a_ids.contains(&a_ws_run.id.as_str()), "workspace-backed run present");
+        assert!(a_ids.contains(&a_adhoc_run.id.as_str()), "adhoc (NULL ws) run present");
+        assert!(!a_ids.contains(&b_run.id.as_str()), "B's run excluded");
+
+        // Newest first: created_at DESC. (created_at is now_ms(); they may share a
+        // millisecond, so assert the ordering is non-increasing rather than a
+        // strict adhoc-then-ws order.)
+        for w in a_runs.windows(2) {
+            assert!(
+                w[0].created_at >= w[1].created_at,
+                "runs ordered by created_at DESC: {} >= {}",
+                w[0].created_at,
+                w[1].created_at
+            );
+        }
+
+        // B sees only its own run.
+        let b_runs = repo.list_runs_by_user("user_b").await.unwrap();
+        assert_eq!(b_runs.len(), 1);
+        assert_eq!(b_runs[0].id, b_run.id);
     }
 }

@@ -40,7 +40,10 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
             "/api/orchestrator/workspaces/{id}",
             get(get_workspace).put(update_workspace).delete(delete_workspace),
         )
-        .route("/api/orchestrator/runs", post(create_run))
+        .route(
+            "/api/orchestrator/runs",
+            get(list_my_runs).post(create_run),
+        )
         .route(
             "/api/orchestrator/workspaces/{ws}/runs",
             get(list_workspace_runs),
@@ -180,6 +183,22 @@ async fn create_run(
         state.engine.start(run.id.clone());
     }
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(run))))
+}
+
+/// List every run owned by the current user, newest first — across all
+/// workspaces AND ad-hoc (workspace-less) runs. This is the read path for the
+/// read-only Run-history library (the repurposed orchestrator tab); ad-hoc runs
+/// created from a conversation carry no workspace, so they only surface here,
+/// never under the workspace-scoped `list_workspace_runs`. PROTECTED route — it
+/// extracts `CurrentUser`, so it mounts under the same auth middleware as the
+/// other run routes (NOT a public route).
+async fn list_my_runs(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+) -> Result<Json<ApiResponse<Vec<Run>>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state.run_service.list_by_user(&user.id).await?,
+    )))
 }
 
 async fn list_workspace_runs(
@@ -503,6 +522,52 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/orchestrator/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_ne!(resp.status(), StatusCode::OK);
+    }
+
+    /// `GET /api/orchestrator/runs` (list-my-runs) returns 200 with a `CurrentUser`
+    /// extension present — exercising the new read path for the Run-history library
+    /// end to end (auth extract → RunService::list_by_user → 200) and confirming
+    /// the GET method was actually mounted on the `/runs` path (which previously
+    /// only carried POST). The seeded run belongs to "u1", the same user injected.
+    #[tokio::test]
+    async fn list_my_runs_returns_ok_with_user() {
+        let (state, _run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrator/runs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// `GET /api/orchestrator/runs` still requires the `CurrentUser` extension —
+    /// without it the handler cannot run (axum returns a non-200). Guards that the
+    /// list-my-runs route was not wired as a public route (a public handler that
+    /// extracted `Extension<CurrentUser>` would 500 with axum 0.8 MissingExtension).
+    #[tokio::test]
+    async fn list_my_runs_without_user_is_not_ok() {
+        let state = build_state().await;
+        let app = orchestrator_routes(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/orchestrator/runs")
                     .body(Body::empty())
                     .unwrap(),
             )

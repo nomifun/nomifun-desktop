@@ -113,7 +113,10 @@ export type TTaskProfile = {
 /** A persisted orchestration run record. */
 export type TRun = {
   id: string;
-  workspace_id: string;
+  /** Owning workspace, or absent for an ad-hoc run created straight from a
+   * conversation (which carries its own work_dir instead — backend serializes
+   * `workspace_id: null`). */
+  workspace_id?: string;
   goal: string;
   autonomy: string;
   max_parallel?: number;

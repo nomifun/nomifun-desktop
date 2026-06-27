@@ -225,6 +225,20 @@ impl RunService {
         Ok(rows.into_iter().map(run_row_to_dto).collect())
     }
 
+    /// All runs owned by a user, newest first — across every workspace AND ad-hoc
+    /// (workspace-less) runs. The read path for the read-only Run-history library
+    /// (the repurposed orchestrator tab): ad-hoc runs created straight from a
+    /// conversation carry `workspace_id = None`, so they never surface under the
+    /// workspace-scoped [`list`](Self::list) and must be listed by owner here.
+    pub async fn list_by_user(&self, user_id: &str) -> Result<Vec<Run>, AppError> {
+        let rows = self
+            .run_repo
+            .list_runs_by_user(user_id)
+            .await
+            .map_err(OrchestratorError::from)?;
+        Ok(rows.into_iter().map(run_row_to_dto).collect())
+    }
+
     /// Plan a run: decompose the goal into a task DAG, persist tasks + deps +
     /// assignments, emit `planUpdated`, then apply the **autonomy gate** — an
     /// `interactive` run parks at `awaiting_plan_approval` (a human approves the

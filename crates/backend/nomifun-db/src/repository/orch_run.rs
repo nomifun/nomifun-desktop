@@ -88,6 +88,13 @@ pub trait IRunRepository: Send + Sync {
     /// Return all runs in a workspace, newest first.
     async fn list_runs(&self, workspace_id: &str) -> Result<Vec<OrchRunRow>, sqlx::Error>;
 
+    /// Return all runs owned by a user, newest first — across every workspace AND
+    /// ad-hoc (workspace_id=NULL) runs. This is the read path for the read-only
+    /// Run-history library (the repurposed orchestrator tab); ad-hoc runs created
+    /// straight from a conversation carry no workspace, so they only surface here,
+    /// never under the workspace-scoped [`list_runs`](Self::list_runs).
+    async fn list_runs_by_user(&self, user_id: &str) -> Result<Vec<OrchRunRow>, sqlx::Error>;
+
     /// Return all runs in a given status across all workspaces (boot-resume).
     async fn list_runs_by_status(&self, status: &str) -> Result<Vec<OrchRunRow>, sqlx::Error>;
 
