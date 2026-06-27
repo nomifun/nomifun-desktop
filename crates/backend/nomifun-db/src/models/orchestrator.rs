@@ -46,7 +46,9 @@ pub struct OrchWorkspaceRow {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct OrchRunRow {
     pub id: String,
-    pub workspace_id: String,
+    /// Owning workspace, or `None` for an ad-hoc run created straight from a
+    /// conversation (such a run carries its own `work_dir` instead).
+    pub workspace_id: Option<String>,
     pub user_id: String,
     pub goal: String,
     pub fleet_snapshot: String, // JSON
@@ -58,6 +60,8 @@ pub struct OrchRunRow {
     pub summary: Option<String>,
     pub total_tokens: Option<i64>,
     pub forked_from: Option<String>,
+    /// Working directory for an ad-hoc (workspace-less) run.
+    pub work_dir: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -132,5 +136,73 @@ mod tests {
             .unwrap();
             assert_eq!(row.0, 1, "table {t} should exist");
         }
+    }
+
+    /// 迁移 020：orch_runs 加 `work_dir` 列；`workspace_id` 改为可空。
+    /// 既有行（workspace_id 非空）经表重建后必须保留。
+    #[tokio::test]
+    async fn migration_020_adds_work_dir_and_nullable_workspace_id() {
+        let db = init_database_memory()
+            .await
+            .expect("db init runs all migrations");
+        let pool = db.pool();
+
+        // PRAGMA table_info(orch_runs): work_dir 存在 + workspace_id notnull==0。
+        let cols: Vec<(String, i64)> =
+            sqlx::query_as("SELECT name, \"notnull\" FROM pragma_table_info('orch_runs')")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+
+        let work_dir = cols.iter().find(|(n, _)| n == "work_dir");
+        assert!(work_dir.is_some(), "orch_runs should have a work_dir column");
+
+        let ws = cols
+            .iter()
+            .find(|(n, _)| n == "workspace_id")
+            .expect("orch_runs should have a workspace_id column");
+        assert_eq!(ws.1, 0, "workspace_id should be nullable (notnull==0)");
+
+        // 表重建保留既有行：种入一行 workspace_id 非空，应原样读回。
+        let now = nomifun_common::now_ms();
+        // workspace FK 行（init 已建 system user，但 workspace 需先存在）。
+        sqlx::query(
+            "INSERT INTO orch_workspaces (id, user_id, name, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("ws_keep")
+        .bind("system_default_user")
+        .bind("保留区")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO orch_runs \
+             (id, workspace_id, user_id, goal, fleet_snapshot, autonomy, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("run_keep")
+        .bind("ws_keep")
+        .bind("system_default_user")
+        .bind("保留这一行")
+        .bind("{}")
+        .bind("auto")
+        .bind("planning")
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let (ws_id, work_dir): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT workspace_id, work_dir FROM orch_runs WHERE id = ?")
+                .bind("run_keep")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(ws_id.as_deref(), Some("ws_keep"), "existing workspace_id preserved");
+        assert!(work_dir.is_none(), "new work_dir defaults to NULL");
     }
 }
