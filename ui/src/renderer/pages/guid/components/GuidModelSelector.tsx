@@ -9,10 +9,9 @@ import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { iconColors } from '@/renderer/styles/colors';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
-import type { GuidModelSelectionMode } from '../hooks/useGuidModelSelection';
 import { getAvailableModels } from '../utils/modelUtils';
-import { Button, Checkbox, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
-import { Brain, Down, Plus, Robot } from '@icon-park/react';
+import { Button, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
+import { Brain, Down, Plus } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -25,14 +24,6 @@ type GuidModelSelectorProps = {
   current_model: TProviderWithModel | undefined;
   setCurrentModel: (model: TProviderWithModel) => Promise<void>;
 
-  // Tri-state orchestration selection (single / auto / range). Optional: when
-  // omitted (e.g. the scheduled-task dialog reuses this selector) the component
-  // behaves as a classic single-select model picker with no segmented control.
-  selectionMode?: GuidModelSelectionMode;
-  setSelectionMode?: (mode: GuidModelSelectionMode) => void;
-  selectedRange?: TProviderWithModel[];
-  toggleRangeModel?: (model: TProviderWithModel) => void;
-
   // ACP model state
   currentAcpCachedModelInfo: AcpModelInfo | null;
   selectedAcpModel: string | null;
@@ -44,10 +35,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
   modelList,
   current_model,
   setCurrentModel,
-  selectionMode,
-  setSelectionMode,
-  selectedRange,
-  toggleRangeModel,
   currentAcpCachedModelInfo,
   selectedAcpModel,
   setSelectedAcpModel,
@@ -55,12 +42,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const defaultModelLabel = t('common.defaultModel');
-
-  // Orchestration tri-state is only active when the host wired the setter (the
-  // 会话 entry). Other reuse sites (scheduled-task dialog) leave it single.
-  const orchestrationEnabled = typeof setSelectionMode === 'function';
-  const effectiveMode: GuidModelSelectionMode = orchestrationEnabled ? (selectionMode ?? 'single') : 'single';
-  const effectiveRange = selectedRange ?? [];
 
   // 获取模型配置数据（包含健康状态）
   const { data: modelConfig } = useProvidersQuery();
@@ -83,24 +64,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
       fallbackLabel: defaultModelLabel,
     });
   }, [current_model?.use_model, defaultModelLabel, geminiSelectedLabel]);
-
-  // The trigger button reflects the active tri-state mode:
-  //   single → the selected model name;
-  //   auto   → 「主管模型: <model>」 — the lead itself still runs on one model
-  //            (workers fan out over every enabled model separately), so we show
-  //            that lead model rather than echoing the "自动编排" segmented label;
-  //   range  → N 个模型.
-  const triStateButtonLabel = React.useMemo(() => {
-    if (effectiveMode === 'auto') return t('guid.modelSelector.leadLabel', { model: geminiButtonLabel });
-    if (effectiveMode === 'range') return t('guid.modelSelector.rangeLabel', { count: effectiveRange.length });
-    return geminiButtonLabel;
-  }, [effectiveMode, effectiveRange.length, geminiButtonLabel, t]);
-
-  // The trigger icon: single + auto both point at one concrete model (the lead),
-  // so they share the Brain glyph. Range stays Robot. The Robot glyph is reserved
-  // for the adjacent orchestration-mode switch so the two controls don't read as
-  // duplicates.
-  const TriStateIcon = effectiveMode === 'range' ? Robot : Brain;
 
   const acpSelectedLabel = React.useMemo(() => {
     return (
@@ -127,20 +90,14 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
 
   if (isGeminiMode) {
     const hasModels = !!enabledModelList && enabledModelList.length > 0;
-    const rangeKeySet = new Set(effectiveRange.map((m) => m.id + m.use_model));
 
-    // Per-model health dot color (shared by single + range bodies).
+    // Per-model health dot color.
     const healthDotColor = (providerId: string, modelName: string): string | null => {
       const matchedProvider = modelConfig?.find((p) => p.id === providerId);
       const healthStatus = matchedProvider?.model_health?.[modelName]?.status || 'unknown';
       if (healthStatus === 'unknown') return null;
       return healthStatus === 'healthy' ? 'bg-green-500' : healthStatus === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400';
     };
-
-    // The orchestration tri-state switch now lives on the visible input-bar
-    // toolbar (GuidOrchestrationMode), so it is the single source of truth for
-    // `selectionMode`. The dropdown body below stays mode-aware (single menu /
-    // range checkboxes / auto hint) driven by that same mode.
 
     const addModelRow = (
       <div
@@ -154,9 +111,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
       </div>
     );
 
-    // Single-select model menu — picks the lead (主管) model. Shared by `single`
-    // mode and `auto` mode (in auto it sets the lead's own model while workers
-    // fan out over every enabled model).
+    // Single-select model menu — provider-grouped.
     const singleSelectMenu = (
       <Menu selectedKeys={current_model ? [current_model.id + current_model.use_model] : []}>
         {[
@@ -199,65 +154,15 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
       </Menu>
     );
 
-    let body: React.ReactNode;
-    if (!hasModels) {
-      // No models configured — same empty + add-model affordance as before.
-      body = (
-        <div className='py-4px'>
-          <div className='px-12px py-12px text-t-secondary text-14px text-center'>{t('settings.noAvailableModels')}</div>
-          {addModelRow}
-        </div>
-      );
-    } else if (effectiveMode === 'auto') {
-      // Auto mode — pick the lead (主管) model here; a one-line hint explains that
-      // workers fan out over every enabled model. This is a single-select picker,
-      // NOT the orchestration switch, so it never duplicates the "自动编排" tab.
-      body = (
-        <div className='py-4px'>
-          <div className='px-12px pt-8px pb-6px flex items-start gap-6px'>
-            <Robot theme='outline' size='14' fill={iconColors.secondary} className='shrink-0 mt-2px' />
-            <span className='text-12px text-t-secondary leading-relaxed'>{t('guid.modelSelector.leadHint')}</span>
-          </div>
-          {singleSelectMenu}
-        </div>
-      );
-    } else if (effectiveMode === 'range') {
-      // Range mode — multi-select checkboxes grouped per provider.
-      body = (
-        <div className='py-4px max-h-300px overflow-y-auto'>
-          {enabledModelList.map((provider) => {
-            const available_models = getAvailableModels(provider);
-            if (available_models.length === 0) return null;
-            return (
-              <div key={provider.id} className='mb-2px'>
-                <div className='px-12px pt-6px pb-2px text-12px text-t-tertiary'>{provider.name}</div>
-                {available_models.map((modelName) => {
-                  const checked = rangeKeySet.has(provider.id + modelName);
-                  const dot = healthDotColor(provider.id, modelName);
-                  return (
-                    <div
-                      key={provider.id + modelName}
-                      role='button'
-                      tabIndex={0}
-                      className={`flex items-center gap-8px px-12px py-6px mx-4px rounded-4px cursor-pointer hover:bg-2 ${checked ? '!bg-2' : ''}`}
-                      onClick={() => toggleRangeModel?.({ ...provider, use_model: modelName })}
-                    >
-                      <Checkbox checked={checked} onChange={() => toggleRangeModel?.({ ...provider, use_model: modelName })} />
-                      {dot && <div className={`w-6px h-6px rounded-full shrink-0 ${dot}`} />}
-                      <span className='text-14px text-t-primary truncate'>{modelName}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-          {addModelRow}
-        </div>
-      );
-    } else {
-      // Single mode — the original single-select Arco menu, unchanged behavior.
-      body = singleSelectMenu;
-    }
+    const body: React.ReactNode = !hasModels ? (
+      // No models configured — empty + add-model affordance.
+      <div className='py-4px'>
+        <div className='px-12px py-12px text-t-secondary text-14px text-center'>{t('settings.noAvailableModels')}</div>
+        {addModelRow}
+      </div>
+    ) : (
+      singleSelectMenu
+    );
 
     return (
       <Dropdown
@@ -270,8 +175,8 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
       >
         <Button className={'sendbox-model-btn guid-config-btn'} shape='round' size='small' data-testid='guid-model-selector'>
           <span className='flex items-center gap-6px min-w-0'>
-            <TriStateIcon theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
-            <span className='truncate'>{triStateButtonLabel}</span>
+            <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />
+            <span className='truncate'>{geminiButtonLabel}</span>
             <Down theme='outline' size='12' fill={iconColors.secondary} className='shrink-0' />
           </span>
         </Button>

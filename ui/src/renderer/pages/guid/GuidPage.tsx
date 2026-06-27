@@ -19,7 +19,6 @@ import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
-import GuidOrchestrationMode from './components/GuidOrchestrationMode';
 import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
 import QuickActionButtons from './components/QuickActionButtons';
 import SummonDrawer from './components/SummonDrawer';
@@ -173,8 +172,6 @@ const GuidPage: React.FC = () => {
     selectedAcpModel: agentSelection.selectedAcpModel,
     currentAcpCachedModelInfo: agentSelection.currentAcpCachedModelInfo,
     current_model: modelSelection.current_model,
-    selectionMode: modelSelection.selectionMode,
-    selectedRange: modelSelection.selectedRange,
 
     // Agent helpers
     findAgentByKey: agentSelection.findAgentByKey,
@@ -512,37 +509,18 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  // Build the model selector node. In `auto` orchestration mode it renders as a
-  // single-select 「主管模型」 picker: the lead (主管) itself still runs on one
-  // model (current_model, sent verbatim by useGuidSend), while workers fan out
-  // over every enabled model. Keeping the picker visible in auto means the lead
-  // model is always changeable — without it, a user with no resolvable default
-  // would be stuck (submit blocks on `!current_model`).
+  // Build the model selector node — a plain single-select model picker.
   const modelSelectorNode = (
     <GuidModelSelector
       isGeminiMode={isGeminiMode}
       modelList={modelSelection.modelList}
       current_model={modelSelection.current_model}
       setCurrentModel={modelSelection.setCurrentModel}
-      selectionMode={modelSelection.selectionMode}
-      setSelectionMode={modelSelection.setSelectionMode}
-      selectedRange={modelSelection.selectedRange}
-      toggleRangeModel={modelSelection.toggleRangeModel}
       currentAcpCachedModelInfo={agentSelection.currentAcpCachedModelInfo}
       selectedAcpModel={agentSelection.selectedAcpModel}
       setSelectedAcpModel={agentSelection.setSelectedAcpModel}
     />
   );
-
-  // Visible orchestration-mode switch for the input bar (single / auto / range).
-  // Only shown for Nomi — ACP/other agents have no provider-based orchestration,
-  // so we render nothing and leave their model selector untouched.
-  const orchestrationModeNode = isGeminiMode ? (
-    <GuidOrchestrationMode
-      selectionMode={modelSelection.selectionMode}
-      setSelectionMode={modelSelection.setSelectionMode}
-    />
-  ) : null;
 
   // Advanced drafts — the same controls as the conversation header, in draft
   // mode (collected locally, applied right after the conversation is created).
@@ -575,7 +553,6 @@ const GuidPage: React.FC = () => {
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
-      orchestrationModeNode={orchestrationModeNode}
       selectedAgent={agentSelection.selectedAgent}
       effectiveModeAgent={agentSelection.currentEffectiveAgentInfo.agent_type}
       selectedMode={agentSelection.selectedMode}

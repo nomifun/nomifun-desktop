@@ -9,20 +9,6 @@
   "selectAssistantHint": "Select an assistant to start a task",
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "Switched to {{agent}}",
-  "modelSelector": {
-    "leadLabel": "Lead: {{model}}",
-    "leadHint": "The model the lead itself runs on; sub-tasks fan out across every enabled model.",
-    "rangeLabel": "{{count}} model(s)",
-    "rangeEmpty": "Select at least one model for range orchestration."
-  },
-  "orchestration": {
-    "label": "Mode",
-    "modeSingle": "Single",
-    "modeAuto": "Auto",
-    "modeRange": "Range",
-    "tooltip": "Single: one fixed model answers on its own. Auto / Range: turn on multi-agent orchestration — the lead splits the work and dispatches sub-tasks.",
-    "onHint": "Multi-agent orchestration on"
-  },
   "workspace": {
     "workInProject": "Work in a project",
     "optional": "Optional",

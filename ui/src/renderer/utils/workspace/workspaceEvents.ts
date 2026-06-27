@@ -1,16 +1,9 @@
 export const WORKSPACE_TOGGLE_EVENT = 'nomifun-workspace-toggle';
 export const WORKSPACE_STATE_EVENT = 'nomifun-workspace-state';
 export const WORKSPACE_HAS_FILES_EVENT = 'nomifun-workspace-has-files';
-export const WORKSPACE_SELECT_TAB_EVENT = 'nomifun-workspace-select-tab';
 
 export interface WorkspaceStateDetail {
   collapsed: boolean;
-}
-
-export interface WorkspaceSelectTabDetail {
-  /** Tab key to activate in the rail (`'files'` | `'changes'` | an extra tab key
-   * such as `'orchestrator-dag'`). The rail ignores keys it does not render. */
-  tab: string;
 }
 
 export interface WorkspaceHasFilesDetail {
@@ -31,16 +24,6 @@ export interface WorkspaceHasFilesDetail {
 export function dispatchWorkspaceToggleEvent() {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(new CustomEvent(WORKSPACE_TOGGLE_EVENT));
-}
-
-/**
- * Ask the workspace rail to activate a specific tab (by key). Used by the
- * orchestration status strip to surface the 「编排」DAG tab when a run starts.
- * Fire-and-forget: a rail that does not render the key simply ignores it.
- */
-export function dispatchWorkspaceSelectTabEvent(tab: string) {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent<WorkspaceSelectTabDetail>(WORKSPACE_SELECT_TAB_EVENT, { detail: { tab } }));
 }
 
 export function dispatchWorkspaceStateEvent(collapsed: boolean) {

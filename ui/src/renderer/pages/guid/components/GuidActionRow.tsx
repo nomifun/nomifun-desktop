@@ -30,10 +30,6 @@ type GuidActionRowProps = {
   // Model selector node (rendered by parent)
   modelSelectorNode: React.ReactNode;
 
-  // Orchestration mode switch (single / auto / range). Rendered by the parent
-  // and only present for Nomi; null for ACP/other agents.
-  orchestrationModeNode?: React.ReactNode;
-
   // Agent mode
   selectedAgent: string | 'custom';
   effectiveModeAgent?: string;
@@ -71,7 +67,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   files,
   onFilesUploaded,
   modelSelectorNode,
-  orchestrationModeNode,
   selectedAgent,
   effectiveModeAgent,
   selectedMode,
@@ -99,8 +94,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
   const modeBackend = effectiveModeAgent || selectedAgent;
   const showModeSwitch = supportsModeSwitch(modeBackend);
-  const configOptionCount =
-    (orchestrationModeNode ? 1 : 0) + (modelSelectorNode ? 1 : 0) + (showModeSwitch ? 1 : 0);
+  const configOptionCount = (modelSelectorNode ? 1 : 0) + (showModeSwitch ? 1 : 0);
 
   // Browser file picker ref (WebUI only)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -260,7 +254,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
       <div className={styles.actionSubmit}>
         {configOptionCount > 0 && (
           <div className={styles.actionConfigGroup} data-mobile={isMobile ? 'true' : undefined}>
-            {orchestrationModeNode}
             {modelSelectorNode}
 
             {showModeSwitch && (

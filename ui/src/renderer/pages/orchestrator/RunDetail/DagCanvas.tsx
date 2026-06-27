@@ -77,10 +77,10 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
   const [message, ctx] = useArcoMessage();
   const [busy, setBusy] = useState(false);
 
-  // The static `fitView` prop fits ONCE at initial mount. In the conversation
-  // rail (DagRailTab) the canvas mounts while the rail is COLLAPSED (≈0-size
-  // container), so that initial fit happens against a zero viewport and leaves
-  // the nodes tiny in a corner; when the rail later auto-expands, react-flow
+  // The static `fitView` prop fits ONCE at initial mount. If the canvas ever
+  // mounts inside a COLLAPSED / ~0-size
+  // container, that initial fit happens against a zero viewport and leaves
+  // the nodes tiny in a corner; when the container later expands, react-flow
   // never re-fits on its own. We capture the instance via `onInit` and re-run
   // `fitView()` whenever the wrapper transitions from ~0 → a real size (i.e.
   // becomes visible). The standalone orchestrator page is sized at mount, so it
