@@ -11,7 +11,7 @@ import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import type { AcpModelInfo } from '../types';
 import type { GuidModelSelectionMode } from '../hooks/useGuidModelSelection';
 import { getAvailableModels } from '../utils/modelUtils';
-import { Button, Checkbox, Dropdown, Menu, Radio, Tooltip } from '@arco-design/web-react';
+import { Button, Checkbox, Dropdown, Menu, Tooltip } from '@arco-design/web-react';
 import { Brain, Down, Plus, Robot } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -130,22 +130,10 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
       return healthStatus === 'healthy' ? 'bg-green-500' : healthStatus === 'unhealthy' ? 'bg-red-500' : 'bg-gray-400';
     };
 
-    // Segmented tri-state switch, pinned to the top of the droplist. Only shown
-    // when the host enabled orchestration (the 会话 entry).
-    const modeHeader = orchestrationEnabled ? (
-      <div className='px-12px pt-10px pb-8px border-b border-solid border-border-2'>
-        <Radio.Group
-          type='button'
-          size='small'
-          value={effectiveMode}
-          onChange={(mode: GuidModelSelectionMode) => setSelectionMode?.(mode)}
-        >
-          <Radio value='single'>{t('guid.modelSelector.modeSingle')}</Radio>
-          <Radio value='auto'>{t('guid.modelSelector.modeAuto')}</Radio>
-          <Radio value='range'>{t('guid.modelSelector.modeRange')}</Radio>
-        </Radio.Group>
-      </div>
-    ) : null;
+    // The orchestration tri-state switch now lives on the visible input-bar
+    // toolbar (GuidOrchestrationMode), so it is the single source of truth for
+    // `selectionMode`. The dropdown body below stays mode-aware (single menu /
+    // range checkboxes / auto hint) driven by that same mode.
 
     const addModelRow = (
       <div
@@ -260,7 +248,6 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
         trigger='click'
         droplist={
           <div className='min-w-260px max-w-340px bg-1 rounded-8px overflow-hidden'>
-            {modeHeader}
             {body}
           </div>
         }

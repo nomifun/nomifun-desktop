@@ -10,14 +10,19 @@
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "Switched to {{agent}}",
   "modelSelector": {
-    "modeSingle": "Single",
-    "modeAuto": "Auto",
-    "modeRange": "Range",
     "autoLabel": "Auto-orchestrate",
     "rangeLabel": "{{count}} model(s)",
     "autoTitle": "All enabled models",
     "autoHint": "The lead picks the best model from every enabled one and dispatches sub-tasks as needed.",
     "rangeEmpty": "Select at least one model for range orchestration."
+  },
+  "orchestration": {
+    "label": "Mode",
+    "modeSingle": "Single",
+    "modeAuto": "Auto",
+    "modeRange": "Range",
+    "tooltip": "Single: one fixed model answers on its own. Auto / Range: turn on multi-agent orchestration — the lead splits the work and dispatches sub-tasks.",
+    "onHint": "Multi-agent orchestration on"
   },
   "workspace": {
     "workInProject": "Work in a project",

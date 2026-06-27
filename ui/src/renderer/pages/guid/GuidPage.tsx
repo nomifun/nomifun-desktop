@@ -19,6 +19,7 @@ import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
+import GuidOrchestrationMode from './components/GuidOrchestrationMode';
 import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
 import QuickActionButtons from './components/QuickActionButtons';
 import SummonDrawer from './components/SummonDrawer';
@@ -528,6 +529,16 @@ const GuidPage: React.FC = () => {
     />
   );
 
+  // Visible orchestration-mode switch for the input bar (single / auto / range).
+  // Only shown for Nomi — ACP/other agents have no provider-based orchestration,
+  // so we render nothing and leave their model selector untouched.
+  const orchestrationModeNode = isGeminiMode ? (
+    <GuidOrchestrationMode
+      selectionMode={modelSelection.selectionMode}
+      setSelectionMode={modelSelection.setSelectionMode}
+    />
+  ) : null;
+
   // Advanced drafts — the same controls as the conversation header, in draft
   // mode (collected locally, applied right after the conversation is created).
   // Keyed by location.key so same-route navigations (which reset the drafts in
@@ -559,6 +570,7 @@ const GuidPage: React.FC = () => {
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
+      orchestrationModeNode={orchestrationModeNode}
       selectedAgent={agentSelection.selectedAgent}
       effectiveModeAgent={agentSelection.currentEffectiveAgentInfo.agent_type}
       selectedMode={agentSelection.selectedMode}
