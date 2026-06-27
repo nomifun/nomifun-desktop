@@ -2704,6 +2704,9 @@ export const orchestrator = {
     list: httpGet<TRun[], { workspace_id: string }>(
       (p) => `/api/orchestrator/workspaces/${p.workspace_id}/runs`
     ),
+    // Every run owned by the current user (all workspaces + ad-hoc/workspace-less
+    // runs), newest first — the read path for the read-only Run-history library.
+    listMine: httpGet<TRun[], void>('/api/orchestrator/runs'),
     get: httpGet<TRunDetail, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
     cancel: httpPost<void, { id: string }>(
       (p) => `/api/orchestrator/runs/${p.id}/cancel`,
