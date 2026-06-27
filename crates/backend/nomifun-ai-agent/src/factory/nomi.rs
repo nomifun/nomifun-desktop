@@ -6,6 +6,7 @@ use nomi_config::config::{McpServerConfig, TransportType};
 use nomifun_api_types::{GatewayMcpConfig, NomiBuildExtra, SessionMcpServer, SessionMcpTransport};
 use nomifun_common::AppError;
 use nomifun_db::IMcpServerRepository;
+use nomifun_db::ISettingsRepository;
 use nomifun_db::models::McpServerRow;
 use nomifun_runtime::resolve_command_path;
 use tracing::{debug, info, warn};
@@ -130,6 +131,25 @@ pub(super) async fn build(
         &ctx.conversation_id,
         knowledge_write_enabled,
     );
+
+    // Companion-owned sessions (local 桌面伙伴 chat + IM channel master) must
+    // reply in the app's UI language, not a hardcoded one. The companion persona
+    // prompt no longer forces a language (see
+    // nomifun-companion::companion::build_companion_system_prompt), so the reply
+    // language is decided HERE from the live system setting and appended LAST —
+    // which also overrides the legacy 「用中文」 line still embedded in
+    // already-persisted local companion threads (whose extra.system_prompt was
+    // frozen at create time). Read live per build (mirrors read_bool_pref), so a
+    // language switch takes effect on the next agent (re)build. Regular chat /
+    // ACP sessions are untouched — they naturally mirror the user's language.
+    if overrides.companion || overrides.channel_platform.is_some() {
+        let lang = read_app_language(deps.settings_repo.as_ref()).await;
+        let directive = reply_language_directive(&lang);
+        overrides.system_prompt = Some(match overrides.system_prompt.take() {
+            Some(existing) => format!("{existing}\n\n{directive}"),
+            None => directive.to_owned(),
+        });
+    }
 
     if !extra_mcp_servers.is_empty() {
         info!(
@@ -444,6 +464,42 @@ async fn read_bool_pref(deps: &AgentFactoryDeps, key: &str, host_default: bool) 
             .map(|r| r.value.trim() == "true")
             .unwrap_or(host_default),
         Err(_) => host_default,
+    }
+}
+
+/// App UI language default, used when no settings repo is wired (tests), no
+/// settings row is persisted yet (fresh install), or the read fails. Matches
+/// `SystemSettingsResponse::default().language` in `nomifun-api-types`.
+const DEFAULT_APP_LANGUAGE: &str = "en-US";
+
+/// Read the app UI language live from system settings (mirrors `read_bool_pref`).
+/// Falls back to [`DEFAULT_APP_LANGUAGE`] when the repo is absent, no row exists,
+/// the stored value is blank, or the read errors — so a companion always gets a
+/// well-formed directive. Takes the bare repo option (not the whole deps) so it
+/// is trivially unit-testable.
+async fn read_app_language(settings_repo: Option<&Arc<dyn ISettingsRepository>>) -> String {
+    let Some(repo) = settings_repo else {
+        return DEFAULT_APP_LANGUAGE.to_owned();
+    };
+    match repo.get_settings().await {
+        Ok(Some(settings)) if !settings.language.trim().is_empty() => settings.language,
+        _ => DEFAULT_APP_LANGUAGE.to_owned(),
+    }
+}
+
+/// Map a stored app-language code to the reply-language directive appended LAST
+/// to a companion-owned system prompt. Phrased as an explicit override so it wins
+/// over any earlier (possibly persisted) language line, while still letting the
+/// owner pull the companion into another language by writing in it. Unknown /
+/// empty / en-US all resolve to English (the app default); only the supported
+/// `zh-CN` selects Chinese (supported set lives in `nomifun-system`).
+fn reply_language_directive(lang: &str) -> &'static str {
+    match lang {
+        "zh-CN" => "【回复语言】无论上文的指令或记忆使用何种语言，都请始终用简体中文回复主人——\
+                    除非主人主动用其他语言和你说话，或明确要求你换一种语言。",
+        _ => "[Reply language] Regardless of the language used in the instructions or memories \
+              above, always reply to the owner in English — unless the owner writes to you in \
+              another language or explicitly asks you to switch.",
     }
 }
 
@@ -925,6 +981,90 @@ fn gateway_mcp_to_config(
 mod tests {
     use super::*;
     use nomifun_api_types::{GuideMcpConfig, TeamMcpStdioConfig};
+
+    // ----- companion reply-language directive (the 用中文 bug fix) -----
+
+    /// Minimal mock settings repo for `read_app_language`: yields a fixed result
+    /// (`Err(())` simulates a DB read failure). Mirrors the McpServerRepo mock in
+    /// factory/acp.rs.
+    struct MockSettingsRepo(Result<Option<nomifun_db::models::SystemSettings>, ()>);
+
+    #[async_trait::async_trait]
+    impl ISettingsRepository for MockSettingsRepo {
+        async fn get_settings(
+            &self,
+        ) -> Result<Option<nomifun_db::models::SystemSettings>, nomifun_db::DbError> {
+            self.0
+                .clone()
+                .map_err(|_| nomifun_db::DbError::Init("simulated".into()))
+        }
+        async fn upsert_settings(
+            &self,
+            _language: &str,
+            _notification_enabled: bool,
+            _cron_notification_enabled: bool,
+            _command_queue_enabled: bool,
+            _save_upload_to_workspace: bool,
+        ) -> Result<nomifun_db::models::SystemSettings, nomifun_db::DbError> {
+            unimplemented!("not exercised by the language tests")
+        }
+    }
+
+    fn settings_row(language: &str) -> nomifun_db::models::SystemSettings {
+        nomifun_db::models::SystemSettings {
+            id: 1,
+            language: language.to_owned(),
+            notification_enabled: true,
+            cron_notification_enabled: false,
+            command_queue_enabled: false,
+            save_upload_to_workspace: false,
+            updated_at: 0,
+        }
+    }
+
+    fn settings_repo(
+        result: Result<Option<nomifun_db::models::SystemSettings>, ()>,
+    ) -> Arc<dyn ISettingsRepository> {
+        Arc::new(MockSettingsRepo(result))
+    }
+
+    #[test]
+    fn reply_language_directive_maps_supported_and_defaults_to_english() {
+        assert!(reply_language_directive("zh-CN").contains("简体中文"));
+        // en-US, unknown codes, and the empty string all resolve to English.
+        for lang in ["en-US", "fr-FR", "zh-TW", ""] {
+            let d = reply_language_directive(lang);
+            assert!(d.contains("in English"), "{lang} should map to English: {d}");
+            assert!(!d.contains("简体中文"), "{lang} must not select Chinese");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_app_language_falls_back_to_en_us() {
+        // No repo wired (tests / standalone composition).
+        assert_eq!(read_app_language(None).await, "en-US");
+        // No persisted row yet (fresh install).
+        assert_eq!(read_app_language(Some(&settings_repo(Ok(None)))).await, "en-US");
+        // Blank stored value.
+        assert_eq!(
+            read_app_language(Some(&settings_repo(Ok(Some(settings_row("   ")))))).await,
+            "en-US"
+        );
+        // Read error.
+        assert_eq!(read_app_language(Some(&settings_repo(Err(())))).await, "en-US");
+    }
+
+    #[tokio::test]
+    async fn read_app_language_returns_persisted_language() {
+        assert_eq!(
+            read_app_language(Some(&settings_repo(Ok(Some(settings_row("zh-CN")))))).await,
+            "zh-CN"
+        );
+        assert_eq!(
+            read_app_language(Some(&settings_repo(Ok(Some(settings_row("en-US")))))).await,
+            "en-US"
+        );
+    }
 
     #[test]
     fn resolve_mcp_servers_adds_gateway_when_flag_set() {
