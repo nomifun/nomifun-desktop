@@ -17,6 +17,7 @@ import ComposerEntryStrip, { type GuidActiveSkill } from './components/ComposerE
 import GuidAssistantEditorHost from './components/GuidAssistantEditorHost';
 import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
+import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
 import GuidResourceCards from './components/GuidResourceCards';
@@ -603,84 +604,90 @@ const GuidPage: React.FC = () => {
             ChatLayout header placement, and freeing the input box's bottom row.
             Desktop only (hidden on mobile via CSS), matching the session header. */}
         <div className={styles.guidAdvancedControls}>{advancedControlsNode}</div>
-        <div className={styles.guidLayout}>
-          <div className={styles.heroHeader}>
-            <p className='text-2xl font-semibold mb-0 text-0 text-center'>
-              {t('conversation.welcome.title')}
-            </p>
-          </div>
+        <div className={styles.guidPrimaryStage}>
+          <div className={styles.guidLayout}>
+            <div className={styles.heroHeader}>
+              <p className='text-2xl font-semibold mb-0 text-0 text-center'>
+                {t('conversation.welcome.title')}
+              </p>
+            </div>
 
-          {agentSelection.availableAgents === undefined ? (
-            <AgentPillBarSkeleton />
-          ) : agentSelection.availableAgents.length > 0 ? (
-            <AgentPillBar
-              availableAgents={agentSelection.availableAgents}
-              selectedAgentKey={agentSelection.selectedAgentKey}
-              getAgentKey={agentSelection.getAgentKey}
-              onSelectAgent={handleSelectAgentFromPillBar}
-              suppressSelectionAnimation={resetAssistantRequested}
+            {agentSelection.availableAgents === undefined ? (
+              <AgentPillBarSkeleton />
+            ) : agentSelection.availableAgents.length > 0 ? (
+              <AgentPillBar
+                availableAgents={agentSelection.availableAgents}
+                selectedAgentKey={agentSelection.selectedAgentKey}
+                getAgentKey={agentSelection.getAgentKey}
+                onSelectAgent={handleSelectAgentFromPillBar}
+                suppressSelectionAnimation={resetAssistantRequested}
+              />
+            ) : null}
+
+            <GuidInputCard
+              input={guidInput.input}
+              onInputChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              onPaste={guidInput.onPaste}
+              onFocus={guidInput.handleTextareaFocus}
+              onBlur={guidInput.handleTextareaBlur}
+              placeholder={`${mention.selectedAgentLabel}, ${typewriterPlaceholder || t('conversation.welcome.placeholder')}`}
+              isInputActive={guidInput.isInputFocused}
+              isFileDragging={guidInput.isFileDragging}
+              activeBorderColor={activeBorderColor}
+              inactiveBorderColor={inactiveBorderColor}
+              activeShadow={activeShadow}
+              dragHandlers={guidInput.dragHandlers}
+              mentionOpen={mention.mentionOpen}
+              mentionSelectorBadge={
+                <MentionSelectorBadge
+                  visible={mention.mentionSelectorVisible}
+                  open={mention.mentionSelectorOpen}
+                  onOpenChange={mention.setMentionSelectorOpen}
+                  agentLabel={mention.selectedAgentLabel}
+                  mentionMenu={mentionDropdownNode}
+                  onResetQuery={() => mention.setMentionQuery(null)}
+                />
+              }
+              mentionDropdown={mentionDropdownNode}
+              files={guidInput.files}
+              onRemoveFile={guidInput.handleRemoveFile}
+              actionRow={actionRowNode}
+              workspaceDir={guidInput.dir}
+              onSelectWorkspace={(dir) => guidInput.setDir(dir)}
+              onClearWorkspace={() => guidInput.setDir('')}
+              entryStrip={
+                <ComposerEntryStrip
+                  isPresetAgent={agentSelection.is_presetAgent}
+                  assistantLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
+                  assistantAvatar={selectedAssistantAvatar ?? undefined}
+                  onSummon={() => { setDrawerMode('assistant'); setDrawerOpen(true); }}
+                  onAdjustSkills={handleOpenSkillsDrawer}
+                  onFree={() => agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey)}
+                  activeSkillCount={activeSkillCount}
+                  activeSkills={activeSkills}
+                />
+              }
             />
-          ) : null}
 
-          <GuidInputCard
-            input={guidInput.input}
-            onInputChange={handleInputChange}
-            onKeyDown={handleInputKeyDown}
-            onPaste={guidInput.onPaste}
-            onFocus={guidInput.handleTextareaFocus}
-            onBlur={guidInput.handleTextareaBlur}
-            placeholder={`${mention.selectedAgentLabel}, ${typewriterPlaceholder || t('conversation.welcome.placeholder')}`}
-            isInputActive={guidInput.isInputFocused}
-            isFileDragging={guidInput.isFileDragging}
-            activeBorderColor={activeBorderColor}
-            inactiveBorderColor={inactiveBorderColor}
-            activeShadow={activeShadow}
-            dragHandlers={guidInput.dragHandlers}
-            mentionOpen={mention.mentionOpen}
-            mentionSelectorBadge={
-              <MentionSelectorBadge
-                visible={mention.mentionSelectorVisible}
-                open={mention.mentionSelectorOpen}
-                onOpenChange={mention.setMentionSelectorOpen}
-                agentLabel={mention.selectedAgentLabel}
-                mentionMenu={mentionDropdownNode}
-                onResetQuery={() => mention.setMentionQuery(null)}
-              />
-            }
-            mentionDropdown={mentionDropdownNode}
-            files={guidInput.files}
-            onRemoveFile={guidInput.handleRemoveFile}
-            actionRow={actionRowNode}
-            workspaceDir={guidInput.dir}
-            onSelectWorkspace={(dir) => guidInput.setDir(dir)}
-            onClearWorkspace={() => guidInput.setDir('')}
-            entryStrip={
-              <ComposerEntryStrip
-                isPresetAgent={agentSelection.is_presetAgent}
-                assistantLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
-                assistantAvatar={selectedAssistantAvatar ?? undefined}
-                onSummon={() => { setDrawerMode('assistant'); setDrawerOpen(true); }}
-                onAdjustSkills={handleOpenSkillsDrawer}
-                onFree={() => agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey)}
-                activeSkillCount={activeSkillCount}
-                activeSkills={activeSkills}
-              />
-            }
-          />
+            <GuidResourceCards />
 
-          <GuidResourceCards />
+            {/* Editor host (modals + example prompts + fallback notice) */}
+            <GuidAssistantEditorHost
+              assistants={agentSelection.assistants}
+              localeKey={localeKey}
+              selectedAgentKey={agentSelection.selectedAgentKey}
+              selectedAgentInfo={agentSelection.selectedAgentInfo}
+              currentEffectiveAgentInfo={agentSelection.currentEffectiveAgentInfo}
+              onSetInput={guidInput.setInput}
+              onFocusInput={guidInput.handleTextareaFocus}
+              onRegisterOpenDetails={handleRegisterOpenDetails}
+            />
+          </div>
+        </div>
 
-          {/* Editor host (modals + example prompts + fallback notice) */}
-          <GuidAssistantEditorHost
-            assistants={agentSelection.assistants}
-            localeKey={localeKey}
-            selectedAgentKey={agentSelection.selectedAgentKey}
-            selectedAgentInfo={agentSelection.selectedAgentInfo}
-            currentEffectiveAgentInfo={agentSelection.currentEffectiveAgentInfo}
-            onSetInput={guidInput.setInput}
-            onFocusInput={guidInput.handleTextareaFocus}
-            onRegisterOpenDetails={handleRegisterOpenDetails}
-          />
+        <div className={styles.guidDiscoveryArea}>
+          <GuidCompanionPosterPreview />
         </div>
 
         {/* SummonDrawer (right-side) */}
