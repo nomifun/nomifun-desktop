@@ -48,6 +48,7 @@ async fn insert_test_provider(repo: &dyn IProviderRepository, id: &str, platform
         capabilities: "[]",
         context_limit: None,
         model_protocols: None,
+        model_descriptions: None,
         model_enabled: None,
         model_health: None,
         bedrock_config: None,
