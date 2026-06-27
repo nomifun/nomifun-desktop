@@ -325,6 +325,7 @@ mod tests {
             capabilities: "[]".into(),
             context_limit: None,
             model_protocols: None,
+            model_descriptions: None,
             model_enabled: Some(r#"{"b": false}"#.into()),
             model_health: None,
             bedrock_config: None,

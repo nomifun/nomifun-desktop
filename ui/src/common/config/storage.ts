@@ -513,6 +513,14 @@ export interface IProvider {
    */
   model_protocols?: Record<string, string>;
   /**
+   * 每个模型的用户撰写描述。映射模型名称到描述文本。
+   * 供编排器按描述自动择优模型。
+   * Per-model user-authored descriptions. Maps model name to description text.
+   * Consumed by the orchestrator to auto-pick models by description.
+   * e.g. { "gpt-4o": "擅长前端与多模态", "claude-sonnet-4": "长上下文推理" }
+   */
+  model_descriptions?: Record<string, string>;
+  /**
    * AWS Bedrock specific configuration
    * Only used when platform is 'bedrock'
    */
