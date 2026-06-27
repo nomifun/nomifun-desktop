@@ -42,9 +42,22 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::GatewayDeps;
-use crate::registry::{Capability, CapabilityMeta, DangerTier};
+use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::{ok, require_user};
 use crate::tools_provider::{ProviderSummary, load_provider_summaries};
+
+/// Orchestration is a DESKTOP master-agent feature: the "lead" conversation that
+/// drives a run lives on a local trusted desktop session (it carries the
+/// `model_range` / `work_dir` context `nomi_run_create` reads). External callers
+/// (the network Remote front door, `Surface::Remote`) are NOT orchestration leads
+/// and must not create or inspect runs — `nomi_run_status` / `nomi_run_result`
+/// take a bare `run_id` with no ownership predicate, so advertising/dispatching
+/// them externally would let one companion's token read ANY run's status/output.
+/// Hard-deny the whole domain on Remote so it is neither advertised (filtered out
+/// of `tool_specs`) NOR dispatchable (a guessed call is Denied, not just hidden),
+/// while staying fully available on the trusted Desktop surface where the lead
+/// runs. (Mirrors the per-surface `deny_on` curation used elsewhere.)
+const ORCHESTRATOR_DENY_SURFACES: &[Surface] = &[Surface::Remote];
 
 // ── param structs (single source: schema + runtime) ──────────────────────
 
@@ -474,36 +487,41 @@ fn project_result(detail: &RunDetail) -> Value {
 
 /// Register the orchestration-domain capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
-    // 1. Create + kick off a run (write).
+    // 1. Create + kick off a run (write). Desktop-only: deny on Remote (an
+    //    external caller is never an orchestration lead).
     out.push(Capability::new::<RunCreateParams, _, _>(
         CapabilityMeta::new(
             "nomi_run_create",
             "orchestrator",
             "Create and start an orchestration run from THIS conversation's context: decompose the goal into a task DAG over the conversation's chosen model range and drive it to completion. Only works in an orchestration-lead conversation (one with a model_range). Returns the run id and status.",
             DangerTier::Write,
-        ),
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, ctx, p| create(deps, ctx, p),
     ));
 
-    // 2. Run status (read).
+    // 2. Run status (read). Desktop-only: deny on Remote — the read takes a bare
+    //    run_id with no ownership predicate, so it must not be reachable externally.
     out.push(Capability::new::<RunStatusParams, _, _>(
         CapabilityMeta::new(
             "nomi_run_status",
             "orchestrator",
             "Get an orchestration run's current status and each task's id, title, and status.",
             DangerTier::Read,
-        ),
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, _ctx, p| status(deps, p),
     ));
 
-    // 3. Run result (read).
+    // 3. Run result (read). Desktop-only: deny on Remote (same bare-run_id reason).
     out.push(Capability::new::<RunResultParams, _, _>(
         CapabilityMeta::new(
             "nomi_run_result",
             "orchestrator",
             "Read an orchestration run's aggregated result: the run summary and each task's output summary. While still running, status reflects the in-flight state.",
             DangerTier::Read,
-        ),
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, _ctx, p| result(deps, p),
     ));
 }
@@ -627,8 +645,8 @@ mod tests {
     }
 
     /// The three orchestration tools are registered and visible on the Desktop
-    /// surface (all are Read/Write — never hard-denied), with names within the
-    /// 42-char style budget.
+    /// surface (the trusted surface where the lead runs; all are Read/Write —
+    /// never hard-denied there), with names within the 42-char style budget.
     #[test]
     fn orchestrator_tools_registered_and_visible_on_desktop() {
         let reg = Registry::global();
@@ -645,6 +663,39 @@ mod tests {
                 name.len() <= 42,
                 "orchestrator tool name {name} exceeds the 42-char budget ({} chars)",
                 name.len()
+            );
+        }
+    }
+
+    /// The orchestration domain is DESKTOP-only: it must NOT be advertised or
+    /// dispatchable on the external Remote front door (a Remote companion is never
+    /// an orchestration lead, and the reads take a bare run_id with no ownership
+    /// predicate). `deny_on(Remote)` makes the tools invisible to `tool_specs`
+    /// (advertisement) AND yields `Decision::Deny` at dispatch (a guessed call is
+    /// denied, not just hidden) — while staying available on Desktop.
+    #[test]
+    fn orchestrator_tools_absent_on_remote_surface() {
+        let reg = Registry::global();
+        let remote: Vec<&str> = reg
+            .tool_specs(Surface::Remote)
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        for name in ["nomi_run_create", "nomi_run_status", "nomi_run_result"] {
+            // Not advertised on the Remote surface.
+            assert!(
+                !remote.contains(&name),
+                "orchestrator tool {name} must NOT be advertised on the Remote surface"
+            );
+            // Not visible (the dispatch gate Denies it, not merely hidden).
+            assert!(
+                !reg.tool_visible(Surface::Remote, name),
+                "orchestrator tool {name} must be denied on the Remote surface"
+            );
+            // …but still available on the trusted Desktop surface (the lead).
+            assert!(
+                reg.tool_visible(Surface::Desktop, name),
+                "orchestrator tool {name} must remain visible on the Desktop surface"
             );
         }
     }
