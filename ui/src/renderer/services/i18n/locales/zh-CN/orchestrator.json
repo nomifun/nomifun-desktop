@@ -1,6 +1,19 @@
 {
   "title": "智能编排",
   "subtitle": "在这里复盘由会话发起的多智能体 Run",
+  "status": {
+    "planning": "主管规划中…",
+    "idle": "尚未拆分 · 提交需求后主管将编排",
+    "error": "未配置可用模型 · 主管未能运行",
+    "awaiting": "已拟定 {{count}} 个任务 · 待批准",
+    "running": "多智能体协作中 · {{done}}/{{total}} 完成",
+    "paused": "编排已暂停",
+    "completed": "编排完成 · 共 {{count}} 个任务",
+    "failed": "编排失败",
+    "cancelled": "编排已取消",
+    "reviewApprove": "查看并批准",
+    "configureModel": "去配置模型"
+  },
   "run": {
     "role": {
       "planner": "规划",

@@ -1,6 +1,19 @@
 {
   "title": "Orchestration",
   "subtitle": "Review the multi-agent runs you started from conversations",
+  "status": {
+    "planning": "Lead is planning…",
+    "idle": "Not yet decomposed · the lead will orchestrate once you send a goal",
+    "error": "No usable model configured · the lead could not run",
+    "awaiting": "{{count}} task(s) planned · awaiting approval",
+    "running": "Agents collaborating · {{done}}/{{total}} done",
+    "paused": "Orchestration paused",
+    "completed": "Orchestration complete · {{count}} task(s)",
+    "failed": "Orchestration failed",
+    "cancelled": "Orchestration cancelled",
+    "reviewApprove": "Review & approve",
+    "configureModel": "Configure model"
+  },
   "run": {
     "role": {
       "planner": "Planner",

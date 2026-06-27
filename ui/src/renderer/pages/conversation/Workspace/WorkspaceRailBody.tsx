@@ -10,6 +10,7 @@ import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { getWorkspaceDisplayName as getDisplayName } from '@/renderer/utils/workspace/workspace';
+import { WORKSPACE_SELECT_TAB_EVENT, type WorkspaceSelectTabDetail } from '@/renderer/utils/workspace/workspaceEvents';
 import { Empty, Tree } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -78,6 +79,26 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   // made before the tab is opened into the baseline so they'd never show.
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('files');
   const [changesTabEverOpened, setChangesTabEverOpened] = useState(false);
+
+  // Allow callers (e.g. the orchestration status strip) to programmatically
+  // activate a rail tab by key — but only if this rail actually renders it, so
+  // the event is safely ignored by every other surface. Built-in keys
+  // ('files'/'changes') are always valid; extra-tab keys must be present.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handler = (event: Event) => {
+      const tab = (event as CustomEvent<WorkspaceSelectTabDetail>).detail?.tab;
+      if (!tab) return;
+      const isBuiltin = tab === 'files' || tab === 'changes';
+      const isExtra = source.extraTabs?.some((t) => t.key === tab) ?? false;
+      if (isBuiltin || isExtra) {
+        setActiveTab(tab);
+      }
+    };
+    window.addEventListener(WORKSPACE_SELECT_TAB_EVENT, handler);
+    return () => window.removeEventListener(WORKSPACE_SELECT_TAB_EVENT, handler);
+  }, [source.extraTabs]);
+
   const fileChangesEnabled = source.lazyChanges ? changesTabEverOpened : true;
   const fileChangesHook = useFileChanges({ workspace, enabled: fileChangesEnabled });
 
