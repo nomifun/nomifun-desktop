@@ -5683,6 +5683,7 @@ dependencies = [
  "nomi-types",
  "nomifun-ai-agent",
  "nomifun-api-types",
+ "nomifun-assistant",
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",

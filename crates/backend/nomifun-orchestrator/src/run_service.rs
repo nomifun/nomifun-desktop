@@ -145,8 +145,15 @@ impl RunService {
             return Err(OrchestratorError::BadRequest("goal must not be empty".into()).into());
         }
         // Synthesize the fleet from the model range (Single/Range only; Auto and
-        // empty ranges are rejected — pinned_roles is parsed but ignored in P1).
-        let members = build_members_from_range(&req.model_range)?;
+        // empty ranges are rejected — pinned_roles is parsed but ignored in P1),
+        // then merge in any pre-constructed role members (P4 Task 2: the
+        // caps_orchestrator layer resolves ENABLED assistants into enriched
+        // FleetMembers and passes them via `role_members`). Dedup by
+        // `(provider_id, model, agent_id)` so an assistant pinned to the same
+        // `(provider, model)` as a bare range member does not produce a duplicate
+        // routing target — the enriched (assistant-backed) member wins, since it
+        // carries the persona/skills/description the planner + worker need.
+        let members = merge_members(build_members_from_range(&req.model_range)?, req.role_members);
         let fleet_snapshot =
             serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string());
 
@@ -640,9 +647,58 @@ fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppE
             capability_profile: None,
             constraints: None,
             sort_order: i as i64,
+            // Bare model members carry no persona/skills. `description` is left
+            // None here — the caps_orchestrator layer fills it from the model's
+            // user-authored description before this point (a bare member built
+            // straight from a range, e.g. the workspace path, simply has no
+            // description, which the planner renders as `desc=-`).
+            description: None,
+            system_prompt: None,
+            enabled_skills: Vec::new(),
+            disabled_builtin_skills: Vec::new(),
         })
         .collect();
     Ok(members)
+}
+
+/// Merge the bare model-range members with the pre-constructed role
+/// (assistant-backed) members into a single snapshot, deduping by
+/// `(provider_id, model, agent_id)`.
+///
+/// **Order:** role members FIRST (keeping their relative order), then the bare
+/// range members appended after; `sort_order` is rewritten to the final position
+/// so the snapshot stays densely ordered and the `member_index` math (which
+/// indexes into this vec during planning) stays correct.
+///
+/// **Dedup key** is the full `(provider_id, model, agent_id)` triple, FIRST
+/// occurrence wins. Two consequences:
+/// - An assistant-backed member is `(p, m, "<assistant id>")` while a bare range
+///   member is `(p, m, "")`, so an assistant pinned to a model already in the
+///   range is a DISTINCT routing target (it adds persona/skills) — both are kept.
+/// - A role member with an EMPTY `agent_id` (a caps-built "description-decorated"
+///   bare member) shares the bare range member's `(p, m, "")` key. Because role
+///   members come first, the caps-built copy (which carries the model's
+///   user-authored `description`) WINS over the plain range-built one — this is
+///   how the bare members get their descriptions for the planner.
+///
+/// This keeps the keystone behavior (enabled assistants become candidate role
+/// members alongside the bare models) while never minting two identical targets.
+fn merge_members(range_members: Vec<FleetMember>, role_members: Vec<FleetMember>) -> Vec<FleetMember> {
+    let mut seen: std::collections::HashSet<(Option<String>, Option<String>, String)> =
+        std::collections::HashSet::new();
+    let mut out: Vec<FleetMember> = Vec::with_capacity(range_members.len() + role_members.len());
+    // Role members first so a caps-built copy wins on a true collision.
+    for m in role_members.into_iter().chain(range_members.into_iter()) {
+        let key = (m.provider_id.clone(), m.model.clone(), m.agent_id.clone());
+        if seen.insert(key) {
+            out.push(m);
+        }
+    }
+    // Re-densify sort_order to the final snapshot index.
+    for (i, m) in out.iter_mut().enumerate() {
+        m.sort_order = i as i64;
+    }
+    out
 }
 
 /// The member + score/rationale chosen for a task during planning.
@@ -765,6 +821,13 @@ fn member_row_to_dto(row: FleetMemberRow) -> FleetMember {
         capability_profile,
         constraints,
         sort_order: row.sort_order,
+        // Pre-built fleet rows (the workspace path) carry no enriched persona;
+        // the enrichment fields default. (Assistant-backed members are minted
+        // at ad-hoc create time, never persisted in the `fleets` table.)
+        description: None,
+        system_prompt: None,
+        enabled_skills: Vec::new(),
+        disabled_builtin_skills: Vec::new(),
     }
 }
 
@@ -1531,6 +1594,7 @@ mod tests {
                 models: vec![model_ref("prov_a", "model-a"), model_ref("prov_b", "model-b")],
             },
             pinned_roles: vec![],
+            role_members: vec![],
             autonomy: None,
             max_parallel: Some(2),
             lead_conv_id: Some(909),
@@ -1574,6 +1638,7 @@ mod tests {
             work_dir: None,
             model_range: ModelRange::Single { model: model_ref("prov_solo", "model-solo") },
             pinned_roles: vec![],
+            role_members: vec![],
             autonomy: Some("autonomous".to_string()),
             max_parallel: None,
             lead_conv_id: None,
@@ -1598,6 +1663,7 @@ mod tests {
             work_dir: None,
             model_range: ModelRange::Single { model: model_ref("p", "m") },
             pinned_roles: vec![],
+            role_members: vec![],
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
@@ -1615,6 +1681,7 @@ mod tests {
             work_dir: None,
             model_range: ModelRange::Range { models: vec![] },
             pinned_roles: vec![],
+            role_members: vec![],
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
@@ -1634,6 +1701,7 @@ mod tests {
             work_dir: None,
             model_range: ModelRange::Auto,
             pinned_roles: vec![],
+            role_members: vec![],
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
@@ -1675,5 +1743,130 @@ mod tests {
         // Auto → BadRequest (caller must expand it).
         let auto = build_members_from_range(&ModelRange::Auto);
         assert!(matches!(auto, Err(AppError::BadRequest(_))), "got: {auto:?}");
+    }
+
+    // -------------------------------------------------------------------------
+    // P4 Task 2: role_members merge (assistant-backed members in the snapshot).
+    // -------------------------------------------------------------------------
+
+    /// An enriched (assistant-backed) member, as the caps_orchestrator layer
+    /// would construct it.
+    fn enriched_member(agent_id: &str, provider_id: &str, model: &str, name: &str) -> FleetMember {
+        FleetMember {
+            id: generate_prefixed_id("rmbr"),
+            agent_id: agent_id.to_string(),
+            provider_id: Some(provider_id.to_string()),
+            model: Some(model.to_string()),
+            role_hint: Some(name.to_string()),
+            capability_profile: None,
+            constraints: None,
+            sort_order: 0,
+            description: Some(format!("{name} 的描述")),
+            system_prompt: Some(format!("你是 {name}")),
+            enabled_skills: vec!["web_search".to_string()],
+            disabled_builtin_skills: vec!["browser".to_string()],
+        }
+    }
+
+    // merge_members unit: role members first, bare range members appended; a true
+    // duplicate `(provider, model, agent_id)` collapses (first wins); an
+    // assistant on the same model but a non-empty agent_id is a DISTINCT member;
+    // a role member with an EMPTY agent_id (a description-decorated bare member)
+    // WINS over the plain range-built one; sort_order re-densified to the index.
+    #[test]
+    fn merge_members_dedups_and_densifies() {
+        let range = build_members_from_range(&ModelRange::Range {
+            models: vec![model_ref("p1", "m1"), model_ref("p2", "m2")],
+        })
+        .expect("range");
+        let roles = vec![
+            // Same (p1, m1) as a range member but with an agent_id → distinct.
+            enriched_member("asst_a", "p1", "m1", "研究员"),
+            // A second assistant on a fresh model.
+            enriched_member("asst_b", "p3", "m3", "写手"),
+        ];
+
+        let merged = merge_members(range, roles);
+        // 2 bare + 2 assistant = 4 distinct routing targets (no collapse, since
+        // the assistant members carry agent_ids the bare ones lack).
+        assert_eq!(merged.len(), 4, "bare + assistant members all kept: {merged:?}");
+        // sort_order densified 0..4 in append order (roles first, then range).
+        for (i, m) in merged.iter().enumerate() {
+            assert_eq!(m.sort_order, i as i64, "sort_order re-densified");
+        }
+        // The assistant-backed members preserved their enrichment.
+        let asst = merged.iter().find(|m| m.agent_id == "asst_a").expect("asst_a present");
+        assert_eq!(asst.role_hint.as_deref(), Some("研究员"));
+        assert_eq!(asst.system_prompt.as_deref(), Some("你是 研究员"));
+        assert_eq!(asst.enabled_skills, vec!["web_search"]);
+
+        // A true duplicate (identical triple) collapses, first occurrence wins.
+        let dup_a = enriched_member("asst_a", "p1", "m1", "研究员");
+        let dup_b = enriched_member("asst_a", "p1", "m1", "研究员-changed");
+        let collapsed = merge_members(vec![], vec![dup_a.clone(), dup_b]);
+        assert_eq!(collapsed.len(), 1, "identical (provider,model,agent) collapses");
+        assert_eq!(collapsed[0].role_hint.as_deref(), Some("研究员"), "first wins");
+
+        // A description-decorated bare role member (empty agent_id) WINS over the
+        // plain range-built one with the same (provider, model).
+        let mut decorated = build_members_from_range(&ModelRange::Single { model: model_ref("p9", "m9") })
+            .expect("single")
+            .remove(0);
+        decorated.description = Some("用户描述".to_string());
+        let plain_range = build_members_from_range(&ModelRange::Single { model: model_ref("p9", "m9") })
+            .expect("single");
+        let merged2 = merge_members(plain_range, vec![decorated]);
+        assert_eq!(merged2.len(), 1, "same (provider,model,empty agent) collapses to one");
+        assert_eq!(
+            merged2[0].description.as_deref(),
+            Some("用户描述"),
+            "the description-decorated role copy wins over the plain range member"
+        );
+    }
+
+    // (KEYSTONE) create_adhoc with role_members merges the assistant-backed
+    // member INTO the snapshot alongside the bare range member, preserving the
+    // assistant's agent_id / role_hint / system_prompt / enabled_skills /
+    // description. This is what lets the worker (Task 3) read a self-contained
+    // persona from the snapshot with no assistant-crate dependency.
+    #[tokio::test]
+    async fn create_adhoc_merges_role_members_into_snapshot() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "build it".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Range { models: vec![model_ref("p1", "m1")] },
+            pinned_roles: vec![],
+            role_members: vec![enriched_member("asst_research", "p2", "m2", "研究员")],
+            autonomy: None,
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+        let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
+
+        let detail = svc.get_detail(&run.id).await.expect("detail");
+        // 1 bare range member + 1 assistant member.
+        assert_eq!(detail.fleet_members.len(), 2, "range + role member snapshotted");
+        let asst = detail
+            .fleet_members
+            .iter()
+            .find(|m| m.agent_id == "asst_research")
+            .expect("assistant member present in snapshot");
+        assert_eq!(asst.provider_id.as_deref(), Some("p2"));
+        assert_eq!(asst.model.as_deref(), Some("m2"));
+        assert_eq!(asst.role_hint.as_deref(), Some("研究员"));
+        assert_eq!(asst.system_prompt.as_deref(), Some("你是 研究员"), "persona folded in");
+        assert_eq!(asst.enabled_skills, vec!["web_search"], "skills folded in");
+        assert_eq!(asst.disabled_builtin_skills, vec!["browser"]);
+        assert_eq!(asst.description.as_deref(), Some("研究员 的描述"), "description folded in");
+
+        // The bare range member is still there (no agent_id), unchanged.
+        let bare = detail
+            .fleet_members
+            .iter()
+            .find(|m| m.agent_id.is_empty())
+            .expect("bare range member present");
+        assert_eq!(bare.provider_id.as_deref(), Some("p1"));
+        assert!(bare.system_prompt.is_none(), "bare member has no persona");
     }
 }
