@@ -4,12 +4,19 @@ use crate::models::{OrchAssignmentRow, OrchRunRow, OrchRunTaskDepRow, OrchRunTas
 /// `updated_at` are minted by the repository (`generate_prefixed_id("run")`).
 /// `status` is supplied by the service (e.g. `"planning"`).
 pub struct CreateRunParams {
-    pub workspace_id: String,
+    /// Owning workspace, or `None` for an ad-hoc run created from a conversation
+    /// (which carries its own `work_dir` instead).
+    pub workspace_id: Option<String>,
     pub user_id: String,
     pub goal: String,
     pub fleet_snapshot: String, // JSON
     pub autonomy: String,
     pub max_parallel: Option<i64>,
+    /// Lead/coordinator worker conversation — local `conversations.id` INTEGER.
+    /// `create_adhoc` needs to write this at creation time.
+    pub lead_conv_id: Option<i64>,
+    /// Working directory for an ad-hoc (workspace-less) run.
+    pub work_dir: Option<String>,
 }
 
 /// Parameters for a partial run update. `None` = leave the column unchanged.

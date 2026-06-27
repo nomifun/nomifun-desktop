@@ -29,8 +29,9 @@ impl IRunRepository for SqliteRunRepository {
         sqlx::query(
             "INSERT INTO orch_runs (\
                 id, workspace_id, user_id, goal, fleet_snapshot, autonomy, max_parallel, \
-                lead_conv_id, status, summary, total_tokens, forked_from, created_at, updated_at\
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, ?, ?)",
+                lead_conv_id, status, summary, total_tokens, forked_from, work_dir, \
+                created_at, updated_at\
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&p.workspace_id)
@@ -39,7 +40,9 @@ impl IRunRepository for SqliteRunRepository {
         .bind(&p.fleet_snapshot)
         .bind(&p.autonomy)
         .bind(p.max_parallel)
+        .bind(p.lead_conv_id)
         .bind(&status)
+        .bind(&p.work_dir)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -52,11 +55,12 @@ impl IRunRepository for SqliteRunRepository {
             fleet_snapshot: p.fleet_snapshot,
             autonomy: p.autonomy,
             max_parallel: p.max_parallel,
-            lead_conv_id: None,
+            lead_conv_id: p.lead_conv_id,
             status,
             summary: None,
             total_tokens: None,
             forked_from: None,
+            work_dir: p.work_dir,
             created_at: now,
             updated_at: now,
         })
@@ -463,12 +467,14 @@ mod tests {
         // --- run ---
         let run = repo
             .create_run(CreateRunParams {
-                workspace_id: ws_id.clone(),
+                workspace_id: Some(ws_id.clone()),
                 user_id: "u1".into(),
                 goal: "构建编排引擎".into(),
                 fleet_snapshot: "{}".into(),
                 autonomy: "auto".into(),
                 max_parallel: Some(2),
+                lead_conv_id: None,
+                work_dir: None,
             })
             .await
             .unwrap();
@@ -589,12 +595,14 @@ mod tests {
         let repo = SqliteRunRepository::new(pool);
         let run = repo
             .create_run(CreateRunParams {
-                workspace_id: ws_id,
+                workspace_id: Some(ws_id),
                 user_id: "u1".into(),
                 goal: "g".into(),
                 fleet_snapshot: "{}".into(),
                 autonomy: "auto".into(),
                 max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
             })
             .await
             .unwrap();
