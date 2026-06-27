@@ -46,12 +46,6 @@ use crate::router::rank_members;
 /// Default autonomy when the create request omits it.
 const DEFAULT_AUTONOMY: &str = "supervised";
 
-/// How far down the Router ranking a planner's pre-assigned `member_index` may
-/// sit and still be honored as the lead's deliberate judgment. Index 0 or 1
-/// (top-2) counts as "a viable top candidate"; anything lower means the Router
-/// found a materially better fit and overrides the planner.
-const PLANNER_HONOR_TOP_K: usize = 2;
-
 #[derive(Clone)]
 pub struct RunService {
     run_repo: Arc<dyn IRunRepository>,
@@ -289,18 +283,30 @@ impl RunService {
             }
         }
 
-        // 3. Assignments via the capability Router. For each task we build a
+        // 3. Assignments — LLM-primary + Router-veto. For each task we build a
         //    TaskProfile (the planner's, or a neutral default), rank the snapshot
         //    members, and pick:
-        //    - the Router's top pick (`rank_members[0]`) by default;
-        //    - the planner's `member_index` IF it survived the hard filters AND
-        //      ranks in the top-K (we trust the lead's deliberate choice when the
-        //      Router agrees it's a viable candidate);
-        //    - a fallback to the planner's index / member 0 when every member was
-        //      hard-filtered out (rank_members empty) — the engine needs an
-        //      assignment to run the task, so leaving it unassigned would fail it.
+        //    - the planner's `member_index` whenever it is VIABLE (present in
+        //      `ranked` at all = it passed the Router's HARD filters);
+        //    - else the Router's top pick (`ranked[0]`) — when the planner abstained
+        //      (no `member_index`) OR its pick was hard-filtered out (vetoed);
+        //    - a fallback to the planner's index / member 0 when EVERY member was
+        //      hard-filtered out (`ranked` empty) — the engine needs an assignment to
+        //      run the task, so leaving it unassigned would fail it.
         //    An existing *locked* assignment is never overwritten (re-plan must
         //    respect human overrides).
+        //
+        //    WHY honor the planner anywhere in `ranked` (not just a Router top-K)?
+        //    Members are now typically BARE models (`capability_profile: None`), which
+        //    the Router scores NEUTRALLY — every such member ties, so the Router has
+        //    no discriminating signal and its ordering is arbitrary among them. The
+        //    real signal is the LLM planner's description-informed `member_index`
+        //    (Change A feeds each model's user-authored `desc` into the prompt). So
+        //    the description-driven pick must be HONORED; the Router's job shrinks to
+        //    (a) a HARD-FILTER veto (vision/tool requirements the member can't meet)
+        //    and (b) supplying the fallback ordering when the planner abstains or its
+        //    pick is vetoed. (The retired top-K rule predates per-model descriptions
+        //    and would wrongly override a deliberate-but-not-top-scored pick.)
         for (idx, planned) in dag.tasks.iter().enumerate() {
             let task_id = &task_ids[idx];
 
@@ -328,14 +334,13 @@ impl RunService {
                     rationale: planned.rationale.clone(),
                 })
             } else {
-                // Honor the planner's pre-assignment when it's a viable top
-                // candidate (present in the ranking AND within the top-K).
-                let planner_choice = planned.member_index.and_then(|mi| {
-                    ranked
-                        .iter()
-                        .take(PLANNER_HONOR_TOP_K)
-                        .find(|c| c.member_index == mi)
-                });
+                // Honor the planner's pre-assignment whenever it is VIABLE (present
+                // anywhere in `ranked` = it survived the hard filters). Only when the
+                // planner abstained, or its pick was hard-filtered (absent from
+                // `ranked` = vetoed), do we fall back to the Router's top pick.
+                let planner_choice = planned
+                    .member_index
+                    .and_then(|mi| ranked.iter().find(|c| c.member_index == mi));
                 let chosen = planner_choice.unwrap_or(&ranked[0]);
                 members.get(chosen.member_index).map(|m| AssignmentPick {
                     member_id: m.id.clone(),
@@ -973,29 +978,98 @@ mod tests {
         );
     }
 
-    // (b') the inverse: when the planner's member_index is NOT a top candidate
-    // (member 0 is a weak generalist, the task strongly favors the coder at index
-    // 1), the Router overrides the planner.
+    // (b') LLM-primary + Router-veto: the planner's pick is honored as long as it
+    // is VIABLE (survives the Router's hard filters = present in `ranked`), even
+    // when the Router would have scored OTHER members higher. Here member 0 is a
+    // weak generalist and the task strongly favors the coders at 1/2, yet the
+    // planner deliberately chose 0 — and a viable choice is honored, not overridden.
+    // (Under the retired top-K rule member 0 fell outside the top-2 and the Router
+    // overrode it; that is exactly the behavior this redesign reverses.)
     #[tokio::test]
-    async fn plan_overrides_planner_when_not_top_candidate() {
-        // 3 members so member 0 falls outside the top-2 for a coding task.
+    async fn plan_honors_viable_planner_pick_even_below_router_top() {
+        // 3 members; the coding profile makes 1/2 clearly stronger than 0.
         let members = vec![
-            member_input("agent_gen", &[], "low", "standard"), // weak
+            member_input("agent_gen", &[], "low", "standard"), // weak, but still viable
             member_input("agent_c1", &["coding"], "high", "standard"),
             member_input("agent_c2", &["coding"], "high", "standard"),
         ];
-        // Planner picked the weak generalist (index 0).
+        // Planner deliberately chose the weak generalist (index 0).
         let dag = single_task_dag(Some(0), Some(coding_profile()));
         let (svc, _repo, snapshot, run_id) = harness(members, dag).await;
 
         svc.plan(&run_id).await.expect("plan");
 
         let detail = svc.get_detail(&run_id).await.expect("detail");
-        let chosen = &detail.assignments[0].member_id;
-        assert_ne!(*chosen, snapshot[0].id, "weak generalist must be overridden");
-        assert!(
-            *chosen == snapshot[1].id || *chosen == snapshot[2].id,
-            "router must pick one of the coders"
+        assert_eq!(
+            detail.assignments[0].member_id, snapshot[0].id,
+            "a viable planner pick is honored even when it is not the Router's top score"
+        );
+    }
+
+    // (b) THE behavior change (keystone): 6 members all with capability_profile=None
+    // (bare models → the Router scores them neutrally, no discriminating signal, all
+    // tied). The planner — informed by the model DESCRIPTIONS — chose member_index=4.
+    // The new rule must honor 4 because it is viable (present in `ranked`). The
+    // retired top-K rule would have wrongly picked ranked[0] (index 0).
+    #[tokio::test]
+    async fn plan_honors_description_driven_pick_among_neutral_members() {
+        // 6 bare members (no capability profile). The default `general` profile
+        // hard-filters none, so all 6 are viable and tie at score 0.
+        let members: Vec<FleetMemberInput> = (0..6)
+            .map(|i| {
+                let agent = format!("agent_{i}");
+                FleetMemberInput {
+                    agent_id: agent,
+                    provider_id: None,
+                    model: None,
+                    role_hint: None,
+                    capability_profile: None, // neutral: Router cannot discriminate
+                    constraints: None,
+                    sort_order: None,
+                }
+            })
+            .collect();
+        // Planner (reading descriptions) picked member 4 — NOT a top-2 candidate
+        // under the retired rule, which would have fallen back to ranked[0].
+        let dag = single_task_dag(Some(4), None);
+        let (svc, _repo, snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.assignments.len(), 1);
+        assert_eq!(
+            detail.assignments[0].member_id, snapshot[4].id,
+            "the description-informed planner pick (member 4) must be honored, \
+             not overridden to ranked[0]"
+        );
+    }
+
+    // (d) when the planner abstains (no member_index), assignment falls to the
+    // Router's top pick — here all members are neutral, so ranked[0] = member 0.
+    #[tokio::test]
+    async fn plan_falls_back_to_router_top_when_planner_abstains() {
+        let members: Vec<FleetMemberInput> = (0..4)
+            .map(|i| FleetMemberInput {
+                agent_id: format!("agent_{i}"),
+                provider_id: None,
+                model: None,
+                role_hint: None,
+                capability_profile: None,
+                constraints: None,
+                sort_order: None,
+            })
+            .collect();
+        // Planner left member_index unset.
+        let dag = single_task_dag(None, None);
+        let (svc, _repo, snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(
+            detail.assignments[0].member_id, snapshot[0].id,
+            "no planner pick → Router top (ranked[0] = member 0 for tied neutrals)"
         );
     }
 
@@ -1026,6 +1100,58 @@ mod tests {
         assert_eq!(
             detail.assignments[0].member_id, snapshot[1].id,
             "fallback honors the planner's member_index"
+        );
+    }
+
+    // (c) Router-veto: when the planner picks a member the Router HARD-FILTERED
+    // (it needs vision but that member has none) while OTHER members survive, the
+    // filtered pick is NOT viable → assignment falls back to ranked[0], never the
+    // excluded index. The hard filter is the Router's veto over the LLM pick.
+    #[tokio::test]
+    async fn plan_vetoes_planner_pick_that_was_hard_filtered() {
+        // index 0: vision-capable (survives the vision filter, becomes ranked[0]).
+        // index 1: text-only (hard-filtered out by the vision requirement).
+        let vision_member = FleetMemberInput {
+            agent_id: "agent_vision".to_string(),
+            provider_id: None,
+            model: None,
+            role_hint: None,
+            capability_profile: Some(CapabilityProfile {
+                strengths: vec!["analysis".to_string()],
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                tools: true,
+                reasoning: "high".to_string(),
+                cost_tier: "standard".to_string(),
+                speed_tier: "standard".to_string(),
+            }),
+            constraints: None,
+            sort_order: None,
+        };
+        let text_only = member_input("agent_text", &["analysis"], "high", "standard");
+        let members = vec![vision_member, text_only];
+
+        let vision = TaskProfile {
+            kind: "analysis".to_string(),
+            needs_vision: true,
+            needs_long_context: false,
+            needs_high_reasoning: false,
+            bulk: false,
+        };
+        // Planner picked the text-only member (index 1) — but it is hard-filtered.
+        let dag = single_task_dag(Some(1), Some(vision));
+        let (svc, _repo, snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.assignments.len(), 1);
+        assert_eq!(
+            detail.assignments[0].member_id, snapshot[0].id,
+            "the hard-filtered planner pick is vetoed → fall back to the viable ranked[0]"
+        );
+        assert_ne!(
+            detail.assignments[0].member_id, snapshot[1].id,
+            "the excluded (no-vision) member must NOT be assigned"
         );
     }
 
