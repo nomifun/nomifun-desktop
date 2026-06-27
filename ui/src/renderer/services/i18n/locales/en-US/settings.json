@@ -126,6 +126,8 @@
   "cannotDeleteBuiltin": "Cannot delete builtin assistants",
   "duplicateAssistant": "Duplicate",
   "assistantMainAgent": "Main Agent",
+  "assistantPreferredModels": "Preferred Models (optional)",
+  "assistantPreferredModelsPlaceholder": "Models this role prefers within range during orchestration",
   "assistantBuiltinReadonlyTip": "This is a builtin assistant. Only Main Agent can be changed. To customize other fields, ",
   "assistantBuiltinReadonlyDuplicateLink": "duplicate it",
   "assistantBuiltinReadonlyTipSuffix": ".",

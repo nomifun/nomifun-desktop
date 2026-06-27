@@ -2562,6 +2562,8 @@ export type I18nKey =
   | 'settings.assistantNameRequired'
   | 'settings.assistantNoDescription'
   | 'settings.assistantNoMatch'
+  | 'settings.assistantPreferredModels'
+  | 'settings.assistantPreferredModelsPlaceholder'
   | 'settings.assistantPrompt'
   | 'settings.assistantPromptHint'
   | 'settings.assistantPromptPlaceholder'
