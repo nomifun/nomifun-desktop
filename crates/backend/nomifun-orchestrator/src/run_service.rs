@@ -25,10 +25,11 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    Assignment, CreateRunRequest, FleetMember, PlannedDag, ReassignRequest, Run, RunDetail,
-    RunTask, RunTaskDep, TaskProfile,
+    Assignment, CreateAdhocRunRequest, CreateRunRequest, FleetMember, ModelRange, PlannedDag,
+    ReassignRequest, Run, RunDetail, RunTask, RunTaskDep, TaskProfile,
 };
 use nomifun_common::AppError;
+use nomifun_common::generate_prefixed_id;
 use nomifun_db::models::{
     FleetMemberRow, OrchAssignmentRow, OrchRunRow, OrchRunTaskDepRow, OrchRunTaskRow,
 };
@@ -108,18 +109,79 @@ impl RunService {
         let row = self
             .run_repo
             .create_run(CreateRunParams {
-                workspace_id: req.workspace_id,
+                workspace_id: Some(req.workspace_id),
                 user_id: user_id.to_string(),
                 goal: req.goal,
                 fleet_snapshot,
                 autonomy,
                 max_parallel: req.max_parallel,
+                // Workspace-backed run: no ad-hoc work_dir / pre-bound conversation.
+                work_dir: None,
+                lead_conv_id: None,
             })
             .await
             .map_err(OrchestratorError::from)?;
 
         let run = run_row_to_dto(row);
         // Status starts at `planning` (the repo INSERTs it); surface it on the bus.
+        self.emitter.emit_run_status(&run.id, &run.status);
+        Ok(run)
+    }
+
+    /// Create an **ad-hoc** run straight from a conversation: no workspace, no
+    /// pre-built fleet. The fleet is synthesized on the fly from the request's
+    /// [`ModelRange`] (one synthetic [`FleetMember`] per `provider+model`), and the
+    /// run carries its own `work_dir` (the engine prefers it over a workspace dir).
+    ///
+    /// The run is parked in `planning` exactly like [`create`](Self::create) —
+    /// the snapshot is opaque to the engine, which resolves members from
+    /// `fleet_snapshot` by id. Synthetic member ids are minted unique + stable
+    /// (`generate_prefixed_id("rmbr")`) so the engine's task→member resolution is
+    /// deterministic.
+    ///
+    /// `ModelRange::Auto` is rejected here: its expansion to a concrete `range`
+    /// requires provider access and is the caps_orchestrator layer's job (Task 3),
+    /// which calls this with an already-expanded `Single`/`Range`.
+    pub async fn create_adhoc(
+        &self,
+        user_id: &str,
+        req: CreateAdhocRunRequest,
+    ) -> Result<Run, AppError> {
+        if req.goal.trim().is_empty() {
+            return Err(OrchestratorError::BadRequest("goal must not be empty".into()).into());
+        }
+        // Synthesize the fleet from the model range (Single/Range only; Auto and
+        // empty ranges are rejected — pinned_roles is parsed but ignored in P1).
+        let members = build_members_from_range(&req.model_range)?;
+        let fleet_snapshot =
+            serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string());
+
+        let autonomy = req
+            .autonomy
+            .filter(|a| !a.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_AUTONOMY.to_string());
+        // An empty work_dir string is treated as absent (no dir).
+        let work_dir = req
+            .work_dir
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty());
+
+        let row = self
+            .run_repo
+            .create_run(CreateRunParams {
+                workspace_id: None,
+                user_id: user_id.to_string(),
+                goal: req.goal,
+                fleet_snapshot,
+                autonomy,
+                max_parallel: req.max_parallel,
+                work_dir,
+                lead_conv_id: req.lead_conv_id,
+            })
+            .await
+            .map_err(OrchestratorError::from)?;
+
+        let run = run_row_to_dto(row);
         self.emitter.emit_run_status(&run.id, &run.status);
         Ok(run)
     }
@@ -523,6 +585,61 @@ fn resolve_member(members: &[FleetMember], member_index: Option<usize>) -> Optio
     }
 }
 
+/// Synthesize the ad-hoc fleet members for a [`ModelRange`]. Each `provider+model`
+/// pair becomes one [`FleetMember`] with both `provider_id` and `model` set to
+/// `Some` (the worker hard-requires both — `worker.rs:116-120`), a freshly minted
+/// unique id (`generate_prefixed_id("rmbr")` — the engine resolves task→member by
+/// id, so ids must be unique + stable), and `sort_order` = its snapshot index.
+/// The member is otherwise bare (`agent_id` empty, no capability profile /
+/// constraints / role hint) — capability routing in P1 falls back to the neutral
+/// default profile.
+///
+/// **Contract (Task 3):** only `Single` and `Range` are handled here. `Auto` is a
+/// `BadRequest` — its expansion to a concrete `Range` requires provider access and
+/// belongs in the caps_orchestrator layer, which must pass an already-expanded
+/// range. An empty `Range` is also a `BadRequest` (a run needs at least one model).
+fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppError> {
+    let model_refs: Vec<(&str, &str)> = match range {
+        ModelRange::Single { model } => {
+            vec![(model.provider_id.as_str(), model.model.as_str())]
+        }
+        ModelRange::Range { models } => models
+            .iter()
+            .map(|m| (m.provider_id.as_str(), m.model.as_str()))
+            .collect(),
+        ModelRange::Auto => {
+            // Caller (caps_orchestrator, Task 3) must expand Auto to a concrete
+            // Range before reaching the service — it has provider access; we don't.
+            return Err(OrchestratorError::BadRequest(
+                "auto range must be expanded by caller".into(),
+            )
+            .into());
+        }
+    };
+
+    if model_refs.is_empty() {
+        return Err(
+            OrchestratorError::BadRequest("model_range 为空：无可用模型".into()).into(),
+        );
+    }
+
+    let members = model_refs
+        .into_iter()
+        .enumerate()
+        .map(|(i, (provider_id, model))| FleetMember {
+            id: generate_prefixed_id("rmbr"),
+            agent_id: String::new(),
+            provider_id: Some(provider_id.to_string()),
+            model: Some(model.to_string()),
+            role_hint: None,
+            capability_profile: None,
+            constraints: None,
+            sort_order: i as i64,
+        })
+        .collect();
+    Ok(members)
+}
+
 /// The member + score/rationale chosen for a task during planning.
 struct AssignmentPick {
     member_id: String,
@@ -568,6 +685,7 @@ fn run_row_to_dto(row: OrchRunRow) -> Run {
         summary: row.summary,
         lead_conv_id: row.lead_conv_id,
         total_tokens: row.total_tokens,
+        work_dir: row.work_dir,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -650,8 +768,8 @@ mod tests {
     use super::*;
     use crate::service::{FleetService, WorkspaceService};
     use nomifun_api_types::{
-        CapabilityProfile, CreateFleetRequest, CreateWorkspaceRequest, FleetMemberInput, PlannedTask,
-        WebSocketMessage,
+        CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateWorkspaceRequest,
+        FleetMemberInput, ModelRange, ModelRef, PlannedTask, WebSocketMessage,
     };
     use nomifun_db::{
         SqliteFleetRepository, SqliteOrchWorkspaceRepository, SqliteRunRepository,
@@ -1245,5 +1363,191 @@ mod tests {
             matches!(svc.resume(missing).await, Err(AppError::NotFound(_))),
             "resume must 404 on missing run"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 2: ad-hoc (workspace-less) run creation from a model range.
+    // -------------------------------------------------------------------------
+
+    /// Build a bare RunService (no fleet/workspace seeded) for the ad-hoc path:
+    /// `create_adhoc` synthesizes its members from a model range, so it needs
+    /// neither a fleet nor a workspace. Returns (svc, run_repo).
+    async fn adhoc_service() -> (RunService, Arc<SqliteRunRepository>) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(NoopBroadcaster));
+        let planner: Arc<dyn PlanProducer> =
+            Arc::new(FixedPlanProducer::new(single_task_dag(None, None)));
+        let svc = RunService::new(run_repo.clone(), fleet_repo, ws_repo, planner, emitter);
+        (svc, run_repo)
+    }
+
+    fn model_ref(provider_id: &str, model: &str) -> ModelRef {
+        ModelRef {
+            provider_id: provider_id.to_string(),
+            model: model.to_string(),
+        }
+    }
+
+    // (a) create_adhoc with a `range` of two models persists the run, snapshots
+    // exactly two synthetic members (each with provider_id + model both Some),
+    // and persists work_dir + lead_conv_id.
+    #[tokio::test]
+    async fn create_adhoc_range_snapshots_two_members() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "ship the feature".to_string(),
+            work_dir: Some("/tmp/proj".to_string()),
+            model_range: ModelRange::Range {
+                models: vec![model_ref("prov_a", "model-a"), model_ref("prov_b", "model-b")],
+            },
+            pinned_roles: vec![],
+            autonomy: None,
+            max_parallel: Some(2),
+            lead_conv_id: Some(909),
+        };
+
+        let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
+
+        // Ad-hoc run is workspace-less, carries its own work_dir + lead_conv_id.
+        assert!(run.workspace_id.is_none(), "ad-hoc run has no workspace");
+        assert_eq!(run.work_dir.as_deref(), Some("/tmp/proj"), "work_dir persisted");
+        assert_eq!(run.lead_conv_id, Some(909), "lead_conv_id persisted");
+        assert_eq!(run.status, "planning", "starts in planning");
+        // Autonomy defaulted (request omitted it).
+        assert_eq!(run.autonomy, DEFAULT_AUTONOMY);
+        assert_eq!(run.max_parallel, Some(2));
+
+        // The fleet snapshot must decode to two members, each Nomi-runnable
+        // (provider_id + model both Some — worker.rs:116-120 requires it).
+        let detail = svc.get_detail(&run.id).await.expect("detail");
+        assert_eq!(detail.fleet_members.len(), 2, "two synthetic members snapshotted");
+        let m0 = &detail.fleet_members[0];
+        let m1 = &detail.fleet_members[1];
+        assert_eq!(m0.provider_id.as_deref(), Some("prov_a"));
+        assert_eq!(m0.model.as_deref(), Some("model-a"));
+        assert_eq!(m1.provider_id.as_deref(), Some("prov_b"));
+        assert_eq!(m1.model.as_deref(), Some("model-b"));
+        // Member ids must be unique + stable (the engine resolves task→member by id).
+        assert_ne!(m0.id, m1.id, "synthetic member ids are unique");
+        assert!(m0.id.starts_with("rmbr_"), "member id uses the rmbr prefix: {}", m0.id);
+        // sort_order is the snapshot index.
+        assert_eq!(m0.sort_order, 0);
+        assert_eq!(m1.sort_order, 1);
+    }
+
+    // create_adhoc with a `single` model snapshots exactly one member.
+    #[tokio::test]
+    async fn create_adhoc_single_snapshots_one_member() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "single-model run".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Single { model: model_ref("prov_solo", "model-solo") },
+            pinned_roles: vec![],
+            autonomy: Some("autonomous".to_string()),
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+
+        let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
+        assert!(run.work_dir.is_none(), "no work_dir given");
+        assert_eq!(run.autonomy, "autonomous", "explicit autonomy honored");
+
+        let detail = svc.get_detail(&run.id).await.expect("detail");
+        assert_eq!(detail.fleet_members.len(), 1);
+        assert_eq!(detail.fleet_members[0].provider_id.as_deref(), Some("prov_solo"));
+        assert_eq!(detail.fleet_members[0].model.as_deref(), Some("model-solo"));
+    }
+
+    // (b) create_adhoc rejects an empty goal (400).
+    #[tokio::test]
+    async fn create_adhoc_empty_goal_is_bad_request() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "   ".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Single { model: model_ref("p", "m") },
+            pinned_roles: vec![],
+            autonomy: None,
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+        let err = svc.create_adhoc("u1", req).await.expect_err("empty goal must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // (b) create_adhoc rejects an empty `range` (no models → 400, no run persisted).
+    #[tokio::test]
+    async fn create_adhoc_empty_range_is_bad_request() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "needs a model".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Range { models: vec![] },
+            pinned_roles: vec![],
+            autonomy: None,
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+        let err = svc.create_adhoc("u1", req).await.expect_err("empty range must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // (b) create_adhoc rejects an unexpanded `auto` range — Auto must be expanded
+    // to a concrete `range` by the caps_orchestrator layer (Task 3) before
+    // reaching the service. This is the contract Task 3 relies on.
+    #[tokio::test]
+    async fn create_adhoc_auto_range_is_bad_request() {
+        let (svc, _repo) = adhoc_service().await;
+        let req = CreateAdhocRunRequest {
+            goal: "auto picks".to_string(),
+            work_dir: None,
+            model_range: ModelRange::Auto,
+            pinned_roles: vec![],
+            autonomy: None,
+            max_parallel: None,
+            lead_conv_id: None,
+        };
+        let err = svc.create_adhoc("u1", req).await.expect_err("auto must reject at service");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // (c) build_members_from_range unit coverage: Range → one member per ModelRef
+    // (provider+model both Some, unique ids, sort_order = index); Single → one
+    // member; Auto / empty Range → BadRequest (must be expanded/non-empty).
+    #[test]
+    fn build_members_from_range_unit() {
+        // Range → two members.
+        let members = build_members_from_range(&ModelRange::Range {
+            models: vec![model_ref("p1", "m1"), model_ref("p2", "m2")],
+        })
+        .expect("range builds members");
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].provider_id.as_deref(), Some("p1"));
+        assert_eq!(members[0].model.as_deref(), Some("m1"));
+        assert_eq!(members[0].sort_order, 0);
+        assert_eq!(members[1].sort_order, 1);
+        assert_ne!(members[0].id, members[1].id);
+        assert!(members[0].agent_id.is_empty(), "synthetic member has no agent");
+
+        // Single → one member.
+        let single = build_members_from_range(&ModelRange::Single {
+            model: model_ref("ps", "ms"),
+        })
+        .expect("single builds a member");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].provider_id.as_deref(), Some("ps"));
+
+        // Empty Range → BadRequest.
+        let empty = build_members_from_range(&ModelRange::Range { models: vec![] });
+        assert!(matches!(empty, Err(AppError::BadRequest(_))), "got: {empty:?}");
+
+        // Auto → BadRequest (caller must expand it).
+        let auto = build_members_from_range(&ModelRange::Auto);
+        assert!(matches!(auto, Err(AppError::BadRequest(_))), "got: {auto:?}");
     }
 }

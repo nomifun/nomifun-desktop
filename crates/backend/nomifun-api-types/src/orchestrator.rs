@@ -145,7 +145,10 @@ pub struct UpdateWorkspaceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
     pub id: String,
-    pub workspace_id: String,
+    /// Owning workspace, or `None` for an ad-hoc run created straight from a
+    /// conversation (such a run carries its own [`work_dir`](Self::work_dir)
+    /// instead). See [`CreateAdhocRunRequest`].
+    pub workspace_id: Option<String>,
     pub goal: String,
     pub autonomy: String,
     pub max_parallel: Option<i64>,
@@ -154,6 +157,9 @@ pub struct Run {
     /// Lead/coordinator worker conversation — local `conversations.id` INTEGER.
     pub lead_conv_id: Option<i64>,
     pub total_tokens: Option<i64>,
+    /// Working directory for an ad-hoc (workspace-less) run; the engine prefers
+    /// this over the workspace's dir when resolving the run's cwd.
+    pub work_dir: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -251,6 +257,50 @@ pub struct CreateRunRequest {
     pub autonomy: Option<String>,
     #[serde(default)]
     pub max_parallel: Option<i64>,
+}
+
+/// A single provider+model pair. Used to synthesize ad-hoc fleet members
+/// straight from a conversation's chosen model range (no pre-built fleet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider_id: String,
+    pub model: String,
+}
+
+/// The model range a conversation-native run may execute over. Tagged by `mode`:
+/// - `single` — one fixed model (every synthetic member uses it);
+/// - `range` — an explicit allow-list of models (one synthetic member each);
+/// - `auto` — "pick from all enabled models". `auto` carries no inline list: the
+///   expansion to a concrete `range` is done by the caps_orchestrator layer
+///   (Task 3), which has provider access. `RunService::create_adhoc` therefore
+///   only accepts `single` / `range` — an unexpanded `auto` is a `BadRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ModelRange {
+    Single { model: ModelRef },
+    Auto,
+    Range { models: Vec<ModelRef> },
+}
+
+/// Create an ad-hoc orchestration run straight from a conversation: no workspace,
+/// no pre-built fleet. The fleet is synthesized on the fly from `model_range`
+/// (see [`ModelRange`]), and the run carries its own [`work_dir`](Self::work_dir).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateAdhocRunRequest {
+    pub goal: String,
+    #[serde(default)]
+    pub work_dir: Option<String>,
+    pub model_range: ModelRange,
+    /// Reserved for P4 (role pinning). Parsed but ignored in P1.
+    #[serde(default)]
+    pub pinned_roles: Vec<String>,
+    #[serde(default)]
+    pub autonomy: Option<String>,
+    #[serde(default)]
+    pub max_parallel: Option<i64>,
+    /// Originating conversation — local `conversations.id` INTEGER.
+    #[serde(default)]
+    pub lead_conv_id: Option<i64>,
 }
 
 /// One planned task in a [`PlannedDag`]. Produced by the PlanProducer (主管规划)
@@ -461,11 +511,81 @@ mod tests {
     }
 
     #[test]
+    fn model_range_tagged_round_trips() {
+        // `single` carries one model.
+        let single: ModelRange = serde_json::from_str(
+            r#"{"mode":"single","model":{"provider_id":"p1","model":"m1"}}"#,
+        )
+        .expect("single");
+        match single {
+            ModelRange::Single { model } => {
+                assert_eq!(model.provider_id, "p1");
+                assert_eq!(model.model, "m1");
+            }
+            other => panic!("expected single, got {other:?}"),
+        }
+
+        // `auto` is a bare tag (no payload).
+        let auto: ModelRange = serde_json::from_str(r#"{"mode":"auto"}"#).expect("auto");
+        assert!(matches!(auto, ModelRange::Auto));
+
+        // `range` carries an explicit allow-list.
+        let range: ModelRange = serde_json::from_str(
+            r#"{"mode":"range","models":[{"provider_id":"p1","model":"m1"},{"provider_id":"p2","model":"m2"}]}"#,
+        )
+        .expect("range");
+        match range {
+            ModelRange::Range { models } => assert_eq!(models.len(), 2),
+            other => panic!("expected range, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_adhoc_run_request_round_trips() {
+        // Full payload.
+        let req = CreateAdhocRunRequest {
+            goal: "Build the thing.".to_string(),
+            work_dir: Some("/tmp/wd".to_string()),
+            model_range: ModelRange::Range {
+                models: vec![
+                    ModelRef { provider_id: "p1".to_string(), model: "m1".to_string() },
+                    ModelRef { provider_id: "p2".to_string(), model: "m2".to_string() },
+                ],
+            },
+            pinned_roles: vec!["lead".to_string()],
+            autonomy: Some("supervised".to_string()),
+            max_parallel: Some(3),
+            lead_conv_id: Some(77),
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let back: CreateAdhocRunRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.goal, "Build the thing.");
+        assert_eq!(back.work_dir.as_deref(), Some("/tmp/wd"));
+        assert_eq!(back.lead_conv_id, Some(77));
+        assert_eq!(back.max_parallel, Some(3));
+        assert_eq!(back.pinned_roles, vec!["lead"]);
+        assert!(matches!(back.model_range, ModelRange::Range { .. }));
+
+        // Minimal payload: only goal + model_range; the rest default.
+        let minimal: CreateAdhocRunRequest = serde_json::from_str(
+            r#"{"goal":"g","model_range":{"mode":"single","model":{"provider_id":"p","model":"m"}}}"#,
+        )
+        .expect("deserialize minimal");
+        assert_eq!(minimal.goal, "g");
+        assert!(minimal.work_dir.is_none());
+        assert!(minimal.pinned_roles.is_empty());
+        assert!(minimal.autonomy.is_none());
+        assert!(minimal.max_parallel.is_none());
+        assert!(minimal.lead_conv_id.is_none());
+        assert!(matches!(minimal.model_range, ModelRange::Single { .. }));
+    }
+
+    #[test]
     fn run_detail_round_trips() {
         let detail = RunDetail {
             run: Run {
                 id: "run_1".to_string(),
-                workspace_id: "ws_abc".to_string(),
+                workspace_id: Some("ws_abc".to_string()),
                 goal: "Research and synthesize.".to_string(),
                 autonomy: "supervised".to_string(),
                 max_parallel: Some(2),
@@ -473,6 +593,7 @@ mod tests {
                 summary: Some("in progress".to_string()),
                 lead_conv_id: Some(101),
                 total_tokens: Some(4242),
+                work_dir: None,
                 created_at: 1_700_000_000_000,
                 updated_at: 1_700_000_500_000,
             },
@@ -544,7 +665,7 @@ mod tests {
 
         // Run.
         assert_eq!(back.run.id, "run_1");
-        assert_eq!(back.run.workspace_id, "ws_abc");
+        assert_eq!(back.run.workspace_id.as_deref(), Some("ws_abc"));
         assert_eq!(back.run.autonomy, "supervised");
         assert_eq!(back.run.max_parallel, Some(2));
         assert_eq!(back.run.status, "running");
