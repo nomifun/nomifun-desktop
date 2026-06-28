@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Input, Popconfirm, Spin } from '@arco-design/web-react';
@@ -15,7 +15,7 @@ import AppLoader from '@/renderer/components/layout/AppLoader';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import RunHistory from './RunHistory';
-import NewRunComposer from './NewRunComposer';
+import NewRunComposer, { type ReplanInitial } from './NewRunComposer';
 import AgentRoster from './RunDetail/AgentRoster';
 import WorkerTranscriptPanel from './RunDetail/WorkerTranscriptPanel';
 import MobileRunSummary from './RunDetail/MobileRunSummary';
@@ -445,6 +445,8 @@ const OrchestratorPage: React.FC = () => {
   const selectedRunId = runParam && runParam !== '' ? runParam : undefined;
 
   const [composing, setComposing] = useState(false);
+  // In-place re-plan editor for the selected run (overlays the run view).
+  const [replanning, setReplanning] = useState(false);
   // The clicked DAG node / roster card payload → opens the transcript drawer.
   const [selectedTask, setSelectedTask] = useState<OpenTaskPayload | null>(null);
 
@@ -452,10 +454,24 @@ const OrchestratorPage: React.FC = () => {
   // Called unconditionally with `undefined` when no run is selected (hooks rule).
   const { detail, refetch } = useRunLive(selectedRunId ?? undefined);
 
+  // Prefill for the re-plan editor: the run's current goal / autonomy, plus its
+  // models reconstructed from the fleet snapshot (one ModelRef per member).
+  const replanInitial = useMemo<ReplanInitial | undefined>(() => {
+    if (!detail) return undefined;
+    return {
+      goal: detail.run.goal,
+      autonomy: detail.run.autonomy === 'supervised' ? 'supervised' : 'interactive',
+      models: detail.fleet_members
+        .filter((m): m is typeof m & { provider_id: string; model: string } => !!m.provider_id && !!m.model)
+        .map((m) => ({ provider_id: m.provider_id, model: m.model })),
+    };
+  }, [detail]);
+
   // Selecting a run sets `?run=`; replace:false so browser-back closes it.
   const selectRun = useCallback(
     (id: string) => {
       setComposing(false);
+      setReplanning(false);
       setSearchParams(
         (prev) => {
           const p = new URLSearchParams(prev);
@@ -481,6 +497,7 @@ const OrchestratorPage: React.FC = () => {
 
   const startComposing = useCallback(() => {
     setComposing(true);
+    setReplanning(false);
     closeRun();
   }, [closeRun]);
 
@@ -492,9 +509,13 @@ const OrchestratorPage: React.FC = () => {
     [selectedRunId, closeRun]
   );
 
-  // Closing the run (or leaving compose) dismisses any open transcript drawer.
+  // Closing the run (or leaving compose) dismisses any open transcript drawer
+  // and the re-plan editor.
   useEffect(() => {
-    if (!selectedRunId) setSelectedTask(null);
+    if (!selectedRunId) {
+      setSelectedTask(null);
+      setReplanning(false);
+    }
   }, [selectedRunId]);
 
   // ── Mobile: read-only list / summary (no interactive canvas) ────────────────
@@ -535,23 +556,46 @@ const OrchestratorPage: React.FC = () => {
             />
           </div>
         ) : selectedRunId ? (
-          <>
-            {/* AgentRoster sits above the canvas; DagCanvas brings its own header,
-                run controls, and completed-run precipitation panel. */}
-            {detail && (
-              <AgentRoster
-                detail={detail}
-                selectedTaskId={selectedTask?.task.id ?? null}
-                onSelectTask={setSelectedTask}
-                refetch={refetch}
+          replanning && detail ? (
+            // In-place re-plan editor — reuses the composer pre-filled with the
+            // run's goal / models / autonomy. On submit it clears the old plan
+            // and re-decomposes (same run id), then drops back to the run view.
+            <div className='min-h-0 flex-1 overflow-y-auto px-40px py-32px'>
+              <NewRunComposer
+                mode='replan'
+                runId={selectedRunId}
+                initial={replanInitial}
+                onCreated={() => {
+                  setReplanning(false);
+                  void refetch();
+                }}
+                onCancel={() => setReplanning(false)}
               />
-            )}
-            <div className='min-h-0 flex-1 overflow-hidden'>
-              <Suspense fallback={<AppLoader />}>
-                <DagCanvas runId={selectedRunId} onBack={closeRun} onOpenTask={setSelectedTask} />
-              </Suspense>
             </div>
-          </>
+          ) : (
+            <>
+              {/* AgentRoster sits above the canvas; DagCanvas brings its own header,
+                  run controls, and completed-run precipitation panel. */}
+              {detail && (
+                <AgentRoster
+                  detail={detail}
+                  selectedTaskId={selectedTask?.task.id ?? null}
+                  onSelectTask={setSelectedTask}
+                  refetch={refetch}
+                />
+              )}
+              <div className='min-h-0 flex-1 overflow-hidden'>
+                <Suspense fallback={<AppLoader />}>
+                  <DagCanvas
+                    runId={selectedRunId}
+                    onBack={closeRun}
+                    onOpenTask={setSelectedTask}
+                    onReplan={() => setReplanning(true)}
+                  />
+                </Suspense>
+              </div>
+            </>
+          )
         ) : (
           <EmptyDetail />
         )}
