@@ -603,12 +603,22 @@ impl JobExecutor {
         let build_extra = build_task_extra(&self.agent_registry, job, &skill_names).await;
         let requested_workspace_missing = workspace.trim().is_empty();
 
+        // Resolve this conversation instance's identity (row `created_at`) for
+        // nomi session ownership validation; best-effort (None skips it).
+        let conversation_created_at = self
+            .get_conversation_row(conversation_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.created_at);
+
         let options = BuildTaskOptions {
             agent_type,
             workspace,
             model,
             conversation_id: conversation_id.to_owned(),
             extra: build_extra,
+            conversation_created_at,
         };
 
         let agent = match self

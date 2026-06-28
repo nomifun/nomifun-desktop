@@ -437,6 +437,12 @@ impl NomiAgentManager {
             );
         }
 
+        // Stamp the owning-conversation identity onto the session so a future
+        // conversation that reuses this integer id cannot resume it (the factory
+        // rejects a mismatching `owner_token` on load). Idempotent; no-op for a
+        // resumed session the factory already migrated, and for None (no token).
+        engine.stamp_owner_token(config_extra.owner_token.clone());
+
         let protocol_sink = BackendProtocolSink::new(runtime.event_sender(), confirmations.clone());
         engine.set_approval_manager(approval_manager.clone());
         engine.set_protocol_writer(Arc::new(protocol_sink));
@@ -978,6 +984,7 @@ mod tests {
             browser_visual_fallback: false,
             goal: None,
             browser_secret_vault: None,
+            owner_token: None,
         }    }
 
     #[tokio::test]
