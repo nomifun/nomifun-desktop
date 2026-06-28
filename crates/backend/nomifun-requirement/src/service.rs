@@ -260,6 +260,8 @@ impl RequirementService {
             // is a UI filter that historically meant the conversation domain.
             owner_kind: None,
             q: query.q.clone(),
+            order_by: query.order_by.clone(),
+            order: query.order.clone(),
             page: Some(page),
             page_size: Some(page_size),
         };
