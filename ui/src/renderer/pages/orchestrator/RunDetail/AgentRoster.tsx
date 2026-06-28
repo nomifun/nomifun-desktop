@@ -6,6 +6,7 @@
 
 import React, { useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Time } from '@icon-park/react';
 import './dag-canvas.css';
 import type {
   TAssignment,
@@ -16,6 +17,7 @@ import type {
 import type { OpenTaskPayload } from './DagCanvas';
 import { memberLogo } from './memberLabel';
 import { taskStatusMeta } from './nodes/TaskNode';
+import { formatDuration, taskHasTiming } from './runFormat';
 
 export interface AgentRosterProps {
   /** Live run detail (run / tasks / deps / assignments / fleet_members). */
@@ -148,6 +150,21 @@ const AgentRoster: React.FC<AgentRosterProps> = ({ detail, selectedTaskId, onSel
                   {model ?? t('orchestrator.roster.modelUnknown')}
                 </span>
               </div>
+
+              {/* Timing — elapsed (done) / running-for, only for started tasks. */}
+              {taskHasTiming(task.status) && (
+                <div className='flex items-center gap-4px text-10px leading-none text-t-tertiary'>
+                  <Time theme='outline' size='10' strokeWidth={3} className='line-height-0' />
+                  <span className='tabular-nums'>
+                    {t(
+                      task.status === 'running'
+                        ? 'orchestrator.run.timing.running'
+                        : 'orchestrator.run.timing.took',
+                      { value: formatDuration(task.updated_at - task.created_at) }
+                    )}
+                  </span>
+                </div>
+              )}
             </div>
           );
         })}

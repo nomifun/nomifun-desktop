@@ -16,6 +16,7 @@ import ReadOnlyConversationView from './ReadOnlyConversationView';
 import type { OpenTaskPayload } from './DagCanvas';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import { taskStatusMeta } from './nodes/TaskNode';
+import { formatDuration, taskHasTiming } from './runFormat';
 
 type WorkerTranscriptPanelProps = {
   /** The clicked DAG node's payload (task + assignment + fleet snapshot + refetch).
@@ -292,6 +293,20 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
                   </span>
                 </span>
               </ConfigRow>
+
+              {/* 用时 — elapsed (done) / running-for, only for started tasks */}
+              {task && taskHasTiming(task.status) && (
+                <ConfigRow label={t('orchestrator.run.progress.elapsed')}>
+                  <span className='tabular-nums text-t-secondary'>
+                    {t(
+                      task.status === 'running'
+                        ? 'orchestrator.run.timing.running'
+                        : 'orchestrator.run.timing.took',
+                      { value: formatDuration(task.updated_at - task.created_at) }
+                    )}
+                  </span>
+                </ConfigRow>
+              )}
             </div>
 
             {/* Rationale + reassign + lock (management) — only with an assignment */}

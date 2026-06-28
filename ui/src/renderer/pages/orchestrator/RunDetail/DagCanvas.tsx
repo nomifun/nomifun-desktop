@@ -56,6 +56,8 @@ interface DagCanvasProps {
    * orchestrator page omits this prop, so its back button still renders.
    */
   embedded?: boolean;
+  /** Open the in-place re-plan editor (standalone page only; omitted when embedded). */
+  onReplan?: () => void;
 }
 
 /**
@@ -71,7 +73,7 @@ interface DagCanvasProps {
  * `data-theme` attribute into `colorMode` + resolved colors via a MutationObserver
  * (template: MermaidBlock).
  */
-const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedded }) => {
+const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedded, onReplan }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
   const [message, ctx] = useArcoMessage();
@@ -232,6 +234,28 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
     };
   }, [detail?.tasks]);
 
+  // Richer progress for the header: per-status counts, the running task's title,
+  // and summed token usage. Elapsed time is the run's created→updated span (it
+  // advances as tasks settle, so it stays fresh on every live event).
+  const { byStatus, currentTitle, totalTokens } = useMemo(() => {
+    const tasks = detail?.tasks ?? [];
+    const counts: Record<string, number> = {};
+    let tokens = 0;
+    let current: string | null = null;
+    for (const task of tasks) {
+      counts[task.status] = (counts[task.status] ?? 0) + 1;
+      tokens += task.tokens ?? 0;
+      if (task.status === 'running' && !current) current = task.title || null;
+    }
+    return { byStatus: counts, currentTitle: current, totalTokens: tokens };
+  }, [detail?.tasks]);
+
+  const elapsedMs = useMemo(() => {
+    if (!detail?.run) return 0;
+    const span = detail.run.updated_at - detail.run.created_at;
+    return span > 0 ? span : 0;
+  }, [detail?.run]);
+
   const handleCancel = async () => {
     setBusy(true);
     try {
@@ -315,12 +339,17 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
         run={detail.run}
         done={done}
         total={total}
+        byStatus={byStatus}
+        currentTitle={currentTitle}
+        totalTokens={totalTokens}
+        elapsedMs={elapsedMs}
         embedded={embedded}
         onBack={onBack}
         onCancel={() => void handleCancel()}
         onApprove={() => void handleApprove()}
         onPause={() => void handlePause()}
         onResume={() => void handleResume()}
+        onReplan={onReplan}
         busy={busy}
       />
 
