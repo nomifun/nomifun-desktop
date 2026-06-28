@@ -27,7 +27,7 @@ import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { Button } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
-import type { ITagSummary, RequirementStatus } from '@/common/adapter/ipcBridge';
+import type { ITagSummary, RequirementOrderBy, RequirementStatus } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { useRequirements } from '../useRequirements';
@@ -69,6 +69,10 @@ const WorkspacePage: React.FC = () => {
   const [tag, setTag] = useState<string | undefined>();
   const [status, setStatus] = useState<RequirementStatus | undefined>();
   const [search, setSearch] = useState('');
+  // Sort: `orderBy` undefined means the default queue order; direction applies
+  // only once a field is chosen.
+  const [orderBy, setOrderBy] = useState<RequirementOrderBy | undefined>(undefined);
+  const [order, setOrder] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
@@ -84,6 +88,20 @@ const WorkspacePage: React.FC = () => {
     });
   }, []);
 
+  // Select / deselect every row on the current page (used by the list header
+  // checkbox). Selection is by id and persists across pages, so batch delete
+  // still operates on the full accumulated set.
+  const selectAllOnPage = useCallback((pageIds: number[], checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) pageIds.forEach((id) => next.add(id));
+      else pageIds.forEach((id) => next.delete(id));
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
   // ---- Data ----------------------------------------------------------------
   // Board groups all matching items client-side → fetch a large page and pin
   // page=1. List uses the paginated page/pageSize.
@@ -91,6 +109,8 @@ const WorkspacePage: React.FC = () => {
     tag,
     status,
     q: search || undefined,
+    order_by: view === 'board' ? undefined : orderBy,
+    order: view === 'board' ? undefined : orderBy ? order : undefined,
     page: view === 'board' ? 1 : page,
     page_size: view === 'board' ? BOARD_PAGE_SIZE : pageSize,
   });
@@ -108,6 +128,16 @@ const WorkspacePage: React.FC = () => {
   }, []);
   const handleSearchChange = useCallback((q: string) => {
     setSearch(q);
+    setPage(1);
+  }, []);
+
+  // Changing the sort field/direction resets to page 1 (same as filters).
+  const handleOrderByChange = useCallback((next?: RequirementOrderBy) => {
+    setOrderBy(next);
+    setPage(1);
+  }, []);
+  const handleOrderChange = useCallback((next: 'asc' | 'desc') => {
+    setOrder(next);
     setPage(1);
   }, []);
 
@@ -259,9 +289,13 @@ const WorkspacePage: React.FC = () => {
         tag={tag}
         status={status}
         search={search}
+        orderBy={orderBy}
+        order={order}
         onTagChange={handleTagChange}
         onStatusChange={handleStatusChange}
         onSearchChange={handleSearchChange}
+        onOrderByChange={handleOrderByChange}
+        onOrderChange={handleOrderChange}
         tagOptions={tagOptions}
         selectedCount={selectedIds.size}
         onBatchDelete={handleBatchDelete}
@@ -282,6 +316,8 @@ const WorkspacePage: React.FC = () => {
           onRetry={() => void refresh()}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
+          onToggleSelectAll={selectAllOnPage}
+          onClearSelection={clearSelection}
           onOpenDetail={openDetail}
           onStatusChange={handleRowStatusChange}
           onEdit={openEdit}

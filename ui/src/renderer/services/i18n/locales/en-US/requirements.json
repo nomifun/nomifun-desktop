@@ -15,6 +15,22 @@
   "viewKanban": "Kanban",
   "loadError": "Failed to load requirements",
   "retry": "Retry",
+  "sort": {
+    "label": "Sort",
+    "default": "Default order",
+    "byId": "ID",
+    "byCreatedAt": "Created",
+    "byUpdatedAt": "Updated",
+    "byStatus": "Status",
+    "asc": "Ascending",
+    "desc": "Descending"
+  },
+  "selection": {
+    "selectAllPage": "Select page",
+    "clear": "Clear",
+    "totalCount": "{{count}} total",
+    "selectedCount": "{{count}} selected"
+  },
   "columns": {
     "seq": "No.",
     "id": "ID",
