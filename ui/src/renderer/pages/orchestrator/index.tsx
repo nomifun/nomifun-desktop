@@ -4,28 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Input, Popconfirm, Spin } from '@arco-design/web-react';
 import { Comment, Delete, Edit, ExpandLeft, ExpandRight, Plus, Right, Workbench } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TRun } from '@/common/types/orchestrator/orchestratorTypes';
-import AppLoader from '@/renderer/components/layout/AppLoader';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import RunHistory from './RunHistory';
 import NewRunComposer, { type ReplanInitial } from './NewRunComposer';
-import AgentRoster from './RunDetail/AgentRoster';
 import WorkerTranscriptPanel from './RunDetail/WorkerTranscriptPanel';
 import MobileRunSummary from './RunDetail/MobileRunSummary';
+import RunView from './RunDetail/RunView';
 import type { OpenTaskPayload } from './RunDetail/DagCanvas';
 import { useMyRuns } from './useOrchestratorData';
 import { useRunLive } from './useRunLive';
-
-// The DAG canvas pulls in react-flow (heavy) and is only mounted when a run is
-// open, so it is split into its own chunk and loaded on demand.
-const DagCanvas = React.lazy(() => import('./RunDetail/DagCanvas'));
 
 /** Run status → theme-var color + i18n label key suffix (mirrors RunHistory). */
 const STATUS_META: Record<string, { color: string; key: string }> = {
@@ -573,28 +568,15 @@ const OrchestratorPage: React.FC = () => {
               />
             </div>
           ) : (
-            <>
-              {/* AgentRoster sits above the canvas; DagCanvas brings its own header,
-                  run controls, and completed-run precipitation panel. */}
-              {detail && (
-                <AgentRoster
-                  detail={detail}
-                  selectedTaskId={selectedTask?.task.id ?? null}
-                  onSelectTask={setSelectedTask}
-                  refetch={refetch}
-                />
-              )}
-              <div className='min-h-0 flex-1 overflow-hidden'>
-                <Suspense fallback={<AppLoader />}>
-                  <DagCanvas
-                    runId={selectedRunId}
-                    onBack={closeRun}
-                    onOpenTask={setSelectedTask}
-                    onReplan={() => setReplanning(true)}
-                  />
-                </Suspense>
-              </div>
-            </>
+            <RunView
+              runId={selectedRunId}
+              detail={detail}
+              selectedTaskId={selectedTask?.task.id ?? null}
+              onSelectTask={setSelectedTask}
+              refetch={refetch}
+              onBack={closeRun}
+              onReplan={() => setReplanning(true)}
+            />
           )
         ) : (
           <EmptyDetail />
