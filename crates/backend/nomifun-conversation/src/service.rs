@@ -2295,6 +2295,8 @@ impl ConversationService {
             model,
             conversation_id: row.id.to_string(),
             extra,
+            // Stamp/validate the nomi session against this conversation instance.
+            conversation_created_at: Some(row.created_at),
         })
     }
 

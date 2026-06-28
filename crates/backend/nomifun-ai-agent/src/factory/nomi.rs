@@ -180,6 +180,36 @@ pub(super) async fn build(
 
     let session_directory = deps.data_dir.join("nomi-sessions");
 
+    // Stable identity of THIS conversation instance (row `created_at`). Sessions
+    // live in a global dir keyed only by the reusable integer conversation id,
+    // so after a delete + id reuse (or a DB rebaseline) a brand-new conversation
+    // can land on an old session file. `accept_owned` refuses such a stale
+    // session and starts fresh; matching/legacy(None) sessions are accepted
+    // (legacy ones migrated forward by stamping the token). See Session::owner_token.
+    let owner_token: Option<String> = options.conversation_created_at.map(|c| c.to_string());
+    let conv_created_ms = options.conversation_created_at;
+    let accept_owned = |mut session: nomi_agent::session::Session| -> Option<nomi_agent::session::Session> {
+        if !nomi_agent::session::session_belongs_to(
+            session.owner_token.as_deref(),
+            session.created_at.timestamp_millis(),
+            owner_token.as_deref(),
+            conv_created_ms,
+        ) {
+            warn!(
+                conversation_id = %ctx.conversation_id,
+                session_id = %session.id,
+                "Discarding stale nomi session (belongs to a prior conversation that reused this id); starting fresh"
+            );
+            return None;
+        }
+        // Matching or legacy(None) stamp that postdates the conversation: accept,
+        // migrating legacy forward by stamping the owner token.
+        if session.owner_token.is_none() {
+            session.owner_token = owner_token.clone();
+        }
+        Some(session)
+    };
+
     let resume_session = {
         let session_mgr = SessionManager::new(session_directory.clone(), 100);
         match session_mgr.load(&ctx.conversation_id) {
@@ -197,7 +227,7 @@ pub(super) async fn build(
                     sanitized_dropped = dropped,
                     "Loaded existing nomi session for resume"
                 );
-                Some(session)
+                accept_owned(session)
             }
             Err(_) => {
                 // Fallback: old architecture stored sessions inside the workspace
@@ -213,7 +243,7 @@ pub(super) async fn build(
                             sanitized_dropped = dropped,
                             "Loaded legacy nomi session from workspace"
                         );
-                        Some(session)
+                        accept_owned(session)
                     }
                     Err(e) => {
                         debug!(
@@ -349,6 +379,9 @@ pub(super) async fn build(
         }),
         // P3-X2: per-pet secret vault descriptor (built above; None when browser-use off).
         browser_secret_vault,
+        // Owning conversation instance identity — the nomi manager stamps it
+        // onto the session after build so a future reused id is rejected.
+        owner_token: owner_token.clone(),
     };
 
     let knowledge_kb_ids: Vec<String> = overrides
