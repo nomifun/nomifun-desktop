@@ -80,11 +80,11 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
 }) => {
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;
-  const { compositionHandlers, isComposing } = useCompositionInput();
+  const { compositionHandlers, isImeActive } = useCompositionInput();
   const textareaAutoSize = isMobile ? { minRows: 2, maxRows: 8 } : { minRows: 2, maxRows: 20 };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (isComposing.current) return;
+    if (isImeActive(e)) return;
     onKeyDown(e);
   };
 

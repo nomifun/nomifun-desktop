@@ -53,6 +53,8 @@ export type ConfigKeyMap = {
   'system.cronNotificationEnabled': boolean | undefined;
   'system.keepAwake': boolean | undefined;
   'system.autoPreviewOfficeFiles': boolean | undefined;
+  // 发送键偏好：'enter'=Enter 发送/Shift+Enter 换行（默认）；'mod-enter'=Ctrl/⌘+Enter 发送、Enter 换行
+  'chat.sendKey': 'enter' | 'mod-enter' | undefined;
   // Desktop control (computer-use): gates the nomi engine's Computer tool
   // (observe/click/type/launch). Read by the backend agent factory per session.
   'agent.computerUse': boolean | undefined;
