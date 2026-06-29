@@ -444,6 +444,7 @@ impl WorkerRunner for LongDelayWorkerRunner {
             conversation_id: conv_id,
             text: Some(format!("output of {task_id}")),
             ok: true,
+            tokens: None,
         })
     }
 }
@@ -677,6 +678,7 @@ impl WorkerRunner for RecordingAdhocWorkerRunner {
             conversation_id: 7777,
             text: Some("adhoc task output".to_string()),
             ok: true,
+            tokens: None,
         })
     }
 }
