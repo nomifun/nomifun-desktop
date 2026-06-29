@@ -30,7 +30,7 @@ pub use engine::{
 };
 pub use error::OrchestratorError;
 pub use events::OrchestratorRunEventEmitter;
-pub use plan::{LlmPlanProducer, PlanProducer};
+pub use plan::{LeadDeltaKind, LeadThinkingSink, LeadThinkingThrottle, LlmPlanProducer, PlanProducer};
 pub use routes::orchestrator_routes;
 pub use router::{rank_members, score_member, ScoredCandidate};
 pub use run_service::RunService;

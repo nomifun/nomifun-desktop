@@ -17,7 +17,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
+use nomifun_ai_agent::{
+    one_shot_completion, resolve_provider_config, streaming_completion_kinded, user_message,
+    DeltaKind,
+};
 use nomifun_api_types::{FleetMember, PlannedDag, PlannedTask, RunTask, RunTaskDep};
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_db::IProviderRepository;
@@ -28,6 +31,173 @@ const PLAN_MAX_TOKENS: u32 = 4096;
 
 /// Max length of the fallback task title derived from the goal.
 const FALLBACK_TITLE_LEN: usize = 60;
+
+/// Which lead-thinking stream channel a delta belongs to, mirroring the
+/// `nomifun_ai_agent::DeltaKind` the provider layer emits. `Text` = the visible
+/// plan-JSON draft (a progress heartbeat — the frontend shows "拟稿中…", never the
+/// raw JSON); `Reasoning` = the model's readable reasoning (`ThinkingDelta`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadDeltaKind {
+    /// A visible-answer (plan-JSON draft) delta.
+    Text,
+    /// A reasoning (thinking) delta.
+    Reasoning,
+}
+
+impl From<DeltaKind> for LeadDeltaKind {
+    fn from(k: DeltaKind) -> Self {
+        match k {
+            DeltaKind::Text => LeadDeltaKind::Text,
+            DeltaKind::Reasoning => LeadDeltaKind::Reasoning,
+        }
+    }
+}
+
+/// A lead-thinking sink: a shared, thread-safe callback the planner invokes with
+/// every streamed lead delta (`kind`, `delta`) so the engine can fan it out over
+/// WebSocket (see `OrchestratorRunEventEmitter::emit_lead_thinking`). Shared
+/// (`Arc<dyn Fn + Send + Sync>`) rather than `&mut FnMut` so it survives the
+/// boxed `async_trait` future and the engine-side throttle (which carries its own
+/// interior-mutable buffer). A `None` sink means "do not stream" — the planner
+/// then takes the byte-identical `one_shot_completion` path (zero behavior change).
+pub type LeadThinkingSink = Arc<dyn Fn(LeadDeltaKind, &str) + Send + Sync>;
+
+// ── Merge throttle (防 WS 洪泛) ─────────────────────────────────────────────
+//
+// Provider token streams arrive one tiny delta at a time (often a few chars).
+// Emitting a WebSocket frame per delta would flood the bus and the frontend.
+// [`LeadThinkingThrottle`] COALESCES deltas per `kind` and only flushes an
+// aggregated chunk to `emit_lead_thinking` when EITHER threshold trips:
+//   - at least [`THROTTLE_FLUSH_INTERVAL`] has elapsed since this kind last
+//     flushed (keeps the stream feeling live without per-token spam), OR
+//   - the buffered chunk reached [`THROTTLE_FLUSH_CHARS`] (bounds frame size).
+// The caller MUST call [`LeadThinkingThrottle::flush`] once after the completion
+// returns to emit any residual buffered bytes — NOTHING is ever dropped.
+
+/// Min wall-clock between two flushes of the SAME kind (time-based coalescing).
+const THROTTLE_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+
+/// Char count that forces a flush regardless of elapsed time (size-based cap).
+const THROTTLE_FLUSH_CHARS: usize = 48;
+
+/// Per-kind coalescing buffer + last-flush instant. Guarded by a `Mutex` because
+/// the sink is an `Arc<dyn Fn>` (shared, non-`mut`) that the streaming completion
+/// may call from any task.
+#[derive(Default)]
+struct ThrottleBuf {
+    /// Pending reasoning bytes not yet flushed.
+    reasoning: String,
+    /// Pending text (plan-JSON draft) bytes not yet flushed.
+    text: String,
+    /// Last flush time for reasoning / text respectively (`None` = never flushed).
+    reasoning_last: Option<std::time::Instant>,
+    text_last: Option<std::time::Instant>,
+}
+
+/// Coalesces lead-thinking deltas and fans them out as merged chunks via
+/// `emit_lead_thinking`, throttled to avoid WebSocket flooding (see the module
+/// comment above). Build one per lead call ([`new`](Self::new)), hand its
+/// [`sink`](Self::sink) to the planner, then [`flush`](Self::flush) the residue
+/// after the call returns.
+pub struct LeadThinkingThrottle {
+    emitter: crate::events::OrchestratorRunEventEmitter,
+    run_id: String,
+    phase: String,
+    buf: Arc<std::sync::Mutex<ThrottleBuf>>,
+}
+
+impl LeadThinkingThrottle {
+    /// Build a throttle bound to `(run_id, phase)` that fans out via `emitter`.
+    pub fn new(
+        emitter: crate::events::OrchestratorRunEventEmitter,
+        run_id: impl Into<String>,
+        phase: impl Into<String>,
+    ) -> Self {
+        Self {
+            emitter,
+            run_id: run_id.into(),
+            phase: phase.into(),
+            buf: Arc::new(std::sync::Mutex::new(ThrottleBuf::default())),
+        }
+    }
+
+    /// The [`LeadThinkingSink`] to hand the planner. Each call appends to the
+    /// per-kind buffer and emits a merged chunk when a threshold trips.
+    pub fn sink(&self) -> LeadThinkingSink {
+        let emitter = self.emitter.clone();
+        let run_id = self.run_id.clone();
+        let phase = self.phase.clone();
+        let buf = Arc::clone(&self.buf);
+        Arc::new(move |kind: LeadDeltaKind, delta: &str| {
+            if delta.is_empty() {
+                return;
+            }
+            let now = std::time::Instant::now();
+            // Compute (under the lock) whether a flush is due and, if so, take the
+            // coalesced chunk + its wire kind. Then DROP the guard before the
+            // broadcast (the bus does its own locking — never nest the two).
+            let to_emit: Option<(&'static str, String)> = {
+                let mut guard = match buf.lock() {
+                    Ok(g) => g,
+                    // A poisoned lock means a prior panic mid-stream; skip rather
+                    // than re-panic (lead thinking is best-effort observability).
+                    Err(_) => return,
+                };
+                match kind {
+                    LeadDeltaKind::Reasoning => {
+                        guard.reasoning.push_str(delta);
+                        let due = guard
+                            .reasoning_last
+                            .map(|t| now.duration_since(t) >= THROTTLE_FLUSH_INTERVAL)
+                            .unwrap_or(true)
+                            || guard.reasoning.chars().count() >= THROTTLE_FLUSH_CHARS;
+                        if due {
+                            guard.reasoning_last = Some(now);
+                            Some(("reasoning", std::mem::take(&mut guard.reasoning)))
+                        } else {
+                            None
+                        }
+                    }
+                    LeadDeltaKind::Text => {
+                        guard.text.push_str(delta);
+                        let due = guard
+                            .text_last
+                            .map(|t| now.duration_since(t) >= THROTTLE_FLUSH_INTERVAL)
+                            .unwrap_or(true)
+                            || guard.text.chars().count() >= THROTTLE_FLUSH_CHARS;
+                        if due {
+                            guard.text_last = Some(now);
+                            Some(("text", std::mem::take(&mut guard.text)))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            };
+            if let Some((wire_kind, chunk)) = to_emit {
+                emitter.emit_lead_thinking(&run_id, &phase, wire_kind, Some(&chunk), None, false);
+            }
+        })
+    }
+
+    /// Flush any residual buffered bytes (both kinds). MUST be called once after
+    /// the lead completion returns so trailing deltas are never dropped.
+    pub fn flush(&self) {
+        let (reasoning, text) = {
+            let mut guard = match self.buf.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            (std::mem::take(&mut guard.reasoning), std::mem::take(&mut guard.text))
+        };
+        if !reasoning.is_empty() {
+            self.emitter.emit_lead_thinking(&self.run_id, &self.phase, "reasoning", Some(&reasoning), None, false);
+        }
+        if !text.is_empty() {
+            self.emitter.emit_lead_thinking(&self.run_id, &self.phase, "text", Some(&text), None, false);
+        }
+    }
+}
 
 /// Per-model user-authored descriptions, keyed by `(provider_id, model)`.
 ///
@@ -41,7 +211,17 @@ type DescriptionMap = HashMap<(String, String), String>;
 #[async_trait]
 pub trait PlanProducer: Send + Sync {
     /// 把目标拆成任务 DAG。`members` 是 fleet 成员快照(供按 index 分派)。
-    async fn produce(&self, goal: &str, members: &[FleetMember]) -> Result<PlannedDag, AppError>;
+    ///
+    /// `sink`(B2): an OPTIONAL lead-thinking sink. When `Some`, the producer
+    /// streams the lead's reasoning/draft deltas through it (the engine fans them
+    /// out over WebSocket); when `None`, the producer takes the byte-identical
+    /// non-streaming path — behavior is EXACTLY as before the sink existed.
+    async fn produce(
+        &self,
+        goal: &str,
+        members: &[FleetMember],
+        sink: Option<&LeadThinkingSink>,
+    ) -> Result<PlannedDag, AppError>;
 
     /// UC-3a: intelligently RE-ADJUST an in-progress run from a free-form INTENT.
     /// The lead (one-shot, no persistent session) sees the intent + the CURRENT
@@ -52,6 +232,11 @@ pub trait PlanProducer: Send + Sync {
     /// (never a fallback): a garbled plan returns a `BadRequest` so the caller
     /// leaves the run untouched.
     ///
+    /// `sink`(B2): same OPTIONAL lead-thinking sink as [`produce`](Self::produce).
+    /// NOTE: the production call site currently passes `None` (the adjust LLM call
+    /// is still inside the per-run lock; streaming it is deferred to B4, which
+    /// first moves the call out of the lock). The mechanism is in place here.
+    ///
     /// Default impl errors — only the production [`LlmPlanProducer`] and the test
     /// producers that exercise `adjust` override it (most planners only `produce`).
     async fn adjust(
@@ -60,6 +245,7 @@ pub trait PlanProducer: Send + Sync {
         _tasks: &[RunTask],
         _deps: &[RunTaskDep],
         _members: &[FleetMember],
+        _sink: Option<&LeadThinkingSink>,
     ) -> Result<AdjustedPlan, AppError> {
         Err(AppError::BadRequest(
             "this PlanProducer does not support adjust".to_string(),
@@ -75,6 +261,10 @@ pub trait PlanProducer: Send + Sync {
     /// (the same `pick_lead` contract the planner uses). Returns the synthesized
     /// summary text.
     ///
+    /// `sink`(B2): same OPTIONAL lead-thinking sink as [`produce`](Self::produce).
+    /// The engine wires a `phase="summarize"` sink here (the summarize call already
+    /// runs OUTSIDE the per-run lock, so streaming it is safe).
+    ///
     /// Default impl ERRORS — only the production [`LlmPlanProducer`] (and the
     /// summary tests' stub producers) override it. The engine treats ANY error
     /// (or a blank result) as a signal to FALL BACK to the mechanical
@@ -85,6 +275,7 @@ pub trait PlanProducer: Send + Sync {
         _goal: &str,
         _tasks_digest: &str,
         _members: &[FleetMember],
+        _sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
         Err(AppError::BadRequest(
             "this PlanProducer does not support summarize".to_string(),
@@ -152,7 +343,12 @@ fn pick_lead(members: &[FleetMember], fallback: &ProviderWithModel) -> ProviderW
 
 #[async_trait]
 impl PlanProducer for LlmPlanProducer {
-    async fn produce(&self, goal: &str, members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+    async fn produce(
+        &self,
+        goal: &str,
+        members: &[FleetMember],
+        sink: Option<&LeadThinkingSink>,
+    ) -> Result<PlannedDag, AppError> {
         // Derive the lead from the fleet members; `self.lead` is the
         // construction-time override/fallback only (the app wires it empty).
         let lead = pick_lead(members, &self.lead);
@@ -184,7 +380,10 @@ impl PlanProducer for LlmPlanProducer {
         };
 
         let user = build_plan_user_prompt(goal, members, &descriptions);
-        let raw = one_shot_completion(&cfg, PLAN_SYSTEM, vec![user_message(user)], PLAN_MAX_TOKENS).await?;
+        // B2: with a sink, stream the lead deltas through it (the returned text is
+        // STILL just the TextDelta concat — byte-identical to one_shot); without a
+        // sink, take the original non-streaming one-shot path (zero change).
+        let raw = run_lead_completion(&cfg, PLAN_SYSTEM, user, PLAN_MAX_TOKENS, sink).await?;
 
         // parse_plan is fail-soft: a bad/empty reply degrades to a single-task DAG
         // rather than erroring out, so the engine always has an executable plan.
@@ -197,6 +396,7 @@ impl PlanProducer for LlmPlanProducer {
         tasks: &[RunTask],
         deps: &[RunTaskDep],
         members: &[FleetMember],
+        sink: Option<&LeadThinkingSink>,
     ) -> Result<AdjustedPlan, AppError> {
         // Same one-shot lead-call shape as `produce`: derive the lead from the
         // fleet snapshot (the app wires `self.lead` empty), resolve its config,
@@ -214,9 +414,9 @@ impl PlanProducer for LlmPlanProducer {
         .await?;
 
         let user = build_adjust_user_prompt(intent, tasks, deps);
-        let raw =
-            one_shot_completion(&cfg, ADJUST_SYSTEM, vec![user_message(user)], PLAN_MAX_TOKENS)
-                .await?;
+        // B2: sink-aware (the production caller passes None until B4 moves this LLM
+        // call out of the per-run lock; honoring a Some sink here is correct + free).
+        let raw = run_lead_completion(&cfg, ADJUST_SYSTEM, user, PLAN_MAX_TOKENS, sink).await?;
 
         // Fail-soft TO AN ERROR (never a fallback): a garbled adjusted plan must
         // not mangle the existing run — the caller surfaces the BadRequest.
@@ -228,6 +428,7 @@ impl PlanProducer for LlmPlanProducer {
         goal: &str,
         tasks_digest: &str,
         members: &[FleetMember],
+        sink: Option<&LeadThinkingSink>,
     ) -> Result<String, AppError> {
         // Same one-shot lead-call shape as `produce`/`adjust`: derive the lead
         // from the fleet snapshot (the app wires `self.lead` empty), resolve its
@@ -246,17 +447,41 @@ impl PlanProducer for LlmPlanProducer {
         .await?;
 
         let user = build_summary_user_prompt(goal, tasks_digest);
-        let raw = one_shot_completion(
-            &cfg,
-            SUMMARY_SYSTEM,
-            vec![user_message(user)],
-            SUMMARY_MAX_TOKENS,
-        )
-        .await?;
+        // B2: sink-aware. The summarize call already runs OUTSIDE the per-run lock,
+        // so streaming it (phase="summarize") is safe; None keeps the one-shot path.
+        let raw = run_lead_completion(&cfg, SUMMARY_SYSTEM, user, SUMMARY_MAX_TOKENS, sink).await?;
 
         // Trim and hand the synthesized text back. A blank result is left for the
         // engine to detect (it falls back to the mechanical concat on blank too).
         Ok(raw.trim().to_string())
+    }
+}
+
+/// Run one lead-model one-shot completion, honoring an optional lead-thinking
+/// `sink`. With a sink, [`streaming_completion_kinded`] forwards each `Text` /
+/// `Reasoning` delta to it (mapped to [`LeadDeltaKind`]) while still returning the
+/// `TextDelta`-only concat; with `None`, [`one_shot_completion`] is used — the
+/// SAME bytes, but without the streaming machinery. The two paths return identical
+/// text for a given stream, so `parse_plan`/`parse_adjusted_plan` are unaffected.
+async fn run_lead_completion(
+    cfg: &nomifun_ai_agent::nomi_config::config::Config,
+    system: &str,
+    user: String,
+    max_tokens: u32,
+    sink: Option<&LeadThinkingSink>,
+) -> Result<String, AppError> {
+    match sink {
+        Some(sink) => {
+            streaming_completion_kinded(
+                cfg,
+                system,
+                vec![user_message(user)],
+                max_tokens,
+                |kind, delta| (sink)(kind.into(), delta),
+            )
+            .await
+        }
+        None => one_shot_completion(cfg, system, vec![user_message(user)], max_tokens).await,
     }
 }
 
@@ -710,7 +935,7 @@ mod tests {
 
     #[async_trait]
     impl PlanProducer for MockPlanProducer {
-        async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+        async fn produce(&self, _goal: &str, _members: &[FleetMember], _sink: Option<&LeadThinkingSink>) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag {
                 tasks: vec![
                     PlannedTask {
@@ -745,6 +970,7 @@ mod tests {
             _tasks: &[RunTask],
             _deps: &[RunTaskDep],
             _members: &[FleetMember],
+            _sink: Option<&LeadThinkingSink>,
         ) -> Result<AdjustedPlan, AppError> {
             Ok(AdjustedPlan { tasks: vec![] })
         }
@@ -753,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn mock_plan_producer_returns_fixed_two_task_dag() {
         let planner: Arc<dyn PlanProducer> = Arc::new(MockPlanProducer);
-        let dag = planner.produce("anything", &[]).await.expect("mock never errors");
+        let dag = planner.produce("anything", &[], None).await.expect("mock never errors");
 
         assert_eq!(dag.tasks.len(), 2);
         assert_eq!(dag.tasks[0].title, "Gather");
@@ -761,6 +987,208 @@ mod tests {
         assert_eq!(dag.tasks[1].title, "Synthesize");
         assert_eq!(dag.tasks[1].depends_on, vec![0]);
         assert_eq!(dag.tasks[1].member_index, Some(1));
+    }
+
+    // ── B2: lead-thinking sink contract ──────────────────────────────────────
+    //
+    // A producer that mirrors `LlmPlanProducer`'s sink/None branching against a
+    // CAPTURED fake delta stream (no live provider — `create_provider` has no
+    // mock hook, so the LLM-call layer is exercised in provider_config's tests).
+    // It proves the two load-bearing invariants B2 must hold:
+    //   1. when a sink is present, every reasoning + text delta reaches it (kind-
+    //      tagged), and
+    //   2. the parsed `PlannedDag` is IDENTICAL on the Some-sink and None paths
+    //      (fail-soft / parse behavior is unchanged by streaming — the returned
+    //      text is the TextDelta concat either way).
+    struct SinkEchoPlanProducer {
+        /// The (kind, delta) stream the producer "receives" from the model.
+        stream: Vec<(LeadDeltaKind, &'static str)>,
+    }
+
+    #[async_trait]
+    impl PlanProducer for SinkEchoPlanProducer {
+        async fn produce(
+            &self,
+            goal: &str,
+            _members: &[FleetMember],
+            sink: Option<&LeadThinkingSink>,
+        ) -> Result<PlannedDag, AppError> {
+            // Mirror `run_lead_completion`: forward every delta to a present sink,
+            // assemble the answer from TEXT deltas ONLY (reasoning is not part of
+            // the answer — exactly the `streaming_completion_kinded` contract).
+            let mut text = String::new();
+            for (kind, delta) in &self.stream {
+                if let Some(sink) = sink {
+                    (sink)(*kind, delta);
+                }
+                if *kind == LeadDeltaKind::Text {
+                    text.push_str(delta);
+                }
+            }
+            // The assembled text is the plan JSON; parse it fail-soft (same as prod).
+            Ok(parse_plan(&text, goal))
+        }
+    }
+
+    // 1) With a sink, the producer forwards every reasoning + text delta to it,
+    //    kind-tagged and in order.
+    #[tokio::test]
+    async fn sink_receives_every_delta_kind_tagged() {
+        let producer = SinkEchoPlanProducer {
+            stream: vec![
+                (LeadDeltaKind::Reasoning, "let me plan… "),
+                (LeadDeltaKind::Text, r#"{"tasks":[{"title":"A",""#),
+                (LeadDeltaKind::Reasoning, "one task suffices "),
+                (LeadDeltaKind::Text, r#"spec":"do A","depends_on":[]}]}"#),
+            ],
+        };
+        let captured: Arc<std::sync::Mutex<Vec<(LeadDeltaKind, String)>>> =
+            Arc::new(std::sync::Mutex::new(vec![]));
+        let cap = Arc::clone(&captured);
+        let sink: LeadThinkingSink = Arc::new(move |kind, delta: &str| {
+            cap.lock().unwrap().push((kind, delta.to_string()));
+        });
+
+        let dag = producer.produce("Do A", &[], Some(&sink)).await.expect("parses");
+
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                (LeadDeltaKind::Reasoning, "let me plan… ".to_string()),
+                (LeadDeltaKind::Text, r#"{"tasks":[{"title":"A",""#.to_string()),
+                (LeadDeltaKind::Reasoning, "one task suffices ".to_string()),
+                (LeadDeltaKind::Text, r#"spec":"do A","depends_on":[]}]}"#.to_string()),
+            ]
+        );
+        // The plan parsed from the TEXT deltas only (reasoning excluded).
+        assert_eq!(dag.tasks.len(), 1);
+        assert_eq!(dag.tasks[0].title, "A");
+    }
+
+    // 2) The parsed DAG is byte-for-byte the same whether a sink is present or not
+    //    — streaming changes nothing about WHAT is produced (fail-soft invariant).
+    #[tokio::test]
+    async fn sink_some_and_none_produce_identical_dag() {
+        let stream = vec![
+            (LeadDeltaKind::Reasoning, "thinking "),
+            (LeadDeltaKind::Text, r#"{"tasks":[{"title":"Build","#),
+            (LeadDeltaKind::Text, r#""spec":"build it","depends_on":[]},"#),
+            (LeadDeltaKind::Text, r#"{"title":"Test","spec":"test it","depends_on":[0]}]}"#),
+        ];
+        let none_dag = SinkEchoPlanProducer { stream: stream.clone() }
+            .produce("Ship", &[], None)
+            .await
+            .expect("None path parses");
+
+        let sink: LeadThinkingSink = Arc::new(|_, _| {});
+        let some_dag = SinkEchoPlanProducer { stream }
+            .produce("Ship", &[], Some(&sink))
+            .await
+            .expect("Some path parses");
+
+        // Same task count, titles, specs, deps — the streaming path is observationally
+        // identical for the produced plan.
+        assert_eq!(none_dag.tasks.len(), some_dag.tasks.len());
+        for (a, b) in none_dag.tasks.iter().zip(some_dag.tasks.iter()) {
+            assert_eq!(a.title, b.title);
+            assert_eq!(a.spec, b.spec);
+            assert_eq!(a.depends_on, b.depends_on);
+            assert_eq!(a.kind, b.kind);
+        }
+        assert_eq!(none_dag.tasks.len(), 2);
+        assert_eq!(none_dag.tasks[0].title, "Build");
+        assert_eq!(none_dag.tasks[1].depends_on, vec![0]);
+    }
+
+    // ── B2: merge-throttle (防 WS 洪泛) ───────────────────────────────────────
+
+    /// Recording broadcaster mirroring the events.rs test helper — captures the
+    /// fanned-out leadThinking frames so we can assert coalescing + no loss.
+    struct RecordingBroadcaster {
+        events: std::sync::Mutex<Vec<nomifun_api_types::WebSocketMessage<serde_json::Value>>>,
+    }
+    impl nomifun_realtime::EventBroadcaster for RecordingBroadcaster {
+        fn broadcast(&self, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    // A size-triggered flush coalesces many small deltas into ONE frame (≥48 chars),
+    // and flush() emits the residue so NOTHING is dropped. The reassembled text
+    // across all frames equals the concatenation of the input deltas.
+    #[test]
+    fn throttle_coalesces_by_size_and_flush_emits_residue() {
+        let bc = Arc::new(RecordingBroadcaster { events: std::sync::Mutex::new(vec![]) });
+        let emitter = crate::events::OrchestratorRunEventEmitter::new(bc.clone());
+        let throttle = LeadThinkingThrottle::new(emitter, "run_x", "plan");
+        let sink = throttle.sink();
+
+        // 12 reasoning deltas of 5 chars = 60 chars > 48 → at least one size flush,
+        // then a residual flush() picks up whatever's left.
+        for _ in 0..12 {
+            sink(LeadDeltaKind::Reasoning, "abcde");
+        }
+        throttle.flush();
+
+        let events = bc.events.lock().unwrap();
+        // Every frame is reasoning/plan, delta-only, done=false.
+        let mut reassembled = String::new();
+        for e in events.iter() {
+            assert_eq!(e.name, "orchestrator.run.leadThinking");
+            assert_eq!(e.data["run_id"], "run_x");
+            assert_eq!(e.data["phase"], "plan");
+            assert_eq!(e.data["kind"], "reasoning");
+            assert_eq!(e.data["done"], false);
+            reassembled.push_str(e.data["delta"].as_str().expect("delta str"));
+        }
+        // NOTHING dropped: the reassembled stream equals all input.
+        assert_eq!(reassembled, "abcde".repeat(12));
+        // It did coalesce (fewer frames than the 12 input deltas).
+        assert!(events.len() < 12, "deltas were coalesced, got {} frames", events.len());
+    }
+
+    // Text and reasoning are buffered + flushed on SEPARATE channels (a text delta
+    // never bleeds into a reasoning frame and vice versa).
+    #[test]
+    fn throttle_keeps_text_and_reasoning_separate() {
+        let bc = Arc::new(RecordingBroadcaster { events: std::sync::Mutex::new(vec![]) });
+        let emitter = crate::events::OrchestratorRunEventEmitter::new(bc.clone());
+        let throttle = LeadThinkingThrottle::new(emitter, "run_y", "summarize");
+        let sink = throttle.sink();
+
+        sink(LeadDeltaKind::Reasoning, "RR");
+        sink(LeadDeltaKind::Text, "TT");
+        throttle.flush();
+
+        let events = bc.events.lock().unwrap();
+        let reasoning: String = events
+            .iter()
+            .filter(|e| e.data["kind"] == "reasoning")
+            .map(|e| e.data["delta"].as_str().unwrap())
+            .collect();
+        let text: String = events
+            .iter()
+            .filter(|e| e.data["kind"] == "text")
+            .map(|e| e.data["delta"].as_str().unwrap())
+            .collect();
+        assert_eq!(reasoning, "RR");
+        assert_eq!(text, "TT");
+        // phase is carried through.
+        assert!(events.iter().all(|e| e.data["phase"] == "summarize"));
+    }
+
+    // An empty delta is a no-op (no frame), and flush() on an empty throttle emits
+    // nothing — the residue flush never invents content.
+    #[test]
+    fn throttle_ignores_empty_and_empty_flush_is_noop() {
+        let bc = Arc::new(RecordingBroadcaster { events: std::sync::Mutex::new(vec![]) });
+        let emitter = crate::events::OrchestratorRunEventEmitter::new(bc.clone());
+        let throttle = LeadThinkingThrottle::new(emitter, "run_z", "plan");
+        let sink = throttle.sink();
+        sink(LeadDeltaKind::Text, "");
+        throttle.flush();
+        assert!(bc.events.lock().unwrap().is_empty(), "empty deltas produce no frames");
     }
 
     #[test]

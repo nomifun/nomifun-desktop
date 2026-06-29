@@ -569,6 +569,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag { tasks: vec![] })
         }
@@ -1129,6 +1130,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag {
                 tasks: vec![PlannedTask {

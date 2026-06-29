@@ -66,7 +66,7 @@ struct ChainPlanProducer;
 
 #[async_trait]
 impl PlanProducer for ChainPlanProducer {
-    async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+    async fn produce(&self, _goal: &str, _members: &[FleetMember], _sink: Option<&nomifun_orchestrator::LeadThinkingSink>) -> Result<PlannedDag, AppError> {
         Ok(PlannedDag {
             tasks: vec![
                 PlannedTask {
@@ -363,7 +363,7 @@ struct DiamondPlanProducer;
 
 #[async_trait]
 impl PlanProducer for DiamondPlanProducer {
-    async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+    async fn produce(&self, _goal: &str, _members: &[FleetMember], _sink: Option<&nomifun_orchestrator::LeadThinkingSink>) -> Result<PlannedDag, AppError> {
         Ok(PlannedDag {
             tasks: vec![
                 PlannedTask {

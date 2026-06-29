@@ -264,7 +264,17 @@ impl RunService {
 
         let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
 
-        let mut dag: PlannedDag = self.planner.produce(&run.goal, &members).await?;
+        // B2: stream the lead's planning thought (reasoning + draft) over WS while
+        // the one-shot completion runs. This path holds NO per-run lock (planning
+        // happens before `engine.start`), so streaming is safe here. The throttle
+        // coalesces deltas to avoid WS flooding; `flush()` after the call emits the
+        // residue (nothing dropped). `sink=None` would be byte-identical to the
+        // pre-B2 one-shot path — passing Some only adds the fan-out.
+        let throttle = crate::plan::LeadThinkingThrottle::new(self.emitter.clone(), run_id, "plan");
+        let sink = throttle.sink();
+        let produced = self.planner.produce(&run.goal, &members, Some(&sink)).await;
+        throttle.flush();
+        let mut dag: PlannedDag = produced?;
 
         // CYCLE GUARD (symmetric with `adjust`'s `reconcile_plan_has_cycle`): the
         // planner's `depends_on` indices are range-validated when wiring edges below,
@@ -1134,7 +1144,18 @@ impl RunService {
 
         // The lead JUDGES keep-vs-redo. Fail-soft TO AN ERROR: a garbled adjusted
         // plan returns BadRequest (the run is still untouched at this point).
-        let plan = self.planner.adjust(intent, &task_dtos, &dep_dtos, &members).await?;
+        //
+        // B2 NOTE: `sink=None` here ON PURPOSE — this adjust LLM call is still
+        // INSIDE the per-run lock (`engine.adjust` holds it across this await today),
+        // and the Global Constraint is that the per-run lock MUST NOT span an LLM
+        // await for longer than necessary, let alone fan out per-token work under it.
+        // Wiring a real streaming sink for adjust is B4's job: B4 first moves this
+        // call OUT of the lock (compute-then-apply split), then passes a phase="adjust"
+        // sink. The trait mechanism is in place; only the production wiring waits.
+        let plan = self
+            .planner
+            .adjust(intent, &task_dtos, &dep_dtos, &members, None)
+            .await?;
 
         // VALIDATE every kept id exists in the current run BEFORE mutating — an
         // adjusted plan that references a stale/foreign id is a bad plan; reject it
@@ -1952,6 +1973,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(self.0.lock().unwrap().clone())
         }
@@ -3159,6 +3181,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             let mut q = self.0.lock().unwrap();
             if q.len() > 1 {
@@ -3548,7 +3571,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl PlanProducer for AdjustTestProducer {
-        async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+        async fn produce(&self, _goal: &str, _members: &[FleetMember], _sink: Option<&crate::plan::LeadThinkingSink>) -> Result<PlannedDag, AppError> {
             Ok(self.initial.clone())
         }
         async fn adjust(
@@ -3557,6 +3580,7 @@ mod tests {
             _tasks: &[RunTask],
             _deps: &[RunTaskDep],
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<AdjustedPlan, AppError> {
             match &*self.adjusted.lock().unwrap() {
                 Ok(p) => Ok(p.clone()),
