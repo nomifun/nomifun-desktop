@@ -13,6 +13,7 @@
 //   orchestrator.task.statusChanged → TOrchTaskStatusEvent
 //   orchestrator.task.assigned      → TOrchTaskAssignedEvent
 //   orchestrator.run.completed      → TOrchRunCompletedEvent
+//   orchestrator.run.leadThinking   → TOrchRunLeadThinkingEvent
 
 /** WS `orchestrator.run.statusChanged` — a run's overall status changed. */
 export type TOrchRunStatusEvent = {
@@ -43,4 +44,26 @@ export type TOrchTaskAssignedEvent = {
 export type TOrchRunCompletedEvent = {
   run_id: string;
   status: string;
+};
+
+/** Phase of the lead (主) agent's planning thought stream. */
+export type TOrchLeadThinkingPhase = 'plan' | 'adjust' | 'summarize';
+
+/** Kind of a lead-thinking delta: incremental reasoning, draft text, or a phase-narration key. */
+export type TOrchLeadThinkingKind = 'reasoning' | 'text' | 'phase';
+
+/**
+ * WS `orchestrator.run.leadThinking` — the lead (主) agent's planning thought
+ * stream: incremental reasoning / draft text or a phase-narration key, fanned
+ * out so the frontend can render the live 编排思考 bubble. `delta` and
+ * `content` are optional and omitted from the payload when the backend sends
+ * `None` (e.g. `kind:"phase"` carries only a semantic key in `content`).
+ */
+export type TOrchRunLeadThinkingEvent = {
+  run_id: string;
+  phase: TOrchLeadThinkingPhase;
+  kind: TOrchLeadThinkingKind;
+  delta?: string;
+  content?: string;
+  done: boolean;
 };

@@ -85,6 +85,7 @@ import type {
 } from '../types/orchestrator/orchestratorTypes';
 import type {
   TOrchRunCompletedEvent,
+  TOrchRunLeadThinkingEvent,
   TOrchRunPlanUpdatedEvent,
   TOrchRunStatusEvent,
   TOrchTaskAssignedEvent,
@@ -2769,6 +2770,7 @@ export const orchestrator = {
     completed: wsEmitter<TOrchRunCompletedEvent>('orchestrator.run.completed'),
     taskStatusChanged: wsEmitter<TOrchTaskStatusEvent>('orchestrator.task.statusChanged'),
     taskAssigned: wsEmitter<TOrchTaskAssignedEvent>('orchestrator.task.assigned'),
+    leadThinking: wsEmitter<TOrchRunLeadThinkingEvent>('orchestrator.run.leadThinking'),
   },
 };
 
