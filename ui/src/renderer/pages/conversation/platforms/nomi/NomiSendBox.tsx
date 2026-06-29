@@ -350,6 +350,33 @@ const NomiSendBox: React.FC<{
     await executeCommand({ input: message, files: filesToSend });
   };
 
+  // 编辑最近一条用户消息并截断重跑：调用 editResubmit 接口（后端回退引擎 turn +
+  // 删除该条及其后的 DB 消息），再以 chat.history.refresh 与后端对齐。
+  const handleEditResubmit = useCallback(
+    async (msgId: string, message: string) => {
+      const filesToSend = collectSelectedFiles(uploadFile, atPath);
+      clearFiles();
+      emitter.emit('nomi.selected.file.clear');
+      setWaitingResponse(true);
+      try {
+        const res = await ipcBridge.conversation.editResubmit.invoke({
+          conversation_id,
+          msg_id: msgId,
+          input: buildDisplayMessage(message, filesToSend, workspacePath),
+          files: filesToSend,
+        });
+        setActiveMsgId(res.msg_id);
+        emitter.emit('chat.history.refresh');
+        if (filesToSend.length > 0) emitter.emit('nomi.workspace.refresh');
+      } catch (error) {
+        setWaitingResponse(false);
+        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        throw error;
+      }
+    },
+    [atPath, conversation_id, uploadFile, workspacePath, clearFiles, setActiveMsgId, setWaitingResponse, t]
+  );
+
   const isSteerUnsupportedError = (error: unknown): boolean => {
     const msg = error instanceof Error ? error.message : String(error ?? '');
     return /not supported for this agent type|steer_unsupported/i.test(msg);
@@ -795,6 +822,7 @@ const NomiSendBox: React.FC<{
         onSend={onSendHandler}
         onSteer={onSteerHandler}
         steerAvailable
+        onEditResubmit={handleEditResubmit}
         slash_commands={slash_commands}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading
