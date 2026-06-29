@@ -13,6 +13,7 @@
 //! - `orchestrator.task.statusChanged` → `{ run_id, task_id, status }`
 //! - `orchestrator.task.assigned`      → `{ run_id, task_id, member_id }`
 //! - `orchestrator.run.completed`      → `{ run_id, status }`
+//! - `orchestrator.run.leadThinking`   → `{ run_id, phase, kind, delta?, content?, done }`
 
 use std::sync::Arc;
 
@@ -68,6 +69,38 @@ impl OrchestratorRunEventEmitter {
         self.bus.broadcast(WebSocketMessage::new(
             "orchestrator.run.completed",
             json!({ "run_id": run_id, "status": status }),
+        ));
+    }
+
+    /// The lead (主) agent's planning thought stream — incremental reasoning /
+    /// draft text or a phase-narration key — fanned out so the frontend can
+    /// render the live 编排思考 bubble. `phase` ∈ `plan|adjust|summarize`,
+    /// `kind` ∈ `reasoning|text|phase`. `delta`/`content` are optional and
+    /// omitted from the payload when `None`.
+    pub fn emit_lead_thinking(
+        &self,
+        run_id: &str,
+        phase: &str,
+        kind: &str,
+        delta: Option<&str>,
+        content: Option<&str>,
+        done: bool,
+    ) {
+        let mut payload = json!({
+            "run_id": run_id,
+            "phase": phase,
+            "kind": kind,
+            "done": done,
+        });
+        if let Some(delta) = delta {
+            payload["delta"] = json!(delta);
+        }
+        if let Some(content) = content {
+            payload["content"] = json!(content);
+        }
+        self.bus.broadcast(WebSocketMessage::new(
+            "orchestrator.run.leadThinking",
+            payload,
         ));
     }
 }
@@ -164,6 +197,56 @@ mod tests {
         assert_eq!(events[0].name, "orchestrator.run.completed");
         assert_eq!(events[0].data["run_id"], "run_1");
         assert_eq!(events[0].data["status"], "completed");
+    }
+
+    #[test]
+    fn lead_thinking_event_shape_with_delta() {
+        let (emitter, bc) = make_emitter();
+        emitter.emit_lead_thinking("run_1", "plan", "reasoning", Some("step "), None, false);
+
+        let events = bc.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "orchestrator.run.leadThinking");
+        assert_eq!(events[0].data["run_id"], "run_1");
+        assert_eq!(events[0].data["phase"], "plan");
+        assert_eq!(events[0].data["kind"], "reasoning");
+        assert_eq!(events[0].data["delta"], "step ");
+        assert_eq!(events[0].data["done"], false);
+        // content is None → field omitted entirely
+        assert!(events[0].data.get("content").is_none());
+    }
+
+    #[test]
+    fn lead_thinking_event_shape_with_content() {
+        let (emitter, bc) = make_emitter();
+        emitter.emit_lead_thinking("run_2", "summarize", "text", None, Some("final"), true);
+
+        let events = bc.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "orchestrator.run.leadThinking");
+        assert_eq!(events[0].data["run_id"], "run_2");
+        assert_eq!(events[0].data["phase"], "summarize");
+        assert_eq!(events[0].data["kind"], "text");
+        assert_eq!(events[0].data["content"], "final");
+        assert_eq!(events[0].data["done"], true);
+        // delta is None → field omitted entirely
+        assert!(events[0].data.get("delta").is_none());
+    }
+
+    #[test]
+    fn lead_thinking_event_phase_omits_both_optionals() {
+        let (emitter, bc) = make_emitter();
+        emitter.emit_lead_thinking("run_3", "plan", "phase", None, None, false);
+
+        let events = bc.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "orchestrator.run.leadThinking");
+        assert_eq!(events[0].data["run_id"], "run_3");
+        assert_eq!(events[0].data["phase"], "plan");
+        assert_eq!(events[0].data["kind"], "phase");
+        assert_eq!(events[0].data["done"], false);
+        assert!(events[0].data.get("delta").is_none());
+        assert!(events[0].data.get("content").is_none());
     }
 
     #[test]
