@@ -11,14 +11,11 @@ import '@xyflow/react/dist/style.css';
 import './dag-canvas.css';
 import { Branch } from '@icon-park/react';
 import { Spin } from '@arco-design/web-react';
-import { ipcBridge } from '@/common';
 import type { TAssignment, TFleetMember, TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
-import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useRunLive } from '../useRunLive';
 import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
-import RunDetailHeader from './RunDetailHeader';
 import TaskNode, { normalizeTaskKind, type TaskFlowNode, type JudgeWinner, type LoopState, type VerifyVerdict } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
@@ -188,9 +185,6 @@ const FIT_VIEW_OPTIONS = { padding: 0.12, maxZoom: 1.6 } as const;
 const MINIMAP_NODE_W = 220;
 const MINIMAP_NODE_H = 96;
 
-/** Statuses that count as "done" for the aggregate progress pill. */
-const DONE_STATUSES = new Set(['done', 'completed', 'skipped', 'cancelled']);
-
 /**
  * The MiniMap's LITERAL mirror of {@link taskStatusMeta}.
  *
@@ -257,17 +251,7 @@ export interface OpenTaskPayload {
 
 interface DagCanvasProps {
   runId: string;
-  onBack: () => void;
   onOpenTask: (payload: OpenTaskPayload) => void;
-  /**
-   * Embedded mode — the canvas lives inside a conversation's workspace rail tab
-   * (no master-detail to return to), so the header's back button is suppressed
-   * while the run controls (cancel/approve/pause/resume) are kept. The standalone
-   * orchestrator page omits this prop, so its back button still renders.
-   */
-  embedded?: boolean;
-  /** Open the in-place re-plan editor (standalone page only; omitted when embedded). */
-  onReplan?: () => void;
 }
 
 /**
@@ -277,17 +261,22 @@ interface DagCanvasProps {
  * runs). Live-updates via {@link useRunLive}; clicking a node opens the worker
  * transcript panel (Task 5) through `onOpenTask`.
  *
+ * The run title + status + run controls (cancel / approve / pause / resume) used
+ * to live in this canvas' own header; they were lifted UP into {@link RunView}'s
+ * shared conversation-style glass header (Task F3) so they are reachable from
+ * both the 对话 and 编排画布 views and rendered exactly once. This component is
+ * now canvas-only: the react-flow graph, the planning / empty states, and the
+ * completed-run {@link RolePrecipitationPanel}.
+ *
  * Positions prefer the task's persisted `graph_x/graph_y` and otherwise fall
  * back to a topological auto-layout ({@link layoutDag}). react-flow's JS-side
  * colors (MiniMap mask, Background dots) can't read CSS vars, so we mirror the
  * `data-theme` attribute into `colorMode` + resolved colors via a MutationObserver
  * (template: MermaidBlock).
  */
-const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedded, onReplan }) => {
+const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
-  const [message, ctx] = useArcoMessage();
-  const [busy, setBusy] = useState(false);
 
   // The static `fitView` prop fits ONCE at initial mount. If the canvas ever
   // mounts inside a COLLAPSED / ~0-size
@@ -492,88 +481,6 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
     });
   }, [detail?.tasks, detail?.deps]);
 
-  const { done, total } = useMemo(() => {
-    const tasks = detail?.tasks ?? [];
-    return {
-      done: tasks.filter((task) => DONE_STATUSES.has(task.status)).length,
-      total: tasks.length,
-    };
-  }, [detail?.tasks]);
-
-  // Richer progress for the header: per-status counts, the running task's title,
-  // and summed token usage. Elapsed time is the run's created→updated span (it
-  // advances as tasks settle, so it stays fresh on every live event).
-  const { byStatus, currentTitle, totalTokens } = useMemo(() => {
-    const tasks = detail?.tasks ?? [];
-    const counts: Record<string, number> = {};
-    let tokens = 0;
-    let current: string | null = null;
-    for (const task of tasks) {
-      counts[task.status] = (counts[task.status] ?? 0) + 1;
-      tokens += task.tokens ?? 0;
-      if (task.status === 'running' && !current) current = task.title || null;
-    }
-    return { byStatus: counts, currentTitle: current, totalTokens: tokens };
-  }, [detail?.tasks]);
-
-  const elapsedMs = useMemo(() => {
-    if (!detail?.run) return 0;
-    const span = detail.run.updated_at - detail.run.created_at;
-    return span > 0 ? span : 0;
-  }, [detail?.run]);
-
-  const handleCancel = async () => {
-    setBusy(true);
-    try {
-      await ipcBridge.orchestrator.runs.cancel.invoke({ id: runId });
-      message.success(t('orchestrator.run.detail.cancelOk'));
-      await refetch();
-    } catch (e) {
-      message.error(t('orchestrator.run.detail.cancelError', { error: String(e) }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleApprove = async () => {
-    setBusy(true);
-    try {
-      await ipcBridge.orchestrator.runs.approve.invoke({ id: runId });
-      message.success(t('orchestrator.run.detail.approveOk'));
-      await refetch();
-    } catch (e) {
-      message.error(t('orchestrator.run.detail.approveError', { error: String(e) }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handlePause = async () => {
-    setBusy(true);
-    try {
-      await ipcBridge.orchestrator.runs.pause.invoke({ id: runId });
-      message.success(t('orchestrator.run.detail.pauseOk'));
-      await refetch();
-    } catch (e) {
-      message.error(t('orchestrator.run.detail.pauseError', { error: String(e) }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleResume = async () => {
-    setBusy(true);
-    try {
-      await ipcBridge.orchestrator.runs.resume.invoke({ id: runId });
-      message.success(t('orchestrator.run.detail.resumeOk'));
-      await refetch();
-    } catch (e) {
-      message.error(t('orchestrator.run.detail.resumeError', { error: String(e) }));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   // First load with no detail yet.
   if (loading && !detail) {
     return (
@@ -600,25 +507,6 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
 
   return (
     <div className='size-full min-h-0 flex flex-col'>
-      {ctx}
-      <RunDetailHeader
-        run={detail.run}
-        done={done}
-        total={total}
-        byStatus={byStatus}
-        currentTitle={currentTitle}
-        totalTokens={totalTokens}
-        elapsedMs={elapsedMs}
-        embedded={embedded}
-        onBack={onBack}
-        onCancel={() => void handleCancel()}
-        onApprove={() => void handleApprove()}
-        onPause={() => void handlePause()}
-        onResume={() => void handleResume()}
-        onReplan={onReplan}
-        busy={busy}
-      />
-
       {/* Role precipitation — when the run is done, suggest saving its used
           roles as assistants. Lives as a `shrink-0` sibling above the canvas so
           the react-flow region keeps its `flex-1 min-h-0` sizing intact. The

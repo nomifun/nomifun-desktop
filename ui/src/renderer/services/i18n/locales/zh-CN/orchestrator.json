@@ -239,6 +239,11 @@
       "lastApplied": "上次意图：{{intent}}",
       "error": "调整编排失败：{{error}}"
     },
+    "header": {
+      "rename": "点击重命名编排目标",
+      "renamePlaceholder": "输入编排目标…",
+      "planning": "规划中"
+    },
     "view": {
       "conversation": "对话",
       "canvas": "编排画布",
