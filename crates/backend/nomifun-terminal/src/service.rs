@@ -128,13 +128,8 @@ pub struct TerminalService {
     /// title is generated at most once per session.
     titled: Arc<DashMap<i64, ()>>,
     /// Accumulates the FIRST line of user input per terminal (until newline / a
-    /// 200-char cap) — the fallback title source for shell sessions and for agent
-    /// sessions when the LLM is unavailable. Dropped once a title is set.
+    /// 200-char cap) — the title source. Dropped once a title is set.
     first_input: Arc<DashMap<i64, String>>,
-    /// Whether a session's live PTY is an agent CLI (claude/codex), decided at
-    /// spawn. Shell/unknown sessions auto-title from their first input line; agent
-    /// sessions wait for the first `TurnEnd` so the LLM summary wins.
-    is_agent: Arc<DashMap<i64, bool>>,
 }
 
 impl TerminalService {
@@ -162,7 +157,6 @@ impl TerminalService {
             title_completer: Arc::new(std::sync::RwLock::new(None)),
             titled: Arc::new(DashMap::new()),
             first_input: Arc::new(DashMap::new()),
-            is_agent: Arc::new(DashMap::new()),
         }
     }
 
@@ -451,17 +445,6 @@ impl TerminalService {
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
         let (program, resolved_args) = resolve_command(command, args);
-        // Record whether this PTY is an agent CLI (claude/codex): agent sessions
-        // auto-title from their first `TurnEnd` (LLM summary), shells from their
-        // first input line. Computed from the resolved program/args BEFORE the
-        // enhancement step appends MCP flags.
-        self.is_agent.insert(
-            id,
-            matches!(
-                crate::enhance::resolve_agent_family(&program, &resolved_args, backend),
-                Some(crate::enhance::AgentCli::Claude) | Some(crate::enhance::AgentCli::Codex)
-            ),
-        );
         // Inject platform capabilities (MCP + lifecycle hooks) into the
         // native CLI launch. Unknown CLIs are returned unchanged (honest).
         let (resolved_args, hook_env) = {
@@ -817,11 +800,13 @@ impl TerminalService {
         Ok(())
     }
 
-    /// Accumulate the first line of user input for a session (the fallback
-    /// title source). On the first newline, a SHELL session auto-titles from
-    /// that line; an AGENT session does not (its first `TurnEnd` produces a
-    /// better LLM title — see the lifecycle consumer in `spawn_pty`). Cheap
-    /// no-op once a title has been claimed.
+    /// Accumulate the first line of user input for a session, then auto-title
+    /// from it. Fires for ALL sessions (shell AND agent CLIs): titling from the
+    /// user's first input line is reliable and immediate, independent of the
+    /// agent lifecycle hook (which may not fire / needs a configured provider).
+    /// For agent sessions this input fires before the assistant replies, so it
+    /// wins the once-guard over the (best-effort) TurnEnd LLM path. Cheap no-op
+    /// once a title has been claimed.
     fn capture_first_input(&self, id: i64, bytes: &[u8]) {
         if self.titled.contains_key(&id) {
             return;
@@ -844,11 +829,14 @@ impl TerminalService {
         if !had_newline {
             return;
         }
-        // First line complete. Only shell/unknown sessions title from input;
-        // agent CLIs wait for TurnEnd. `is_agent` is set at spawn; a missing
-        // entry (shouldn't happen post-spawn) is treated as non-agent.
-        let is_agent = self.is_agent.get(&id).map(|v| *v).unwrap_or(false);
-        if is_agent {
+        // Skip a bare Enter (empty first line): keep waiting for real input so the
+        // one-shot trigger isn't wasted on an empty title.
+        let first_line_empty = self
+            .first_input
+            .get(&id)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true);
+        if first_line_empty {
             return;
         }
         let svc = self.clone();
@@ -899,7 +887,13 @@ impl TerminalService {
         }
         self.first_input.remove(&id);
 
-        if title.is_empty() || title == row.name {
+        if title.is_empty() {
+            // Nothing usable yet — release the once-guard so a later, real input
+            // can try again (never permanently block titling on a junk first line).
+            self.titled.remove(&id);
+            return;
+        }
+        if title == row.name {
             return;
         }
         if let Err(e) = self.update_meta(id, Some(title), None).await {
@@ -965,7 +959,6 @@ impl TerminalService {
         // Drop per-session auto-title bookkeeping.
         self.titled.remove(&id);
         self.first_input.remove(&id);
-        self.is_agent.remove(&id);
         if let Some((_, handle)) = self.live.remove(&id) {
             let _ = handle.kill();
         }
@@ -1161,7 +1154,6 @@ impl TerminalService {
         self.pending_spawn.clear();
         self.titled.clear();
         self.first_input.clear();
-        self.is_agent.clear();
         let n = self.repo.delete_all().await?;
         info!(deleted = n, "terminal shutdown cleanup: all sessions killed and removed");
         Ok(n)
@@ -2219,6 +2211,25 @@ mod tests {
         assert!(
             wait_for_name(&svc, id, "echo hello world", 4000).await,
             "shell title should fall back to the first input line, got {:?}",
+            svc.get(id).await.unwrap().name
+        );
+        svc.kill(id).await.ok();
+    }
+
+    #[tokio::test]
+    async fn agent_session_also_autotitles_from_first_input_line() {
+        let (svc, _bc) = service();
+        // An agent session (backend "claude", mechanical name "claude") must ALSO
+        // title from the first input line — independent of the (possibly-absent)
+        // TurnEnd lifecycle hook / a configured provider. No completer is wired
+        // here, so it takes the first-N-chars path.
+        let mut r = req("cat", &[]);
+        r.backend = Some("claude".into());
+        let id = svc.create("u", r).await.unwrap().id;
+        svc.input(id, &BASE64.encode("你好\r")).await.unwrap();
+        assert!(
+            wait_for_name(&svc, id, "你好", 4000).await,
+            "agent session should title from first input, got {:?}",
             svc.get(id).await.unwrap().name
         );
         svc.kill(id).await.ok();
