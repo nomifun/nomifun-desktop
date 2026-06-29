@@ -9,8 +9,8 @@ import InstantHoverTooltip from '@renderer/components/base/InstantHoverTooltip';
 import MobileConversationBrand from './MobileConversationBrand';
 import TitlebarLanguageMenu from './TitlebarLanguageMenu';
 import WindowControls from '../WindowControls';
-import { WORKSPACE_STATE_EVENT, WORKSPACE_AVAILABILITY_EVENT, dispatchWorkspaceToggleEvent } from '@renderer/utils/workspace/workspaceEvents';
-import type { WorkspaceStateDetail, WorkspaceAvailabilityDetail } from '@renderer/utils/workspace/workspaceEvents';
+import { WORKSPACE_STATE_EVENT, dispatchWorkspaceToggleEvent } from '@renderer/utils/workspace/workspaceEvents';
+import type { WorkspaceStateDetail } from '@renderer/utils/workspace/workspaceEvents';
 import {
   SESSION_SIDER_STATE_EVENT,
   dispatchSessionSiderToggleEvent,
@@ -66,13 +66,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const { t } = useTranslation();
   const appTitle = useMemo(() => 'NomiFun', []);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
-  // Whether the current workspace route actually hosts a rail right now. The
-  // orchestrator Tab fires WORKSPACE_AVAILABILITY_EVENT to flip this off when no
-  // run with a work_dir is open (so the titlebar workspace button hides, just
-  // like conversation/terminal never show it without a workspace). Defaults to
-  // true; conversation/terminal routes always carry a workspace so they never
-  // need to fire the event.
-  const [workspaceRailAvailable, setWorkspaceRailAvailable] = useState(true);
   const [sessionSiderCollapsed, setSessionSiderCollapsed] = useState(false);
   const [mobileCenterTitle, setMobileCenterTitle] = useState(appTitle);
   const [mobileCenterOffset, setMobileCenterOffset] = useState(0);
@@ -102,35 +95,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     };
   }, []);
 
-  // 监听工作空间可用性（编排 Tab 在所选 Run 无 work_dir 时关闭右栏开关）
-  // Track whether the current route hosts a workspace rail (orchestrator fires
-  // this; conversation/terminal default to available).
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return undefined;
-    }
-    const handler = (event: Event) => {
-      const customEvent = event as CustomEvent<WorkspaceAvailabilityDetail>;
-      if (typeof customEvent.detail?.available === 'boolean') {
-        setWorkspaceRailAvailable(customEvent.detail.available);
-      }
-    };
-    window.addEventListener(WORKSPACE_AVAILABILITY_EVENT, handler as EventListener);
-    return () => {
-      window.removeEventListener(WORKSPACE_AVAILABILITY_EVENT, handler as EventListener);
-    };
-  }, []);
-
-  // 离开编排路由时重置为可用，避免上一次「无 work_dir」的 false 泄漏到会话/终端
-  // Reset availability when leaving /orchestrator so a stale `false` never
-  // suppresses the conversation/terminal workspace button (those routes always
-  // carry a workspace and never broadcast availability themselves).
-  useEffect(() => {
-    if (!location.pathname.startsWith('/orchestrator')) {
-      setWorkspaceRailAvailable(true);
-    }
-  }, [location.pathname]);
-
   // 同步会话二级侧栏折叠状态，使标题栏开关图标保持一致
   // Sync session secondary-sidebar collapsed state for the titlebar toggle icon
   useEffect(() => {
@@ -152,18 +116,13 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const isDesktopRuntime = isDesktopShell();
   const isMacRuntime = isDesktopRuntime && isMacOS();
   const isWinRuntime = isDesktopRuntime && isWindows();
-  const isOrchestratorRoute = location.pathname.startsWith('/orchestrator');
   // Windows/Linux 显示自定义窗口按钮；macOS 在标题栏给工作区一个切换入口
   const showWindowControls = isDesktopRuntime && !isMacRuntime;
   // WebUI、macOS、Windows 桌面都在标题栏放工作区开关。
   // Windows 上它落在系统窗口按钮（最小化/最大化/关闭）左侧；macOS 没有系统按钮占位。
   // Linux 桌面不在此列：它改用工作区面板内的折叠/展开按钮
   //（ChatLayout 中按 `!isMac && !isWindows` 渲染），避免与标题栏开关重复。
-  // 编排 Tab 额外要求 workspaceRailAvailable：所选 Run 无 work_dir / 无 Run 时不显示右栏开关。
-  const showWorkspaceButton =
-    workspaceAvailable &&
-    (!isDesktopRuntime || isMacRuntime || isWinRuntime) &&
-    (!isOrchestratorRoute || workspaceRailAvailable);
+  const showWorkspaceButton = workspaceAvailable && (!isDesktopRuntime || isMacRuntime || isWinRuntime);
 
   const workspaceTooltip = workspaceCollapsed
     ? t('common.expandMore', { defaultValue: 'Expand workspace' })
@@ -188,23 +147,14 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   // 会话二级侧栏开关：仅在会话区路由显示，桌面与移动端都给一个稳定的开/合入口
   // Session secondary-sidebar toggle: shown on session routes only; a stable
   // open/close entry on both desktop and mobile (mirrors the workspace toggle).
-  // 编排 Tab 复用同一开关驱动其左侧 Run 列表栏（同一事件总线，路由互斥不串扰）。
-  // 仅桌面：移动端编排是只读列表，无可折叠的左栏，不挂这个开关。
-  const orchestratorSessionRoute = isOrchestratorRoute && !layout?.isMobile;
   const isSessionRoute =
     location.pathname === '/guid' ||
     location.pathname.startsWith('/conversation/') ||
     location.pathname === '/terminal-new' ||
-    location.pathname.startsWith('/terminal/') ||
-    orchestratorSessionRoute;
-  // 编排路由下左栏是 Run 列表（非会话），用与之相称的中性文案。
-  const sessionToggleTooltip = orchestratorSessionRoute
-    ? sessionSiderCollapsed
-      ? t('orchestrator.tab.titlebarShowList', { defaultValue: 'Show runs' })
-      : t('orchestrator.tab.titlebarHideList', { defaultValue: 'Hide runs' })
-    : sessionSiderCollapsed
-      ? t('sessionList.expandList', { defaultValue: 'Show conversations' })
-      : t('sessionList.collapseList', { defaultValue: 'Hide conversations' });
+    location.pathname.startsWith('/terminal/');
+  const sessionToggleTooltip = sessionSiderCollapsed
+    ? t('sessionList.expandList', { defaultValue: 'Show conversations' })
+    : t('sessionList.collapseList', { defaultValue: 'Hide conversations' });
 
   const handleSiderToggle = () => {
     if (!showSiderToggle || !layout?.setSiderCollapsed) return;
