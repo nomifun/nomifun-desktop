@@ -127,6 +127,7 @@ impl PlanProducer for NoopSummaryProducer {
         &self,
         _goal: &str,
         _members: &[FleetMember],
+        _sink: Option<&crate::plan::LeadThinkingSink>,
     ) -> Result<nomifun_api_types::PlannedDag, AppError> {
         // The engine never calls `produce` on the summarizer (planning lives in
         // RunService); error rather than fabricate a plan.
@@ -1443,7 +1444,19 @@ async fn compute_completed_summary(
     };
 
     let digest = build_summary_digest(tasks);
-    match deps.summarizer.summarize(&run.goal, &digest, &members).await {
+    // B2: stream the lead's summarization thought over WS. This runs with NO lock
+    // held (the loop drops the per-run terminal guard before awaiting this — see
+    // the doc comment above), so streaming is safe. Throttle coalesces deltas;
+    // flush() after the call emits the residue. Fail-soft is unchanged below.
+    let throttle =
+        crate::plan::LeadThinkingThrottle::new(deps.emitter.clone(), run_id, "summarize");
+    let sink = throttle.sink();
+    let summarized = deps
+        .summarizer
+        .summarize(&run.goal, &digest, &members, Some(&sink))
+        .await;
+    throttle.flush();
+    match summarized {
         Ok(text) if !text.trim().is_empty() => text,
         Ok(_) => {
             // Producer returned blank → no synthesis; fall back (no regression).
@@ -2973,6 +2986,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag {
                 tasks: vec![
@@ -4052,6 +4066,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag {
                 tasks: vec![
@@ -5084,6 +5099,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             let mut tasks = vec![PlannedTask {
                 title: "Build".to_string(),
@@ -5410,6 +5426,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             let mut tasks = vec![];
             // M candidate tasks (independent, share a fan-out group tag).
@@ -5712,6 +5729,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             let mut tasks = vec![];
             let mut candidate_indices = vec![];
@@ -6314,6 +6332,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Ok(PlannedDag {
                 tasks: vec![
@@ -6877,6 +6896,7 @@ mod tests {
                 &self,
                 _goal: &str,
                 _members: &[FleetMember],
+                _sink: Option<&crate::plan::LeadThinkingSink>,
             ) -> Result<PlannedDag, AppError> {
                 Ok(PlannedDag {
                     tasks: vec![PlannedTask {
@@ -6898,6 +6918,7 @@ mod tests {
                 _tasks: &[nomifun_api_types::RunTask],
                 _deps: &[nomifun_api_types::RunTaskDep],
                 _members: &[FleetMember],
+                _sink: Option<&crate::plan::LeadThinkingSink>,
             ) -> Result<crate::plan::AdjustedPlan, AppError> {
                 Ok(self.adjusted.lock().unwrap().clone())
             }
@@ -7888,6 +7909,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Err(AppError::BadRequest("stub summarizer does not plan".to_string()))
         }
@@ -7896,6 +7918,7 @@ mod tests {
             goal: &str,
             tasks_digest: &str,
             members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<String, AppError> {
             *self.seen.lock().unwrap() =
                 Some((goal.to_string(), tasks_digest.to_string(), members.len()));
@@ -7912,6 +7935,7 @@ mod tests {
             &self,
             _goal: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<PlannedDag, AppError> {
             Err(AppError::BadRequest("stub summarizer does not plan".to_string()))
         }
@@ -7920,6 +7944,7 @@ mod tests {
             _goal: &str,
             _tasks_digest: &str,
             _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
         ) -> Result<String, AppError> {
             Err(AppError::Internal("lead summarize boom".to_string()))
         }
