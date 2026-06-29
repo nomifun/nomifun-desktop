@@ -11,18 +11,26 @@
 //!   spawns (or restarts) the loop that drives ready tasks to completion.
 //!
 //! `nomi_run_create` performs the create → plan → (conditionally) start
-//! choreography so a single tool call sets up a run from EXPLICIT params. As of
-//! the orchestration-Tab redesign (P1) the lead-conversation concept is GONE: the
-//! tool takes `{goal, work_dir?, model_range?, autonomy?}` directly — it no longer
-//! reads the calling conversation's `extra`, and no longer writes a run id back to
-//! any conversation. `model_range` defaults to `Auto` (expanded HERE to every
-//! enabled `(provider, model)` pair); `work_dir` defaults to `None` (a temp dir);
-//! `autonomy` defaults to **`supervised`** — an MCP/agent caller auto-runs (it has
-//! no orchestration Tab to approve a plan from). An explicit `autonomy:
-//! "interactive"` still parks the run at `awaiting_plan_approval` and returns a
-//! relay message for the 主管 instead of starting. It drives the workspace-less
-//! [`create_adhoc`](nomifun_orchestrator::RunService::create_adhoc) path with
-//! `lead_conv_id: None`. The two read tools project the rich `RunDetail` down to a
+//! choreography so a single tool call sets up a run from EXPLICIT params. The
+//! tool takes `{goal, work_dir?, model_range?, autonomy?}` directly. `model_range`
+//! defaults to `Auto` (expanded HERE to every enabled `(provider, model)` pair);
+//! `work_dir` defaults to `None` (a temp dir); `autonomy` defaults to
+//! **`supervised`** — an MCP/agent caller auto-runs (it has no orchestration Tab to
+//! approve a plan from). An explicit `autonomy: "interactive"` still parks the run
+//! at `awaiting_plan_approval` and returns a relay message for the 主管 instead of
+//! starting. It drives the workspace-less
+//! [`create_adhoc`](nomifun_orchestrator::RunService::create_adhoc) path.
+//!
+//! ## Path A — bind the run to the CALLING conversation
+//! (conversation-native orchestration v2). When the master agent invokes this tool
+//! from inside a conversation, the calling conversation id (`ctx.conversation_id`)
+//! is parsed to `lead_conv_id` and the run is linked back to that conversation via
+//! [`ConversationService::link_orchestrator_run`] (merge `extra.orchestrator_run_id`
+//! + broadcast `conversation.listChanged`), so the FE lights up that conversation's
+//! orchestration canvas entry. An MCP / no-session caller has an empty
+//! `conversation_id` ⇒ `lead_conv_id: None` and no write-back — the run is still
+//! created. The link is best-effort: a link failure only `warn!`s, never failing the
+//! already-persisted run. The two read tools project the rich `RunDetail` down to a
 //! compact, LLM-friendly shape (run status + per-task title/status, and on result
 //! the per-task `output_summary`).
 //!
@@ -65,10 +73,10 @@ const ORCHESTRATOR_DENY_SURFACES: &[Surface] = &[Surface::Remote];
 
 // ── param structs (single source: schema + runtime) ──────────────────────
 
-/// Create and kick off an orchestration run from EXPLICIT params (the
-/// lead-conversation concept is gone): the goal plus optional `work_dir`,
-/// `model_range`, and `autonomy`. Nothing is read from or written back to the
-/// calling conversation.
+/// Create and kick off an orchestration run from EXPLICIT params: the goal plus
+/// optional `work_dir`, `model_range`, and `autonomy`. Nothing is read FROM the
+/// calling conversation, but when invoked from inside one the run is linked back
+/// to it (Path A — `lead_conv_id` + `extra.orchestrator_run_id`).
 #[derive(Deserialize, JsonSchema)]
 struct RunCreateParams {
     /// The high-level goal to decompose into tasks and execute.
@@ -155,16 +163,44 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     //    a run with just the bare model members is still valid.
     let role_members = build_assistant_members(&deps, &summaries, &range_pairs).await;
 
-    // Build the ad-hoc request from the EXPLICIT params (no lead conversation):
-    // work_dir straight from the arg, autonomy passed through so an omitted value
-    // falls to `create_adhoc`'s own `supervised` default, lead_conv_id = None.
-    let req = build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members);
+    // Path A: bind the run to the CALLING conversation (the master agent's chat)
+    // when there is one. Parse the id once: empty ⇒ no lead (MCP / no-session),
+    // non-numeric ⇒ None (never panic). The link write-back below is gated on the
+    // same non-empty id.
+    let lead_conv_id = parse_lead_conv_id(&ctx.conversation_id);
+
+    // Build the ad-hoc request from the EXPLICIT params: work_dir straight from the
+    // arg, autonomy passed through so an omitted value falls to `create_adhoc`'s own
+    // `supervised` default, lead_conv_id = the parsed calling-conversation id.
+    let req =
+        build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members, lead_conv_id);
 
     // 4. Create: synthesize the fleet from the model range + park in `planning`.
     let run = match deps.orchestrator_run_service.create_adhoc(&user, req).await {
         Ok(run) => run,
         Err(e) => return json!({ "error": e.to_string() }),
     };
+
+    // Path A link write-back: associate the calling conversation with this run
+    // (merge `extra.orchestrator_run_id` + broadcast `conversation.listChanged`) so
+    // the FE lights up that conversation's orchestration canvas entry. Best-effort:
+    // the run is already persisted, so a link failure only `warn!`s — it must NOT
+    // fail the created run. An empty `ctx.conversation_id` is a no-op inside
+    // `link_orchestrator_run`; we still skip the call to avoid a needless round-trip.
+    if !ctx.conversation_id.is_empty() {
+        if let Err(e) = deps
+            .conversation_service
+            .link_orchestrator_run(&ctx.conversation_id, &run.id)
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                conversation_id = %ctx.conversation_id,
+                run_id = %run.id,
+                "failed to link orchestration run to calling conversation; run still created"
+            );
+        }
+    }
     // 5. Plan: decompose the goal → task DAG + assignments, then apply the
     //    autonomy gate. An `interactive` run parks at `awaiting_plan_approval`;
     //    every other level (incl. the supervised default) flips to `running`.
@@ -240,18 +276,19 @@ fn resolve_model_range(model_range: Option<Value>) -> Result<ModelRange, Value> 
     }
 }
 
-/// Build the [`CreateAdhocRunRequest`] from the EXPLICIT params (no lead
-/// conversation). `work_dir` comes straight from the arg; `autonomy` is passed
-/// through untouched so an omitted value falls to `create_adhoc`'s own
-/// `supervised` default; `lead_conv_id` is always `None` (the lead concept is
-/// gone — no run id is written back to any conversation). The model range is
-/// already expanded (no `Auto`) and the role members already built.
+/// Build the [`CreateAdhocRunRequest`] from the EXPLICIT params plus an optional
+/// lead conversation (Path A). `work_dir` comes straight from the arg; `autonomy`
+/// is passed through untouched so an omitted value falls to `create_adhoc`'s own
+/// `supervised` default; `lead_conv_id` is the parsed calling-conversation id
+/// (`None` for MCP / no-session callers). The model range is already expanded (no
+/// `Auto`) and the role members already built.
 fn build_adhoc_request(
     goal: String,
     work_dir: Option<String>,
     model_range: ModelRange,
     autonomy: Option<String>,
     role_members: Vec<FleetMember>,
+    lead_conv_id: Option<i64>,
 ) -> CreateAdhocRunRequest {
     CreateAdhocRunRequest {
         goal,
@@ -265,8 +302,23 @@ fn build_adhoc_request(
         autonomy,
         // Serial loop (P1): parallelism is not yet a gateway-exposed knob.
         max_parallel: None,
-        // No lead conversation — explicit-param runs are not bound to a chat.
-        lead_conv_id: None,
+        // Path A: bind the run to the calling conversation (the master agent's
+        // chat) when there is one, so the FE lights up that conversation's
+        // orchestration canvas entry. `None` for MCP / no-session callers.
+        lead_conv_id,
+    }
+}
+
+/// Parse `ctx.conversation_id` (a `String`, empty when there is no calling
+/// conversation) into a lead conversation id. An empty id ⇒ `None` (MCP /
+/// no-session caller — regress to the no-lead behavior); a non-empty id is parsed
+/// with `.parse().ok()`, so a non-numeric value degrades to `None` rather than
+/// panicking.
+fn parse_lead_conv_id(conversation_id: &str) -> Option<i64> {
+    if conversation_id.is_empty() {
+        None
+    } else {
+        conversation_id.parse::<i64>().ok()
     }
 }
 
@@ -648,13 +700,13 @@ mod tests {
         assert!(msg.contains("malformed"), "got: {msg}");
     }
 
-    // ── build_adhoc_request: EXPLICIT params → CreateAdhocRunRequest (no lead) ──
+    // ── build_adhoc_request: EXPLICIT params → CreateAdhocRunRequest ──────────
 
     #[test]
-    fn build_adhoc_request_uses_explicit_params_and_no_lead_conv() {
+    fn build_adhoc_request_uses_explicit_params_and_threads_lead_conv() {
         // The explicit-param contract: goal/work_dir/model_range/autonomy/role_members
-        // map straight onto the request, lead_conv_id is ALWAYS None (the lead
-        // concept is gone — no run id is written back to any conversation).
+        // map straight onto the request; lead_conv_id is whatever the caller threads
+        // in (Path A: the parsed calling-conversation id).
         let range = ModelRange::Range {
             models: vec![ModelRef { provider_id: "p1".into(), model: "m1".into() }],
         };
@@ -664,14 +716,30 @@ mod tests {
             range,
             Some("supervised".into()),
             vec![],
+            Some(909),
         );
         assert_eq!(req.goal, "ship it");
         assert_eq!(req.work_dir.as_deref(), Some("/tmp/proj"));
         assert!(matches!(req.model_range, ModelRange::Range { .. }), "explicit range preserved");
         assert_eq!(req.autonomy.as_deref(), Some("supervised"), "autonomy passed through");
-        assert!(req.lead_conv_id.is_none(), "lead_conv_id must be None (no lead conversation)");
+        assert_eq!(req.lead_conv_id, Some(909), "lead_conv_id threaded through");
         assert!(req.pinned_roles.is_empty());
         assert!(req.max_parallel.is_none());
+    }
+
+    #[test]
+    fn build_adhoc_request_none_lead_conv_stays_none() {
+        // No calling conversation (MCP / no-session) ⇒ lead_conv_id None: behaves
+        // exactly as before this Path-A wiring (regression guard).
+        let req = build_adhoc_request(
+            "ship it".into(),
+            Some("/tmp/proj".into()),
+            ModelRange::Range { models: vec![] },
+            Some("supervised".into()),
+            vec![],
+            None,
+        );
+        assert!(req.lead_conv_id.is_none(), "lead_conv_id must be None (no lead conversation)");
     }
 
     #[test]
@@ -684,10 +752,34 @@ mod tests {
             ModelRange::Range { models: vec![] },
             None,
             vec![],
+            None,
         );
         assert!(req.autonomy.is_none(), "omitted autonomy → None (service default applies)");
         assert!(req.work_dir.is_none(), "omitted work_dir → None (temp dir)");
         assert!(req.lead_conv_id.is_none());
+    }
+
+    // ── parse_lead_conv_id: ctx.conversation_id (String) → Option<i64> ────────
+
+    #[test]
+    fn parse_lead_conv_id_non_empty_numeric_is_some() {
+        // A real calling conversation (Path A): the numeric id parses to Some(id),
+        // which the handler threads onto the request as the run's lead.
+        assert_eq!(parse_lead_conv_id("909"), Some(909));
+    }
+
+    #[test]
+    fn parse_lead_conv_id_empty_is_none() {
+        // Empty conversation_id (MCP / no-session caller) ⇒ None: regress to today's
+        // behavior — no lead conversation, nothing written back.
+        assert_eq!(parse_lead_conv_id(""), None);
+    }
+
+    #[test]
+    fn parse_lead_conv_id_non_numeric_is_none_not_panic() {
+        // A non-empty but non-numeric id must NOT panic (`.parse().ok()` swallows the
+        // error) — it degrades to None, so the run is still created without a lead.
+        assert_eq!(parse_lead_conv_id("not-a-number"), None);
     }
 
     // ── expand_auto_range: Auto → concrete Range of enabled (provider, model) ──
