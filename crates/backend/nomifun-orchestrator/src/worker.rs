@@ -48,6 +48,14 @@ pub struct WorkerOutcome {
     pub text: Option<String>,
     /// Whether the run produced a final text (false on timeout / no reply).
     pub ok: bool,
+    /// Total tokens (`input + output`, summed across the turns this worker
+    /// conversation ran) reported by the agent's `TurnCompleted` metrics and
+    /// accumulated in the conversation runtime state. `None` when no usage was
+    /// observed — a non-nomi member, a turn that never completed, or a runner
+    /// (the mock) with no live token source. Written to `orch_run_tasks.tokens`
+    /// by the engine's `settle_task_outcome` for the DAG/inspector per-node
+    /// token display. NEVER fabricated: it is the real provider count or `None`.
+    pub tokens: Option<i64>,
 }
 
 /// Runs a single task on a worker conversation, blocking until completion or
@@ -181,10 +189,14 @@ impl WorkerRunner for ConversationWorkerRunner {
         let finished = self.await_turn(&id, timeout, Duration::from_millis(500)).await;
         if !finished {
             // Still running after timeout: hand back the conversation id with ok=false.
+            // Take any token usage that DID accumulate (a long multi-turn run may
+            // have completed earlier turns before the budget elapsed) — real count
+            // or None, never fabricated.
             return Ok(WorkerOutcome {
                 conversation_id: conv.id,
                 text: None,
                 ok: false,
+                tokens: self.conv.take_turn_tokens(&id),
             });
         }
 
@@ -196,10 +208,17 @@ impl WorkerRunner for ConversationWorkerRunner {
             .await_turn(&id, Duration::from_secs(5), Duration::from_millis(25))
             .await;
         let text = self.read_final_text(&id).await;
+        // Read (and remove) the conversation's accumulated token total. The relay
+        // records the `TurnCompleted` usage BEFORE the turn claim releases, and we
+        // only reach here AFTER `await_turn` observed the claim released, so the
+        // total is fully written by now (no race). `None` when no usage event was
+        // seen (the existing zero-source behaviour — task.tokens stays None).
+        let tokens = self.conv.take_turn_tokens(&id);
         Ok(WorkerOutcome {
             conversation_id: conv.id,
             ok: text.is_some(),
             text,
+            tokens,
         })
     }
 }
@@ -349,6 +368,10 @@ impl MockWorkerRunner {
                 conversation_id,
                 text: Some(text),
                 ok: true,
+                // The mock has no live token source — mirrors the production
+                // zero-source path (task.tokens stays None). A test that needs a
+                // token value sets `outcome.tokens` directly after construction.
+                tokens: None,
             },
             delay,
         }

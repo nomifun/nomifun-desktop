@@ -778,7 +778,8 @@ async fn run_loop(
                         .all(|t| t.status == "done" || t.status == "skipped");
                     let any_failed = tasks.iter().any(|t| t.status == "failed");
                     if !tasks.is_empty() && all_terminal {
-                        finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks)))
+                        let total_tokens = sum_task_tokens(&tasks);
+                        finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks)), total_tokens)
                             .await;
                         // Deregister our handle UNDER the lock so `is_running` flips
                         // false atomically with the terminal status write — a rerun
@@ -786,7 +787,8 @@ async fn run_loop(
                         // loop and the route restarts it (no variant-A strand).
                         handles.remove_if(run_id, |_, h| h.generation == generation);
                     } else if any_failed {
-                        finish_run(&deps, run_id, "failed", None).await;
+                        let total_tokens = sum_task_tokens(&tasks);
+                        finish_run(&deps, run_id, "failed", None, total_tokens).await;
                         handles.remove_if(run_id, |_, h| h.generation == generation);
                     } else {
                         // Stuck (no ready, no in-flight, not terminal) — break,
@@ -877,7 +879,7 @@ async fn dispatch_task(
         Ok(m) => m,
         Err(reason) => {
             warn!(run_id, task_id = %task.id, reason, "Run loop: cannot resolve member — failing task");
-            mark_task_failed(deps, run_id, &task.id, None).await;
+            mark_task_failed(deps, run_id, &task.id, None, None).await;
             return None;
         }
     };
@@ -976,16 +978,15 @@ async fn settle_task_outcome(
                         output_summary: Some(o.text),
                         output_files: None,
                         attempt: None,
-                        // TODO(迁移 023 token 接通): write the worker's token usage here
-                        // once it is surfaced. `WorkerOutcome` and
-                        // `ConversationRuntimeSummary` currently expose NO token count
-                        // (only conversation_id / final text / is_processing), so there
-                        // is nothing real to write yet — wiring it would require
-                        // threading per-turn usage out of the conversation/agent layer
-                        // into `WorkerOutcome.tokens`. Deferred (don't fabricate); the
-                        // `orch_run_tasks.tokens` column + the RunTask DTO/UI field are
-                        // already plumbed and will light up once that source exists.
-                        tokens: None,
+                        // Per-task token usage (`input + output`, summed over the
+                        // worker conversation's turns), surfaced via the conversation
+                        // runtime-state accumulator the stream relay fills from each
+                        // `TurnCompleted` metrics event. `None` when no usage was
+                        // observed (non-nomi member / turn never completed / mock
+                        // runner) — task.tokens stays None, the prior behaviour. The
+                        // `orch_run_tasks.tokens` column + RunTask DTO + UI are already
+                        // plumbed; this is the real source. Never fabricated.
+                        tokens: o.tokens.map(Some),
                         graph_x: None,
                         graph_y: None,
                         pattern_config: None,
@@ -996,11 +997,12 @@ async fn settle_task_outcome(
         }
         Ok(o) => {
             // Worker returned but did not produce a final text (timeout / empty).
-            mark_task_failed(deps, run_id, task_id, Some(o.conversation_id)).await;
+            // Still record any token usage that accumulated before giving up.
+            mark_task_failed(deps, run_id, task_id, Some(o.conversation_id), o.tokens).await;
         }
         Err(e) => {
             warn!(run_id, task_id, error = %e, "Run loop: worker errored — failing task");
-            mark_task_failed(deps, run_id, task_id, None).await;
+            mark_task_failed(deps, run_id, task_id, None, None).await;
         }
     }
 }
@@ -2543,6 +2545,7 @@ async fn mark_task_failed(
     run_id: &str,
     task_id: &str,
     conversation_id: Option<i64>,
+    tokens: Option<i64>,
 ) {
     let _ = deps
         .run_repo
@@ -2555,7 +2558,10 @@ async fn mark_task_failed(
                 output_summary: None,
                 output_files: None,
                 attempt: None,
-                tokens: None,
+                // Record any token usage observed before the failure (a timed-out
+                // multi-turn run may have completed earlier turns). `None` keeps
+                // the prior behaviour when nothing was observed. Never fabricated.
+                tokens: tokens.map(Some),
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
@@ -2568,7 +2574,18 @@ async fn mark_task_failed(
 /// Settle the run row to a terminal status (with an optional summary) and emit
 /// `run.completed`. Best-effort: a persistence error is logged, not propagated
 /// (the loop is exiting regardless).
-async fn finish_run(deps: &Arc<RunEngineDeps>, run_id: &str, status: &str, summary: Option<String>) {
+///
+/// `total_tokens` is the run's aggregate token usage (sum of the tasks' real
+/// per-task `tokens`); `None` leaves the run total untouched (no observed
+/// usage). The DAG/inspector run header reads `Run.total_tokens` — already
+/// plumbed; this writes the real sum.
+async fn finish_run(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    status: &str,
+    summary: Option<String>,
+    total_tokens: Option<i64>,
+) {
     if let Err(e) = deps
         .run_repo
         .update_run(
@@ -2577,7 +2594,7 @@ async fn finish_run(deps: &Arc<RunEngineDeps>, run_id: &str, status: &str, summa
                 status: Some(status.to_string()),
                 summary: summary.map(Some),
                 lead_conv_id: None,
-                total_tokens: None,
+                total_tokens: total_tokens.map(Some),
                 goal: None,
                 autonomy: None,
                 fleet_snapshot: None,
@@ -2590,6 +2607,23 @@ async fn finish_run(deps: &Arc<RunEngineDeps>, run_id: &str, status: &str, summa
     deps.emitter.emit_run_status(run_id, status);
     deps.emitter.emit_run_completed(run_id, status);
     info!(run_id, status, "Run finished");
+}
+
+/// Sum the real per-task `tokens` across a run's tasks for the run-level total.
+/// Returns `None` when NO task recorded any usage (so the run total stays
+/// untouched rather than being written as a fabricated `0`); otherwise the
+/// saturating sum of every present per-task count. Aggregator tasks
+/// (verify/judge/loop) carry no `tokens`, so they contribute nothing.
+fn sum_task_tokens(tasks: &[OrchRunTaskRow]) -> Option<i64> {
+    let mut total: i64 = 0;
+    let mut any = false;
+    for t in tasks {
+        if let Some(n) = t.tokens {
+            total = total.saturating_add(n);
+            any = true;
+        }
+    }
+    any.then_some(total)
 }
 
 #[cfg(test)]
@@ -2891,7 +2925,141 @@ mod tests {
         assert!(deregistered, "engine loop should deregister after the run completes");
     }
 
-    // ── P6 Task 1: interactive ad-hoc run parks before the engine ─────────────
+    // ── UC-2b: per-task token observability ───────────────────────────────────
+
+    /// A worker that reports a FIXED token count on every task it runs, so a test
+    /// can prove `settle_task_outcome` writes the real `WorkerOutcome.tokens` into
+    /// `orch_run_tasks.tokens` (and that the run total sums them). The production
+    /// `ConversationWorkerRunner` derives this same value from the conversation
+    /// runtime-state token accumulator (filled by the stream relay's
+    /// `TurnCompleted` handler); here we inject it directly to isolate the engine
+    /// settle/aggregate wiring from the live conversation layer.
+    struct TokenReportingWorker {
+        tokens: i64,
+    }
+    #[async_trait]
+    impl WorkerRunner for TokenReportingWorker {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            on_started(777);
+            Ok(WorkerOutcome {
+                conversation_id: 777,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+                tokens: Some(self.tokens),
+            })
+        }
+    }
+
+    /// A run whose worker reports N tokens per task → every done task's `tokens`
+    /// is written N (the REAL count, not fabricated), and the run's `total_tokens`
+    /// is the sum across tasks. Exercises the full settle/aggregate path on the
+    /// 3-task chain.
+    #[tokio::test]
+    async fn per_task_tokens_are_written_and_summed_into_run_total() {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster.clone());
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let worker: Arc<dyn WorkerRunner> = Arc::new(TokenReportingWorker { tokens: 125 });
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let h = Harness {
+            run_service,
+            engine,
+            run_repo,
+            fleet_repo,
+            ws_repo,
+            broadcaster,
+        };
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+        h.engine.start(run_id.clone());
+
+        let mut completed = false;
+        for _ in 0..50 {
+            let d = h.run_service.get_detail(&run_id).await.expect("detail");
+            if d.run.status == "completed" {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(completed, "run must reach completed within the bounded poll");
+
+        let detail = h.run_service.get_detail(&run_id).await.expect("detail");
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done", "task {} should be done", t.title);
+            assert_eq!(
+                t.tokens,
+                Some(125),
+                "task {} must record the worker's real token count",
+                t.title
+            );
+        }
+        // Run total = 3 tasks × 125 = 375.
+        assert_eq!(
+            detail.run.total_tokens,
+            Some(375),
+            "run total_tokens must sum the per-task token counts (3 × 125)"
+        );
+    }
+
+    /// Zero-regression: a worker with NO token source (the fixed MockWorkerRunner,
+    /// which mirrors the production zero-source path) leaves every task's `tokens`
+    /// as `None` and the run's `total_tokens` as `None` — exactly the prior
+    /// behaviour. No fabricated zeros.
+    #[tokio::test]
+    async fn no_token_source_leaves_tokens_none() {
+        let h = harness().await; // MockWorkerRunner::with_text → tokens: None
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+        h.engine.start(run_id.clone());
+
+        let mut completed = false;
+        for _ in 0..50 {
+            let d = h.run_service.get_detail(&run_id).await.expect("detail");
+            if d.run.status == "completed" {
+                completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(completed, "run must reach completed within the bounded poll");
+
+        let detail = h.run_service.get_detail(&run_id).await.expect("detail");
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done");
+            assert_eq!(t.tokens, None, "task {} tokens must stay None (no source)", t.title);
+        }
+        assert_eq!(
+            detail.run.total_tokens, None,
+            "run total_tokens must stay None when no task reported usage"
+        );
+    }
+
 
     // The conversation-native lead path creates an AD-HOC (workspace_id NULL) run
     // with autonomy `interactive`. After plan() the run must park at
@@ -3685,6 +3853,7 @@ mod tests {
                 conversation_id: 900,
                 text: Some(format!("output of {task_id}")),
                 ok: true,
+                tokens: None,
             })
         }
     }
@@ -4022,6 +4191,7 @@ mod tests {
                 conversation_id: conv_id,
                 text: Some(format!("output of {task_id}")),
                 ok: true,
+                tokens: None,
             })
         }
     }
@@ -4228,6 +4398,7 @@ mod tests {
                 conversation_id: 900,
                 text: Some(format!("output of {task_id}")),
                 ok: true,
+                tokens: None,
             })
         }
     }
@@ -4599,6 +4770,7 @@ mod tests {
                 conversation_id: 900,
                 text: Some(text),
                 ok: true,
+                tokens: None,
             })
         }
     }
@@ -4923,7 +5095,7 @@ mod tests {
             } else {
                 format!("did {task_spec}")
             };
-            Ok(WorkerOutcome { conversation_id: 900, text: Some(text), ok: true })
+            Ok(WorkerOutcome { conversation_id: 900, text: Some(text), ok: true, tokens: None })
         }
     }
 
@@ -5516,16 +5688,17 @@ mod tests {
                 };
                 if self.fail_on_round == Some(round) {
                     // Body fails this round → ok:false (no final text).
-                    return Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false });
+                    return Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false, tokens: None });
                 }
                 let idx = round.saturating_sub(1).min(self.rounds.len().saturating_sub(1));
                 let text = self.rounds.get(idx).cloned().unwrap_or_else(|| "body output".to_string());
-                Ok(WorkerOutcome { conversation_id: 900, text: Some(text), ok: true })
+                Ok(WorkerOutcome { conversation_id: 900, text: Some(text), ok: true, tokens: None })
             } else {
                 Ok(WorkerOutcome {
                     conversation_id: 900,
                     text: Some(format!("did {task_spec}")),
                     ok: true,
+                    tokens: None,
                 })
             }
         }
@@ -5934,6 +6107,7 @@ mod tests {
                 conversation_id: 900,
                 text: Some(format!("output of {task_id}")),
                 ok: true,
+                tokens: None,
             })
         }
     }
@@ -6113,12 +6287,13 @@ mod tests {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     // First call: no final text → the engine marks the task failed.
-                    Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false })
+                    Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false, tokens: None })
                 } else {
                     Ok(WorkerOutcome {
                         conversation_id: 900,
                         text: Some(format!("output of {task_id}")),
                         ok: true,
+                        tokens: None,
                     })
                 }
             }
@@ -6170,6 +6345,7 @@ mod tests {
                     conversation_id: 900,
                     text: Some(format!("output of {task_id}")),
                     ok: true,
+                    tokens: None,
                 })
             }
         }
@@ -6284,7 +6460,7 @@ mod tests {
             ) -> Result<WorkerOutcome, AppError> {
                 on_started(900);
                 self.gate.notified().await;
-                Ok(WorkerOutcome { conversation_id: 900, text: Some(format!("out {task_id}")), ok: true })
+                Ok(WorkerOutcome { conversation_id: 900, text: Some(format!("out {task_id}")), ok: true, tokens: None })
             }
         }
         let gate = Arc::new(tokio::sync::Notify::new());
@@ -6466,6 +6642,7 @@ mod tests {
                     conversation_id: 900,
                     text: Some(format!("output of {task_id}")),
                     ok: true,
+                    tokens: None,
                 })
             }
         }
@@ -6726,6 +6903,7 @@ mod tests {
                     conversation_id: 900,
                     text: Some(format!("output of {task_id}")),
                     ok: true,
+                    tokens: None,
                 })
             }
         }

@@ -1113,6 +1113,7 @@ mod tests {
                 conversation_id: conv_id,
                 text: Some(format!("output of {task_id}")),
                 ok: true,
+                tokens: None,
             })
         }
     }
