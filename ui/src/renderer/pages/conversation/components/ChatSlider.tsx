@@ -11,6 +11,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import ChatWorkspace from '../Workspace';
 import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
+import OrchestrationRailTab from '../orchestration/OrchestrationRailTab';
 
 const ChatSlider: React.FC<{
   conversation?: TChatConversation;
@@ -54,6 +55,11 @@ const ChatSlider: React.FC<{
         eventPrefix='nomi'
         messageApi={messageApi}
         extraTabs={[
+          {
+            key: 'orchestration',
+            title: t('conversation.orchestration.tab', { defaultValue: '编排' }),
+            content: <OrchestrationRailTab />,
+          },
           {
             key: 'nomi-session-metrics',
             title: t('conversation.sessionMetrics.tab'),

@@ -18,6 +18,15 @@
   box-sizing: border-box;
 }
 
+/* Fluid variant — drops the 800px centered clamp so the composer fills its
+ * container width. Used by the narrow conversation right-rail (F5 编排 tab),
+ * where the centered column would overflow / waste the ~300-360px rail. Opt-in
+ * via the `fluid` prop; the default (`.composerLayout` only) is unchanged. */
+.composerLayoutFluid {
+  width: 100%;
+  margin: 0;
+}
+
 /* Outer wrap — the `--bg-2` tinted shell around the inner card (mirrors
  * `.guidInputCardWrap`). */
 .composerWrap {

@@ -45,6 +45,11 @@ export interface OrchestratorComposerProps {
   placeholder?: string;
   /** Small primary-tinted label inside the card (e.g. 「新建编排」/「调整编排」). */
   label?: string;
+  /** Drop the 800px centered column so the composer fills its container width.
+   * For narrow surfaces like the conversation right-rail (F5 编排 tab) where the
+   * centered clamp would overflow / waste the rail. Default `false` keeps the
+   * existing centered behavior byte-identical (standalone 编排页 / RunIntentBox). */
+  fluid?: boolean;
 
   // ── Toolbar pills (advanced controls) ──────────────────────────────────────
   /** Show the model-range pill (new-run surface). Adjust surfaces hide it. */
@@ -96,6 +101,7 @@ const OrchestratorComposer: React.FC<OrchestratorComposerProps> = ({
   submitting = false,
   placeholder,
   label,
+  fluid = false,
   showModelRange = false,
   modelRange,
   onModelRangeChange,
@@ -338,7 +344,7 @@ const OrchestratorComposer: React.FC<OrchestratorComposerProps> = ({
       : t('orchestrator.composer.autonomy.interactive');
 
   return (
-    <div className={styles.composerLayout}>
+    <div className={`${styles.composerLayout} ${fluid ? styles.composerLayoutFluid : ''}`}>
       {/* Outer `--bg-2` shell wrapping the inner rd-24 card (mirrors GuidInputCard). */}
       <div className={styles.composerWrap} style={{ padding: 6 }}>
         <div
