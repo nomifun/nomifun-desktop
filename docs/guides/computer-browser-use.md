@@ -101,8 +101,27 @@ Computer use needs OS permissions the first time it is used:
 - **Screen Recording**: required for screenshots. A black screenshot usually
   means this permission is missing.
 
-Current builds report permission failures reactively in the tool result. Future
-builds may add proactive permission preflight and guided restart flows.
+These run **in-process inside the desktop app**, so the permission must be
+granted to **NomiFun itself** (the entry named "NomiFun" in System Settings),
+not to the terminal/editor — and a freshly-granted permission only takes effect
+after the app is **completely quit and reopened** (macOS does not hot-load TCC
+grants into a running process). Permission-failure messages name "NomiFun"
+explicitly so the guidance is unambiguous.
+
+Settings → Computer Use surfaces a live status panel (macOS): it shows whether
+Accessibility / Screen Recording are *in effect for the running process* —
+which is authoritative, since a System Settings toggle bound to a stale
+code-signing identity reads "Not in effect" even while it looks on — with
+buttons that deep-link to the exact Privacy pane and trigger the OS prompt.
+Backed by `GET/POST /api/computer/permissions[/request|/open-settings]`
+(`nomi_computer::permissions` → `AXIsProcessTrusted` /
+`CG*ScreenCaptureAccess`).
+
+> **Stale grant.** If a toggle is clearly on yet computer use still fails, the
+> grant is bound to an older build's identity. Quit NomiFun, run
+> `tccutil reset Accessibility com.nomifun.desktop` and
+> `tccutil reset ScreenCapture com.nomifun.desktop`, relaunch, re-grant, and
+> fully restart once more.
 
 ## Approval Semantics
 
