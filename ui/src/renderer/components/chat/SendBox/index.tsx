@@ -168,7 +168,7 @@ const SendBox: React.FC<{
   /** When provided (Nomi only), enables "edit a sent message" mode: the message text is
    *  recalled into the composer via the `sendbox.edit` event and submitting calls this
    *  instead of onSend, which truncates the conversation and re-runs from that message. */
-  onEditResubmit?: (msgId: string, message: string) => Promise<void>;
+  onEditResubmit?: (msgId: string, createdAt: number, message: string) => Promise<void>;
   /** Clear the agent's conversation context (release model context). When set, a `/clear` builtin appears. */
   onClearContext?: () => void | Promise<void>;
   disabled?: boolean;
@@ -258,6 +258,7 @@ const SendBox: React.FC<{
   const historyDraftRef = useRef<string | null>(null);
   const [replyQuote, setReplyQuote] = useState<ReplyQuote | null>(null);
   const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const editingCreatedAtRef = useRef<number>(0);
   const editPrevDraftRef = useRef<string | null>(null);
   const [caretPosition, setCaretPosition] = useState(0);
   const [workspaceMentionItems, setWorkspaceMentionItems] = useState<FileOrFolderItem[]>([]);
@@ -282,6 +283,7 @@ const SendBox: React.FC<{
     (payload) => {
       if (!onEditResubmit) return;
       editPrevDraftRef.current = latestInputRef.current;
+      editingCreatedAtRef.current = payload.createdAt;
       setEditingMsgId(payload.msgId);
       setReplyQuote(null);
       setInputRef.current(payload.content);
@@ -1276,11 +1278,12 @@ const SendBox: React.FC<{
       if (!input.trim()) return;
       const finalMessage = input;
       const targetId = editingMsgId;
+      const targetCreatedAt = editingCreatedAtRef.current;
       setEditingMsgId(null);
       editPrevDraftRef.current = null;
       setInput('');
       setIsLoading(true);
-      onEditResubmit(targetId, finalMessage)
+      onEditResubmit(targetId, targetCreatedAt, finalMessage)
         .catch(() => {})
         .finally(() => {
           setIsLoading(false);

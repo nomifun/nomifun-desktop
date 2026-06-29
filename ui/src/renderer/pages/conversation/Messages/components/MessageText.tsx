@@ -17,7 +17,7 @@ import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import { emitter } from '@/renderer/utils/emitter';
-import { useMessageList, useRemoveMessagesFrom } from '../hooks';
+import { useMessageList } from '../hooks';
 import CollapsibleContent from '@renderer/components/chat/CollapsibleContent';
 import FilePreview from '@renderer/components/media/FilePreview';
 import HorizontalFileList from '@renderer/components/media/HorizontalFileList';
@@ -132,7 +132,6 @@ const MessageText: React.FC<{ message: IMessageText }> = ({ message }) => {
 
   // 仅 Nomi、且为最近一条用户文本消息时可编辑（与后端"仅最近一条"对齐）。
   const messageList = useMessageList();
-  const removeMessagesFrom = useRemoveMessagesFrom();
   const isLatestUserMessage = useMemo(() => {
     if (!isUserMessage) return false;
     const lastRight = [...messageList].reverse().find((m) => m.position === 'right' && m.type === 'text');
@@ -177,7 +176,6 @@ const MessageText: React.FC<{ message: IMessageText }> = ({ message }) => {
     if (!message.msg_id || !message.created_at) return;
     const rawContent = typeof message.content?.content === 'string' ? message.content.content : '';
     const { text: editText } = parseFileMarker(rawContent);
-    removeMessagesFrom(message.created_at);
     emitter.emit('sendbox.edit', { msgId: message.msg_id, createdAt: message.created_at, content: editText });
   };
 
