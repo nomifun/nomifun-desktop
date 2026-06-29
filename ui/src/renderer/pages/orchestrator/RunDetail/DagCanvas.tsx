@@ -19,7 +19,7 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import RunDetailHeader from './RunDetailHeader';
-import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type VerifyVerdict } from './nodes/TaskNode';
+import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type JudgeWinner, type VerifyVerdict } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
 const NODE_TYPES = { task: TaskNode } as const;
@@ -47,6 +47,46 @@ function parseVerifyVerdict(outputSummary: string | null | undefined): VerifyVer
   const m = VERDICT_RE.exec(outputSummary.trim());
   if (!m) return NEUTRAL_VERDICT;
   return { pass: m[1] === 'PASS', tally: `${m[2]}/${m[3]}` };
+}
+
+/** Neutral winner for a judge node whose marker is absent / `none` / unparseable
+ * / still settling — renders the pill in its neutral "no winner / judging…"
+ * state instead of a success tone. */
+const NEUTRAL_WINNER: JudgeWinner = { winner: null, aggregate: null, judges: null };
+
+/** Leading `WINNER:` marker a judge aggregator writes to its `output_summary`
+ * (`render_judge_summary` in engine.rs), e.g.
+ *   `WINNER: candidate 0 (aggregate=mean, scores=[…], judges=2/3)`
+ *   `WINNER: none (aggregate=borda, scores=[…], judges=0/2)`
+ * We pull the 0-based candidate index (or `none`); the `aggregate` policy and the
+ * `judges=c/n` tally are captured optionally so the pill can surface them. */
+const WINNER_RE = /^WINNER:\s+(?:candidate\s+(\d+)|none)/;
+const WINNER_AGG_RE = /aggregate=(mean|borda)/;
+const WINNER_JUDGES_RE = /judges=(\d+\/\d+)/;
+
+/**
+ * Parse a judge task's `output_summary` into a {@link JudgeWinner}. Defensive by
+ * design: a missing/empty/unparseable summary, or a `none` marker (no candidates
+ * / no usable ballots / still judging), yields `winner: null` so the pill shows
+ * the neutral "no winner / judging…" state instead of ever throwing on the canvas.
+ * The `aggregate` policy and `judges=c/n` tally are best-effort extras (null when
+ * absent) and never gate the winner parse.
+ */
+function parseJudgeWinner(outputSummary: string | null | undefined): JudgeWinner {
+  if (!outputSummary) return NEUTRAL_WINNER;
+  const trimmed = outputSummary.trim();
+  const m = WINNER_RE.exec(trimmed);
+  if (!m) return NEUTRAL_WINNER;
+  // m[1] is the candidate index for `candidate K`; undefined for the `none` arm.
+  const winner = m[1] != null ? Number.parseInt(m[1], 10) : null;
+  const aggMatch = WINNER_AGG_RE.exec(trimmed);
+  const aggregate = aggMatch ? (aggMatch[1] as 'mean' | 'borda') : null;
+  const judgesMatch = WINNER_JUDGES_RE.exec(trimmed);
+  return {
+    winner: winner != null && Number.isFinite(winner) ? winner : null,
+    aggregate,
+    judges: judgesMatch ? judgesMatch[1] : null,
+  };
 }
 
 /**
@@ -254,6 +294,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
       const taskKind = normalizeTaskKind(task.kind);
       const isSynthesis = taskKind === 'synthesis';
       const isVerify = taskKind === 'verify';
+      const isJudge = taskKind === 'judge';
       const groupLabel = parseGroupLabel(task.pattern_config);
       const groupHue = groupLabel ? hueByGroup.get(groupLabel) : undefined;
       return {
@@ -275,6 +316,15 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
                 pass: t('orchestrator.run.verdict.pass'),
                 fail: t('orchestrator.run.verdict.fail'),
                 pending: t('orchestrator.run.verdict.pending'),
+              }
+            : undefined,
+          judgeLabel: isJudge ? t('orchestrator.run.kind.judge') : undefined,
+          judgeWinner: isJudge ? parseJudgeWinner(task.output_summary) : undefined,
+          judgeWinnerLabels: isJudge
+            ? {
+                winner: t('orchestrator.run.judge.winner'),
+                none: t('orchestrator.run.judge.none'),
+                pending: t('orchestrator.run.judge.pending'),
               }
             : undefined,
           groupLabel,

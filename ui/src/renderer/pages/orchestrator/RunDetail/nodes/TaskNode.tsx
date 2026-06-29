@@ -6,7 +6,7 @@
 
 import React from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { Branch, CheckOne, CloseOne, Lock, Merge, Shield } from '@icon-park/react';
+import { Branch, CheckOne, CloseOne, Gavel, Lock, Merge, Shield, Trophy } from '@icon-park/react';
 
 /** Task status → theme-var color + a slow-pulse hint for the running state. */
 export interface TaskStatusMeta {
@@ -56,6 +56,12 @@ export const TASK_KIND_SYNTHESIS = 'synthesis';
  * pass/fail verdict pill. Unknown kinds collapse to `'agent'` (no badge). */
 export const TASK_KIND_VERIFY = 'verify';
 
+/** The judge task kind — a synchronous aggregator that tallies N judges' ballots
+ * over M candidates and writes a WINNER marker to its `output_summary`. Renders a
+ * gavel badge + a winner pill (the picked candidate, or a neutral "no winner" /
+ * "judging…" state). Unknown kinds collapse to `'agent'` (no badge). */
+export const TASK_KIND_JUDGE = 'judge';
+
 /**
  * Normalize a raw `TRunTask.kind` defensively. The wire value defaults to
  * `'agent'` on the backend, but legacy / malformed values must never crash the
@@ -63,9 +69,10 @@ export const TASK_KIND_VERIFY = 'verify';
  */
 export function normalizeTaskKind(
   kind: string | null | undefined
-): 'agent' | 'synthesis' | 'verify' {
+): 'agent' | 'synthesis' | 'verify' | 'judge' {
   if (kind === TASK_KIND_SYNTHESIS) return 'synthesis';
   if (kind === TASK_KIND_VERIFY) return 'verify';
+  if (kind === TASK_KIND_JUDGE) return 'judge';
   return 'agent';
 }
 
@@ -78,6 +85,24 @@ const SYNTH_ACCENT = 'var(--brand)';
  * itself reads as a structural role (the verdict pill carries the success/danger
  * semantics separately, so the badge must NOT borrow a status color). */
 const VERIFY_ACCENT = 'rgb(var(--primary-6))';
+
+/** Accent for the judge-kind badge — uses the brand tone (same family as the
+ * synthesis badge) so the gavel reads as a structural aggregator role. The
+ * winner pill carries the success/neutral semantics separately, so the badge
+ * must NOT borrow a status color. Defined in every theme preset. */
+const JUDGE_ACCENT = 'var(--brand)';
+
+/** A parsed judge result, ready for the winner pill. `winner === null` means the
+ * marker said `none`, was absent, or was unparseable (or the node hasn't settled
+ * yet) → neutral "no winner / judging…" state. */
+export interface JudgeWinner {
+  /** 0-based index of the winning candidate, or `null` for no-winner / pending. */
+  winner: number | null;
+  /** Aggregation policy parsed from the marker (`mean` | `borda`), else null. */
+  aggregate: 'mean' | 'borda' | null;
+  /** Judge tally string like `"2/3"` when present in the marker, else null. */
+  judges: string | null;
+}
 
 /** A parsed verify verdict, ready for the pill. `pass === null` means the marker
  * was absent or unparseable (or the node hasn't settled yet) → neutral state. */
@@ -101,12 +126,20 @@ export interface TaskNodeData extends Record<string, unknown> {
   synthesisLabel?: string;
   /** Localized "verify" label for the verify-kind badge (computed in DagCanvas). */
   verifyLabel?: string;
+  /** Localized "judge" label for the judge-kind badge (computed in DagCanvas). */
+  judgeLabel?: string;
   /** Parsed pass/fail verdict for a `verify` node (from its `output_summary`).
    * Present only for verify-kind nodes; rendered as a verdict pill. A `pass` of
    * `null` shows the neutral "verifying…" state (marker absent / unparseable). */
   verifyVerdict?: VerifyVerdict;
   /** Localized labels for the verdict pill — pass / fail / pending text. */
   verifyVerdictLabels?: { pass: string; fail: string; pending: string };
+  /** Parsed winner for a `judge` node (from its `output_summary`). Present only
+   * for judge-kind nodes; rendered as a winner pill. A `winner` of `null` shows
+   * the neutral "no winner / judging…" state (marker absent / `none` / bad). */
+  judgeWinner?: JudgeWinner;
+  /** Localized labels for the winner pill — winner / none / pending text. */
+  judgeWinnerLabels?: { winner: string; none: string; pending: string };
   /** Fan-out group label parsed from `pattern_config` (`{"group":"<label>"}`).
    * Present only for sibling tasks the planner fanned out in parallel. */
   groupLabel?: string;
@@ -145,6 +178,7 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
   const kind = normalizeTaskKind(data.kind);
   const isSynthesis = kind === 'synthesis';
   const isVerify = kind === 'verify';
+  const isJudge = kind === 'judge';
   // A fan-out group needs a label AND a resolved hue; either missing → no group
   // affordance (defensive against half-parsed config).
   const inGroup = data.groupLabel != null && data.groupHue != null;
@@ -224,6 +258,20 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
             {data.verifyLabel}
           </span>
         )}
+        {isJudge && (
+          <span
+            className='nomi-dag-kind-badge inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+            style={{
+              color: JUDGE_ACCENT,
+              background: `color-mix(in srgb, ${JUDGE_ACCENT} 14%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${JUDGE_ACCENT} 32%, transparent)`,
+            }}
+            title={data.judgeLabel}
+          >
+            <Gavel theme='outline' size='10' strokeWidth={4} className='line-height-0' />
+            {data.judgeLabel}
+          </span>
+        )}
       </div>
 
       {/* Meta row: status label + verdict pill + assignment chip + retry badge + fan-out group chip */}
@@ -264,6 +312,38 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
               )}
               {pass === false && (
                 <CloseOne theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              <span className='truncate'>{text}</span>
+            </span>
+          );
+        })()}
+        {isJudge && data.judgeWinner && (() => {
+          const { winner, judges } = data.judgeWinner;
+          const labels = data.judgeWinnerLabels;
+          const hasWinner = winner !== null;
+          // hasWinner → success/trophy tone · no winner / pending → neutral
+          // (defined --text-secondary / --color-fill-1 — never undefined
+          // var(--text-tertiary) / var(--fill-1)).
+          const tone = hasWinner ? 'var(--success)' : 'var(--text-secondary)';
+          const text = hasWinner
+            ? `${labels?.winner ?? ''} #${winner}${judges ? ` · ${judges}` : ''}`
+            : (labels?.none ?? labels?.pending ?? '');
+          return (
+            <span
+              className='inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+              style={
+                hasWinner
+                  ? {
+                      color: tone,
+                      background: `color-mix(in srgb, ${tone} 14%, transparent)`,
+                      border: `1px solid color-mix(in srgb, ${tone} 32%, transparent)`,
+                    }
+                  : { color: tone, background: 'var(--color-fill-1)', border: '1px solid var(--border-light)' }
+              }
+              title={text}
+            >
+              {hasWinner && (
+                <Trophy theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
               )}
               <span className='truncate'>{text}</span>
             </span>
