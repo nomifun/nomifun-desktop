@@ -19,10 +19,43 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import RunDetailHeader from './RunDetailHeader';
-import TaskNode, { taskStatusMeta, type TaskFlowNode } from './nodes/TaskNode';
+import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
 const NODE_TYPES = { task: TaskNode } as const;
+
+/**
+ * Defensively pull the fan-out group label out of a task's `pattern_config`
+ * (a raw JSON string, e.g. `{"group":"research"}`). Returns the trimmed label
+ * or `undefined` for anything malformed — null/empty, non-JSON, non-object, or
+ * a missing/blank `group` — so a bad payload never throws on the canvas.
+ */
+function parseGroupLabel(patternConfig: string | null | undefined): string | undefined {
+  if (!patternConfig) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(patternConfig);
+    if (parsed && typeof parsed === 'object' && 'group' in parsed) {
+      const group = (parsed as { group: unknown }).group;
+      if (typeof group === 'string') {
+        const trimmed = group.trim();
+        return trimmed.length > 0 ? trimmed : undefined;
+      }
+    }
+  } catch {
+    // Malformed JSON → no group (no crash).
+  }
+  return undefined;
+}
+
+/** Deterministic hue (0–359°) from a group label so every sibling in a fan-out
+ * group shares one calm tint, stable across re-renders and live refetches. */
+function hueForGroup(label: string): number {
+  let hash = 0;
+  for (let i = 0; i < label.length; i += 1) {
+    hash = (hash * 31 + label.charCodeAt(i)) % 360;
+  }
+  return hash;
+}
 
 /** fitView tuning — shared by the static `fitView` prop (initial mount) and the
  * ResizeObserver-driven refit (see below). A small padding keeps the DAG from
@@ -176,6 +209,13 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
     const deps = detail?.deps ?? [];
     if (tasks.length === 0) return [];
     const fallback = layoutDag(tasks, deps);
+    // Resolve each fan-out group's shared hue once (deterministic from the label)
+    // so every sibling in a group lands on the same tint.
+    const hueByGroup = new Map<string, number>();
+    for (const task of tasks) {
+      const group = parseGroupLabel(task.pattern_config);
+      if (group && !hueByGroup.has(group)) hueByGroup.set(group, hueForGroup(group));
+    }
     return tasks.map((task) => {
       const pos =
         task.graph_x != null && task.graph_y != null
@@ -186,6 +226,9 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
       // Friendly label from the fleet snapshot; fall back to the localized
       // "assigned" pill if the member can't be resolved (still better than a uuid).
       const friendly = memberShortLabel(member);
+      const isSynthesis = normalizeTaskKind(task.kind) === 'synthesis';
+      const groupLabel = parseGroupLabel(task.pattern_config);
+      const groupHue = groupLabel ? hueByGroup.get(groupLabel) : undefined;
       return {
         id: task.id,
         type: 'task',
@@ -196,6 +239,13 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
           statusLabel: t(`orchestrator.run.task.status.${task.status}`, {
             defaultValue: t('orchestrator.run.status.unknown'),
           }),
+          kind: task.kind,
+          synthesisLabel: isSynthesis ? t('orchestrator.run.kind.synthesis') : undefined,
+          groupLabel,
+          groupHue,
+          groupChipLabel: groupLabel
+            ? t('orchestrator.run.kind.fanout', { label: groupLabel })
+            : undefined,
           memberId: assignment?.member_id,
           chipLabel: assignment ? (friendly ?? t('orchestrator.run.detail.assigned')) : undefined,
           memberLogo: memberLogo(member),
