@@ -25,9 +25,11 @@ import FigureLibraryPage from './FigureLibraryPage';
 import { useCompanion, useCompanions, useCompanionShared } from './useNomi';
 
 /** Companion-domain tabs follow the selected companion; shared-domain tabs are cross-companion.
- *  Sub-tab render order under the workbench puts 总览 (overview) first — see the right-pane strip. */
-const COMPANION_TABS = ['overview', 'chat', 'knowledge', 'skills', 'remote', 'secrets', 'settings'] as const;
-const SHARED_TABS = ['memories', 'collect', 'learn', 'suggestions', 'migrate'] as const;
+ *  Sub-tab render order under the workbench puts 总览 (overview) first — see the right-pane strip.
+ *  `memories` lives in the companion domain (shared + that companion's private, scope-aware) so it
+ *  is one click from the selected companion rather than buried under a "shared" domain switch. */
+const COMPANION_TABS = ['overview', 'memories', 'chat', 'knowledge', 'skills', 'remote', 'secrets', 'settings'] as const;
+const SHARED_TABS = ['collect', 'learn', 'suggestions', 'migrate'] as const;
 const ALL_TABS: readonly string[] = [...COMPANION_TABS, ...SHARED_TABS];
 /** Standalone figure-library domain (not companion-scoped, no tab set of its own). */
 const FIGURES_TAB = 'figures';
@@ -42,8 +44,8 @@ const NomiConfigPage: React.FC = () => {
   const shared = useCompanionShared();
   const { companions } = companionsApi;
 
-  // ?tab= deep link (legacy values keep working: overview/chat/settings →
-  // companion domain, memories/collect/learn/suggestions → shared domain, figures →
+  // ?tab= deep link (legacy values keep working: overview/chat/settings/memories →
+  // companion domain, collect/learn/suggestions → shared domain, figures →
   // the standalone figure library). Back-compat: the old `modelKnowledge` tab
   // split into `knowledge` (model config moved to the chat tab), so map it.
   const rawTabParam = searchParams.get('tab');
@@ -109,7 +111,7 @@ const NomiConfigPage: React.FC = () => {
   );
 
   const setDomain = useCallback(
-    (d: Domain) => setTab(d === 'companion' ? 'overview' : d === 'shared' ? 'memories' : FIGURES_TAB),
+    (d: Domain) => setTab(d === 'companion' ? 'overview' : d === 'shared' ? 'collect' : FIGURES_TAB),
     [setTab]
   );
 
@@ -192,6 +194,7 @@ const NomiConfigPage: React.FC = () => {
                     <div className='shrink-0 mb-8px'>
                       <Radio.Group type='button' size='small' value={activeTab} onChange={setTab}>
                         <Radio value='overview'>{t('nomi.tabs.overview')}</Radio>
+                        <Radio value='memories'>{t('nomi.tabs.memories')}</Radio>
                         <Radio value='chat'>{t('nomi.tabs.chat')}</Radio>
                         <Radio value='knowledge'>{t('nomi.tabs.knowledge')}</Radio>
                         <Radio value='skills'>{t('nomi.tabs.skills', { defaultValue: '技能' })}</Radio>
@@ -215,6 +218,9 @@ const NomiConfigPage: React.FC = () => {
                         {activeTab === 'overview' && (
                           <OverviewTab key={selectedCompanionId} companion={companion} onGoTab={setTab} />
                         )}
+                        {activeTab === 'memories' && (
+                          <MemoriesTab key={selectedCompanionId} companionId={selectedCompanionId} companions={companions} />
+                        )}
                         {activeTab === 'knowledge' && <KnowledgeTab key={selectedCompanionId} companion={companion} />}
                         {activeTab === 'skills' && <SkillsTab key={selectedCompanionId} companion={companion} />}
                         {activeTab === 'remote' && <RemoteTab key={selectedCompanionId} companion={companion} />}
@@ -233,9 +239,6 @@ const NomiConfigPage: React.FC = () => {
               </div>
             ) : (
               <Tabs activeTab={activeTab} onChange={setTab} lazyload>
-                <Tabs.TabPane key='memories' title={t('nomi.tabs.memories')}>
-                  <MemoriesTab />
-                </Tabs.TabPane>
                 <Tabs.TabPane key='collect' title={t('nomi.tabs.collect')}>
                   <CollectTab shared={shared} />
                 </Tabs.TabPane>

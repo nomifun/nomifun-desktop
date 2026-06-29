@@ -2112,6 +2112,70 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Edit the most recent user message and re-run from there (Nomi only).
+    /// Rewinds the engine's last turn, truncates the DB transcript at the
+    /// target message (inclusive), then re-sends the edited content as a fresh
+    /// turn. Rejects non-Nomi conversations and any target that is not the
+    /// latest user message (so the engine rewind and DB truncation stay aligned).
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id, message_id = %message_id))]
+    pub async fn edit_and_resubmit(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        message_id: &str,
+        req: SendMessageRequest,
+        task_manager: &Arc<dyn IWorkerTaskManager>,
+    ) -> Result<String, AppError> {
+        if req.content.trim().is_empty() {
+            return Err(AppError::BadRequest("Message content must not be empty".into()));
+        }
+        let conv_id = parse_conv_id(conversation_id)?;
+
+        // 1. 归属校验
+        let row = self
+            .conversation_repo
+            .get(conv_id)
+            .await?
+            .filter(|r| r.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        // 2. 仅 Nomi
+        if row.r#type != "nomi" {
+            return Err(AppError::BadRequest(
+                "Edit & resubmit is only supported for Nomi conversations".into(),
+            ));
+        }
+
+        // 3. 目标必须是最近一条用户(right/text)消息（保证引擎"回退最后一个 turn"
+        //    与 DB"删除该条及其后"对齐）。
+        let recent = self.conversation_repo.get_messages_keyset(conv_id, None, 50).await?;
+        let latest_user = recent
+            .items
+            .iter()
+            .find(|m| m.position.as_deref() == Some("right") && m.r#type == "text");
+        let Some(target) = latest_user else {
+            return Err(AppError::BadRequest("No editable user message found".into()));
+        };
+        if target.id != message_id {
+            return Err(AppError::BadRequest(
+                "Only the most recent user message can be edited".into(),
+            ));
+        }
+        let (from_created_at, from_id) = (target.created_at, target.id.clone());
+
+        // 4. 取在飞 agent 并回退最后一个 turn（内部会先停掉在飞 turn）。
+        let agent = self.task(conversation_id)?;
+        agent.rewind_last_turn().await?;
+
+        // 5. 截断 DB：删除目标(含)及其后所有消息。
+        self.conversation_repo
+            .delete_messages_from(conv_id, from_created_at, &from_id)
+            .await?;
+
+        // 6. 复用正常发送：重新插入用户消息行 + 起新 turn。
+        self.send_message(user_id, conversation_id, req, task_manager).await
+    }
+
     /// Stop the current streaming response for a conversation.
     #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
     pub async fn cancel(

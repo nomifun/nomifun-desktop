@@ -39,6 +39,9 @@ use nomifun_secret::secret_routes;
 
 use crate::services::AppServices;
 
+use super::computer_permissions::{
+    computer_permission_status, open_permission_settings, request_computer_permission,
+};
 use super::health::{
     guide_mcp_status, health_check, knowledge_global_status_handler, mcp_register_template_handler,
     register_knowledge_global_handler, register_knowledge_handler,
@@ -405,6 +408,23 @@ pub fn create_router_with_all_state(
         .with_state(services.guide_mcp_config.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
+    // handlers probe/trigger the host process's own grants. Auth-gated like the
+    // other diagnostic endpoints. Registered on every build (handlers degrade to
+    // null/no-op off macOS / non-computer-use), so the shared settings UI can
+    // always query without a 404.
+    let computer_permissions_authenticated = Router::new()
+        .route("/api/computer/permissions", get(computer_permission_status))
+        .route(
+            "/api/computer/permissions/request",
+            post(request_computer_permission),
+        )
+        .route(
+            "/api/computer/permissions/open-settings",
+            post(open_permission_settings),
+        )
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // MCP registration template — stateless read-only GET, auth-gated.
     let mcp_register_template_authenticated = Router::new()
         .route(
@@ -457,6 +477,7 @@ pub fn create_router_with_all_state(
         .merge(auth_routes(auth_state))
         .merge(crate::router::companion_token_routes::companion_token_routes(companion_token_state))
         .merge(system_authenticated)
+        .merge(computer_permissions_authenticated)
         .merge(conversation_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(remote_agent_authenticated)

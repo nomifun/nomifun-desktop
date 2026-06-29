@@ -467,11 +467,14 @@ unsafe fn focused_app() -> Result<AxElem, A11yError> {
         A11yError::Backend("AXUIElementCreateSystemWide returned null".to_string())
     })?;
     copy_elem_attr(sw.ptr(), "AXFocusedApplication").ok_or_else(|| {
-        A11yError::Permission(
-            "No focused application is readable. Grant Accessibility permission to this app in \
-             System Settings → Privacy & Security → Accessibility, then retry."
-                .to_string(),
-        )
+        let app = crate::host_app_label();
+        A11yError::Permission(format!(
+            "No focused application is readable — Accessibility permission is not in effect for \
+             {app}. Grant it in System Settings → Privacy & Security → Accessibility (the entry is \
+             named \"{app}\"), then COMPLETELY quit and reopen {app} — macOS does not apply this \
+             permission to an already-running process. Computer-use runs inside {app} itself, so \
+             do not grant a terminal or editor."
+        ))
     })
 }
 
