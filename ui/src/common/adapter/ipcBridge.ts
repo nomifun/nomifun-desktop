@@ -74,6 +74,7 @@ import type {
 } from '../types/provider/providerApi';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
+  TAdjustRunRequest,
   TCreateAdhocRun,
   TReassign,
   TReplanRequest,
@@ -2694,6 +2695,19 @@ export const orchestrator = {
     replan: httpPost<TRun, { id: string } & TReplanRequest>(
       (p) => `/api/orchestrator/runs/${p.id}/replan`,
       ({ id: _id, ...body }) => body
+    ),
+    // Conversation-driven intelligent re-adjust IN PLACE (owner-scoped, POST):
+    // the lead model judges, per task, whether to KEEP the completed work or
+    // re-decompose, and the backend RECONCILEs the run to the result — preserving
+    // the kept tasks + their output (unlike `replan`, which wipes the whole plan),
+    // dropping the un-kept ones, inserting + routing the new tasks, and rebuilding
+    // the deps. Returns the (re-activated) run. Rejected (400) for a blank intent
+    // or a run with any running task (pause first). The backend runs the whole
+    // reconcile + terminal re-activation under the run's per-run lock and re-arms
+    // the engine for a re-activated run, mirroring `rerunTask`.
+    adjustRun: httpPost<TRun, { run_id: string } & TAdjustRunRequest>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/adjust`,
+      ({ run_id: _run_id, ...body }) => body
     ),
     cancel: httpPost<void, { id: string }>(
       (p) => `/api/orchestrator/runs/${p.id}/cancel`,

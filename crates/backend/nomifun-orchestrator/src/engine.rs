@@ -458,6 +458,33 @@ impl RunEngine {
         let _rerun_guard = lock.lock().await;
         run_service.rerun_task(user_id, run_id, task_id).await
     }
+
+    /// UC-3a — **conversation-driven intelligent re-adjust** with the loop-vs-
+    /// reconcile race CLOSED. The engine-side entry the route calls instead of
+    /// [`RunService::adjust`](crate::run_service::RunService::adjust) directly: it
+    /// acquires the run's lock (the SAME [`RunLocks`] registry the `run_loop`
+    /// terminal check holds) and performs the WHOLE reconcile (clear deps + drop
+    /// unkept + insert/route new + rebuild deps) and the terminal-run re-activation
+    /// UNDER it — so the loop cannot conclude the run terminal (and write
+    /// `completed`/`failed`) in the gap between our mutation and re-activation,
+    /// stranding the run with freshly-added pending tasks and no driver.
+    ///
+    /// Returns the (possibly re-activated) run DTO; the CALLER (route) makes the
+    /// engine-lifecycle decision (`run.status == "running" && !is_running →
+    /// engine.start`) OUTSIDE this lock, exactly like [`rerun_task`](Self::rerun_task)
+    /// — `start` (which `stop`s first) is kept strictly off the locked path so the
+    /// no-deadlock invariant stays trivially obvious.
+    pub async fn adjust(
+        &self,
+        run_service: &crate::run_service::RunService,
+        user_id: &str,
+        run_id: &str,
+        intent: &str,
+    ) -> Result<nomifun_api_types::Run, AppError> {
+        let lock = self.deps.run_locks.for_run(run_id);
+        let _adjust_guard = lock.lock().await;
+        run_service.adjust(user_id, run_id, intent).await
+    }
 }
 
 /// The bounded-parallel run loop: dispatch up to `cap` ready tasks concurrently,
@@ -6173,6 +6200,171 @@ mod tests {
             .expect("run create");
         run_service.plan(&run.id).await.expect("plan");
         (run_service, engine, run.id)
+    }
+
+    // UC-3a — conversation-driven re-adjust: the WHOLE reconcile + terminal-run
+    // re-activation under the per-run lock (`engine.adjust`), then the route gate
+    // re-drives the new pending task to completion with a LIVE loop (no strand).
+    //
+    // A single-task run is driven to `completed` (its loop deregisters under the
+    // lock). We then `engine.adjust` with a plan that KEEPS the completed task +
+    // ADDS a new task depending on it: reconcile preserves the done task (NOT
+    // re-run — its output survives) and inserts+routes the new pending task, the
+    // terminal run is re-activated to `running` UNDER the lock, the route starts a
+    // fresh loop, and the run re-drives to `completed` with the kept task still
+    // done and the new task now done — the run was never stranded
+    // `running`-with-pending-and-no-driver.
+    #[tokio::test]
+    async fn adjust_completed_run_keeps_done_adds_new_redrives_no_strand() {
+        // A planner whose `produce` yields ONE task and whose `adjust` returns a
+        // plan the test fills in (after it learns the real kept task id).
+        struct AdjustEngineProducer {
+            adjusted: Mutex<crate::plan::AdjustedPlan>,
+        }
+        #[async_trait]
+        impl PlanProducer for AdjustEngineProducer {
+            async fn produce(
+                &self,
+                _goal: &str,
+                _members: &[FleetMember],
+            ) -> Result<PlannedDag, AppError> {
+                Ok(PlannedDag {
+                    tasks: vec![PlannedTask {
+                        title: "原始".to_string(),
+                        spec: "do the original work".to_string(),
+                        task_profile: None,
+                        depends_on: vec![],
+                        member_index: Some(0),
+                        rationale: None,
+                        role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
+                    }],
+                })
+            }
+            async fn adjust(
+                &self,
+                _intent: &str,
+                _tasks: &[nomifun_api_types::RunTask],
+                _deps: &[nomifun_api_types::RunTaskDep],
+                _members: &[FleetMember],
+            ) -> Result<crate::plan::AdjustedPlan, AppError> {
+                Ok(self.adjusted.lock().unwrap().clone())
+            }
+        }
+
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let producer = Arc::new(AdjustEngineProducer {
+            adjusted: Mutex::new(crate::plan::AdjustedPlan { tasks: vec![] }),
+        });
+        let planner: Arc<dyn PlanProducer> = producer.clone();
+        let svc = RunService::new(run_repo.clone(), fleet_repo.clone(), ws_repo.clone(), planner, emitter.clone());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "adjust fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "adjust ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "adjust chain".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run");
+        svc.plan(&run.id).await.expect("plan");
+        let run_id = run.id;
+
+        // Drive the single task to completion.
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed", "initial run completes");
+        assert_eq!(first.tasks.len(), 1);
+        let kept_id = first.tasks[0].id.clone();
+        assert_eq!(first.tasks[0].status, "done");
+        // The completed loop deregisters its handle under the lock.
+        for _ in 0..200 {
+            if !engine.is_running(&run_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!engine.is_running(&run_id), "completed run's loop deregistered");
+
+        // Stage the adjusted plan: keep the done task + add one depending on it.
+        *producer.adjusted.lock().unwrap() = crate::plan::AdjustedPlan {
+            tasks: vec![
+                crate::plan::AdjustedNode::Keep { keep: kept_id.clone() },
+                crate::plan::AdjustedNode::New(crate::plan::AdjustedNewTask {
+                    title: "追加".to_string(),
+                    spec: "build on the kept work".to_string(),
+                    role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
+                    depends_on: vec![crate::plan::AdjustedDepRef::Kept(kept_id.clone())],
+                }),
+            ],
+        };
+
+        // Adjust under the lock, then apply the EXACT route gate.
+        let adjusted_run = engine
+            .adjust(&svc, "u1", &run_id, "在已完成工作上追加一步")
+            .await
+            .expect("adjust");
+        assert_eq!(adjusted_run.status, "running", "terminal run re-activated to running");
+        let started = adjusted_run.status == "running" && !engine.is_running(&run_id);
+        assert!(started, "route must (re)start the loop for the re-activated run");
+        engine.start(run_id.clone());
+
+        // The re-activated run re-drives to completion WITHOUT re-running the kept
+        // task (it was already done) and WITH the new task now done — no strand.
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed", "re-activated run completes (no strand)");
+        assert_eq!(second.tasks.len(), 2, "kept + new");
+        let kept = second.tasks.iter().find(|t| t.id == kept_id).expect("kept task survives");
+        assert_eq!(kept.status, "done", "kept task stayed done");
+        assert_eq!(kept.attempt, first.tasks[0].attempt, "kept task NOT re-run (attempt unchanged)");
+        let new_task = second.tasks.iter().find(|t| t.title == "追加").expect("new task added");
+        assert_eq!(new_task.status, "done", "new task re-driven to done");
+        // The dep kept→new was wired (the new task only ran after the kept blocker).
+        assert!(
+            second.deps.iter().any(|d| d.blocker_task_id == kept_id && d.blocked_task_id == new_task.id),
+            "kept→new dep wired: {:?}",
+            second.deps
+        );
     }
 
     // Rerun a `done` task on a completed run: the task AND its downstream dependents

@@ -391,7 +391,6 @@ pub struct RunRenameRequest {
 }
 
 /// Re-design a run in place. The body of `POST /api/orchestrator/runs/{id}/replan`.
-/// All fields optional — omitted = keep the run's current value. The service
 /// clears the run's old plan (tasks/deps/assignments) and re-decomposes against
 /// the (optionally) edited goal / model range / autonomy. `model_range` here must
 /// already be `single`/`range` (an unexpanded `auto` is rejected, like create).
@@ -405,6 +404,18 @@ pub struct ReplanRequest {
     pub autonomy: Option<String>,
     #[serde(default)]
     pub pinned_roles: Vec<String>,
+}
+
+/// Conversation-driven intelligent re-adjust (UC-3a). The body of
+/// `POST /api/orchestrator/runs/{id}/adjust`. `intent` is the user's free-form
+/// instruction; the lead model judges, per task, whether to KEEP the completed
+/// work or re-decompose, and the service reconciles the run to the result. The
+/// service rejects a blank intent (400) and a run with any `running` task (400 —
+/// pause first). Unlike [`ReplanRequest`] this does NOT wipe the whole plan: it
+/// preserves the work the lead chose to keep.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdjustRunRequest {
+    pub intent: String,
 }
 
 /// Create (and kick off) an orchestration run within a workspace against a fleet.

@@ -150,6 +150,7 @@ pub use orchestrator::{
     RunDetail, RunRenameRequest, RunTask, RunTaskDep, SteerRequest, TaskProfile,
     TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest, derive_capability,
 };
+pub use orchestrator::AdjustRunRequest;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,
     DetectedProtocol, DetectionSuggestion, FetchModelsAnonymousRequest, FetchModelsRequest,
