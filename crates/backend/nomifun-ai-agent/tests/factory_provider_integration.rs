@@ -110,6 +110,7 @@ async fn nomi_factory_returns_error_for_missing_provider() {
             use_model: None,
         },
         conversation_id: "conv-test-1".into(),
+        conversation_created_at: None,
         extra: serde_json::json!({}),
     };
 
@@ -141,6 +142,7 @@ async fn nomi_factory_resolves_provider_from_db() {
             use_model: None,
         },
         conversation_id: "conv-test-2".into(),
+        conversation_created_at: None,
         extra: serde_json::json!({ "max_tokens": 2048 }),
     };
 
@@ -163,6 +165,7 @@ async fn nomi_factory_respects_use_model_override() {
             use_model: Some("gpt-5.4".into()),
         },
         conversation_id: "conv-test-3".into(),
+        conversation_created_at: None,
         extra: serde_json::json!({}),
     };
 
