@@ -19,10 +19,35 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import RunDetailHeader from './RunDetailHeader';
-import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode } from './nodes/TaskNode';
+import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type VerifyVerdict } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
 const NODE_TYPES = { task: TaskNode } as const;
+
+/** Neutral verdict for a verify node whose marker is absent / unparseable / still
+ * settling — renders the pill in its neutral "verifying…" state instead of a
+ * pass/fail tone. */
+const NEUTRAL_VERDICT: VerifyVerdict = { pass: null, tally: null };
+
+/** Leading `VERDICT:` marker a verify task writes to its `output_summary`
+ * (`render_verify_summary` in engine.rs), e.g.
+ *   `VERDICT: PASS (2/3 skeptics passed, policy=majority)`
+ *   `VERDICT: FAIL (1/2 skeptics passed, policy=...)`
+ * We only need the pass/fail word and the `m/n` tally; the rest is free text. */
+const VERDICT_RE = /^VERDICT:\s+(PASS|FAIL)\s+\((\d+)\/(\d+)/;
+
+/**
+ * Parse a verify task's `output_summary` into a {@link VerifyVerdict}. Defensive
+ * by design: a missing/empty/unparseable summary (still verifying, legacy data,
+ * or a malformed marker) yields the neutral `{ pass: null, tally: null }` so the
+ * pill shows "verifying…" instead of ever throwing on the canvas.
+ */
+function parseVerifyVerdict(outputSummary: string | null | undefined): VerifyVerdict {
+  if (!outputSummary) return NEUTRAL_VERDICT;
+  const m = VERDICT_RE.exec(outputSummary.trim());
+  if (!m) return NEUTRAL_VERDICT;
+  return { pass: m[1] === 'PASS', tally: `${m[2]}/${m[3]}` };
+}
 
 /**
  * Defensively pull the fan-out group label out of a task's `pattern_config`
@@ -226,7 +251,9 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
       // Friendly label from the fleet snapshot; fall back to the localized
       // "assigned" pill if the member can't be resolved (still better than a uuid).
       const friendly = memberShortLabel(member);
-      const isSynthesis = normalizeTaskKind(task.kind) === 'synthesis';
+      const taskKind = normalizeTaskKind(task.kind);
+      const isSynthesis = taskKind === 'synthesis';
+      const isVerify = taskKind === 'verify';
       const groupLabel = parseGroupLabel(task.pattern_config);
       const groupHue = groupLabel ? hueByGroup.get(groupLabel) : undefined;
       return {
@@ -241,6 +268,15 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
           }),
           kind: task.kind,
           synthesisLabel: isSynthesis ? t('orchestrator.run.kind.synthesis') : undefined,
+          verifyLabel: isVerify ? t('orchestrator.run.kind.verify') : undefined,
+          verifyVerdict: isVerify ? parseVerifyVerdict(task.output_summary) : undefined,
+          verifyVerdictLabels: isVerify
+            ? {
+                pass: t('orchestrator.run.verdict.pass'),
+                fail: t('orchestrator.run.verdict.fail'),
+                pending: t('orchestrator.run.verdict.pending'),
+              }
+            : undefined,
           groupLabel,
           groupHue,
           groupChipLabel: groupLabel

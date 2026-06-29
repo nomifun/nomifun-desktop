@@ -6,7 +6,7 @@
 
 import React from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { Branch, Lock, Merge } from '@icon-park/react';
+import { Branch, CheckOne, CloseOne, Lock, Merge, Shield } from '@icon-park/react';
 
 /** Task status → theme-var color + a slow-pulse hint for the running state. */
 export interface TaskStatusMeta {
@@ -50,19 +50,43 @@ export function taskStatusMeta(status: string): TaskStatusMeta {
  * with zero visual change, so the common case is untouched. */
 export const TASK_KIND_SYNTHESIS = 'synthesis';
 
+/** The verify task kind — a synchronous aggregator that tallies its skeptic
+ * dependencies' pass/fail votes into a single verdict (written to its
+ * `output_summary`) and gates downstream on a FAIL. Renders a shield badge + a
+ * pass/fail verdict pill. Unknown kinds collapse to `'agent'` (no badge). */
+export const TASK_KIND_VERIFY = 'verify';
+
 /**
  * Normalize a raw `TRunTask.kind` defensively. The wire value defaults to
  * `'agent'` on the backend, but legacy / malformed values must never crash the
  * canvas — anything we don't recognize collapses to `'agent'` (no badge).
  */
-export function normalizeTaskKind(kind: string | null | undefined): 'agent' | 'synthesis' {
-  return kind === TASK_KIND_SYNTHESIS ? 'synthesis' : 'agent';
+export function normalizeTaskKind(
+  kind: string | null | undefined
+): 'agent' | 'synthesis' | 'verify' {
+  if (kind === TASK_KIND_SYNTHESIS) return 'synthesis';
+  if (kind === TASK_KIND_VERIFY) return 'verify';
+  return 'agent';
 }
 
 /** Brand-tinted accent for the synthesis badge — intentionally distinct from the
  * status palette (success/danger/warning/primary) so a synthesis node reads as a
  * structural role, not a status. Defined in every theme preset. */
 const SYNTH_ACCENT = 'var(--brand)';
+
+/** Accent for the verify-kind badge — uses the primary brand tone so the badge
+ * itself reads as a structural role (the verdict pill carries the success/danger
+ * semantics separately, so the badge must NOT borrow a status color). */
+const VERIFY_ACCENT = 'rgb(var(--primary-6))';
+
+/** A parsed verify verdict, ready for the pill. `pass === null` means the marker
+ * was absent or unparseable (or the node hasn't settled yet) → neutral state. */
+export interface VerifyVerdict {
+  /** true = PASS · false = FAIL · null = unknown / still verifying. */
+  pass: boolean | null;
+  /** Tally string like `"2/3"` when present in the marker, else null. */
+  tally: string | null;
+}
 
 /** The data payload DagCanvas attaches to each task node. */
 export interface TaskNodeData extends Record<string, unknown> {
@@ -75,6 +99,14 @@ export interface TaskNodeData extends Record<string, unknown> {
   /** Localized "synthesis" label for the kind badge (computed in DagCanvas so the
    * node stays free of i18n wiring). */
   synthesisLabel?: string;
+  /** Localized "verify" label for the verify-kind badge (computed in DagCanvas). */
+  verifyLabel?: string;
+  /** Parsed pass/fail verdict for a `verify` node (from its `output_summary`).
+   * Present only for verify-kind nodes; rendered as a verdict pill. A `pass` of
+   * `null` shows the neutral "verifying…" state (marker absent / unparseable). */
+  verifyVerdict?: VerifyVerdict;
+  /** Localized labels for the verdict pill — pass / fail / pending text. */
+  verifyVerdictLabels?: { pass: string; fail: string; pending: string };
   /** Fan-out group label parsed from `pattern_config` (`{"group":"<label>"}`).
    * Present only for sibling tasks the planner fanned out in parallel. */
   groupLabel?: string;
@@ -110,7 +142,9 @@ export type TaskFlowNode = Node<TaskNodeData, 'task'>;
  */
 function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
   const meta = taskStatusMeta(data.status);
-  const isSynthesis = normalizeTaskKind(data.kind) === 'synthesis';
+  const kind = normalizeTaskKind(data.kind);
+  const isSynthesis = kind === 'synthesis';
+  const isVerify = kind === 'verify';
   // A fan-out group needs a label AND a resolved hue; either missing → no group
   // affordance (defensive against half-parsed config).
   const inGroup = data.groupLabel != null && data.groupHue != null;
@@ -176,13 +210,65 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
             {data.synthesisLabel}
           </span>
         )}
+        {isVerify && (
+          <span
+            className='nomi-dag-kind-badge inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+            style={{
+              color: VERIFY_ACCENT,
+              background: `color-mix(in srgb, ${VERIFY_ACCENT} 14%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${VERIFY_ACCENT} 32%, transparent)`,
+            }}
+            title={data.verifyLabel}
+          >
+            <Shield theme='outline' size='10' strokeWidth={4} className='line-height-0' />
+            {data.verifyLabel}
+          </span>
+        )}
       </div>
 
-      {/* Meta row: status label + assignment chip + retry badge + fan-out group chip */}
+      {/* Meta row: status label + verdict pill + assignment chip + retry badge + fan-out group chip */}
       <div className='flex flex-wrap items-center gap-6px'>
         <span className='text-11px font-500 leading-none' style={{ color: meta.color }}>
           {data.statusLabel}
         </span>
+        {isVerify && data.verifyVerdict && (() => {
+          const { pass, tally } = data.verifyVerdict;
+          const labels = data.verifyVerdictLabels;
+          // pass===true → success · pass===false → danger · pass===null → neutral
+          // "verifying…" (no hardcoded var(--text-tertiary) — undefined here; the
+          // defined --text-secondary / --color-fill-1 carry the neutral tone).
+          const tone =
+            pass === true ? 'var(--success)' : pass === false ? 'var(--danger)' : 'var(--text-secondary)';
+          const text =
+            pass === true
+              ? `${labels?.pass ?? ''}${tally ? ` ${tally}` : ''}`
+              : pass === false
+                ? `${labels?.fail ?? ''}${tally ? ` ${tally}` : ''}`
+                : (labels?.pending ?? '');
+          return (
+            <span
+              className='inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+              style={
+                pass === null
+                  ? { color: tone, background: 'var(--color-fill-1)', border: '1px solid var(--border-light)' }
+                  : {
+                      color: tone,
+                      background: `color-mix(in srgb, ${tone} 14%, transparent)`,
+                      border: `1px solid color-mix(in srgb, ${tone} 32%, transparent)`,
+                    }
+              }
+              title={text}
+            >
+              {pass === true && (
+                <CheckOne theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              {pass === false && (
+                <CloseOne theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              <span className='truncate'>{text}</span>
+            </span>
+          );
+        })()}
         {data.chipLabel && (
           <span
             className='inline-flex max-w-[150px] items-center gap-3px rd-100px px-6px py-2px text-10px leading-none text-t-secondary'
