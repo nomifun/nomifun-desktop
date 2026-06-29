@@ -69,7 +69,13 @@
     },
     "kind": {
       "synthesis": "Synthesis",
+      "verify": "Verify",
       "fanout": "Fan-out · {{label}}"
+    },
+    "verdict": {
+      "pass": "Pass",
+      "fail": "Fail",
+      "pending": "Verifying…"
     },
     "title": "Run History",
     "subtitle": "Browse every orchestration run you started — click any one to replay its task graph",
