@@ -27,7 +27,7 @@ import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useS
 import { useSlashCommands } from '@/renderer/hooks/chat/useSlashCommands';
 import { useOpenFileSelector } from '@/renderer/hooks/file/useOpenFileSelector';
 import { useLatestRef } from '@/renderer/hooks/ui/useLatestRef';
-import { useAddOrUpdateMessage, useRemoveMessageByMsgId } from '@/renderer/pages/conversation/Messages/hooks';
+import { useAddOrUpdateMessage, useRemoveMessageByMsgId, useRemoveMessagesFrom } from '@/renderer/pages/conversation/Messages/hooks';
 import { savePreferredMode } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import {
   shouldEnqueueConversationCommand,
@@ -178,6 +178,7 @@ const NomiSendBox: React.FC<{
 
   const addOrUpdateMessage = useAddOrUpdateMessage();
   const removeMessageByMsgId = useRemoveMessageByMsgId();
+  const removeMessagesFrom = useRemoveMessagesFrom();
   const { setSendBoxHandler } = usePreviewContext();
   const isBusy = running;
   const processingStartedAt = useProcessingStartedAt(conversation_id, running);
@@ -341,6 +342,61 @@ const NomiSendBox: React.FC<{
 
     await executeCommand({ input: message, files: filesToSend });
   };
+
+  // 编辑最近一条用户消息并截断重跑：先本地移除被编辑消息及其后内容（在新 turn 流式
+  // 开始之前，避免被流式新消息误删），调用 editResubmit 接口（后端回退引擎 turn +
+  // 删除该条及其后的 DB 消息），再乐观插入新的用户气泡（与 executeCommand 一致，
+  // 因为消息列表不会随 chat.history.refresh 重载，气泡只能靠乐观插入渲染）。
+  const handleEditResubmit = useCallback(
+    async (msgId: string, createdAt: number, message: string) => {
+      const filesToSend = collectSelectedFiles(uploadFile, atPath);
+      clearFiles();
+      emitter.emit('nomi.selected.file.clear');
+      // 在新 turn 开始流式之前移除旧消息（旧用户消息 + 其后被截断的内容）。
+      removeMessagesFrom(createdAt);
+      setWaitingResponse(true);
+      const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
+      try {
+        const res = await ipcBridge.conversation.editResubmit.invoke({
+          conversation_id,
+          msg_id: msgId,
+          input: displayMessage,
+          files: filesToSend,
+        });
+        // 乐观插入新用户气泡（compose 模式按 msg_id 去重，避免 DB 行重复）。
+        addOrUpdateMessage({
+          id: res.msg_id,
+          msg_id: res.msg_id,
+          type: 'text',
+          position: 'right',
+          conversation_id,
+          content: {
+            content: displayMessage,
+          },
+          created_at: Date.now(),
+        });
+        setActiveMsgId(res.msg_id);
+        emitter.emit('chat.history.refresh');
+        if (filesToSend.length > 0) emitter.emit('nomi.workspace.refresh');
+      } catch (error) {
+        setWaitingResponse(false);
+        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        throw error;
+      }
+    },
+    [
+      atPath,
+      conversation_id,
+      uploadFile,
+      workspacePath,
+      clearFiles,
+      removeMessagesFrom,
+      addOrUpdateMessage,
+      setActiveMsgId,
+      setWaitingResponse,
+      t,
+    ]
+  );
 
   const isSteerUnsupportedError = (error: unknown): boolean => {
     const msg = error instanceof Error ? error.message : String(error ?? '');
@@ -785,6 +841,7 @@ const NomiSendBox: React.FC<{
         onSend={onSendHandler}
         onSteer={onSteerHandler}
         steerAvailable
+        onEditResubmit={handleEditResubmit}
         slash_commands={slash_commands}
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading

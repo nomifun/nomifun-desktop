@@ -465,6 +465,29 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
+    async fn delete_messages_from(
+        &self,
+        conv_id: i64,
+        from_created_at: i64,
+        from_id: &str,
+    ) -> Result<u64, DbError> {
+        // Keyset 截断：删除 (created_at, id) >= 游标 的所有消息。
+        // 命中复合索引 idx_messages_conv_created_id。
+        let result = sqlx::query(
+            "DELETE FROM messages \
+             WHERE conversation_id = ? \
+               AND (created_at > ? OR (created_at = ? AND id >= ?))",
+        )
+        .bind(conv_id)
+        .bind(from_created_at)
+        .bind(from_created_at)
+        .bind(from_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     async fn get_message_by_msg_id(
         &self,
         conv_id: i64,
@@ -1807,5 +1830,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(f.effective_limit(), 50);
+    }
+
+    #[tokio::test]
+    async fn delete_messages_from_removes_cursor_and_newer() {
+        let (repo, _db) = setup().await;
+        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        conv.id = repo.create(&conv).await.unwrap();
+
+        let mk = |id: &str, created_at: i64| MessageRow {
+            id: id.to_string(),
+            conversation_id: conv.id,
+            msg_id: Some(id.to_string()),
+            r#type: "text".to_string(),
+            content: r#"{"content":"x"}"#.to_string(),
+            position: Some("right".to_string()),
+            status: Some("finish".to_string()),
+            hidden: false,
+            created_at,
+        };
+        // 三条：t=100,200,300
+        repo.insert_message(&mk("m1", 100)).await.unwrap();
+        repo.insert_message(&mk("m2", 200)).await.unwrap();
+        repo.insert_message(&mk("m3", 300)).await.unwrap();
+
+        // 从 m2 (t=200) 起（含）删除 → 删 m2、m3，留 m1
+        let deleted = repo.delete_messages_from(conv.id, 200, "m2").await.unwrap();
+        assert_eq!(deleted, 2);
+
+        assert!(repo.get_message(conv.id, "m1").await.unwrap().is_some());
+        assert!(repo.get_message(conv.id, "m2").await.unwrap().is_none());
+        assert!(repo.get_message(conv.id, "m3").await.unwrap().is_none());
     }
 }

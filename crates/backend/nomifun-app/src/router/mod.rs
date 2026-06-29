@@ -1,6 +1,7 @@
 //! HTTP router assembly for the application.
 
 pub mod companion_token_routes;
+mod computer_permissions;
 mod health;
 mod model_failover;
 mod routes;

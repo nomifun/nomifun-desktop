@@ -274,6 +274,13 @@ export const conversation = {
       inject_skills: p.inject_skills,
     })
   ),
+  editResubmit: httpPost<ISendMessageResult, { conversation_id: number; msg_id: string; input: string; files?: string[] }>(
+    (p) => `/api/conversations/${p.conversation_id}/messages/${p.msg_id}/edit-resubmit`,
+    (p) => ({
+      content: p.input,
+      files: p.files,
+    })
+  ),
   getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: number }>(
     (p) => `/api/conversations/${p.conversation_id}/slash-commands`
   ),
@@ -1262,6 +1269,34 @@ export const systemSettings = {
   setAutoPreviewOfficeFiles: httpPut<void, { enabled: boolean }>('/api/settings/client', (p) => ({
     autoPreviewOfficeFiles: p.enabled,
   })),
+};
+
+// ---------------------------------------------------------------------------
+// Computer-use OS permissions — macOS TCC (Accessibility / Screen Recording).
+// Routed to the in-process backend, which probes/triggers the HOST process's
+// OWN grants, so `get` is the authoritative answer to "did my grant take effect
+// for the running app?" — a visibly-on System Settings toggle bound to a stale
+// code identity reports `false` here. Off macOS the booleans are null.
+// ---------------------------------------------------------------------------
+
+export type ComputerPermissionKind = 'accessibility' | 'screen_recording';
+
+export interface ComputerPermissionStatus {
+  accessibility: boolean | null;
+  screen_recording: boolean | null;
+  platform: 'macos' | 'windows' | 'linux' | 'other';
+  app_label: string;
+}
+
+export const computerPermissions = {
+  /** Live grant state for the running host process (safe to poll). */
+  get: httpGet<ComputerPermissionStatus, void>('/api/computer/permissions'),
+  /** Trigger the macOS prompt + register the app in the list; returns post-call status. */
+  request: httpPost<ComputerPermissionStatus, { kind: ComputerPermissionKind }>(
+    '/api/computer/permissions/request'
+  ),
+  /** Deep-link to the exact System Settings privacy pane for `kind`. */
+  openSettings: httpPost<void, { kind: ComputerPermissionKind }>('/api/computer/permissions/open-settings'),
 };
 
 // ---------------------------------------------------------------------------
@@ -2809,6 +2844,10 @@ export interface ICompanionMemory {
   created_at: number;
   updated_at: number;
   last_reinforced_at: number;
+  /** `'user'` = shared (all companions) / `'companion'` = private to one. */
+  scope_kind: 'user' | 'companion';
+  /** Owning companion id when private; `''` when shared. */
+  scope_companion_id: string;
 }
 
 export interface ICompanionSuggestion {
@@ -3045,22 +3084,35 @@ export interface ICompanionDeletedEvent {
 }
 
 export const companion = {
-  listMemories: httpGet<ICompanionMemory[], { kind?: string; q?: string; status?: string; limit?: number; offset?: number }>(
-    (p) => {
-      const params = new URLSearchParams();
-      if (p?.kind) params.set('kind', p.kind);
-      if (p?.q) params.set('q', p.q);
-      if (p?.status) params.set('status', p.status);
-      if (p?.limit) params.set('limit', String(p.limit));
-      if (p?.offset) params.set('offset', String(p.offset));
-      const qs = params.toString();
-      return `/api/companion/memories${qs ? `?${qs}` : ''}`;
-    }
+  listMemories: httpGet<
+    ICompanionMemory[],
+    { kind?: string; q?: string; status?: string; scope_companion_id?: string; limit?: number; offset?: number }
+  >((p) => {
+    const params = new URLSearchParams();
+    if (p?.kind) params.set('kind', p.kind);
+    if (p?.q) params.set('q', p.q);
+    if (p?.status) params.set('status', p.status);
+    if (p?.scope_companion_id) params.set('scope_companion_id', p.scope_companion_id);
+    if (p?.limit) params.set('limit', String(p.limit));
+    if (p?.offset) params.set('offset', String(p.offset));
+    const qs = params.toString();
+    return `/api/companion/memories${qs ? `?${qs}` : ''}`;
+  }),
+  addMemory: httpPost<ICompanionMemory, { kind: string; content: string; tags?: string[]; scope_companion_id?: string }>(
+    '/api/companion/memories'
   ),
-  addMemory: httpPost<ICompanionMemory, { kind: string; content: string; tags?: string[] }>('/api/companion/memories'),
-  updateMemory: httpPut<void, { id: string; content?: string; pinned?: boolean; status?: string }>(
+  updateMemory: httpPut<
+    void,
+    { id: string; content?: string; pinned?: boolean; status?: string; scope_kind?: string; scope_companion_id?: string }
+  >(
     (p) => `/api/companion/memories/${p.id}`,
-    (p) => ({ content: p.content, pinned: p.pinned, status: p.status })
+    (p) => ({
+      content: p.content,
+      pinned: p.pinned,
+      status: p.status,
+      scope_kind: p.scope_kind,
+      scope_companion_id: p.scope_companion_id,
+    })
   ),
   deleteMemory: httpDelete<void, { id: string }>((p) => `/api/companion/memories/${p.id}`),
   listSuggestions: httpGet<ICompanionSuggestion[], { status?: string; limit?: number }>((p) => {
@@ -3196,6 +3248,8 @@ export const companion = {
   onMoodChanged: wsEmitter<{ mood: string; companion_id?: string }>('companion.mood-changed'),
   onConfigUpdated: wsEmitter<ICompanionConfigUpdatedEvent>('companion.config-updated'),
   onMemoryCreated: wsEmitter<ICompanionMemory>('companion.memory-created'),
+  onMemoryUpdated: wsEmitter<ICompanionMemory>('companion.memory-updated'),
+  onMemoryDeleted: wsEmitter<{ id: string }>('companion.memory-deleted'),
   onSkillDrafted: wsEmitter<ICompanionSkillEvent>('companion.skill-drafted'),
   onSkillLearned: wsEmitter<ICompanionSkillEvent>('companion.skill-learned'),
   onSkillArchived: wsEmitter<ICompanionSkillEvent>('companion.skill-archived'),

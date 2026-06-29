@@ -4202,3 +4202,43 @@ async fn perform_model_failover_returns_none_for_acp_conversation() {
     assert_eq!(model.provider_id, "p1");
     assert!(provider_repo.health_writes().is_empty());
 }
+
+// ── edit_and_resubmit tests ─────────────────────────────────────
+
+/// 非 Nomi 会话调用 edit_and_resubmit → BadRequest（Nomi 门禁在取 agent/查消息之前）。
+#[tokio::test]
+async fn edit_and_resubmit_rejects_non_nomi() {
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    // make_create_req() 建的是 acp 会话
+    let conv = svc.create("user_1", make_create_req()).await.unwrap();
+    let conv_id = conv.id.to_string();
+
+    let req: SendMessageRequest = serde_json::from_value(json!({ "content": "edited" })).unwrap();
+    let err = svc
+        .edit_and_resubmit("user_1", &conv_id, "msg_whatever", req, &task_mgr)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, AppError::BadRequest(_)));
+    assert!(err.to_string().contains("Nomi"), "应为 Nomi 门禁错误，实际: {err}");
+}
+
+/// Nomi 会话但没有可编辑的用户消息 → BadRequest（消息查找守卫，在取 agent 之前）。
+#[tokio::test]
+async fn edit_and_resubmit_rejects_when_no_editable_message() {
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let nomi_req: CreateConversationRequest =
+        serde_json::from_value(json!({ "type": "nomi", "extra": { "workspace": "/project" } })).unwrap();
+    let conv = svc.create("user_1", nomi_req).await.unwrap();
+    let conv_id = conv.id.to_string();
+
+    let req: SendMessageRequest = serde_json::from_value(json!({ "content": "edited" })).unwrap();
+    let err = svc
+        .edit_and_resubmit("user_1", &conv_id, "msg_missing", req, &task_mgr)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, AppError::BadRequest(_)));
+}

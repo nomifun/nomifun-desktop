@@ -32,6 +32,7 @@ import { theme } from '@/platform';
 import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useCompositionInput } from '@renderer/hooks/chat/useCompositionInput';
+import { useConfig } from '@renderer/hooks/config/useConfig';
 import { useConversationExport } from '@renderer/hooks/file/useConversationExport';
 import { useDragUpload } from '@renderer/hooks/file/useDragUpload';
 import { useLatestRef } from '@renderer/hooks/ui/useLatestRef';
@@ -163,6 +164,10 @@ const SendBox: React.FC<{
   onSteer?: (message: string) => Promise<void>;
   /** Gate the steer affordance (e.g. only for the Nomi native engine). */
   steerAvailable?: boolean;
+  /** When provided (Nomi only), enables "edit a sent message" mode: the message text is
+   *  recalled into the composer via the `sendbox.edit` event and submitting calls this
+   *  instead of onSend, which truncates the conversation and re-runs from that message. */
+  onEditResubmit?: (msgId: string, createdAt: number, message: string) => Promise<void>;
   /** Clear the agent's conversation context (release model context). When set, a `/clear` builtin appears. */
   onClearContext?: () => void | Promise<void>;
   disabled?: boolean;
@@ -197,6 +202,7 @@ const SendBox: React.FC<{
   onStop,
   onSteer,
   steerAvailable,
+  onEditResubmit,
   onClearContext,
   prefix,
   className,
@@ -249,6 +255,9 @@ const SendBox: React.FC<{
   const [historyNavigationIndex, setHistoryNavigationIndex] = useState<number | null>(null);
   const historyDraftRef = useRef<string | null>(null);
   const [replyQuote, setReplyQuote] = useState<ReplyQuote | null>(null);
+  const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+  const editingCreatedAtRef = useRef<number>(0);
+  const editPrevDraftRef = useRef<string | null>(null);
   const [caretPosition, setCaretPosition] = useState(0);
   const [workspaceMentionItems, setWorkspaceMentionItems] = useState<FileOrFolderItem[]>([]);
   const [workspaceMentionLoading, setWorkspaceMentionLoading] = useState(false);
@@ -265,6 +274,28 @@ const SendBox: React.FC<{
   // Listen for reply events from message actions
   useAddEventListener('sendbox.reply', (quote) => setReplyQuote(quote), []);
   useAddEventListener('sendbox.reply.clear', () => setReplyQuote(null), []);
+
+  // 编辑已发送消息：把原文回填输入框，进入"编辑模式"，提交即截断重跑（仅 Nomi 提供 onEditResubmit）
+  useAddEventListener(
+    'sendbox.edit',
+    (payload) => {
+      if (!onEditResubmit) return;
+      editPrevDraftRef.current = latestInputRef.current;
+      editingCreatedAtRef.current = payload.createdAt;
+      setEditingMsgId(payload.msgId);
+      setReplyQuote(null);
+      setInputRef.current(payload.content);
+      requestAnimationFrame(() => {
+        const textarea = containerRef.current?.querySelector('textarea');
+        if (textarea instanceof HTMLTextAreaElement) {
+          textarea.focus();
+          const caret = textarea.value.length;
+          textarea.setSelectionRange(caret, caret);
+        }
+      });
+    },
+    [onEditResubmit]
+  );
 
   // 集成预览面板的"添加到聊天"功能 / Integrate preview panel's "Add to chat" functionality
   const { setSendBoxHandler, domSnippets, removeDomSnippet, clearDomSnippets } = usePreviewContext();
@@ -980,6 +1011,8 @@ const SendBox: React.FC<{
 
   // 使用共享的输入法合成处理
   const { compositionHandlers, isComposingState, createKeyDownHandler } = useCompositionInput();
+  const [sendKeyPref] = useConfig('chat.sendKey');
+  const sendKey = sendKeyPref ?? 'enter';
 
   // 使用共享的PasteService集成
   const { onPaste, onFocus: handlePasteFocus } = usePasteService({
@@ -1228,8 +1261,32 @@ const SendBox: React.FC<{
     return finalMessage;
   };
 
+  const cancelEdit = () => {
+    setEditingMsgId(null);
+    const prev = editPrevDraftRef.current ?? '';
+    editPrevDraftRef.current = null;
+    setInput(prev);
+  };
+
   const sendMessageHandler = () => {
     if (isUploading) return;
+    // 编辑模式：提交走截断重跑而非普通发送。
+    if (editingMsgId && onEditResubmit) {
+      if (!input.trim()) return;
+      const finalMessage = input;
+      const targetId = editingMsgId;
+      const targetCreatedAt = editingCreatedAtRef.current;
+      setEditingMsgId(null);
+      editPrevDraftRef.current = null;
+      setInput('');
+      setIsLoading(true);
+      onEditResubmit(targetId, targetCreatedAt, finalMessage)
+        .catch(() => {})
+        .finally(() => {
+          setIsLoading(false);
+        });
+      return;
+    }
     // Cancel any pending warmup: once the user actually submits, the
     // forthcoming /messages request will build the agent on its own.
     // Without this, a focus-triggered warmup timer still fires ~1s later
@@ -1554,6 +1611,19 @@ const SendBox: React.FC<{
         <div style={{ width: '100%' }}>
           {prefix}
           {context}
+          {/* 编辑消息提示条 / Editing message banner */}
+          {editingMsgId && (
+            <div className='flex items-center gap-10px mb-8px px-12px py-8px rd-10px bg-fill-1 b-1 b-solid b-border-2'>
+              <span className='text-13px text-t-primary'>{t('conversation.editMessage.banner')}</span>
+              <div
+                className='ml-auto flex-shrink-0 p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
+                onClick={cancelEdit}
+                style={{ lineHeight: 0 }}
+              >
+                <CloseSmall theme='outline' size='14' />
+              </div>
+            </div>
+          )}
           {/* Reply quote preview */}
           {replyQuote && (
             <div className='flex items-start gap-10px mb-8px px-12px py-10px rd-10px bg-fill-1 b-1 b-solid b-border-2'>
@@ -1708,26 +1778,31 @@ const SendBox: React.FC<{
               }}
               {...compositionHandlers}
               autoSize={isSingleLine ? false : { minRows: 1, maxRows: 10 }}
-              onKeyDown={createKeyDownHandler(sendMessageHandler, (event) => {
-                if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
-                  return true;
-                }
-                // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
-                // instead of enqueuing it. Plain Enter still sends; Shift+Enter
-                // still inserts a newline. Opt-in via onSteer + steerAvailable.
-                if (
-                  onSteer &&
-                  steerAvailable &&
-                  event.key === 'Enter' &&
-                  !event.shiftKey &&
-                  (event.metaKey || event.ctrlKey)
-                ) {
-                  event.preventDefault();
-                  steerMessageHandler();
-                  return true;
-                }
-                return false;
-              })}
+              onKeyDown={createKeyDownHandler(
+                sendMessageHandler,
+                (event) => {
+                  if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
+                    return true;
+                  }
+                  // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
+                  // instead of enqueuing it. Only in 'enter' mode — in 'mod-enter'
+                  // mode Mod+Enter IS the submit gesture. Opt-in via onSteer + steerAvailable.
+                  if (
+                    sendKey === 'enter' &&
+                    onSteer &&
+                    steerAvailable &&
+                    event.key === 'Enter' &&
+                    !event.shiftKey &&
+                    (event.metaKey || event.ctrlKey)
+                  ) {
+                    event.preventDefault();
+                    steerMessageHandler();
+                    return true;
+                  }
+                  return false;
+                },
+                sendKey
+              )}
             ></Input.TextArea>
           </div>
           {isSingleLine && (

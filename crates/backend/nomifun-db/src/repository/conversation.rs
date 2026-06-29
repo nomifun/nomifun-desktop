@@ -115,6 +115,18 @@ pub trait IConversationRepository: Send + Sync {
     /// Deletes all messages belonging to a conversation.
     async fn delete_messages_by_conversation(&self, conv_id: i64) -> Result<(), DbError>;
 
+    /// Deletes the message at the `(created_at, id)` keyset cursor (inclusive)
+    /// and every newer message in the conversation. Returns the number of rows
+    /// deleted. Default no-op so mock repos compile; SQLite overrides it.
+    async fn delete_messages_from(
+        &self,
+        _conv_id: i64,
+        _from_created_at: i64,
+        _from_id: &str,
+    ) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
     /// Finds a message by (conversation_id, msg_id, type) triple.
     async fn get_message_by_msg_id(
         &self,

@@ -101,23 +101,36 @@ pub fn accessibility_hint_detailed() -> String {
     )
 }
 
-/// Guidance appended to screen-capture failures.
-pub fn screen_capture_hint() -> &'static str {
+/// Guidance appended to screen-capture failures. Names the host app (see
+/// [`nomi_a11y::host_app_label`]) and stresses the relaunch, because macOS never
+/// hot-loads Screen Recording into an already-running process.
+pub fn screen_capture_hint() -> String {
     if cfg!(target_os = "macos") {
-        "If this keeps failing, grant Screen Recording permission in \
-         System Settings → Privacy & Security → Screen Recording, then restart this app."
+        let app = nomi_a11y::host_app_label();
+        format!(
+            "If this keeps failing, grant Screen Recording permission to {app} in \
+             System Settings → Privacy & Security → Screen Recording, then COMPLETELY quit and \
+             reopen {app} (a freshly-granted Screen Recording permission only takes effect after \
+             a relaunch)."
+        )
     } else {
-        "Check that a display is connected and the app is allowed to capture the screen."
+        "Check that a display is connected and the app is allowed to capture the screen.".to_string()
     }
 }
 
-/// Guidance appended to input-synthesis failures.
-pub fn accessibility_hint() -> &'static str {
+/// Guidance appended to input-synthesis failures. Names the host app and the
+/// relaunch — the generic "this app" otherwise leads a model to send the user
+/// to grant a terminal/editor rather than the desktop host itself.
+pub fn accessibility_hint() -> String {
     if cfg!(target_os = "macos") {
-        "If this keeps failing, grant Accessibility permission in \
-         System Settings → Privacy & Security → Accessibility, then restart this app."
+        let app = nomi_a11y::host_app_label();
+        format!(
+            "If this keeps failing, grant Accessibility permission to {app} in \
+             System Settings → Privacy & Security → Accessibility, then COMPLETELY quit and reopen \
+             {app}. Computer-use runs inside {app} itself, so grant {app} — not a terminal or editor."
+        )
     } else {
-        "Check that the app is allowed to control the mouse and keyboard."
+        "Check that the app is allowed to control the mouse and keyboard.".to_string()
     }
 }
 
@@ -256,6 +269,25 @@ mod tests {
         // Detailed variants embed live status and must still be non-empty.
         assert!(!screen_capture_hint_detailed().is_empty());
         assert!(!accessibility_hint_detailed().is_empty());
+    }
+
+    // The hints must name the host app on macOS so a model stops sending the
+    // user to grant a terminal/editor. Off macOS the message is generic.
+    #[test]
+    fn macos_hints_name_the_host_app() {
+        nomi_a11y::set_host_app_label("NomiFun");
+        if cfg!(target_os = "macos") {
+            assert!(
+                accessibility_hint().contains("NomiFun"),
+                "accessibility hint should name the host app: {}",
+                accessibility_hint()
+            );
+            assert!(
+                screen_capture_hint().contains("NomiFun"),
+                "screen-capture hint should name the host app: {}",
+                screen_capture_hint()
+            );
+        }
     }
 
     #[test]
