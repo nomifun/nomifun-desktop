@@ -147,8 +147,8 @@ pub use orchestrator::{
     Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,
     CreateWorkspaceRequest, Fleet, FleetMember, FleetMemberInput, MemberConstraints, ModelRange,
     ModelRef, OrchWorkspace, PlannedDag, PlannedTask, ReassignRequest, ReplanRequest, Run,
-    RunDetail, RunRenameRequest, RunTask, RunTaskDep, SteerRequest, TaskProfile, UpdateFleetRequest,
-    UpdateWorkspaceRequest, derive_capability,
+    RunDetail, RunRenameRequest, RunTask, RunTaskDep, SteerRequest, TaskProfile,
+    TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest, derive_capability,
 };
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,

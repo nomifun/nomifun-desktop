@@ -80,6 +80,7 @@ import type {
   TRun,
   TRunDetail,
   TSteer,
+  TTaskSpecUpdate,
 } from '../types/orchestrator/orchestratorTypes';
 import type {
   TOrchRunCompletedEvent,
@@ -2716,6 +2717,19 @@ export const orchestrator = {
     ),
     steer: httpPost<void, { run_id: string; task_id: string; updates: TSteer }>(
       (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/steer`,
+      (p) => p.updates
+    ),
+    // Re-execute a single node (UC-2a): resets the task + its settled downstream
+    // dependents to pending and re-activates a terminal run, so the engine re-drives
+    // it. Rejected (400) if the task is currently running (pause/stop first).
+    rerunTask: httpPost<void, { run_id: string; task_id: string }>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/rerun`,
+      () => undefined
+    ),
+    // Fine-tune a node's intent/prompt (UC-2a): replace the task's spec. Rejected
+    // (400) for a blank spec or a running task; a later rerun uses the new spec.
+    updateTaskSpec: httpPatch<void, { run_id: string; task_id: string; updates: TTaskSpecUpdate }>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/spec`,
       (p) => p.updates
     ),
     // List one directory level under a run's working directory (read-only). Root

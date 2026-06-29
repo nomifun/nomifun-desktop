@@ -36,7 +36,7 @@ use nomifun_db::models::{
 };
 use nomifun_db::{
     CreateAssignmentParams, CreateRunParams, CreateTaskParams, IFleetRepository,
-    IOrchWorkspaceRepository, IRunRepository, UpdateRunParams,
+    IOrchWorkspaceRepository, IRunRepository, UpdateRunParams, UpdateTaskParams,
 };
 
 use crate::error::OrchestratorError;
@@ -559,6 +559,206 @@ impl RunService {
             .await
             .map_err(OrchestratorError::from)?;
         self.emitter.emit_task_assigned(run_id, task_id, &req.member_id);
+        Ok(())
+    }
+
+    /// Re-execute a single node (UC-2a): RESET the task to `pending` (clearing its
+    /// prior output + worker conversation, bumping `attempt`), CASCADE the reset
+    /// down to its settled dependents (so they re-run against the new upstream
+    /// output), and RE-ACTIVATE the run (flip a terminal run back to `running`) so
+    /// the engine loop re-drives the now-pending tasks. Owner-scoped (404 missing /
+    /// 403 not-owner, like `delete`/`rename`/`replan`).
+    ///
+    /// **Reject-running (no live-worker clobber):** if the target task is currently
+    /// `running`, this is a `BadRequest` — resetting a live task's row would let its
+    /// in-flight worker settle `done` OVER the reset (the worker future is still
+    /// holding the row and will `update_task(done)` when it returns). The user must
+    /// pause/stop the run first. (This is the validated reverted-workflow lesson.)
+    ///
+    /// **Cascade safety:** the BFS over the dep edges only resets *settled*
+    /// dependents (`done`/`failed`/`skipped`) — a `running` dependent is SKIPPED
+    /// (left untouched), never reset, for the same live-worker reason; a `pending`
+    /// dependent is already going to run, so it needs no reset. The walk is bounded
+    /// by a `seen` guard over the (acyclic) graph.
+    ///
+    /// **Re-activation:** if the run is terminal (`completed`/`failed`/`cancelled`)
+    /// it is flipped back to `running` + emitted, so the boot-resume-style loop the
+    /// route then `engine.start`s has a `running` run to drive. An already-`running`
+    /// run is left as-is (the live loop re-picks the reset tasks on its next sweep);
+    /// the route still pokes the engine so an exited loop respawns. Returns the run
+    /// DTO so the route can mirror `approve`/`replan`'s engine-lifecycle handling.
+    pub async fn rerun_task(&self, user_id: &str, run_id: &str, task_id: &str) -> Result<Run, AppError> {
+        let run = self.owned_run(user_id, run_id).await?;
+
+        // The task must exist and belong to this run.
+        let task = self
+            .run_repo
+            .get_task(task_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("task {task_id}")))?;
+        if task.run_id != run_id {
+            return Err(OrchestratorError::NotFound(format!("task {task_id} in run {run_id}")).into());
+        }
+
+        // Reject re-running a LIVE task: its in-flight worker would settle `done`
+        // over the reset. Pause/stop the run first.
+        if task.status == "running" {
+            return Err(OrchestratorError::BadRequest(
+                "任务运行中，请先暂停/停止再重跑".into(),
+            )
+            .into());
+        }
+
+        // RESET the target task (status→pending, clear output/conv, attempt+1).
+        self.reset_task(task_id, task.attempt).await?;
+        self.emitter.emit_task_status(run_id, task_id, "pending");
+
+        // CASCADE: transitively reset the target's SETTLED dependents so they
+        // re-run with the new upstream output. A `running` dependent is skipped
+        // (never clobbered); a `pending` one needs no reset.
+        let dep_edges = self
+            .run_repo
+            .list_deps(run_id)
+            .await
+            .map_err(OrchestratorError::from)?;
+        let mut frontier: Vec<String> = dep_edges
+            .iter()
+            .filter(|d| d.blocker_task_id == task_id)
+            .map(|d| d.blocked_task_id.clone())
+            .collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(tid) = frontier.pop() {
+            if !seen.insert(tid.clone()) {
+                continue;
+            }
+            if let Some(dep_task) = self
+                .run_repo
+                .get_task(&tid)
+                .await
+                .map_err(OrchestratorError::from)?
+            {
+                // Only reset a SETTLED dependent; never touch a running one.
+                if matches!(dep_task.status.as_str(), "done" | "failed" | "skipped") {
+                    self.reset_task(&tid, dep_task.attempt).await?;
+                    self.emitter.emit_task_status(run_id, &tid, "pending");
+                }
+            }
+            // Enqueue this task's own dependents (transitive cascade).
+            for d in dep_edges.iter().filter(|d| d.blocker_task_id == tid) {
+                frontier.push(d.blocked_task_id.clone());
+            }
+        }
+
+        // RE-ACTIVATE: a terminal run must flip back to `running` so the engine
+        // loop (which the route then starts) has a live run to drive — `run_loop`
+        // fills the now-pending ready tasks and re-settles. An already-running run
+        // needs no flip (its loop re-picks the reset tasks).
+        if matches!(run.status.as_str(), "completed" | "failed" | "cancelled") {
+            self.run_repo
+                .update_run(
+                    run_id,
+                    UpdateRunParams {
+                        status: Some("running".to_string()),
+                        summary: None,
+                        lead_conv_id: None,
+                        total_tokens: None,
+                        goal: None,
+                        autonomy: None,
+                        fleet_snapshot: None,
+                    },
+                )
+                .await
+                .map_err(OrchestratorError::from)?;
+            self.emitter.emit_run_status(run_id, "running");
+        }
+
+        // Return the (possibly re-activated) run so the route can read its status
+        // and start the engine loop.
+        let row = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+        Ok(run_row_to_dto(row))
+    }
+
+    /// Fine-tune a node's intent/prompt (UC-2a, "意图/prompt 微调"): replace the
+    /// task's `spec` (the field the worker brief is built from). Owner-scoped
+    /// (404/403). A subsequent [`rerun_task`](Self::rerun_task) re-executes the node
+    /// with the amended spec. REJECTS a task that is currently `running` — mutating
+    /// a live task's spec would race the in-flight worker (which already composed
+    /// its brief from the OLD spec); the user must pause/stop first. A blank spec is
+    /// a `BadRequest` (the spec drives the worker; an empty intent is meaningless).
+    pub async fn update_task_spec(
+        &self,
+        user_id: &str,
+        run_id: &str,
+        task_id: &str,
+        new_spec: &str,
+    ) -> Result<(), AppError> {
+        let new_spec = new_spec.trim();
+        if new_spec.is_empty() {
+            return Err(OrchestratorError::BadRequest("spec must not be empty".into()).into());
+        }
+        self.owned_run(user_id, run_id).await?;
+
+        let task = self
+            .run_repo
+            .get_task(task_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("task {task_id}")))?;
+        if task.run_id != run_id {
+            return Err(OrchestratorError::NotFound(format!("task {task_id} in run {run_id}")).into());
+        }
+        if task.status == "running" {
+            return Err(OrchestratorError::BadRequest(
+                "任务运行中，请先暂停/停止再微调".into(),
+            )
+            .into());
+        }
+
+        self.run_repo
+            .update_task(
+                task_id,
+                UpdateTaskParams {
+                    spec: Some(new_spec.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+        // Surface a plan-updated signal so subscribers refresh the node's spec.
+        self.emitter.emit_run_plan_updated(run_id);
+        Ok(())
+    }
+
+    /// RESET a settled task for re-execution: status→`pending`, clear
+    /// `output_summary` + `conversation_id` (and `output_files` + any loop carry on
+    /// `pattern_config`), and bump `attempt`. Shared by the target reset + the
+    /// cascade walk in [`rerun_task`]. Mirrors the engine's `settle_loop_task`
+    /// CONTINUE reset (the validated reset shape: pending + clear output/conv +
+    /// attempt+1) so a re-run task is indistinguishable from a fresh dispatch.
+    async fn reset_task(&self, task_id: &str, prior_attempt: i64) -> Result<(), AppError> {
+        self.run_repo
+            .update_task(
+                task_id,
+                UpdateTaskParams {
+                    status: Some("pending".to_string()),
+                    conversation_id: Some(None),
+                    output_summary: Some(None),
+                    output_files: Some(None),
+                    attempt: Some(prior_attempt + 1),
+                    // Clear any stale loop carry so a re-run starts from the (possibly
+                    // amended) spec, not a prior round's brief.
+                    pattern_config: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
         Ok(())
     }
 

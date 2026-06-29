@@ -11,12 +11,12 @@ use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 
 use nomifun_api_types::{
     ApiResponse, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest,
     Fleet, OrchWorkspace, ReassignRequest, ReplanRequest, Run, RunDetail, RunRenameRequest,
-    SteerRequest, UpdateFleetRequest, UpdateWorkspaceRequest, WorkspaceEntry,
+    SteerRequest, TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest, WorkspaceEntry,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -85,6 +85,14 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
         .route(
             "/api/orchestrator/runs/{run_id}/tasks/{task_id}/assignment",
             put(reassign_task),
+        )
+        .route(
+            "/api/orchestrator/runs/{run_id}/tasks/{task_id}/rerun",
+            post(rerun_task),
+        )
+        .route(
+            "/api/orchestrator/runs/{run_id}/tasks/{task_id}/spec",
+            patch(update_task_spec),
         )
         .with_state(state)
 }
@@ -431,6 +439,48 @@ async fn reassign_task(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state.run_service.reassign(&run_id, &task_id, req).await?;
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Re-execute a single node (UC-2a, owner-scoped). The service RESETS the task +
+/// its settled dependents to `pending`, RE-ACTIVATES a terminal run back to
+/// `running`, and returns the (possibly re-activated) run. The route then drives
+/// the engine: only `engine.start` when the loop is NOT already running (mirrors
+/// `resume_run`) — an unconditional start would `stop()` first, cancelling any
+/// in-flight worker conversations of an already-running run (the work the reject-
+/// running guard meant to preserve). A re-activated terminal run had no live loop,
+/// so it is (re)spawned here; an alive loop self-re-picks the reset pending tasks
+/// on its next sweep. The service rejects re-running a `running` task (400).
+async fn rerun_task(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((run_id, task_id)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    state.run_service.rerun_task(&user.id, &run_id, &task_id).await?;
+    // Re-activated terminal run's loop has exited → (re)spawn it; an alive loop
+    // re-picks the reset tasks itself, so do not stop+restart it (would clobber
+    // any in-flight worker of an already-running run).
+    if !state.engine.is_running(&run_id) {
+        state.engine.start(run_id);
+    }
+    Ok(Json(ApiResponse::success()))
+}
+
+/// Fine-tune a node's intent/prompt (UC-2a, owner-scoped). Body is a
+/// [`TaskSpecUpdateRequest`]; the service rejects a blank spec / a `running` task
+/// (400) and updates the task's `spec`. No engine call — this only amends the
+/// node; a subsequent `rerun` re-executes it with the new spec.
+async fn update_task_spec(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((run_id, task_id)): Path<(String, String)>,
+    body: Result<Json<TaskSpecUpdateRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<()>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state
+        .run_service
+        .update_task_spec(&user.id, &run_id, &task_id, &req.spec)
+        .await?;
     Ok(Json(ApiResponse::success()))
 }
 

@@ -271,3 +271,12 @@ export type TReassign = {
 export type TSteer = {
   text: string;
 };
+
+/** Body for `PATCH /api/orchestrator/runs/{run_id}/tasks/{task_id}/spec`.
+ * Fine-tune a node's intent/prompt (UC-2a "意图/prompt 微调"): replace the task's
+ * spec (the prompt the worker brief is built from). Rejected (400) for a blank
+ * spec or a task that is currently running; a subsequent rerun re-executes the
+ * node with the amended spec. */
+export type TTaskSpecUpdate = {
+  spec: string;
+};

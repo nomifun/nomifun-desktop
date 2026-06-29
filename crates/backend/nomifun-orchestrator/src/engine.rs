@@ -770,6 +770,7 @@ async fn dispatch_task(
                         &task_id_for_started,
                         UpdateTaskParams {
                             status: None,
+                            spec: None,
                             conversation_id: Some(Some(conv_id)),
                             output_summary: None,
                             output_files: None,
@@ -823,6 +824,7 @@ async fn settle_task_outcome(
                     task_id,
                     UpdateTaskParams {
                         status: Some("done".to_string()),
+                        spec: None,
                         conversation_id: Some(Some(o.conversation_id)),
                         output_summary: Some(o.text),
                         output_files: None,
@@ -1345,6 +1347,7 @@ async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &Orch
             &task.id,
             UpdateTaskParams {
                 status: Some("done".to_string()),
+                spec: None,
                 conversation_id: None,
                 output_summary: Some(Some(summary)),
                 output_files: None,
@@ -1769,6 +1772,7 @@ async fn settle_judge_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchR
             &task.id,
             UpdateTaskParams {
                 status: Some("done".to_string()),
+                spec: None,
                 conversation_id: None,
                 output_summary: Some(Some(summary)),
                 output_files: None,
@@ -2232,6 +2236,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                     &task.id,
                     UpdateTaskParams {
                         status: None,
+                        spec: None,
                         conversation_id: None,
                         output_summary: Some(Some(state_summary)),
                         output_files: None,
@@ -2267,6 +2272,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                     &body.id,
                     UpdateTaskParams {
                         status: Some("pending".to_string()),
+                        spec: None,
                         conversation_id: Some(None), // clear the prior round's conv
                         output_summary: Some(None),  // clear the prior round's output
                         output_files: Some(None),
@@ -2310,6 +2316,7 @@ async fn finish_loop_controller(
             task_id,
             UpdateTaskParams {
                 status: Some(status.to_string()),
+                spec: None,
                 conversation_id: None,
                 output_summary: Some(Some(summary)),
                 output_files: None,
@@ -2370,6 +2377,7 @@ async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &s
             task_id,
             UpdateTaskParams {
                 status: Some(status.to_string()),
+                spec: None,
                 conversation_id: None,
                 output_summary: None,
                 output_files: None,
@@ -2395,6 +2403,7 @@ async fn mark_task_failed(
             task_id,
             UpdateTaskParams {
                 status: Some("failed".to_string()),
+                spec: None,
                 conversation_id: conversation_id.map(Some),
                 output_summary: None,
                 output_files: None,
@@ -5734,5 +5743,466 @@ mod tests {
             assert_eq!(t.status, "done", "task {} done", t.title);
             assert_eq!(t.kind, "agent", "no loop kind injected");
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UC-2a: manual per-node rerun (reset + cascade + re-activate; reject running)
+    // + node spec/prompt fine-tune (gates on running, reflected in next brief).
+    // These drive a REAL engine through the chain harness so a rerun re-executes
+    // to completion, not just resets state.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Records every `(task_id, task_spec)` brief it was asked to run, so a test
+    /// can prove an amended spec reaches the worker on the re-run. Always succeeds.
+    struct SpecRecordingWorkerRunner {
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    }
+    impl SpecRecordingWorkerRunner {
+        fn new() -> Self {
+            Self { seen: Arc::new(Mutex::new(vec![])) }
+        }
+        fn handle(&self) -> Arc<Mutex<Vec<(String, String)>>> {
+            self.seen.clone()
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for SpecRecordingWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((task_id.to_string(), task_spec.to_string()));
+            on_started(900);
+            Ok(WorkerOutcome {
+                conversation_id: 900,
+                text: Some(format!("output of {task_id}")),
+                ok: true,
+            })
+        }
+    }
+
+    /// Build a chain harness (A→B→C) whose worker is the supplied dyn runner, with
+    /// a real engine. Returns (RunService, RunEngine, run_id) after plan.
+    async fn rerun_chain_harness(
+        worker: Arc<dyn WorkerRunner>,
+    ) -> (RunService, RunEngine, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "rerun fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "rerun ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "rerun chain".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run create");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, run.id)
+    }
+
+    // Rerun a `done` task on a completed run: the task AND its downstream dependents
+    // reset to `pending` and re-execute to `done`; the run re-activates from
+    // `completed` and reaches `completed` again. (Mirrors the route's `engine.start`.)
+    #[tokio::test]
+    async fn rerun_done_task_resets_with_cascade_and_re_executes() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+
+        // First drive to completion (A→B→C all done).
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed", "initial run completes");
+        let a = first.tasks.iter().find(|t| t.title == "A").expect("A").clone();
+        let b = first.tasks.iter().find(|t| t.title == "B").expect("B");
+        let c = first.tasks.iter().find(|t| t.title == "C").expect("C");
+        let (a_attempt, b_attempt, c_attempt) = (a.attempt, b.attempt, c.attempt);
+
+        // Rerun the ROOT task A → it + its transitive dependents (B, C) reset.
+        let run_after = svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun A");
+        assert_eq!(run_after.status, "running", "completed run re-activated to running");
+
+        // Immediately after reset (before the loop re-drives), A/B/C are pending and
+        // their attempt bumped. Read the detail right away — the re-activated loop is
+        // not started yet (the service does the reset synchronously).
+        let reset = svc.get_detail(&run_id).await.expect("detail");
+        for title in ["A", "B", "C"] {
+            let t = reset.tasks.iter().find(|t| t.title == title).unwrap();
+            assert_eq!(t.status, "pending", "{title} reset to pending");
+            assert!(t.output_summary.is_none(), "{title} output cleared");
+            assert!(t.conversation_id.is_none(), "{title} conversation cleared");
+        }
+        let a2 = reset.tasks.iter().find(|t| t.title == "A").unwrap();
+        let b2 = reset.tasks.iter().find(|t| t.title == "B").unwrap();
+        let c2 = reset.tasks.iter().find(|t| t.title == "C").unwrap();
+        assert_eq!(a2.attempt, a_attempt + 1, "A attempt bumped");
+        assert_eq!(b2.attempt, b_attempt + 1, "B (dependent) attempt bumped");
+        assert_eq!(c2.attempt, c_attempt + 1, "C (transitive dependent) attempt bumped");
+
+        // Drive the re-activated run: the engine re-executes the reset tasks to done.
+        engine.start(run_id.clone());
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed", "re-activated run completes again");
+        for t in &second.tasks {
+            assert_eq!(t.status, "done", "task {} re-executed to done", t.title);
+        }
+    }
+
+    // engine.start re-drives a previously-COMPLETED run (confirmation): after
+    // rerun flips it back to `running`, a plain `engine.start` picks up the
+    // now-pending tasks and the run reaches `completed` again. Reruns a LEAF (C)
+    // so only C resets — proving the cascade only touches dependents, not A/B.
+    #[tokio::test]
+    async fn rerun_leaf_resets_only_itself_and_re_completes() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+        let b = first.tasks.iter().find(|t| t.title == "B").unwrap().clone();
+        let c = first.tasks.iter().find(|t| t.title == "C").unwrap().clone();
+
+        svc.rerun_task("u1", &run_id, &c.id).await.expect("rerun C");
+
+        let reset = svc.get_detail(&run_id).await.expect("detail");
+        let a2 = reset.tasks.iter().find(|t| t.title == "A").unwrap();
+        let b2 = reset.tasks.iter().find(|t| t.title == "B").unwrap();
+        let c2 = reset.tasks.iter().find(|t| t.title == "C").unwrap();
+        // Only the leaf reset; A/B (upstream of C) untouched (still done, attempt same).
+        assert_eq!(a2.status, "done", "A upstream untouched");
+        assert_eq!(a2.attempt, a.attempt, "A attempt unchanged");
+        assert_eq!(b2.status, "done", "B upstream untouched");
+        assert_eq!(b2.attempt, b.attempt, "B attempt unchanged");
+        assert_eq!(c2.status, "pending", "C (leaf) reset");
+        assert_eq!(c2.attempt, c.attempt + 1, "C attempt bumped");
+
+        engine.start(run_id.clone());
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed", "engine.start re-drove the completed run");
+        assert_eq!(
+            second.tasks.iter().find(|t| t.title == "C").unwrap().status,
+            "done",
+            "C re-executed"
+        );
+    }
+
+    // Rerun a FAILED task: it re-runs. Seed a run whose worker fails the first time
+    // then succeeds, so the task lands `failed`, then rerun re-executes it to done.
+    #[tokio::test]
+    async fn rerun_failed_task_re_executes() {
+        // A worker that fails the FIRST call then succeeds — so the run fails first,
+        // and the rerun (a fresh call) succeeds.
+        struct FlakyWorker {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl WorkerRunner for FlakyWorker {
+            async fn run(
+                &self,
+                _member: &FleetMember,
+                _workspace_dir: Option<&str>,
+                _run_id: &str,
+                task_id: &str,
+                _brief: &str,
+                _task_spec: &str,
+                _timeout: Duration,
+                on_started: Box<dyn FnOnce(i64) + Send>,
+            ) -> Result<WorkerOutcome, AppError> {
+                on_started(900);
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    // First call: no final text → the engine marks the task failed.
+                    Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false })
+                } else {
+                    Ok(WorkerOutcome {
+                        conversation_id: 900,
+                        text: Some(format!("output of {task_id}")),
+                        ok: true,
+                    })
+                }
+            }
+        }
+        let worker: Arc<dyn WorkerRunner> = Arc::new(FlakyWorker { calls: AtomicUsize::new(0) });
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "failed", "first A fails → run fails");
+        let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+        assert_eq!(a.status, "failed", "A failed");
+
+        // Rerun the failed A → re-activates the failed run + re-executes.
+        let run_after = svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun failed A");
+        assert_eq!(run_after.status, "running", "failed run re-activated to running");
+        engine.start(run_id.clone());
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed", "rerun drives the whole chain to done");
+        for t in &second.tasks {
+            assert_eq!(t.status, "done", "task {} done after rerun", t.title);
+        }
+    }
+
+    // Reject rerunning a RUNNING task: a live worker is in flight (gated), so the
+    // task is `running` — rerun must 400 (no live-worker clobber).
+    #[tokio::test]
+    async fn rerun_rejects_running_task() {
+        // Gated worker keeps the task `running` until released.
+        struct GatedWorker {
+            gate: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl WorkerRunner for GatedWorker {
+            async fn run(
+                &self,
+                _member: &FleetMember,
+                _workspace_dir: Option<&str>,
+                _run_id: &str,
+                task_id: &str,
+                _brief: &str,
+                _task_spec: &str,
+                _timeout: Duration,
+                on_started: Box<dyn FnOnce(i64) + Send>,
+            ) -> Result<WorkerOutcome, AppError> {
+                on_started(900);
+                self.gate.notified().await;
+                Ok(WorkerOutcome {
+                    conversation_id: 900,
+                    text: Some(format!("output of {task_id}")),
+                    ok: true,
+                })
+            }
+        }
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(GatedWorker { gate: gate.clone() });
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+        engine.start(run_id.clone());
+
+        // Wait until task A is `running` (its worker is blocked on the gate).
+        let mut running_id = None;
+        for _ in 0..200 {
+            let d = svc.get_detail(&run_id).await.expect("detail");
+            running_id = d.tasks.iter().find(|t| t.status == "running").map(|t| t.id.clone());
+            if running_id.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let running_id = running_id.expect("a task is running");
+
+        let err = svc
+            .rerun_task("u1", &run_id, &running_id)
+            .await
+            .expect_err("rerun of a running task must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // Release the gated workers (the chain has 3 gated tasks) so the test does
+        // not leak blocked tasks — notify repeatedly until the run settles.
+        tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..20 {
+                    gate.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let _ = drive_to_completion(&svc, &run_id).await;
+    }
+
+    // Edit a non-running task's spec → the task's spec changes AND a subsequent
+    // rerun's brief reflects the NEW spec (the worker is called with the amended
+    // task_spec on the re-run).
+    #[tokio::test]
+    async fn update_spec_changes_spec_and_rerun_uses_new_spec() {
+        let recorder = Arc::new(SpecRecordingWorkerRunner::new());
+        let seen = recorder.handle();
+        let worker: Arc<dyn WorkerRunner> = recorder;
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+        assert_eq!(a.spec, "do A", "initial A spec");
+        // The worker saw the original spec on the first run.
+        assert!(
+            seen.lock().unwrap().iter().any(|(_, s)| s == "do A"),
+            "worker ran A with the original spec"
+        );
+
+        // Amend A's spec, then rerun it.
+        svc.update_task_spec("u1", &run_id, &a.id, "重新做 A（改进版）")
+            .await
+            .expect("update spec");
+        let after_edit = svc.get_detail(&run_id).await.expect("detail");
+        let a_edited = after_edit.tasks.iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(a_edited.spec, "重新做 A（改进版）", "spec persisted");
+
+        svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun A");
+        engine.start(run_id.clone());
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed");
+        // The re-run dispatched A with the AMENDED spec.
+        assert!(
+            seen.lock().unwrap().iter().any(|(tid, s)| *tid == a.id && s == "重新做 A（改进版）"),
+            "rerun's worker brief must use the amended spec; seen={:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    // update_task_spec rejects a blank spec (400) and a running task (400).
+    #[tokio::test]
+    async fn update_spec_rejects_blank_and_running() {
+        // Blank spec → 400 (use the plain mock; the run need not even execute).
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let (svc, _engine, run_id) = rerun_chain_harness(worker).await;
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        let a = detail.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+        let err = svc
+            .update_task_spec("u1", &run_id, &a.id, "   ")
+            .await
+            .expect_err("blank spec must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // Running task → 400. Drive with a gated worker so A is provably running.
+        struct GatedWorker {
+            gate: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl WorkerRunner for GatedWorker {
+            async fn run(
+                &self,
+                _member: &FleetMember,
+                _workspace_dir: Option<&str>,
+                _run_id: &str,
+                task_id: &str,
+                _brief: &str,
+                _task_spec: &str,
+                _timeout: Duration,
+                on_started: Box<dyn FnOnce(i64) + Send>,
+            ) -> Result<WorkerOutcome, AppError> {
+                on_started(900);
+                self.gate.notified().await;
+                Ok(WorkerOutcome { conversation_id: 900, text: Some(format!("out {task_id}")), ok: true })
+            }
+        }
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let worker2: Arc<dyn WorkerRunner> = Arc::new(GatedWorker { gate: gate.clone() });
+        let (svc2, engine2, run_id2) = rerun_chain_harness(worker2).await;
+        engine2.start(run_id2.clone());
+        let mut running_id = None;
+        for _ in 0..200 {
+            let d = svc2.get_detail(&run_id2).await.expect("detail");
+            running_id = d.tasks.iter().find(|t| t.status == "running").map(|t| t.id.clone());
+            if running_id.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let running_id = running_id.expect("a task is running");
+        let err = svc2
+            .update_task_spec("u1", &run_id2, &running_id, "改不了运行中的")
+            .await
+            .expect_err("running task spec edit must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+        tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..20 {
+                    gate.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let _ = drive_to_completion(&svc2, &run_id2).await;
+    }
+
+    // Both per-node controls are owner-scoped: a wrong user gets 403 (Forbidden)
+    // and a missing run 404 (NotFound). The run is left untouched.
+    #[tokio::test]
+    async fn rerun_and_spec_are_owner_scoped() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await; // owned by "u1"
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+
+        // Wrong user → 403 for both controls.
+        let err = svc.rerun_task("intruder", &run_id, &a.id).await.expect_err("cross-user rerun");
+        assert!(matches!(err, AppError::Forbidden(_)), "rerun cross-user is 403, got: {err:?}");
+        let err = svc
+            .update_task_spec("intruder", &run_id, &a.id, "盗改")
+            .await
+            .expect_err("cross-user spec edit");
+        assert!(matches!(err, AppError::Forbidden(_)), "spec cross-user is 403, got: {err:?}");
+
+        // Missing run → 404 for both.
+        let err = svc.rerun_task("u1", "run_missing", &a.id).await.expect_err("missing run rerun");
+        assert!(matches!(err, AppError::NotFound(_)), "rerun missing is 404, got: {err:?}");
+        let err = svc
+            .update_task_spec("u1", "run_missing", &a.id, "x")
+            .await
+            .expect_err("missing run spec edit");
+        assert!(matches!(err, AppError::NotFound(_)), "spec missing is 404, got: {err:?}");
+
+        // The run is untouched: A is still done with its original spec.
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        let a_after = detail.tasks.iter().find(|t| t.title == "A").unwrap();
+        assert_eq!(a_after.status, "done", "non-owner ops did not reset A");
+        assert_eq!(a_after.spec, "do A", "non-owner edit did not change the spec");
     }
 }
