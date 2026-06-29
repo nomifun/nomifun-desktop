@@ -27,6 +27,10 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/associated", get(associated))
         .route("/api/conversations/{id}/messages", get(list_msg).post(send_msg))
         .route("/api/conversations/{id}/messages/{messageId}", get(get_msg))
+        .route(
+            "/api/conversations/{id}/messages/{messageId}/edit-resubmit",
+            post(edit_resubmit),
+        )
         .route("/api/conversations/{id}/artifacts", get(list_artifacts))
         .route("/api/conversations/{id}/artifacts/{artifactId}", patch(update_artifact))
         .route("/api/conversations/{id}/cancel", post(cancel))
@@ -192,6 +196,23 @@ async fn get_msg(
         .get_message(&user.id, &params.id, &params.message_id)
         .await?;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn edit_resubmit(
+    State(state): State<ConversationRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(params): Path<MessagePathParams>,
+    body: Result<Json<SendMessageRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let msg_id = state
+        .service
+        .edit_and_resubmit(&user.id, &params.id, &params.message_id, req, &state.task_manager)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ApiResponse::ok(SendMessageResponse { msg_id })),
+    ))
 }
 
 async fn send_msg(
