@@ -225,6 +225,14 @@
       "sent": "已发送引导消息",
       "error": "发送引导消息失败：{{error}}"
     },
+    "intent": {
+      "label": "调整编排",
+      "placeholder": "描述你想如何调整编排（如：研究太浅，加一道校验和第二个研究员）",
+      "send": "发送调整意图",
+      "summary": "已调整：保留 {{kept}} · 新增 {{added}} · 移除 {{removed}}",
+      "lastApplied": "上次意图：{{intent}}",
+      "error": "调整编排失败：{{error}}"
+    },
     "precipitate": {
       "title": "沉淀为助手",
       "subtitle": "这个 Run 里有 {{count}} 个角色可一键保存为助手，下次直接复用",

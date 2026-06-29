@@ -225,6 +225,14 @@
       "sent": "Steering message sent",
       "error": "Failed to send steering message: {{error}}"
     },
+    "intent": {
+      "label": "Adjust orchestration",
+      "placeholder": "Describe how you'd like the orchestration changed (e.g. research is too shallow, add a verify pass and a second researcher)",
+      "send": "Send adjustment intent",
+      "summary": "Adjusted: kept {{kept}} · added {{added}} · removed {{removed}}",
+      "lastApplied": "Last intent: {{intent}}",
+      "error": "Failed to adjust orchestration: {{error}}"
+    },
     "precipitate": {
       "title": "Save roles as assistants",
       "subtitle": "{{count}} role(s) from this run can be saved as assistants for reuse",
