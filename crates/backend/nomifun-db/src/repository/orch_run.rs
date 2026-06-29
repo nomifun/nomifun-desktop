@@ -96,6 +96,54 @@ pub struct CreateAssignmentParams {
     pub locked: bool,
 }
 
+/// A dependency reference inside a [`ReconcilePlan`], resolved INSIDE the
+/// transaction once the NEW tasks have been minted. Mirrors the service-layer
+/// `AdjustedDepRef` but lives here so the trait never sees orchestrator types:
+/// a `Kept` id resolves directly; a `NewIndex(i)` resolves to the i-th minted
+/// new task. The service validates ranges + acyclicity BEFORE handing the plan
+/// to the repo, so the repo only resolves — it never re-validates the graph.
+pub enum ReconcileDepRef {
+    /// An existing task id the adjusted plan KEPT (survives the reconcile).
+    Kept(String),
+    /// A 0-based index into the [`ReconcilePlan::new_tasks`] vec (a freshly
+    /// minted task in THIS reconcile).
+    NewIndex(usize),
+}
+
+/// One NEW task to insert during a [`reconcile_run_plan`](IRunRepository::reconcile_run_plan):
+/// the create params (sans the still-unminted task id), an OPTIONAL resolved
+/// auto-assignment (the routing decision the service computed in memory — its
+/// `task_id` is ignored/overwritten with the freshly minted id inside the tx),
+/// and the dep refs naming this task's blockers (kept ids and/or earlier
+/// new-task indices). The service resolves the routing pick BEFORE the tx so the
+/// repo only persists — no orchestrator routing logic leaks into the db layer.
+pub struct ReconcileNewTask {
+    /// Create params for the task. `run_id` is filled by the repo from the
+    /// reconcile's `run_id`; the minted id is returned implicitly (used to
+    /// resolve `NewIndex` dep refs that point at this task).
+    pub task: CreateTaskParams,
+    /// The pre-computed auto-assignment for this task, or `None` to skip
+    /// assigning it (e.g. an empty fleet snapshot — the engine will fail it).
+    pub assignment: Option<CreateAssignmentParams>,
+    /// The blockers this task depends on (resolved to ids inside the tx).
+    pub depends_on: Vec<ReconcileDepRef>,
+}
+
+/// A fully-resolved conversational-reconcile plan, computed IN MEMORY by the
+/// service ([`RunService::adjust`]) and applied ATOMICALLY by
+/// [`reconcile_run_plan`](IRunRepository::reconcile_run_plan). The service does
+/// ALL judgment first — validates kept ids exist, decides the routing pick per
+/// new task, and proves the final (kept + new) graph is ACYCLIC — then hands this
+/// over so the repo's only job is to persist it in one transaction (all-or-nothing).
+pub struct ReconcilePlan {
+    /// Existing task ids the adjusted plan did NOT keep → delete (cascading each
+    /// task's deps + assignment). KEPT tasks are absent here and untouched.
+    pub delete_task_ids: Vec<String>,
+    /// The NEW tasks to insert (pending) + route. Order is significant: a
+    /// `ReconcileDepRef::NewIndex(i)` resolves to `new_tasks[i]`'s minted id.
+    pub new_tasks: Vec<ReconcileNewTask>,
+}
+
 /// Data access abstraction for one orchestration-run aggregate: the
 /// `orch_runs` + `orch_run_tasks` + `orch_run_task_deps` + `orch_assignments`
 /// tables. A run owns a task DAG; deps are `blocker → blocked` edges; ready
@@ -185,6 +233,26 @@ pub trait IRunRepository: Send + Sync {
 
     /// Return all dependency edges for tasks belonging to a run.
     async fn list_deps(&self, run_id: &str) -> Result<Vec<OrchRunTaskDepRow>, sqlx::Error>;
+
+    /// Apply a fully-resolved conversational-reconcile plan ATOMICALLY (UC-3a 评审
+    /// Important-A): in ONE transaction, (1) clear the run's dep edges, (2) delete
+    /// every un-kept task (cascading its deps + assignment), (3) insert each NEW
+    /// task (pending) + its pre-computed assignment, and (4) rebuild the dep edges
+    /// from the plan (resolving `NewIndex` refs to the freshly minted ids). The
+    /// whole sequence is `pool.begin()…commit()`: a mid-way error rolls the WHOLE
+    /// thing back, so a DB failure leaves the run EXACTLY as it was (no durable
+    /// half-state). The service ([`RunService::adjust`]) does all judgment first —
+    /// validates kept ids, decides routing, proves acyclicity — so the repo only
+    /// persists. KEPT tasks (absent from `delete_task_ids`) and their completed
+    /// output/conversation/assignment are untouched. Requires `PRAGMA
+    /// foreign_keys=ON` (project default) for the delete cascades. A self-edge
+    /// (blocker == blocked) is skipped (the table CHECKs blocker <> blocked).
+    async fn reconcile_run_plan(
+        &self,
+        run_id: &str,
+        plan: ReconcilePlan,
+    ) -> Result<(), sqlx::Error>;
+
 
     /// Return the run's currently-runnable tasks: `status == 'pending'` AND
     /// every blocker task is `'done'` (a task with zero deps is ready).

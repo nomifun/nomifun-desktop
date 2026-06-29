@@ -47,7 +47,8 @@ pub use repository::{
 pub use repository::{
     CreateAssignmentParams, CreateFleetParams, CreateOrchWorkspaceParams, CreateRunParams,
     CreateTaskParams, IFleetRepository, IOrchWorkspaceRepository, IRunRepository, NewFleetMember,
-    SqliteFleetRepository, SqliteOrchWorkspaceRepository, SqliteRunRepository, UpdateFleetParams,
+    ReconcileDepRef, ReconcileNewTask, ReconcilePlan, SqliteFleetRepository,
+    SqliteOrchWorkspaceRepository, SqliteRunRepository, UpdateFleetParams,
     UpdateOrchWorkspaceParams, UpdateRunParams, UpdateTaskParams,
 };
 
