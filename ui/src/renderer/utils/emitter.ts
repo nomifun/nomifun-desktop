@@ -64,6 +64,7 @@ interface EventTypes {
   'sendbox.fill': [string]; // prompt text to fill
   'sendbox.reply': [ReplyQuote]; // reply/quote a message
   'sendbox.reply.clear': void; // clear reply quote
+  'sendbox.edit': [{ msgId: string; createdAt: number; content: string }]; // edit a sent user message (recall into composer)
   'staroffice.install.request': [{ conversation_id: string; text: string; detectedUrl?: string | null }];
   'staroffice.install.finished': [{ conversation_id: string }];
 }

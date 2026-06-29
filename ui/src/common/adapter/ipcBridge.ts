@@ -275,6 +275,13 @@ export const conversation = {
       inject_skills: p.inject_skills,
     })
   ),
+  editResubmit: httpPost<ISendMessageResult, { conversation_id: number; msg_id: string; input: string; files?: string[] }>(
+    (p) => `/api/conversations/${p.conversation_id}/messages/${p.msg_id}/edit-resubmit`,
+    (p) => ({
+      content: p.input,
+      files: p.files,
+    })
+  ),
   getSlashCommands: httpGet<Array<{ command: string; description: string }>, { conversation_id: number }>(
     (p) => `/api/conversations/${p.conversation_id}/slash-commands`
   ),
