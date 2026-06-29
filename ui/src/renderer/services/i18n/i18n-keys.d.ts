@@ -2048,6 +2048,7 @@ export type I18nKey =
   | 'orchestrator.run.assign.reassignError'
   | 'orchestrator.run.assign.reassignSuccess'
   | 'orchestrator.run.assign.score'
+  | 'orchestrator.run.canvas.mainNode'
   | 'orchestrator.run.detail.approveError'
   | 'orchestrator.run.detail.approveOk'
   | 'orchestrator.run.detail.approvePlan'
