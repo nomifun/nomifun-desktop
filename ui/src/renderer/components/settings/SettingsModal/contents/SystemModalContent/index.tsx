@@ -9,6 +9,7 @@ import { ipcBridge } from '@/common';
 import type { IGpuStatus, IStartOnBootStatus } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { iconColors } from '@/renderer/styles/colors';
@@ -56,6 +57,7 @@ const SystemModalContent: React.FC = () => {
   const [cronNotificationEnabled, setCronNotificationEnabled] = useState(false);
   const [saveUploadToWorkspace, setSaveUploadToWorkspace] = useState(false);
   const [autoPreviewOfficeFiles, setAutoPreviewOfficeFiles] = useState(true);
+  const [sendKey, setSendKey] = useState<'enter' | 'mod-enter'>('enter');
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
 
   useEffect(() => {
@@ -87,6 +89,7 @@ const SystemModalContent: React.FC = () => {
     setCronNotificationEnabled(configService.get('system.cronNotificationEnabled') ?? false);
     setSaveUploadToWorkspace(configService.get('upload.saveToWorkspace') ?? false);
     setAutoPreviewOfficeFiles(configService.get('system.autoPreviewOfficeFiles') ?? true);
+    setSendKey(configService.get('chat.sendKey') ?? 'enter');
   }, [isDesktop]);
 
   const handleHardwareAccelerationChange = useCallback(
@@ -184,6 +187,15 @@ const SystemModalContent: React.FC = () => {
     });
   }, []);
 
+  const handleSendKeyChange = useCallback((value: 'enter' | 'mod-enter') => {
+    setSendKey(value);
+    configService.set('chat.sendKey', value).catch(() => {
+      const fallback = value === 'enter' ? 'mod-enter' : 'enter';
+      setSendKey(fallback);
+      configService.setLocal('chat.sendKey', fallback);
+    });
+  }, []);
+
   const { keepAwake, setKeepAwake: applyKeepAwake } = useKeepAwake();
 
   const handleKeepAwakeChange = useCallback(async (checked: boolean) => {
@@ -215,6 +227,21 @@ const SystemModalContent: React.FC = () => {
 
   const preferenceItems = [
     { key: 'language', label: t('settings.language'), component: <LanguageSwitcher /> },
+    {
+      key: 'sendKey',
+      label: t('settings.sendKey'),
+      description: t('settings.sendKeyDesc'),
+      component: (
+        <NomiSelect
+          className='w-200px'
+          value={sendKey}
+          onChange={(v) => handleSendKeyChange(v as 'enter' | 'mod-enter')}
+        >
+          <NomiSelect.Option value='enter'>{t('settings.sendKeyEnter')}</NomiSelect.Option>
+          <NomiSelect.Option value='mod-enter'>{t('settings.sendKeyModEnter')}</NomiSelect.Option>
+        </NomiSelect>
+      ),
+    },
     {
       key: 'startOnBoot',
       label: t('settings.startOnBoot'),
