@@ -320,6 +320,18 @@ impl IRunRepository for SqliteRunRepository {
         Ok(())
     }
 
+    async fn delete_task(&self, id: &str) -> Result<(), sqlx::Error> {
+        // One statement: deleting the task fires the task-keyed `ON DELETE CASCADE`
+        // FKs (migration 018), sweeping out its dep edges (as blocker OR blocked)
+        // and its assignment. The run row + its OTHER tasks are untouched. Requires
+        // PRAGMA foreign_keys=ON on the connection (project default).
+        sqlx::query("DELETE FROM orch_run_tasks WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn clear_run_tasks(&self, run_id: &str) -> Result<(), sqlx::Error> {
         // One statement: deleting the run's tasks fires the task-keyed
         // `ON DELETE CASCADE` FKs (migration 018), sweeping out that run's deps +
@@ -340,6 +352,21 @@ impl IRunRepository for SqliteRunRepository {
         )
         .bind(blocker)
         .bind(blocked)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn clear_run_deps(&self, run_id: &str) -> Result<(), sqlx::Error> {
+        // Delete only this run's edges (join the blocked task back to its run);
+        // the tasks themselves are untouched. Used by conversational reconcile to
+        // rebuild the DAG while preserving KEPT task rows + their output.
+        sqlx::query(
+            "DELETE FROM orch_run_task_deps WHERE blocked_task_id IN (\
+                 SELECT id FROM orch_run_tasks WHERE run_id = ?\
+             )",
+        )
+        .bind(run_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1082,5 +1109,147 @@ mod tests {
 
         // The untouched run's task survived (clear is scoped to the target run).
         assert!(repo.get_task(&s_task.id).await.unwrap().is_some(), "survivor task kept");
+    }
+
+    // UC-3a: delete_task removes ONE task (cascading its dep edges — as blocker
+    // OR blocked — and its assignment) while the run + its OTHER tasks survive
+    // intact. This is the conversational-reconcile "drop an unkept task" step.
+    #[tokio::test]
+    async fn delete_task_removes_one_task_and_cascades_its_edges_and_assignment() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "reconcile".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let mk = |title: &str| CreateTaskParams {
+            run_id: run.id.clone(),
+            title: title.into(),
+            spec: "s".into(),
+            task_profile: None,
+            status: "pending".into(),
+            graph_x: None,
+            graph_y: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        // A→B→C chain; delete B (the middle task) — both its edges (A→B, B→C) and
+        // its assignment must cascade; A and C (and their kept edges/assignments)
+        // survive.
+        let a = repo.create_task(mk("A")).await.unwrap();
+        let b = repo.create_task(mk("B")).await.unwrap();
+        let c = repo.create_task(mk("C")).await.unwrap();
+        repo.add_dep(&a.id, &b.id).await.unwrap();
+        repo.add_dep(&b.id, &c.id).await.unwrap();
+        for t in [&a, &b, &c] {
+            repo.create_assignment(CreateAssignmentParams {
+                task_id: t.id.clone(),
+                member_id: "fmem_x".into(),
+                score: None,
+                rationale: None,
+                source: "auto".into(),
+                locked: false,
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(repo.list_tasks(&run.id).await.unwrap().len(), 3);
+        assert_eq!(repo.list_deps(&run.id).await.unwrap().len(), 2);
+        assert_eq!(repo.list_assignments(&run.id).await.unwrap().len(), 3);
+
+        repo.delete_task(&b.id).await.unwrap();
+
+        // B is gone; A and C survive.
+        assert!(repo.get_task(&b.id).await.unwrap().is_none(), "B deleted");
+        assert!(repo.get_task(&a.id).await.unwrap().is_some(), "A kept");
+        assert!(repo.get_task(&c.id).await.unwrap().is_some(), "C kept");
+        // Both of B's edges cascaded → zero edges remain.
+        assert!(repo.list_deps(&run.id).await.unwrap().is_empty(), "B's edges cascaded");
+        // B's assignment cascaded; A's and C's survive.
+        assert_eq!(repo.list_assignments(&run.id).await.unwrap().len(), 2, "only B's assignment gone");
+        assert!(repo.get_assignment_for_task(&b.id).await.unwrap().is_none(), "B's assignment gone");
+        assert!(repo.get_assignment_for_task(&a.id).await.unwrap().is_some(), "A's assignment kept");
+        // The run row survives.
+        assert!(repo.get_run(&run.id).await.unwrap().is_some(), "run kept");
+    }
+
+    // UC-3a: clear_run_deps removes ALL of a run's dep edges while leaving the
+    // tasks (and their assignments) intact — the reconcile "rebuild the DAG" step.
+    // A second run's edges are untouched (scoped to the target run).
+    #[tokio::test]
+    async fn clear_run_deps_clears_edges_keeps_tasks() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id.clone()),
+                user_id: "u1".into(),
+                goal: "rewire".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let mk = |run_id: String, title: &str| CreateTaskParams {
+            run_id,
+            title: title.into(),
+            spec: "s".into(),
+            task_profile: None,
+            status: "pending".into(),
+            graph_x: None,
+            graph_y: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        let a = repo.create_task(mk(run.id.clone(), "A")).await.unwrap();
+        let b = repo.create_task(mk(run.id.clone(), "B")).await.unwrap();
+        repo.add_dep(&a.id, &b.id).await.unwrap();
+
+        // A second run with its own edge that must survive.
+        let other = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "other".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let oa = repo.create_task(mk(other.id.clone(), "OA")).await.unwrap();
+        let ob = repo.create_task(mk(other.id.clone(), "OB")).await.unwrap();
+        repo.add_dep(&oa.id, &ob.id).await.unwrap();
+
+        assert_eq!(repo.list_deps(&run.id).await.unwrap().len(), 1);
+
+        repo.clear_run_deps(&run.id).await.unwrap();
+
+        // The target run's edges are gone but its tasks survive.
+        assert!(repo.list_deps(&run.id).await.unwrap().is_empty(), "target run edges cleared");
+        assert!(repo.get_task(&a.id).await.unwrap().is_some(), "task A kept");
+        assert!(repo.get_task(&b.id).await.unwrap().is_some(), "task B kept");
+        // The OTHER run's edge is untouched.
+        assert_eq!(repo.list_deps(&other.id).await.unwrap().len(), 1, "other run's edge survives");
     }
 }

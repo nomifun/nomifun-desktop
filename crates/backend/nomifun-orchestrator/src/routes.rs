@@ -14,9 +14,10 @@ use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 
 use nomifun_api_types::{
-    ApiResponse, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest, CreateWorkspaceRequest,
-    Fleet, OrchWorkspace, ReassignRequest, ReplanRequest, Run, RunDetail, RunRenameRequest,
-    SteerRequest, TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest, WorkspaceEntry,
+    ApiResponse, AdjustRunRequest, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,
+    CreateWorkspaceRequest, Fleet, OrchWorkspace, ReassignRequest, ReplanRequest, Run, RunDetail,
+    RunRenameRequest, SteerRequest, TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest,
+    WorkspaceEntry,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -71,6 +72,7 @@ pub fn orchestrator_routes(state: OrchestratorRouterState) -> Router {
         )
         .route("/api/orchestrator/runs/{id}/cancel", post(cancel_run))
         .route("/api/orchestrator/runs/{id}/replan", post(replan_run))
+        .route("/api/orchestrator/runs/{id}/adjust", post(adjust_run))
         .route("/api/orchestrator/runs/{id}/approve", post(approve_run))
         .route("/api/orchestrator/runs/{id}/pause", post(pause_run))
         .route("/api/orchestrator/runs/{id}/resume", post(resume_run))
@@ -361,6 +363,37 @@ async fn replan_run(
     let run = state.run_service.replan(&user.id, &id, req).await?;
     if run.autonomy != "interactive" {
         state.engine.start(run.id.clone());
+    }
+    Ok(Json(ApiResponse::ok(run)))
+}
+
+/// Conversation-driven intelligent re-adjust (UC-3a, owner-scoped). Goes through
+/// [`RunEngine::adjust`](crate::engine::RunEngine::adjust) so the service's WHOLE
+/// reconcile (clear deps + drop unkept + insert/route new + rebuild deps) and the
+/// terminal-run re-activation run UNDER the engine's per-run lock (the SAME lock
+/// the run-loop's terminal-check-and-finish holds) — closing the re-activation
+/// race (a lock-free reconcile could be overwritten by a loop concurrently writing
+/// `completed`/`failed`, stranding the run with freshly-added pending tasks). The
+/// lock is released before the engine-lifecycle decision below: only `engine.start`
+/// when the loop is NOT already running (mirrors `rerun_run`/`resume_run`) — an
+/// unconditional start would `stop()` first, cancelling in-flight work of an
+/// already-running run. A re-activated terminal run had its loop deregister under
+/// the lock as it finished, so `!is_running` is authoritative and the fresh loop is
+/// (re)spawned; an alive loop self-re-picks the new pending tasks. The service
+/// rejects a blank intent / a run with any `running` task (400, mutating nothing).
+async fn adjust_run(
+    State(state): State<OrchestratorRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<AdjustRunRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<Run>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let run = state
+        .engine
+        .adjust(&state.run_service, &user.id, &id, &req.intent)
+        .await?;
+    if run.status == "running" && !state.engine.is_running(&id) {
+        state.engine.start(id);
     }
     Ok(Json(ApiResponse::ok(run)))
 }
@@ -1022,7 +1055,64 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // P3b Task 1 (bug guard): `POST .../resume` must NOT cancel an in-flight
+    // UC-3a: POST /runs/{id}/adjust route. Mirrors the seeded-run smoke pattern.
+    // The seeded run is planned by EmptyPlanProducer (no `adjust` support → the
+    // default trait `adjust` errors), so an owner reaching the handler gets a
+    // BadRequest (NOT 404/405): that still confirms the route is MOUNTED UNDER
+    // auth + reaches the service. Without the CurrentUser layer the handler cannot
+    // run (axum 0.8 MissingExtension → 500) — guarding it is not a public route.
+    // -------------------------------------------------------------------------
+
+    /// `POST /api/orchestrator/runs/{id}/adjust` with an `AdjustRunRequest` body is
+    /// MOUNTED under auth: with the CurrentUser layer the owner reaches the handler
+    /// (the route is not 404/405). The seeded run's planner does not support adjust
+    /// so the body errors with 400 — which still proves routing + auth extraction.
+    #[tokio::test]
+    async fn adjust_run_is_mounted_under_auth() {
+        let (state, run_id) = build_state_with_run().await; // run owned by "u1"
+        let app = orchestrator_routes(state).layer(axum::Extension(CurrentUser {
+            id: "u1".to_string(),
+            username: "tester".to_string(),
+        }));
+
+        let body = serde_json::json!({ "intent": "把报告改成中文" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/orchestrator/runs/{run_id}/adjust"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        // Mounted + reached the handler: NOT a routing miss (404) / method miss (405).
+        assert_ne!(resp.status(), StatusCode::NOT_FOUND, "adjust route must be mounted");
+        assert_ne!(resp.status(), StatusCode::METHOD_NOT_ALLOWED, "POST must be allowed");
+    }
+
+    /// `POST /api/orchestrator/runs/{id}/adjust` still requires the `CurrentUser`
+    /// extension — without it the handler cannot run (non-200). Guards the adjust
+    /// route was not wired as a public route.
+    #[tokio::test]
+    async fn adjust_run_without_user_is_not_ok() {
+        let (state, run_id) = build_state_with_run().await;
+        let app = orchestrator_routes(state);
+        let body = serde_json::json!({ "intent": "x" }).to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/orchestrator/runs/{run_id}/adjust"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .expect("request");
+        assert_ne!(resp.status(), StatusCode::OK);
+    }
     // worker. At cap=1, pausing a run with one live worker is the standard pause
     // state; the buggy resume_run called `engine.start` UNCONDITIONALLY, whose
     // `stop()` cancels every in-flight worker conversation — destroying the live

@@ -258,6 +258,16 @@ export type TReplanRequest = {
   pinned_roles?: string[];
 };
 
+/** Body for `POST /api/orchestrator/runs/{id}/adjust`. Conversation-driven
+ * intelligent re-adjust (UC-3a): the lead model judges, per task, whether to KEEP
+ * the completed work or re-decompose, and the backend reconciles the run to the
+ * result — preserving the work it chose to keep (unlike replan, which wipes the
+ * whole plan). Rejected (400) for a blank `intent` or a run with any running task
+ * (pause first). Mirrors the backend `AdjustRunRequest`. */
+export type TAdjustRunRequest = {
+  intent: string;
+};
+
 /** Body for `PUT /api/orchestrator/runs/{run_id}/tasks/{task_id}/assignment`.
  * Reassign a task to a different fleet member and/or lock the assignment so the
  * orchestrator's auto-router won't override it on the next plan update. */

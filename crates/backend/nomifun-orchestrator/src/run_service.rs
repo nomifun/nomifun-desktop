@@ -350,58 +350,15 @@ impl RunService {
                 }
             }
 
-            let profile = planned.task_profile.clone().unwrap_or_else(default_profile);
-            let ranked = rank_members(&members, &profile);
-
-            // Decide the member index + the score/rationale to record.
-            let pick = if ranked.is_empty() {
-                // All hard-filtered: fall back so the task still gets assigned.
-                resolve_member(&members, planned.member_index).map(|m| AssignmentPick {
-                    member_id: m.id.clone(),
-                    score: None,
-                    rationale: planned.rationale.clone(),
-                })
-            } else {
-                // Honor the planner's pre-assignment whenever it is VIABLE (present
-                // anywhere in `ranked` = it survived the hard filters). Only when the
-                // planner abstained, or its pick was hard-filtered (absent from
-                // `ranked` = vetoed), do we fall back to the Router's top pick.
-                let planner_choice = planned
-                    .member_index
-                    .and_then(|mi| ranked.iter().find(|c| c.member_index == mi));
-                let chosen = planner_choice.unwrap_or(&ranked[0]);
-                members.get(chosen.member_index).map(|m| AssignmentPick {
-                    member_id: m.id.clone(),
-                    score: Some(chosen.score),
-                    rationale: Some(chosen.rationale.clone()),
-                })
-            };
-
-            let Some(pick) = pick else {
-                tracing::warn!(
-                    run_id,
-                    task_idx = idx,
-                    "fleet snapshot has no members; cannot assign task (engine will fail it)"
-                );
-                continue;
-            };
-
-            // `plan` mints fresh tasks every call, so each task_id here is new and
-            // has no prior assignment — `create_assignment` never stacks. The
-            // locked-skip guard above is defensive (in case a future re-plan reuses
-            // task ids): an existing locked assignment is honored, not overwritten.
-            self.run_repo
-                .create_assignment(CreateAssignmentParams {
-                    task_id: task_id.clone(),
-                    member_id: pick.member_id.clone(),
-                    score: pick.score,
-                    rationale: pick.rationale,
-                    source: "auto".to_string(),
-                    locked: false,
-                })
-                .await
-                .map_err(OrchestratorError::from)?;
-            self.emitter.emit_task_assigned(run_id, task_id, &pick.member_id);
+            self.assign_task(
+                run_id,
+                task_id,
+                &members,
+                planned.task_profile.as_ref(),
+                planned.member_index,
+                planned.rationale.as_deref(),
+            )
+            .await?;
         }
 
         self.emitter.emit_run_plan_updated(run_id);
@@ -433,6 +390,70 @@ impl RunService {
             .await
             .map_err(OrchestratorError::from)?;
         self.emitter.emit_run_status(run_id, next_status);
+        Ok(())
+    }
+
+    /// Route + persist ONE task's auto-assignment (the LLM-primary + Router-veto
+    /// pick) and emit `task.assigned`. Extracted from [`plan`](Self::plan) so the
+    /// conversational reconcile path ([`adjust`](Self::adjust)) routes its NEW
+    /// tasks IDENTICALLY (same Router behavior, same `source = "auto"`). `profile`
+    /// is the task's [`TaskProfile`] (or a neutral default), `member_index` the
+    /// planner's pre-assignment (honored when viable), `rationale` the planner's
+    /// note (used only on the all-hard-filtered fallback). A snapshot with no
+    /// members logs a warn + skips (the engine will fail the task).
+    async fn assign_task(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        members: &[FleetMember],
+        task_profile: Option<&TaskProfile>,
+        member_index: Option<usize>,
+        rationale: Option<&str>,
+    ) -> Result<(), AppError> {
+        let profile = task_profile.cloned().unwrap_or_else(default_profile);
+        let ranked = rank_members(members, &profile);
+
+        // Decide the member index + the score/rationale to record.
+        let pick = if ranked.is_empty() {
+            // All hard-filtered: fall back so the task still gets assigned.
+            resolve_member(members, member_index).map(|m| AssignmentPick {
+                member_id: m.id.clone(),
+                score: None,
+                rationale: rationale.map(str::to_string),
+            })
+        } else {
+            // Honor a VIABLE pre-assignment (present in `ranked` = survived the
+            // hard filters); else fall back to the Router's top pick.
+            let planner_choice = member_index.and_then(|mi| ranked.iter().find(|c| c.member_index == mi));
+            let chosen = planner_choice.unwrap_or(&ranked[0]);
+            members.get(chosen.member_index).map(|m| AssignmentPick {
+                member_id: m.id.clone(),
+                score: Some(chosen.score),
+                rationale: Some(chosen.rationale.clone()),
+            })
+        };
+
+        let Some(pick) = pick else {
+            tracing::warn!(
+                run_id,
+                task_id,
+                "fleet snapshot has no members; cannot assign task (engine will fail it)"
+            );
+            return Ok(());
+        };
+
+        self.run_repo
+            .create_assignment(CreateAssignmentParams {
+                task_id: task_id.to_string(),
+                member_id: pick.member_id.clone(),
+                score: pick.score,
+                rationale: pick.rationale,
+                source: "auto".to_string(),
+                locked: false,
+            })
+            .await
+            .map_err(OrchestratorError::from)?;
+        self.emitter.emit_task_assigned(run_id, task_id, &pick.member_id);
         Ok(())
     }
 
@@ -1015,6 +1036,245 @@ impl RunService {
         // Return the re-planned run so the route can read its (possibly switched)
         // autonomy to decide whether to (re)start the engine — mirrors create /
         // create_adhoc (which `engine.start` only for non-`interactive` runs).
+        let row = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+        Ok(run_row_to_dto(row))
+    }
+
+    /// UC-3a — **conversation-driven intelligent re-adjust**. The user expresses a
+    /// free-form `intent` against an EXISTING run; the lead model (one-shot, no
+    /// persistent session) sees the intent + the CURRENT run state and JUDGES, per
+    /// task, whether to KEEP the completed work or re-decompose. The service then
+    /// RECONCILEs the current plan to the lead's adjusted plan:
+    ///
+    /// - **KEEP** = the existing task ids the adjusted plan kept → their rows
+    ///   (status / output_summary / conversation_id / tokens / assignment) are left
+    ///   UNTOUCHED — completed work is preserved, never re-run.
+    /// - **DROP** = existing tasks NOT kept → deleted (cascading their deps +
+    ///   assignment). The lead chose to discard/replace them.
+    /// - **NEW** = the adjusted plan's new tasks → inserted `pending` and routed via
+    ///   the SAME [`assign_task`](Self::assign_task) path the planner uses.
+    /// - **DEPS** = the run's edges are cleared and REBUILT from the adjusted plan:
+    ///   every node's `depends_on` (kept-id strings + new-index ints) is resolved to
+    ///   task ids and wired. A kept DONE task with new deps is fine — its deps are
+    ///   already satisfied (it is done), so it is not re-run.
+    ///
+    /// **Running-task safety (the chosen SAFE option — REJECT):** if ANY task is
+    /// currently `running`, `adjust` is a `BadRequest` ("运行中,请先暂停再重调") and
+    /// NOTHING is mutated. A running task has a live worker holding its row (it will
+    /// `update_task` when it returns); deleting/rewiring it under the worker is the
+    /// Phase-2 live-clobber hazard. Rejecting (vs. force-keeping) keeps the contract
+    /// simple and the run state coherent — the user pauses, then re-adjusts.
+    ///
+    /// **No-strand (lock + re-activation):** the WHOLE reconcile + the terminal-run
+    /// re-activation runs under the engine's per-run lock — call it via
+    /// [`RunEngine::adjust`](crate::engine::RunEngine::adjust), NOT directly in
+    /// production. That serializes it with the run loop's terminal-check-and-finish
+    /// (mirroring [`rerun_task`](Self::rerun_task)): the re-activation re-reads the
+    /// run status FRESH, so a run the loop concluded terminal AFTER our `owned_run`
+    /// read is still flipped back to `running` (never stranded terminal-with-pending).
+    ///
+    /// Owner-scoped (404 missing / 403 not-owner). A bad adjusted plan (unparseable
+    /// / empty / referencing an unknown kept id) is surfaced as an error with the
+    /// run UNCHANGED (no partial mutation — every validation precedes the writes).
+    pub async fn adjust(&self, user_id: &str, run_id: &str, intent: &str) -> Result<Run, AppError> {
+        let intent = intent.trim();
+        if intent.is_empty() {
+            return Err(OrchestratorError::BadRequest("意图不能为空".into()).into());
+        }
+        // 404 (missing) / 403 (not owner) BEFORE any read of run internals.
+        let run = self.owned_run(user_id, run_id).await?;
+
+        // Snapshot the CURRENT run state for the lead + for validation/reconcile.
+        let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
+        let current_tasks = self.run_repo.list_tasks(run_id).await.map_err(OrchestratorError::from)?;
+        let current_deps = self.run_repo.list_deps(run_id).await.map_err(OrchestratorError::from)?;
+
+        // SAFETY: refuse to re-adjust while any worker is in-flight. Checked BEFORE
+        // calling the lead so we fail fast and mutate nothing.
+        if current_tasks.iter().any(|t| t.status == "running") {
+            return Err(OrchestratorError::BadRequest(
+                "运行中，请先暂停再重调".into(),
+            )
+            .into());
+        }
+
+        let task_dtos: Vec<RunTask> =
+            current_tasks.iter().cloned().map(task_row_to_dto).collect();
+        let dep_dtos: Vec<RunTaskDep> =
+            current_deps.iter().cloned().map(dep_row_to_dto).collect();
+
+        // The lead JUDGES keep-vs-redo. Fail-soft TO AN ERROR: a garbled adjusted
+        // plan returns BadRequest (the run is still untouched at this point).
+        let plan = self.planner.adjust(intent, &task_dtos, &dep_dtos, &members).await?;
+
+        // VALIDATE every kept id exists in the current run BEFORE mutating — an
+        // adjusted plan that references a stale/foreign id is a bad plan; reject it
+        // so we never delete real tasks chasing an unresolvable keep.
+        let current_ids: std::collections::HashSet<&str> =
+            current_tasks.iter().map(|t| t.id.as_str()).collect();
+        let mut kept_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &plan.tasks {
+            if let crate::plan::AdjustedNode::Keep { keep } = node {
+                if !current_ids.contains(keep.as_str()) {
+                    return Err(OrchestratorError::BadRequest(format!(
+                        "调整计划保留了不存在的任务 {keep};运行未改动"
+                    ))
+                    .into());
+                }
+                kept_ids.insert(keep.clone());
+            }
+        }
+
+        // ---- RECONCILE (all writes from here; preceded by full validation) ----
+
+        // (1) Clear the run's dep edges (kept tasks lose their wiring but SURVIVE);
+        //     we rebuild all edges from the adjusted plan at the end.
+        self.run_repo
+            .clear_run_deps(run_id)
+            .await
+            .map_err(OrchestratorError::from)?;
+
+        // (2) DROP every existing task the adjusted plan did NOT keep (cascades its
+        //     assignment; its deps are already cleared). KEEP tasks are untouched —
+        //     their status/output/conversation/tokens/assignment are preserved.
+        for t in &current_tasks {
+            if !kept_ids.contains(&t.id) {
+                self.run_repo
+                    .delete_task(&t.id)
+                    .await
+                    .map_err(OrchestratorError::from)?;
+                self.emitter.emit_task_status(run_id, &t.id, "removed");
+            }
+        }
+
+        // (3) INSERT each NEW task (pending) + route it. Record a per-node id map so
+        //     dep refs resolve: a kept node maps to its existing id; a new node maps
+        //     to the freshly-minted id. The map is indexed by the adjusted plan's
+        //     node order (so a NewIndex(i) ref resolves to node i's id).
+        let mut node_ids: Vec<String> = Vec::with_capacity(plan.tasks.len());
+        for node in &plan.tasks {
+            match node {
+                crate::plan::AdjustedNode::Keep { keep } => {
+                    node_ids.push(keep.clone());
+                }
+                crate::plan::AdjustedNode::New(new_task) => {
+                    let created = self
+                        .run_repo
+                        .create_task(CreateTaskParams {
+                            run_id: run_id.to_string(),
+                            title: new_task.title.clone(),
+                            spec: new_task.spec.clone(),
+                            task_profile: None,
+                            status: "pending".to_string(),
+                            graph_x: None,
+                            graph_y: None,
+                            role: new_task.role.clone(),
+                            kind: new_task.kind.clone(),
+                            pattern_config: new_task.pattern_config.clone(),
+                        })
+                        .await
+                        .map_err(OrchestratorError::from)?;
+                    self.assign_task(run_id, &created.id, &members, None, None, None)
+                        .await?;
+                    node_ids.push(created.id);
+                }
+            }
+        }
+
+        // (4) REBUILD deps from the adjusted plan: for each NEW node, wire every
+        //     `depends_on` ref → a concrete blocker task id. A kept-id string ref
+        //     resolves directly (validated above to exist); a new-index int ref
+        //     resolves via `node_ids[i]` (the node at that position). Out-of-range
+        //     indices are logged + skipped (fail-soft on a single bad edge — the
+        //     plan as a whole already parsed + validated). Kept nodes carry no
+        //     `depends_on` in the schema (their upstream is expressed by OTHER
+        //     nodes referencing them), so only NEW nodes contribute edges.
+        for (idx, node) in plan.tasks.iter().enumerate() {
+            let crate::plan::AdjustedNode::New(new_task) = node else {
+                continue;
+            };
+            let blocked_id = &node_ids[idx];
+            for dep_ref in &new_task.depends_on {
+                let blocker_id = match dep_ref {
+                    crate::plan::AdjustedDepRef::Kept(id) => {
+                        if kept_ids.contains(id) {
+                            Some(id.clone())
+                        } else {
+                            tracing::warn!(
+                                run_id,
+                                node_idx = idx,
+                                dep_id = %id,
+                                "adjusted plan dep references a non-kept id; skipping edge"
+                            );
+                            None
+                        }
+                    }
+                    crate::plan::AdjustedDepRef::NewIndex(i) => match node_ids.get(*i) {
+                        Some(id) => Some(id.clone()),
+                        None => {
+                            tracing::warn!(
+                                run_id,
+                                node_idx = idx,
+                                dep_index = *i,
+                                "adjusted plan dep references an out-of-range new index; skipping edge"
+                            );
+                            None
+                        }
+                    },
+                };
+                if let Some(blocker_id) = blocker_id {
+                    // Guard against a self-edge (the table CHECKs blocker <> blocked).
+                    if &blocker_id != blocked_id {
+                        self.run_repo
+                            .add_dep(&blocker_id, blocked_id)
+                            .await
+                            .map_err(OrchestratorError::from)?;
+                    }
+                }
+            }
+        }
+
+        self.emitter.emit_run_plan_updated(run_id);
+
+        // (5) RE-ACTIVATE a terminal run so the engine loop (the route then starts)
+        //     has a live run to drive. Re-read the status FRESH (NOT the
+        //     top-of-method `run` snapshot): under the per-run lock the loop's
+        //     terminal-check-and-finish is mutually exclusive with this reconcile,
+        //     but the loop may have written `completed`/`failed` AFTER our
+        //     `owned_run` read and BEFORE the lock was acquired (mirrors
+        //     `rerun_task`'s 评审 Critical fix). The fresh read flips a now-terminal
+        //     run back to `running`; an already-`running` run is left as-is.
+        let current_status = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .map(|r| r.status)
+            .unwrap_or_else(|| run.status.clone());
+        if matches!(current_status.as_str(), "completed" | "failed" | "cancelled") {
+            self.run_repo
+                .update_run(
+                    run_id,
+                    UpdateRunParams {
+                        status: Some("running".to_string()),
+                        summary: None,
+                        lead_conv_id: None,
+                        total_tokens: None,
+                        goal: None,
+                        autonomy: None,
+                        fleet_snapshot: None,
+                    },
+                )
+                .await
+                .map_err(OrchestratorError::from)?;
+            self.emitter.emit_run_status(run_id, "running");
+        }
+
         let row = self
             .run_repo
             .get_run(run_id)
@@ -2966,5 +3226,393 @@ mod tests {
             .await
             .expect_err("no working dir must reject");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    // -------------------------------------------------------------------------
+    // UC-3a: conversation-driven intelligent re-adjust (adjust + reconcile).
+    // -------------------------------------------------------------------------
+
+    use crate::plan::{AdjustedDepRef, AdjustedNewTask, AdjustedNode, AdjustedPlan};
+
+    /// A planner whose `produce` returns a fixed initial dag and whose `adjust`
+    /// returns a pre-staged [`AdjustedPlan`] (or a configurable error), so a test
+    /// drives reconcile with the EXACT adjusted plan it wants — no live LLM.
+    struct AdjustTestProducer {
+        initial: PlannedDag,
+        adjusted: Mutex<Result<AdjustedPlan, AppError>>,
+    }
+    impl AdjustTestProducer {
+        fn new(initial: PlannedDag, adjusted: AdjustedPlan) -> Self {
+            Self { initial, adjusted: Mutex::new(Ok(adjusted)) }
+        }
+        fn with_error(initial: PlannedDag, err: AppError) -> Self {
+            Self { initial, adjusted: Mutex::new(Err(err)) }
+        }
+    }
+    #[async_trait::async_trait]
+    impl PlanProducer for AdjustTestProducer {
+        async fn produce(&self, _goal: &str, _members: &[FleetMember]) -> Result<PlannedDag, AppError> {
+            Ok(self.initial.clone())
+        }
+        async fn adjust(
+            &self,
+            _intent: &str,
+            _tasks: &[RunTask],
+            _deps: &[RunTaskDep],
+            _members: &[FleetMember],
+        ) -> Result<AdjustedPlan, AppError> {
+            match &*self.adjusted.lock().unwrap() {
+                Ok(p) => Ok(p.clone()),
+                Err(AppError::BadRequest(m)) => Err(AppError::BadRequest(m.clone())),
+                Err(e) => Err(AppError::Internal(format!("{e}"))),
+            }
+        }
+    }
+
+    /// Build a RunService whose planner stages `initial` (for the first `plan`) +
+    /// `adjusted` (for `adjust`), seed a workspace + single-member fleet, create a
+    /// run, plan it, and return (svc, run_id). The run is `running` after plan.
+    async fn adjust_harness(initial: PlannedDag, adjusted: AdjustedPlan) -> (RunService, String) {
+        adjust_harness_with(AdjustTestProducer::new(initial, adjusted)).await
+    }
+
+    async fn adjust_harness_with(producer: AdjustTestProducer) -> (RunService, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(NoopBroadcaster));
+        let planner: Arc<dyn PlanProducer> = Arc::new(producer);
+        let svc = RunService::new(run_repo, fleet_repo.clone(), ws_repo.clone(), planner, emitter);
+        let fleet = FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "adjust fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![member_input("agent_a", &["coding"], "high", "standard")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "adjust ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "do the thing".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: Some("supervised".to_string()),
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run create");
+        svc.plan(&run.id).await.expect("plan");
+        (svc, run.id)
+    }
+
+    /// Mark a task `done` with an output summary (simulating a completed worker)
+    /// so a KEEP test can assert the output survived reconcile.
+    async fn mark_done(svc: &RunService, task_id: &str, output: &str) {
+        svc.run_repo
+            .update_task(
+                task_id,
+                UpdateTaskParams {
+                    status: Some("done".to_string()),
+                    output_summary: Some(Some(output.to_string())),
+                    conversation_id: Some(Some(4242)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("mark done");
+    }
+
+    /// An adjusted node keeping an existing task by id.
+    fn keep(id: &str) -> AdjustedNode {
+        AdjustedNode::Keep { keep: id.to_string() }
+    }
+    /// An adjusted NEW task with the given title + deps.
+    fn new_node(title: &str, deps: Vec<AdjustedDepRef>) -> AdjustedNode {
+        AdjustedNode::New(AdjustedNewTask {
+            title: title.to_string(),
+            spec: format!("spec-{title}"),
+            role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
+            depends_on: deps,
+        })
+    }
+
+    // KEEP + ADD: the adjusted plan keeps a DONE task (its output preserved, NOT
+    // re-run) and adds a NEW task depending on it (kept-id string ref). Reconcile
+    // preserves the done task + its assignment, inserts+routes the new pending
+    // task, wires the dep, and leaves the done task done.
+    #[tokio::test]
+    async fn adjust_keep_done_and_add_new_preserves_output_and_wires_dep() {
+        let (svc, run_id) = adjust_harness(
+            single_task_dag(Some(0), Some(coding_profile())),
+            AdjustedPlan { tasks: vec![] }, // placeholder; reset below
+        )
+        .await;
+        // The initial plan has one task; complete it.
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 1);
+        let done_id = before.tasks[0].id.clone();
+        mark_done(&svc, &done_id, "已完成的产出").await;
+
+        // Re-stage the adjusted plan to keep that task + add one depending on it.
+        // (We rebuild the harness producer's staged plan via a fresh service so the
+        // ids line up — simplest is to drive adjust through a producer that returns
+        // a plan referencing the real done_id.)
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![keep(&done_id), new_node("扩展", vec![AdjustedDepRef::Kept(done_id.clone())])],
+        });
+
+        let run = svc.adjust("u1", &run_id, "在已完成工作基础上扩展").await.expect("adjust");
+        assert_eq!(run.status, "running", "terminal-or-running run is running after adjust");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        // Two tasks now: the kept done one + the new pending one.
+        assert_eq!(after.tasks.len(), 2, "kept + new");
+        let kept = after.tasks.iter().find(|t| t.id == done_id).expect("kept task survives");
+        assert_eq!(kept.status, "done", "kept task NOT re-run");
+        assert_eq!(kept.output_summary.as_deref(), Some("已完成的产出"), "output preserved");
+        assert_eq!(kept.conversation_id, Some(4242), "conversation preserved");
+        let new_task = after.tasks.iter().find(|t| t.title == "扩展").expect("new task added");
+        assert_eq!(new_task.status, "pending", "new task is pending");
+        // The new task is routed (has an auto assignment).
+        assert!(
+            after.assignments.iter().any(|a| a.task_id == new_task.id && a.source == "auto"),
+            "new task routed: {:?}",
+            after.assignments
+        );
+        // The kept done task still has its assignment.
+        assert!(
+            after.assignments.iter().any(|a| a.task_id == done_id),
+            "kept task assignment preserved"
+        );
+        // The dep done→new is wired.
+        assert!(
+            after.deps.iter().any(|d| d.blocker_task_id == done_id && d.blocked_task_id == new_task.id),
+            "dep kept→new wired: {:?}",
+            after.deps
+        );
+    }
+
+    // RE-DECOMPOSE: the adjusted plan keeps NOTHING — all old tasks are deleted and
+    // the new tasks created (like replan, but via the intelligent reconcile path).
+    #[tokio::test]
+    async fn adjust_keep_nothing_redecomposes() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["旧A", "旧B"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 2);
+        let old_ids: Vec<String> = before.tasks.iter().map(|t| t.id.clone()).collect();
+
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![new_node("新X", vec![]), new_node("新Y", vec![AdjustedDepRef::NewIndex(0)])],
+        });
+        svc.adjust("u1", &run_id, "全部重做").await.expect("adjust");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 2, "two new tasks");
+        for old in &old_ids {
+            assert!(!after.tasks.iter().any(|t| &t.id == old), "old task {old} deleted");
+        }
+        let titles: Vec<&str> = after.tasks.iter().map(|t| t.title.as_str()).collect();
+        assert!(titles.contains(&"新X") && titles.contains(&"新Y"), "new tasks present: {titles:?}");
+    }
+
+    // DEPS REBUILD: a NEW task whose depends_on MIXES a kept-id string ref and a
+    // new-index int ref resolves both to concrete edges.
+    #[tokio::test]
+    async fn adjust_rebuilds_mixed_kept_and_new_index_deps() {
+        let (svc, run_id) = adjust_harness(
+            single_task_dag(Some(0), None),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let kept_id = before.tasks[0].id.clone();
+        mark_done(&svc, &kept_id, "out").await;
+
+        // Plan: keep[0] = existing; new[1] = "中间" deps [kept]; new[2] = "末" deps
+        // [kept (string), node 1 (int)].
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![
+                keep(&kept_id),
+                new_node("中间", vec![AdjustedDepRef::Kept(kept_id.clone())]),
+                new_node("末", vec![AdjustedDepRef::Kept(kept_id.clone()), AdjustedDepRef::NewIndex(1)]),
+            ],
+        });
+        svc.adjust("u1", &run_id, "扩展两层").await.expect("adjust");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        let mid = after.tasks.iter().find(|t| t.title == "中间").expect("中间").id.clone();
+        let last = after.tasks.iter().find(|t| t.title == "末").expect("末").id.clone();
+        // kept→中间, kept→末, 中间→末 all wired.
+        let has = |b: &str, k: &str| after.deps.iter().any(|d| d.blocker_task_id == b && d.blocked_task_id == k);
+        assert!(has(&kept_id, &mid), "kept→中间");
+        assert!(has(&kept_id, &last), "kept→末 (string ref)");
+        assert!(has(&mid, &last), "中间→末 (new-index ref)");
+        assert_eq!(after.deps.len(), 3, "exactly the three rebuilt edges: {:?}", after.deps);
+    }
+
+    // DROP: an un-kept old task is deleted along with its assignment + deps. Here a
+    // two-task run is adjusted to keep only the first; the second must vanish.
+    #[tokio::test]
+    async fn adjust_drops_unkept_task_and_its_assignment() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["留", "弃"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let keep_id = before.tasks.iter().find(|t| t.title == "留").unwrap().id.clone();
+        let drop_id = before.tasks.iter().find(|t| t.title == "弃").unwrap().id.clone();
+        assert_eq!(before.assignments.len(), 2);
+
+        let svc = restage_adjust(svc, AdjustedPlan { tasks: vec![keep(&keep_id)] });
+        svc.adjust("u1", &run_id, "删掉第二个").await.expect("adjust");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 1, "only the kept task remains");
+        assert!(after.tasks.iter().any(|t| t.id == keep_id), "kept task present");
+        assert!(!after.tasks.iter().any(|t| t.id == drop_id), "dropped task gone");
+        // The dropped task's assignment cascaded.
+        assert!(
+            !after.assignments.iter().any(|a| a.task_id == drop_id),
+            "dropped task's assignment gone"
+        );
+    }
+
+    // SAFETY: adjust with any `running` task is REJECTED (400) and NOTHING is
+    // mutated (the chosen safe option — pause first, then re-adjust).
+    #[tokio::test]
+    async fn adjust_rejects_when_a_task_is_running() {
+        let (svc, run_id) = adjust_harness(
+            single_task_dag(Some(0), None),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let tid = before.tasks[0].id.clone();
+        // Flip the task to running (a live worker would hold it).
+        svc.run_repo
+            .update_task(&tid, UpdateTaskParams { status: Some("running".to_string()), ..Default::default() })
+            .await
+            .expect("set running");
+
+        let svc = restage_adjust(svc, AdjustedPlan { tasks: vec![new_node("新", vec![])] });
+        let err = svc.adjust("u1", &run_id, "改改").await.expect_err("must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+        // Nothing changed: still exactly the one running task, no new task added.
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 1, "run untouched");
+        assert_eq!(after.tasks[0].id, tid);
+        assert!(!after.tasks.iter().any(|t| t.title == "新"), "no new task added");
+    }
+
+    // OWNER-SCOPE: a non-owner is rejected (403) and the run is untouched.
+    #[tokio::test]
+    async fn adjust_cross_user_is_forbidden() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["A"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let svc = restage_adjust(svc, AdjustedPlan { tasks: vec![new_node("X", vec![])] });
+        let err = svc.adjust("intruder", &run_id, "盗改").await.expect_err("cross-user must reject");
+        assert!(matches!(err, AppError::Forbidden(_)), "got: {err:?}");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 1, "non-owner adjust must not mutate");
+        assert_eq!(after.tasks[0].title, "A");
+    }
+
+    // FAIL-SOFT PARSE: a bad adjusted plan (the producer errors, as parse would on
+    // garbage) surfaces an error and the run is UNCHANGED (no partial mutation).
+    #[tokio::test]
+    async fn adjust_bad_plan_errors_and_leaves_run_unchanged() {
+        let (svc, run_id) = adjust_harness_with(AdjustTestProducer::with_error(
+            dag_with_titles(&["A", "B"]),
+            AppError::BadRequest("主 agent 调整计划无法解析;运行未改动".to_string()),
+        ))
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 2);
+        let ids: Vec<String> = before.tasks.iter().map(|t| t.id.clone()).collect();
+
+        let err = svc.adjust("u1", &run_id, "乱来").await.expect_err("bad plan must error");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 2, "run unchanged on parse failure");
+        for id in &ids {
+            assert!(after.tasks.iter().any(|t| &t.id == id), "task {id} survives");
+        }
+        assert_eq!(after.deps.len(), before.deps.len(), "deps unchanged");
+    }
+
+    // KEEP-UNKNOWN-ID: an adjusted plan keeping a non-existent task id is rejected
+    // BEFORE any mutation (we never delete real tasks chasing an unresolvable keep).
+    #[tokio::test]
+    async fn adjust_keep_unknown_id_is_rejected_run_unchanged() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["A", "B"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 2);
+
+        let svc = restage_adjust(svc, AdjustedPlan { tasks: vec![keep("rtask_does_not_exist")] });
+        let err = svc.adjust("u1", &run_id, "保留幽灵").await.expect_err("unknown keep must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 2, "run unchanged when a kept id is unknown");
+    }
+
+    // EMPTY-INTENT: a blank intent is a 400 (mutates nothing, never calls the lead).
+    #[tokio::test]
+    async fn adjust_empty_intent_is_bad_request() {
+        let (svc, run_id) = adjust_harness(dag_with_titles(&["A"]), AdjustedPlan { tasks: vec![] }).await;
+        let err = svc.adjust("u1", &run_id, "   ").await.expect_err("empty intent must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+    }
+
+    /// Rebuild a RunService over the SAME repos/emitter as `svc` but with the
+    /// planner re-staged to return `adjusted` from `adjust` (so a test can stage a
+    /// plan that references the REAL task ids minted by the first `plan`). The
+    /// initial dag is irrelevant here (we never re-`plan`).
+    fn restage_adjust(svc: RunService, adjusted: AdjustedPlan) -> RunService {
+        let planner: Arc<dyn PlanProducer> = Arc::new(AdjustTestProducer::new(
+            PlannedDag { tasks: vec![] },
+            adjusted,
+        ));
+        RunService {
+            run_repo: svc.run_repo.clone(),
+            fleet_repo: svc.fleet_repo.clone(),
+            ws_repo: svc.ws_repo.clone(),
+            planner,
+            emitter: svc.emitter.clone(),
+        }
     }
 }

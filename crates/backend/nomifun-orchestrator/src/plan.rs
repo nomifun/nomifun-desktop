@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::{one_shot_completion, resolve_provider_config, user_message};
-use nomifun_api_types::{FleetMember, PlannedDag, PlannedTask};
+use nomifun_api_types::{FleetMember, PlannedDag, PlannedTask, RunTask, RunTaskDep};
 use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_db::IProviderRepository;
 use nomifun_db::models::Provider;
@@ -42,6 +42,29 @@ type DescriptionMap = HashMap<(String, String), String>;
 pub trait PlanProducer: Send + Sync {
     /// 把目标拆成任务 DAG。`members` 是 fleet 成员快照(供按 index 分派)。
     async fn produce(&self, goal: &str, members: &[FleetMember]) -> Result<PlannedDag, AppError>;
+
+    /// UC-3a: intelligently RE-ADJUST an in-progress run from a free-form INTENT.
+    /// The lead (one-shot, no persistent session) sees the intent + the CURRENT
+    /// run state (`tasks` + `deps`) and JUDGES, per task, whether to KEEP the
+    /// completed work or re-decompose, emitting an [`AdjustedPlan`]. `members` is
+    /// the run's fleet snapshot (used only to derive the lead model — assignment
+    /// of the resulting NEW tasks is the service's job). **Fail-soft to an ERROR**
+    /// (never a fallback): a garbled plan returns a `BadRequest` so the caller
+    /// leaves the run untouched.
+    ///
+    /// Default impl errors — only the production [`LlmPlanProducer`] and the test
+    /// producers that exercise `adjust` override it (most planners only `produce`).
+    async fn adjust(
+        &self,
+        _intent: &str,
+        _tasks: &[RunTask],
+        _deps: &[RunTaskDep],
+        _members: &[FleetMember],
+    ) -> Result<AdjustedPlan, AppError> {
+        Err(AppError::BadRequest(
+            "this PlanProducer does not support adjust".to_string(),
+        ))
+    }
 }
 
 /// Production planner: a single structured LLM call against a "lead" model
@@ -141,6 +164,38 @@ impl PlanProducer for LlmPlanProducer {
         // parse_plan is fail-soft: a bad/empty reply degrades to a single-task DAG
         // rather than erroring out, so the engine always has an executable plan.
         Ok(parse_plan(&raw, goal))
+    }
+
+    async fn adjust(
+        &self,
+        intent: &str,
+        tasks: &[RunTask],
+        deps: &[RunTaskDep],
+        members: &[FleetMember],
+    ) -> Result<AdjustedPlan, AppError> {
+        // Same one-shot lead-call shape as `produce`: derive the lead from the
+        // fleet snapshot (the app wires `self.lead` empty), resolve its config,
+        // and ask for the adjusted-plan JSON. There is NO persistent session — a
+        // single structured completion, exactly like planning.
+        let lead = pick_lead(members, &self.lead);
+        let model = lead.use_model.as_deref().unwrap_or(&lead.model);
+        let cfg = resolve_provider_config(
+            &self.provider_repo,
+            &self.encryption_key,
+            &lead.provider_id,
+            model,
+            self.workspace.as_path(),
+        )
+        .await?;
+
+        let user = build_adjust_user_prompt(intent, tasks, deps);
+        let raw =
+            one_shot_completion(&cfg, ADJUST_SYSTEM, vec![user_message(user)], PLAN_MAX_TOKENS)
+                .await?;
+
+        // Fail-soft TO AN ERROR (never a fallback): a garbled adjusted plan must
+        // not mangle the existing run — the caller surfaces the BadRequest.
+        parse_adjusted_plan(&raw)
     }
 }
 
@@ -372,6 +427,181 @@ fn truncate_title(goal: &str) -> String {
     format!("{truncated}…")
 }
 
+// ===========================================================================
+// UC-3a: conversation-driven intelligent re-adjust (adjust + reconcile).
+//
+// The user expresses a free-form INTENT against an EXISTING run; the lead model
+// (one-shot, no persistent session) sees the intent + the CURRENT run state and
+// JUDGES — per task — whether to KEEP the completed work or RE-DECOMPOSE. It
+// outputs an "adjusted plan" whose nodes are EITHER `{"keep":"<existing_id>"}`
+// (preserve that task + its output) OR a NEW task. The service then RECONCILEs
+// the current plan to the adjusted one (see `RunService::adjust`).
+// ===========================================================================
+
+/// How many chars of a task's `output_summary` to surface in the adjust prompt.
+const ADJUST_OUTPUT_SUMMARY_LEN: usize = 300;
+
+/// A dependency reference inside an adjusted-plan NEW task. Untagged so the lead
+/// may write EITHER an existing kept `task_id` (a JSON string) OR a 0-based index
+/// into the adjusted plan's `tasks` array pointing at a NEW task (a JSON int).
+/// The reconcile step resolves both to concrete task ids.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum AdjustedDepRef {
+    /// An existing task id the adjusted plan KEPT (a string).
+    Kept(String),
+    /// A 0-based index into the adjusted plan's `tasks` array (a NEW task).
+    NewIndex(usize),
+}
+
+/// One NEW task in an adjusted plan: a task the lead chose to ADD (or to replace
+/// a dropped one with). Mirrors the create-time task fields. `kind` defaults to
+/// `"agent"` (zero-regression); the engine treats any unknown kind as agent.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AdjustedNewTask {
+    pub title: String,
+    pub spec: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default = "default_adjusted_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub pattern_config: Option<String>,
+    /// Refs to the nodes this NEW task depends on (kept ids and/or new indices).
+    #[serde(default)]
+    pub depends_on: Vec<AdjustedDepRef>,
+}
+
+fn default_adjusted_kind() -> String {
+    "agent".to_string()
+}
+
+/// One node of an adjusted plan: untagged so the lead may write EITHER
+/// `{"keep":"<existing_task_id>"}` (preserve that task + its completed work) OR a
+/// full NEW task object. Serde tries `Keep` first (it has the distinctive `keep`
+/// key); a node without `keep` is parsed as a `New` task.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum AdjustedNode {
+    /// Keep an existing task (by id) — its status/output/conversation/assignment
+    /// are preserved unchanged in reconcile.
+    Keep {
+        /// The existing `task_id` to preserve.
+        keep: String,
+    },
+    /// A brand-new task to insert (pending) + route + wire.
+    New(AdjustedNewTask),
+}
+
+/// The adjusted plan the lead produces for `adjust`: an ordered list of nodes,
+/// each KEEPing an existing task or describing a NEW one. Existing tasks NOT
+/// kept are dropped in reconcile.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AdjustedPlan {
+    pub tasks: Vec<AdjustedNode>,
+}
+
+/// System prompt for `adjust`: hand the lead the user's INTENT + the CURRENT run
+/// state and EMPOWER it to judge, per task, whether to keep the completed work or
+/// re-decompose. Output is ONLY the adjusted-plan JSON.
+pub const ADJUST_SYSTEM: &str = "You are the lead agent re-adjusting an in-progress multi-agent orchestration. \
+You are given the user's INTENT (a free-form instruction) and the CURRENT state of the run: every task with its id, title, spec, role, kind, status, a short output summary (if any), and its dependencies. \
+Your job is to produce an ADJUSTED PLAN of the task DAG that best serves the intent. \
+Output ONLY a single JSON object — no prose, no explanation, no markdown fences. \
+The JSON object MUST have exactly this shape:\n\
+{\"tasks\":[ <node> ]}\n\
+where each <node> is EITHER\n\
+  {\"keep\":\"<existing_task_id>\"}  — preserve that existing task AND its already-completed work (status/output/assignment) untouched, OR\n\
+  {\"title\":string,\"spec\":string,\"role\":string?,\"kind\":string?,\"pattern_config\":string?,\"depends_on\":[<ref>]}  — a NEW task to add,\n\
+where each <ref> in \"depends_on\" is EITHER an existing KEPT task_id (a JSON string) OR a 0-based index (a JSON integer) into THIS \"tasks\" array pointing at a NEW task earlier in the list.\n\
+YOU JUDGE, per task, based on the intent AND the current delivery state:\n\
+- KEEP a completed task whose work STILL serves the intent — do NOT waste finished work by re-doing it. Reference it as {\"keep\":\"<id>\"} and (if other nodes build on it) by its id in their \"depends_on\".\n\
+- RE-DECOMPOSE / REPLACE what the intent changes: drop the now-obsolete tasks (simply do NOT keep them) and add NEW tasks describing the corrected work.\n\
+- ADD new tasks the intent introduces, wiring their \"depends_on\" to the kept upstream work and/or to earlier new tasks.\n\
+- A task you neither keep nor replace is DROPPED — only keep what genuinely still helps.\n\
+You are NOT constrained to a fixed policy: decide freely how much to preserve vs. rebuild so the resulting DAG delivers the user's intent with the least wasted work.\n\
+\"role\" is a SHORT Chinese role name (例如 规划/前端/后端/测试/设计/文档/研究) for a NEW task. \"kind\" is the NEW task's execution mode; omit it (or use \"agent\") for a normal single-agent task (the default and the vast majority). The other kinds (\"synthesis\"/\"verify\"/\"judge\"/\"loop\") and their \"pattern_config\" follow the same conventions as the planner: synthesis merges its dependencies' outputs; a fan-out group is sibling agent tasks sharing \"pattern_config\":\"{\\\"group\\\":\\\"<label>\\\"}\". Reach for them only when the intent genuinely benefits.\n\
+\"title\" is a short imperative label; \"spec\" is the full instruction the worker will execute.\n\
+The graph MUST be acyclic: a NEW task's integer \"depends_on\" indices must point EARLIER in the \"tasks\" array.\n\
+Output the JSON object and nothing else.";
+
+/// Build the `adjust` user message: the INTENT + a compact serialization of the
+/// CURRENT run state (one line per task). `output_summary` is truncated to
+/// [`ADJUST_OUTPUT_SUMMARY_LEN`] chars (CJK-safe) so a long deliverable does not
+/// blow the prompt budget. Dependencies are listed by the depended-on task ids
+/// so the lead can reference them with `{"keep":"<id>"}` + id-string deps.
+pub fn build_adjust_user_prompt(
+    intent: &str,
+    tasks: &[RunTask],
+    deps: &[RunTaskDep],
+) -> String {
+    let mut out = String::new();
+    out.push_str("INTENT:\n");
+    out.push_str(intent.trim());
+    out.push_str("\n\nCURRENT RUN STATE (one task per line — id | title | role | kind | status | depends_on=[ids] | output):\n");
+    if tasks.is_empty() {
+        out.push_str("(no tasks yet)\n");
+    } else {
+        for t in tasks {
+            // The ids this task depends on (blocker → this task).
+            let dep_ids: Vec<&str> = deps
+                .iter()
+                .filter(|d| d.blocked_task_id == t.id)
+                .map(|d| d.blocker_task_id.as_str())
+                .collect();
+            let role = t.role.as_deref().unwrap_or("-");
+            let summary = t
+                .output_summary
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(truncate_summary)
+                .unwrap_or_else(|| "-".to_string());
+            out.push_str(&format!(
+                "{} | {} | role={role} | kind={} | status={} | depends_on={:?} | output={summary}\n",
+                t.id, t.title, t.kind, t.status, dep_ids
+            ));
+        }
+    }
+    out.push_str("\nReturn ONLY the adjusted-plan JSON object.");
+    out
+}
+
+/// Truncate a task's `output_summary` to [`ADJUST_OUTPUT_SUMMARY_LEN`] chars,
+/// CJK-safe, collapsing inner newlines so it stays on one prompt line.
+fn truncate_summary(summary: &str) -> String {
+    let one_line: String = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= ADJUST_OUTPUT_SUMMARY_LEN {
+        return one_line;
+    }
+    let truncated: String = one_line.chars().take(ADJUST_OUTPUT_SUMMARY_LEN).collect();
+    format!("{truncated}…")
+}
+
+/// Parse the raw lead text into an [`AdjustedPlan`], **fail-soft to an ERROR**
+/// (NOT a fallback DAG). Unlike [`parse_plan`] — which degrades to a single-task
+/// fallback so the engine always has SOMETHING to run — `adjust` mutates an
+/// EXISTING run with real completed work, so a garbled adjusted plan must NOT be
+/// guessed at: it returns a `BadRequest` the caller surfaces, leaving the run
+/// untouched. Strips ```json fences + surrounding prose (reusing
+/// [`extract_json_object`]). An empty `tasks` array is rejected (an adjust that
+/// keeps + adds nothing would silently wipe the run). Unknown `kind` on a new
+/// task is left verbatim (the engine maps it to `agent`).
+pub fn parse_adjusted_plan(raw: &str) -> Result<AdjustedPlan, AppError> {
+    let json = extract_json_object(raw).ok_or_else(|| {
+        AppError::BadRequest("主 agent 调整计划无法解析(未找到 JSON);运行未改动".to_string())
+    })?;
+    let plan: AdjustedPlan = serde_json::from_str(&json).map_err(|e| {
+        AppError::BadRequest(format!("主 agent 调整计划格式无效({e});运行未改动"))
+    })?;
+    if plan.tasks.is_empty() {
+        return Err(AppError::BadRequest(
+            "主 agent 调整计划为空(既未保留也未新增);运行未改动".to_string(),
+        ));
+    }
+    Ok(plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +640,16 @@ mod tests {
                     },
                 ],
             })
+        }
+
+        async fn adjust(
+            &self,
+            _intent: &str,
+            _tasks: &[RunTask],
+            _deps: &[RunTaskDep],
+            _members: &[FleetMember],
+        ) -> Result<AdjustedPlan, AppError> {
+            Ok(AdjustedPlan { tasks: vec![] })
         }
     }
 
@@ -1027,5 +1267,137 @@ mod tests {
         ];
         let map = build_description_map(&providers, &members);
         assert!(map.is_empty(), "bad/blank/absent descriptions yield no entries: {map:?}");
+    }
+
+    // ── UC-3a: adjust schema / prompt / fail-soft parse ──────────────────────
+
+    /// Build a minimal `RunTask` for the adjust-prompt tests.
+    fn run_task(id: &str, title: &str, status: &str, output: Option<&str>) -> RunTask {
+        RunTask {
+            id: id.to_string(),
+            run_id: "run_x".to_string(),
+            title: title.to_string(),
+            spec: format!("spec-{title}"),
+            task_profile: None,
+            status: status.to_string(),
+            conversation_id: None,
+            output_summary: output.map(str::to_string),
+            output_files: vec![],
+            attempt: 0,
+            tokens: None,
+            graph_x: None,
+            graph_y: None,
+            role: Some("研究".to_string()),
+            kind: "agent".to_string(),
+            pattern_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    // parse_adjusted_plan accepts a mixed keep+new plan: a kept existing id, a new
+    // task whose depends_on references the kept id (string) AND an earlier new
+    // index (int). Both ref kinds round-trip.
+    #[test]
+    fn parse_adjusted_plan_accepts_keep_and_new_with_mixed_deps() {
+        let raw = r#"{"tasks":[
+            {"keep":"rtask_abc"},
+            {"title":"扩写","spec":"基于上游产出扩写","role":"写作","depends_on":["rtask_abc"]},
+            {"title":"汇总","spec":"合并","kind":"synthesis","depends_on":["rtask_abc",1]}
+        ]}"#;
+        let plan = parse_adjusted_plan(raw).expect("valid adjusted plan parses");
+        assert_eq!(plan.tasks.len(), 3);
+        // Node 0 keeps an existing task by id.
+        match &plan.tasks[0] {
+            AdjustedNode::Keep { keep } => assert_eq!(keep, "rtask_abc"),
+            other => panic!("expected Keep, got {other:?}"),
+        }
+        // Node 1 is a new task depending on the kept id (a string ref).
+        match &plan.tasks[1] {
+            AdjustedNode::New(t) => {
+                assert_eq!(t.title, "扩写");
+                assert_eq!(t.kind, "agent", "kind defaults to agent");
+                assert_eq!(t.depends_on, vec![AdjustedDepRef::Kept("rtask_abc".to_string())]);
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
+        // Node 2 mixes a kept-id string ref + a new-index int ref (→ node 1).
+        match &plan.tasks[2] {
+            AdjustedNode::New(t) => {
+                assert_eq!(t.kind, "synthesis");
+                assert_eq!(
+                    t.depends_on,
+                    vec![AdjustedDepRef::Kept("rtask_abc".to_string()), AdjustedDepRef::NewIndex(1)]
+                );
+            }
+            other => panic!("expected New, got {other:?}"),
+        }
+    }
+
+    // parse_adjusted_plan strips ```json fences + surrounding prose (reuses
+    // extract_json_object).
+    #[test]
+    fn parse_adjusted_plan_strips_fences_and_prose() {
+        let raw = "好的，这是调整后的计划：\n```json\n{\"tasks\":[{\"keep\":\"rtask_1\"}]}\n```\n如需修改请告诉我。";
+        let plan = parse_adjusted_plan(raw).expect("parses through fences + prose");
+        assert_eq!(plan.tasks.len(), 1);
+    }
+
+    // parse_adjusted_plan is fail-soft TO AN ERROR (not a fallback): garbage,
+    // malformed JSON, and an empty tasks array each return a BadRequest so the
+    // caller leaves the run UNTOUCHED (no guessing at a mangled plan).
+    #[test]
+    fn parse_adjusted_plan_errors_on_garbage_malformed_and_empty() {
+        for raw in [
+            "对不起，我无法处理这个请求。",
+            r#"{"tasks":[{"keep":"rtask_1" "#, // unterminated
+            r#"{"tasks":[]}"#,                 // empty → would wipe the run
+        ] {
+            let err = parse_adjusted_plan(raw).expect_err("must error, not fall back");
+            assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?} for {raw}");
+        }
+    }
+
+    // build_adjust_user_prompt surfaces the intent + one line per task (id, title,
+    // status, depends_on ids), and truncates a long output_summary.
+    #[test]
+    fn build_adjust_user_prompt_includes_intent_state_and_truncates_output() {
+        let long_output = "段".repeat(400); // 400 CJK chars > 300 cap
+        let tasks = vec![
+            run_task("rtask_a", "研究", "done", Some(&long_output)),
+            run_task("rtask_b", "写作", "pending", None),
+        ];
+        let deps = vec![RunTaskDep {
+            blocker_task_id: "rtask_a".to_string(),
+            blocked_task_id: "rtask_b".to_string(),
+        }];
+        let prompt = build_adjust_user_prompt("把报告改成中文", &tasks, &deps);
+        assert!(prompt.contains("把报告改成中文"), "intent present: {prompt}");
+        assert!(prompt.contains("rtask_a"), "task id present");
+        assert!(prompt.contains("status=done"), "status present");
+        // rtask_b's depends_on lists rtask_a.
+        assert!(prompt.contains("depends_on=[\"rtask_a\"]"), "deps listed: {prompt}");
+        // The 400-char output was truncated with an ellipsis.
+        assert!(prompt.contains('…'), "long output truncated: {prompt}");
+        assert!(
+            !prompt.contains(&"段".repeat(350)),
+            "output must not carry the full 400-char summary"
+        );
+    }
+
+    // The adjust system prompt must TEACH the keep-vs-new schema + the dep-ref
+    // convention + empower judging, otherwise the lead never emits a valid plan.
+    #[test]
+    fn adjust_system_teaches_keep_new_and_dep_refs() {
+        assert!(ADJUST_SYSTEM.contains("\"keep\""), "must teach keep node: {ADJUST_SYSTEM}");
+        assert!(ADJUST_SYSTEM.contains("depends_on"), "must teach deps: {ADJUST_SYSTEM}");
+        assert!(ADJUST_SYSTEM.contains("INTENT"), "must mention the intent: {ADJUST_SYSTEM}");
+        // Empowered to judge keep vs re-decompose (not a fixed policy).
+        assert!(ADJUST_SYSTEM.contains("KEEP"), "must empower keeping: {ADJUST_SYSTEM}");
+        assert!(
+            ADJUST_SYSTEM.contains("RE-DECOMPOSE") || ADJUST_SYSTEM.contains("REPLACE"),
+            "must empower re-decomposition: {ADJUST_SYSTEM}"
+        );
+        assert!(ADJUST_SYSTEM.contains("DROPPED"), "must allow dropping: {ADJUST_SYSTEM}");
     }
 }

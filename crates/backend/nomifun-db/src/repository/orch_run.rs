@@ -152,6 +152,15 @@ pub trait IRunRepository: Send + Sync {
     /// field is `None`. Bumps `updated_at` whenever any column changes.
     async fn update_task(&self, id: &str, p: UpdateTaskParams) -> Result<(), sqlx::Error>;
 
+    /// Delete ONE task (`DELETE FROM orch_run_tasks WHERE id = ?`). The task-keyed
+    /// `ON DELETE CASCADE` FKs (migration 018) sweep out that task's dependency
+    /// edges (`orch_run_task_deps`, where the task is blocker OR blocked) and its
+    /// assignment (`orch_assignments`). This is the conversational-reconcile "drop
+    /// an unkept task" step — unlike [`clear_run_tasks`](Self::clear_run_tasks) it
+    /// removes a SINGLE task so the run's KEPT tasks (and their completed output)
+    /// survive untouched. Requires `PRAGMA foreign_keys=ON` (project default).
+    async fn delete_task(&self, id: &str) -> Result<(), sqlx::Error>;
+
     /// Delete ALL of a run's tasks (`DELETE FROM orch_run_tasks WHERE run_id = ?`),
     /// leaving the `orch_runs` row intact. The task-keyed `ON DELETE CASCADE` FKs
     /// (migration 018) sweep out that run's dependency edges (`orch_run_task_deps`)
@@ -165,6 +174,14 @@ pub trait IRunRepository: Send + Sync {
 
     /// Insert a `blocker → blocked` dependency edge into the task DAG.
     async fn add_dep(&self, blocker: &str, blocked: &str) -> Result<(), sqlx::Error>;
+
+    /// Delete ALL dependency edges of a run, leaving its tasks intact. Scoped to
+    /// the run by joining each edge's blocked task back to its `run_id` (so other
+    /// runs' edges are untouched). This is the conversational-reconcile "rebuild
+    /// the DAG" step: clear the run's edges, then re-wire them from the adjusted
+    /// plan (kept + new tasks) — the KEPT tasks' rows (status/output/assignment)
+    /// survive, only their wiring is replaced.
+    async fn clear_run_deps(&self, run_id: &str) -> Result<(), sqlx::Error>;
 
     /// Return all dependency edges for tasks belonging to a run.
     async fn list_deps(&self, run_id: &str) -> Result<Vec<OrchRunTaskDepRow>, sqlx::Error>;
