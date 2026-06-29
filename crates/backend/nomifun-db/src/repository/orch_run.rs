@@ -67,6 +67,11 @@ pub struct CreateTaskParams {
 #[derive(Default)]
 pub struct UpdateTaskParams {
     pub status: Option<String>,
+    /// New task spec (the prompt/intent the worker brief is built from). Plain
+    /// skip-on-`None` (the `spec` column is `NOT NULL`). Used by the per-node
+    /// "意图/prompt 微调" path (`RunService::update_task_spec`) so a user can amend
+    /// a node's intent before re-running it.
+    pub spec: Option<String>,
     pub conversation_id: Option<Option<i64>>,
     pub output_summary: Option<Option<String>>,
     pub output_files: Option<Option<String>>,

@@ -250,6 +250,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.status.is_some() {
             sets.push("status = ?");
         }
+        if p.spec.is_some() {
+            sets.push("spec = ?");
+        }
         if p.conversation_id.is_some() {
             sets.push("conversation_id = ?");
         }
@@ -283,6 +286,9 @@ impl IRunRepository for SqliteRunRepository {
         let mut q = sqlx::query(&sql);
         if let Some(status) = &p.status {
             q = q.bind(status);
+        }
+        if let Some(spec) = &p.spec {
+            q = q.bind(spec);
         }
         if let Some(conversation_id) = &p.conversation_id {
             q = q.bind(conversation_id);
@@ -507,6 +513,7 @@ mod tests {
             task_id,
             UpdateTaskParams {
                 status: Some("done".into()),
+                spec: None,
                 conversation_id: None,
                 output_summary: None,
                 output_files: None,

@@ -371,6 +371,16 @@ pub struct SteerRequest {
     pub text: String,
 }
 
+/// Fine-tune a node's intent/prompt (UC-2a "意图/prompt 微调"). The body of
+/// `PATCH /api/orchestrator/runs/{run_id}/tasks/{task_id}/spec`. `spec` is the new
+/// task spec (the prompt the worker brief is built from); the service rejects a
+/// blank value and a task that is currently `running`. A subsequent rerun
+/// re-executes the node with the amended spec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSpecUpdateRequest {
+    pub spec: String,
+}
+
 /// Rename a run = change its goal. The body of `PATCH /api/orchestrator/runs/{id}`.
 /// `goal` is the new goal text; the service rejects a blank value (a run goal is
 /// `NOT NULL` and must not be empty). Named `RunRenameRequest` to avoid clashing
