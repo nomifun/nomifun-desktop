@@ -180,6 +180,26 @@
       "locked": "锁定分派",
       "lockedHint": "锁定后，编排器不会在后续重新规划时自动改派该任务。"
     },
+    "spec": {
+      "title": "意图 / Prompt",
+      "placeholder": "描述该节点要做什么…",
+      "save": "保存",
+      "saving": "保存中…",
+      "dirtyHint": "保存后点「重跑」以应用新的意图。",
+      "runningHint": "任务运行中，暂停后方可编辑。",
+      "empty": "（暂无意图）",
+      "saveOk": "已保存节点意图",
+      "saveError": "保存失败：{{error}}"
+    },
+    "rerun": {
+      "button": "重跑",
+      "running": "任务运行中，请先暂停",
+      "confirm": "重跑将重置此节点及其下游并重新执行，确定？",
+      "confirmOk": "重跑",
+      "confirmCancel": "取消",
+      "ok": "已发起重跑",
+      "error": "重跑失败：{{error}}"
+    },
     "task": {
       "status": {
         "pending": "待开始",
