@@ -140,8 +140,13 @@ pub struct StreamRelay {
     /// `TurnCompleted` token usage (`input + output`) into the conversation's
     /// running total so the orchestrator worker can read it after the turn
     /// settles (DAG/inspector per-node token display). `None` (the default) =
-    /// no token accumulation (the common chat/companion path is unaffected); the
-    /// worker only wires this on the `ConversationService` it drives.
+    /// no token accumulation (the common chat/companion path is unaffected).
+    /// The GATE is NOT in this relay (nor per-`ConversationService`): a single
+    /// shared `ConversationService` serves both chat and orchestrator turns. It is
+    /// `ConversationService::send_message` that decides, PER TURN, whether to wire
+    /// this — it sets it ONLY when the conversation row's `extra` carries an
+    /// `orchestrator_run_id` (see its `token_runtime_state`). Once wired here, this
+    /// relay always accumulates (no further conditional below).
     runtime_state: Option<Arc<ConversationRuntimeStateService>>,
 }
 
@@ -178,9 +183,11 @@ impl StreamRelay {
 
     /// Wire the process-wide runtime state so this relay accumulates each turn's
     /// `TurnCompleted` token usage into the conversation's running total (read
-    /// back by the orchestrator worker after the turn settles). Only the
-    /// orchestrator's `ConversationService` sets this; the default chat path
-    /// leaves it `None` (no accumulation, no behaviour change).
+    /// back by the orchestrator worker after the turn settles). Wired PER TURN by
+    /// `ConversationService::send_message` — and only for a conversation whose row
+    /// carries an `orchestrator_run_id` (the gate lives there, not in this relay or
+    /// in a dedicated service). The default chat/companion turn leaves it `None`
+    /// (no accumulation, no behaviour change).
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
         self.runtime_state = Some(runtime_state);
         self
@@ -503,13 +510,15 @@ impl StreamRelay {
                         }
                         AgentStreamEvent::TurnCompleted(metrics) => {
                             // Accumulate this turn's token usage into the
-                            // conversation's running total (when wired — only the
-                            // orchestrator worker's ConversationService is). The
-                            // worker reads it back after the turn settles to fill
-                            // `orch_run_tasks.tokens`. `context_tokens` is a gauge
-                            // (last-request occupancy), so per-turn COST is the
-                            // additive `input + output`. Recorded BEFORE the turn
-                            // claim releases, so the polling worker never races it.
+                            // conversation's running total (only when this relay was
+                            // wired — `send_message` wires it solely for a turn whose
+                            // conversation carries an `orchestrator_run_id`; that is
+                            // where the gate lives). The worker reads it back after
+                            // the turn settles to fill `orch_run_tasks.tokens`.
+                            // `context_tokens` is a gauge (last-request occupancy), so
+                            // per-turn COST is the additive `input + output`. Recorded
+                            // BEFORE the turn claim releases, so the polling worker
+                            // never races it.
                             if let Some(runtime_state) = self.runtime_state.as_ref() {
                                 let turn_tokens =
                                     metrics.input_tokens.saturating_add(metrics.output_tokens);

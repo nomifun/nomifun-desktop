@@ -345,24 +345,38 @@ const RunDecisionFeed: React.FC<RunDecisionFeedProps> = ({ detail, turns, onSele
     [t]
   );
 
-  // Render the ordered tasks, folding consecutive fan-out siblings of one group
-  // into a labelled band so the parallel structure reads as one cohort. Verify /
-  // judge / loop / synthesis stay inline (their kind badge already labels them),
-  // but get a one-row band so the aggregator role reads when it's a lone node.
+  // Render the ordered tasks, folding ALL fan-out siblings of one group label into
+  // a single labelled band (regardless of whether they're contiguous in the ordered
+  // list) so a non-contiguous fan-out cohort reads as ONE cohort rather than being
+  // split into multiple same-label bands. The band renders at the position of the
+  // group's FIRST (topologically-earliest) member; its members keep their true
+  // topological order within the band. Verify / judge / loop / synthesis stay inline
+  // (their kind badge already labels them). Each task keeps its 1-based topological
+  // step index (its position in `orderedTasks`), so indices stay stable + meaningful
+  // even when a group's members aren't adjacent.
   const decisionBody = useMemo(() => {
+    // Group label → its members (in topological order, since we collect while
+    // iterating the already-ordered list). Malformed pattern_config → no group.
+    const groupMembers = new Map<string, TRunTask[]>();
+    for (const task of orderedTasks) {
+      const group = parseGroupLabel(task.pattern_config);
+      if (!group) continue;
+      const list = groupMembers.get(group);
+      if (list) list.push(task);
+      else groupMembers.set(group, [task]);
+    }
+
+    const stepOf = new Map(orderedTasks.map((task, i) => [task.id, i + 1]));
+    const emittedGroups = new Set<string>();
     const blocks: React.ReactNode[] = [];
-    let i = 0;
-    let step = 0;
-    while (i < orderedTasks.length) {
-      const task = orderedTasks[i];
+
+    for (const task of orderedTasks) {
       const group = parseGroupLabel(task.pattern_config);
       if (group) {
-        // Collect this and following tasks sharing the same fan-out group label.
-        const members: TRunTask[] = [];
-        while (i < orderedTasks.length && parseGroupLabel(orderedTasks[i].pattern_config) === group) {
-          members.push(orderedTasks[i]);
-          i += 1;
-        }
+        // Emit the whole cohort once, at its first (earliest) member's position.
+        if (emittedGroups.has(group)) continue;
+        emittedGroups.add(group);
+        const members = groupMembers.get(group) ?? [task];
         const hue = hueByGroup.get(group);
         const groupColor = hue != null ? `hsl(${hue}, 62%, 55%)` : 'rgb(var(--primary-6))';
         blocks.push(
@@ -373,13 +387,12 @@ const RunDecisionFeed: React.FC<RunDecisionFeedProps> = ({ detail, turns, onSele
             label={t('orchestrator.run.feed.groupFanout', { label: group })}
           >
             {members.map((m) => {
-              step += 1;
               const a = assignmentByTask.get(m.id) ?? null;
               return (
                 <DecisionTaskRow
                   key={m.id}
                   task={m}
-                  index={step}
+                  index={stepOf.get(m.id) ?? 0}
                   assignment={a}
                   member={a ? memberById.get(a.member_id) : undefined}
                   selected={selectedTaskId === m.id}
@@ -394,14 +407,13 @@ const RunDecisionFeed: React.FC<RunDecisionFeedProps> = ({ detail, turns, onSele
         continue;
       }
 
-      step += 1;
       const assignment = assignmentByTask.get(task.id) ?? null;
       const member = assignment ? memberById.get(assignment.member_id) : undefined;
       blocks.push(
         <DecisionTaskRow
           key={task.id}
           task={task}
-          index={step}
+          index={stepOf.get(task.id) ?? 0}
           assignment={assignment}
           member={member}
           selected={selectedTaskId === task.id}
@@ -410,7 +422,6 @@ const RunDecisionFeed: React.FC<RunDecisionFeedProps> = ({ detail, turns, onSele
           onOpen={() => handleOpen(task)}
         />
       );
-      i += 1;
     }
     return blocks;
   }, [orderedTasks, hueByGroup, assignmentByTask, memberById, selectedTaskId, kindMetaFor, handleOpen, t]);

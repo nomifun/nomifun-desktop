@@ -149,6 +149,19 @@ impl ConversationRuntimeStateService {
             .and_then(|mut totals| totals.remove(conversation_id))
     }
 
+    /// Evict a conversation's accumulated token entry WITHOUT reading it. Bounds the
+    /// map for the benign leak case: an orchestrator worker conversation that
+    /// accumulated some `TurnCompleted` usage but ERRORED before the worker called
+    /// [`Self::take_turn_tokens`] would otherwise linger until process restart.
+    /// Called on conversation delete (alongside [`Self::clear_knowledge_signature`]),
+    /// so a removed conversation never keeps a stale accumulator entry. Idempotent —
+    /// a no-op when nothing was recorded (the common chat path never records here).
+    pub fn clear_turn_tokens(&self, conversation_id: &str) {
+        if let Ok(mut totals) = self.turn_tokens.lock() {
+            totals.remove(conversation_id);
+        }
+    }
+
     pub fn summary_from_parts(
         &self,
         conversation_id: &str,
@@ -329,5 +342,20 @@ mod tests {
         assert_eq!(state.take_turn_tokens("conv-a"), Some(10));
         // conv-b is untouched by conv-a's take.
         assert_eq!(state.take_turn_tokens("conv-b"), Some(99));
+    }
+
+    // C item 5: clear_turn_tokens evicts an accumulated entry without reading it
+    // (the benign-leak bound for an errored orchestrator conv), and is idempotent.
+    #[test]
+    fn clear_turn_tokens_evicts_entry() {
+        let state = Arc::new(ConversationRuntimeStateService::default());
+        state.add_turn_tokens("conv-x", 150);
+        // Clear (not take): the entry is gone, a later take sees None.
+        state.clear_turn_tokens("conv-x");
+        assert_eq!(state.take_turn_tokens("conv-x"), None);
+        // Idempotent: clearing a never-recorded / already-cleared conv is a no-op.
+        state.clear_turn_tokens("conv-x");
+        state.clear_turn_tokens("never-seen");
+        assert_eq!(state.take_turn_tokens("never-seen"), None);
     }
 }
