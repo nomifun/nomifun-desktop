@@ -149,15 +149,19 @@ const PLAN_SYSTEM: &str = "You are a planning supervisor for a multi-agent fleet
 Decompose the user's GOAL into an executable task DAG and output ONLY a single JSON object — \
 no prose, no explanation, no markdown fences. \
 The JSON object MUST have exactly this shape:\n\
-{\"tasks\":[{\"title\":string,\"spec\":string,\"role\":string,\"task_profile\":{\"kind\":string,\"needs_vision\":bool,\"needs_long_context\":bool,\"needs_high_reasoning\":bool,\"bulk\":bool}?,\"depends_on\":[int],\"member_index\":int?,\"rationale\":string?}]}\n\
+{\"tasks\":[{\"title\":string,\"spec\":string,\"role\":string,\"kind\":string?,\"pattern_config\":string?,\"task_profile\":{\"kind\":string,\"needs_vision\":bool,\"needs_long_context\":bool,\"needs_high_reasoning\":bool,\"bulk\":bool}?,\"depends_on\":[int],\"member_index\":int?,\"rationale\":string?}]}\n\
 Rules:\n\
 - \"depends_on\" lists the 0-based indices of EARLIER tasks (smaller index) this task depends on; the graph MUST be acyclic.\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
 - Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
 - \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable assistants. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
+- \"kind\" is the task's EXECUTION MODE; omit it (or use \"agent\") for a normal single-agent task — this is the DEFAULT and should be the vast majority of tasks. The only other value is:\n\
+  - \"synthesis\": a task that MERGES/synthesizes its dependency tasks' outputs into one coherent final result. Use it for a closing step like 「综合/合并上述产出，写出最终的 X」: set \"kind\":\"synthesis\" and make \"depends_on\" list every task whose output it should merge. A synthesis task needs no tools of its own — it reasons over the upstream results you give it.\n\
+- FAN-OUT (parallel variants / shards) is expressed by PLANNING, NOT a special kind: when a step benefits from doing the same work in parallel (e.g. N independent drafts, N shards of a corpus, N candidate approaches), emit MULTIPLE sibling tasks that all have \"kind\":\"agent\" and SHARE the same \"pattern_config\" group tag — a JSON string like \"{\\\"group\\\":\\\"<label>\\\"}\" (e.g. \"{\\\"group\\\":\\\"drafts\\\"}\"). Then add ONE downstream task (usually \"kind\":\"synthesis\") that \"depends_on\" ALL of those siblings to combine them. The engine runs the siblings in parallel automatically.\n\
+- \"pattern_config\" is a raw JSON STRING (or omit it). Today it is only used for the fan-out \"group\" tag above; leave it out for ordinary tasks.\n\
 - \"task_profile\", \"member_index\" and \"rationale\" are optional.\n\
 - \"title\" is a short imperative label; \"spec\" is the full instruction the worker agent will execute.\n\
-- Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged.\n\
+- Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged. Do NOT over-use synthesis/fan-out — reach for them only when the goal genuinely benefits from merging multiple outputs or parallel variants.\n\
 Output the JSON object and nothing else.";
 
 /// Build the `(provider_id, model) → description` map for the prompt.
@@ -340,6 +344,8 @@ fn fallback_dag(goal: &str) -> PlannedDag {
             member_index: Some(0),
             rationale: Some("fallback: planner output unparseable".to_string()),
             role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
         }],
     }
 }
@@ -377,6 +383,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                     PlannedTask {
                         title: "Synthesize".to_string(),
@@ -386,6 +394,8 @@ mod tests {
                         member_index: Some(1),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                 ],
             })
@@ -431,6 +441,75 @@ mod tests {
         let dag = parse_plan(raw, "goal");
         assert_eq!(dag.tasks.len(), 1);
         assert_eq!(dag.tasks[0].title, "One");
+    }
+
+    // 迁移 023: a plan whose closing task is kind="synthesis" parses, and its
+    // pattern_config (fan-out group tag on a sibling) round-trips. Sibling agent
+    // tasks sharing a "group" tag + a synthesis task depending on all of them is
+    // the 1a fan-out → synthesis shape.
+    #[test]
+    fn parse_plan_accepts_kind_synthesis_and_fanout_group() {
+        let raw = r#"{"tasks":[
+            {"title":"Draft A","spec":"write variant A","depends_on":[],"kind":"agent","pattern_config":"{\"group\":\"drafts\"}"},
+            {"title":"Draft B","spec":"write variant B","depends_on":[],"kind":"agent","pattern_config":"{\"group\":\"drafts\"}"},
+            {"title":"Merge","spec":"combine the two drafts into the final","depends_on":[0,1],"kind":"synthesis"}
+        ]}"#;
+        let dag = parse_plan(raw, "produce a doc via parallel drafts");
+        assert_eq!(dag.tasks.len(), 3);
+        // The two fan-out siblings are agent tasks sharing the same group tag.
+        assert_eq!(dag.tasks[0].kind, "agent");
+        assert_eq!(dag.tasks[1].kind, "agent");
+        assert_eq!(dag.tasks[0].pattern_config.as_deref(), Some("{\"group\":\"drafts\"}"));
+        assert_eq!(dag.tasks[1].pattern_config.as_deref(), Some("{\"group\":\"drafts\"}"));
+        // The closing task is synthesis and depends on BOTH siblings.
+        assert_eq!(dag.tasks[2].kind, "synthesis");
+        assert_eq!(dag.tasks[2].depends_on, vec![0, 1]);
+        assert!(dag.tasks[2].pattern_config.is_none());
+    }
+
+    // ZERO-REGRESSION: a legacy plan WITHOUT any `kind` field parses with every
+    // task defaulting to "agent" — the current single-agent behavior is unchanged
+    // for any pre-023 plan.
+    #[test]
+    fn parse_plan_legacy_without_kind_defaults_all_agent() {
+        let raw = r#"{"tasks":[
+            {"title":"Research","spec":"find sources","depends_on":[],"member_index":0},
+            {"title":"Write","spec":"synthesize","depends_on":[0],"member_index":1}
+        ]}"#;
+        let dag = parse_plan(raw, "Research and write a report");
+        assert_eq!(dag.tasks.len(), 2);
+        for t in &dag.tasks {
+            assert_eq!(t.kind, "agent", "missing kind must default to agent (zero regression)");
+            assert!(t.pattern_config.is_none());
+        }
+    }
+
+    // The fallback DAG (planner output unparseable) is an `agent` task — patterns
+    // never appear on the safety fallback.
+    #[test]
+    fn fallback_dag_task_is_agent_kind() {
+        let dag = parse_plan("not json at all", "Build a thing");
+        assert_eq!(dag.tasks.len(), 1);
+        assert_eq!(dag.tasks[0].kind, "agent", "fallback task must be a plain agent task");
+        assert!(dag.tasks[0].pattern_config.is_none());
+    }
+
+    // The system prompt must TEACH the synthesis kind + the fan-out grouping
+    // convention, otherwise the lead model never emits them. Assert both the
+    // schema mentions `kind`/`pattern_config` and the rules name synthesis + group.
+    #[test]
+    fn plan_system_teaches_synthesis_and_fanout() {
+        assert!(PLAN_SYSTEM.contains("\"kind\""), "schema must mention kind: {PLAN_SYSTEM}");
+        assert!(
+            PLAN_SYSTEM.contains("\"pattern_config\""),
+            "schema must mention pattern_config: {PLAN_SYSTEM}"
+        );
+        assert!(PLAN_SYSTEM.contains("synthesis"), "rules must teach synthesis: {PLAN_SYSTEM}");
+        assert!(
+            PLAN_SYSTEM.contains("FAN-OUT") || PLAN_SYSTEM.contains("fan-out"),
+            "rules must teach fan-out: {PLAN_SYSTEM}"
+        );
+        assert!(PLAN_SYSTEM.contains("group"), "rules must teach the group tag: {PLAN_SYSTEM}");
     }
 
     #[test]

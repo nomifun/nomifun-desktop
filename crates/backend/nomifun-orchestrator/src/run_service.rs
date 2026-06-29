@@ -280,6 +280,11 @@ impl RunService {
                     graph_x: None,
                     graph_y: None,
                     role: planned.role.clone(),
+                    // 迁移 023: persist the planner-chosen mode + optional config.
+                    // `kind` is serde-defaulted to "agent" for legacy/fallback plans,
+                    // so a normal single-agent task is unchanged (zero regression).
+                    kind: planned.kind.clone(),
+                    pattern_config: planned.pattern_config.clone(),
                 })
                 .await
                 .map_err(OrchestratorError::from)?;
@@ -1005,6 +1010,11 @@ fn task_row_to_dto(row: OrchRunTaskRow) -> RunTask {
         graph_x: row.graph_x,
         graph_y: row.graph_y,
         role: row.role,
+        // 迁移 023: pass through the task mode + optional config (raw JSON text,
+        // like task_profile). Legacy rows read back `kind = "agent"` (column
+        // default) so the DTO is unchanged for them.
+        kind: row.kind,
+        pattern_config: row.pattern_config,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -1210,6 +1220,8 @@ mod tests {
                 member_index,
                 rationale: None,
                 role: None,
+                kind: "agent".to_string(),
+                pattern_config: None,
             }],
         }
     }
@@ -2117,6 +2129,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: Some("前端".to_string()),
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "无角色任务".to_string(),
@@ -2126,6 +2140,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
             ],
         };
@@ -2169,6 +2185,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "B".to_string(),
@@ -2178,6 +2196,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
             ],
         };
@@ -2318,6 +2338,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 })
                 .collect(),
         }

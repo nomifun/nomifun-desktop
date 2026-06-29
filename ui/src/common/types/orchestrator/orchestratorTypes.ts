@@ -158,6 +158,15 @@ export type TRunTask = {
   /** Short role the planner named for this task (P5 沉淀捕获, migration 022).
    * Nullable: tasks planned before this column existed read back as absent. */
   role?: string;
+  /** Task mode (ultracode 模式增强, migration 023):
+   * - `'agent'` (default) — a normal single-agent task (current behavior);
+   * - `'synthesis'` — merges its dependency tasks' outputs into a final result.
+   * Backend serde-defaults missing/legacy values to `'agent'`. */
+  kind: string;
+  /** Optional per-kind config as a raw JSON string (migration 023). Today only
+   * carries the fan-out group tag (`{"group":"<label>"}`) on sibling agent tasks;
+   * absent for ordinary tasks. */
+  pattern_config?: string;
   /** Creation / last-update timestamps (epoch ms). Drive per-task pacing in the
    * roster + inspector (用时 = updated_at − created_at, 相对时间). */
   created_at: number;
