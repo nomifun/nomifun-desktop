@@ -4,12 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useState } from 'react';
+import React, { Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ExpandRight, FolderClose } from '@icon-park/react';
 import type { TRunDetail } from '@/common/types/orchestrator/orchestratorTypes';
 import AppLoader from '@/renderer/components/layout/AppLoader';
+import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+import { isDesktopShell, isMacOS, isWindows } from '@/renderer/utils/platform';
 import { PreviewPanel, PreviewProvider, usePreviewContext } from '@/renderer/pages/conversation/Preview';
+import { useWorkspaceCollapse } from '@/renderer/pages/conversation/hooks/useWorkspaceCollapse';
+import WorkspacePanelHeader, {
+  DesktopWorkspaceToggle,
+} from '@/renderer/pages/conversation/components/ChatLayout/WorkspacePanelHeader';
+import { WORKSPACE_HEADER_HEIGHT } from '@/renderer/pages/conversation/utils/layoutCalc';
+import { dispatchWorkspaceToggleEvent } from '@/renderer/utils/workspace/workspaceEvents';
 import AgentRoster from './AgentRoster';
 import RunIntentBox from './RunIntentBox';
 import RunWorkspaceRail from './RunWorkspaceRail';
@@ -18,9 +25,6 @@ import type { OpenTaskPayload } from './DagCanvas';
 // react-flow (heavy) is only needed inside the run view, so the canvas chunk is
 // loaded on demand here just like the standalone page did.
 const DagCanvas = React.lazy(() => import('./DagCanvas'));
-
-/** localStorage key for the run-view workspace rail collapse preference. */
-const RUNWS_COLLAPSE_KEY = 'orchestrator-runworkspace-collapsed';
 
 export interface RunViewProps {
   runId: string;
@@ -57,35 +61,32 @@ const RunViewInner: React.FC<RunViewProps> = ({
   onReplan,
 }) => {
   const { t } = useTranslation();
+  const layout = useLayoutContext();
+  const isMobile = Boolean(layout?.isMobile);
   const { isOpen: isPreviewOpen } = usePreviewContext();
   const workDir = detail?.run.work_dir?.trim() ?? '';
   const hasWorkDir = workDir.length > 0;
 
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(RUNWS_COLLAPSE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const toggleCollapsed = useCallback(() => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(RUNWS_COLLAPSE_KEY, next ? '1' : '0');
-      } catch {
-        /* ignore persistence failures */
-      }
-      return next;
-    });
-  }, []);
+  // Desktop-shell mac/win runtime — gate on isDesktopShell() first (matching
+  // ChatLayout/TerminalSessionPage): on mac/Windows the titlebar drives the
+  // toggle, so the in-panel toggle + floating expand button are hidden there;
+  // everyone else (Linux desktop, WebUI browser) keeps the in-panel toggle.
+  const isDesktopRuntime = isDesktopShell();
+  const isMacRuntime = isDesktopRuntime && isMacOS();
+  const isWindowsRuntime = isDesktopRuntime && isWindows();
 
-  const onKeyActivate = (fn: () => void) => (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      fn();
-    }
-  };
+  // Rail collapse — the SAME hook the conversation / terminal rails use, so the
+  // titlebar workspace button (WORKSPACE_TOGGLE_EVENT) toggles it and the
+  // titlebar icon stays in sync (WORKSPACE_STATE_EVENT). Per-run preference key;
+  // a run's work_dir is the user's own artifact dir (not a temp workspace), so
+  // it auto-expands once the work_dir's files load. When the run has no work_dir
+  // the hook stays force-collapsed and broadcasts collapsed STATE.
+  const { rightSiderCollapsed } = useWorkspaceCollapse({
+    workspaceEnabled: hasWorkDir,
+    isMobile,
+    preferenceKey: `orchestrator-run-${runId}`,
+    isTemporaryWorkspace: false,
+  });
 
   return (
     <div className='flex size-full min-h-0'>
@@ -117,44 +118,44 @@ const RunViewInner: React.FC<RunViewProps> = ({
       )}
 
       {/* Workspace rail (Files / Changes) — only when the run carries a work_dir
-          (legacy workspace-backed runs without one simply omit the rail). */}
+          (legacy workspace-backed runs without one simply omit the rail). The
+          rail collapse is driven by the titlebar workspace toggle on mac /
+          Windows / WebUI; Linux desktop keeps the in-panel toggle +
+          DesktopWorkspaceToggle floating button (mirrors ChatLayout / terminal).
+          Collapsed → width 0 (no slim strip), matching the conversation Tab. */}
+      {hasWorkDir && detail && !isMobile && (
+        <div
+          className='!bg-1 relative shrink-0 layout-sider'
+          style={{
+            width: rightSiderCollapsed ? '0px' : '340px',
+            minWidth: rightSiderCollapsed ? '0px' : '340px',
+            overflow: 'hidden',
+            borderLeft: rightSiderCollapsed ? 'none' : '1px solid var(--bg-3)',
+          }}
+        >
+          <WorkspacePanelHeader
+            showToggle={!isMacRuntime && !isWindowsRuntime}
+            collapsed={rightSiderCollapsed}
+            onToggle={() => dispatchWorkspaceToggleEvent()}
+            togglePlacement='right'
+            workspacePath={workDir}
+          >
+            <span className='truncate text-13px font-600 text-t-primary'>{t('orchestrator.run.workspace.title')}</span>
+          </WorkspacePanelHeader>
+          <div style={{ height: `calc(100% - ${WORKSPACE_HEADER_HEIGHT}px)` }}>
+            <RunWorkspaceRail run={detail.run} />
+          </div>
+        </div>
+      )}
+
+      {/* Desktop expand button when collapsed — Linux/web only (mac/Windows use
+          the titlebar workspace button). */}
       {hasWorkDir &&
         detail &&
-        (collapsed ? (
-          <div className='flex h-full w-44px shrink-0 flex-col items-center border-l border-l-base bg-1 py-12px'>
-            <div
-              role='button'
-              tabIndex={0}
-              aria-label={t('orchestrator.run.workspace.expand')}
-              title={t('orchestrator.run.workspace.expand')}
-              onClick={toggleCollapsed}
-              onKeyDown={onKeyActivate(toggleCollapsed)}
-              className='flex size-28px items-center justify-center rd-8px text-t-tertiary transition-colors hover:bg-fill-2 hover:text-t-primary'
-            >
-              <FolderClose theme='outline' size='16' strokeWidth={3} />
-            </div>
-          </div>
-        ) : (
-          <div className='flex h-full w-340px shrink-0 flex-col border-l border-l-base bg-1'>
-            <div className='flex shrink-0 items-center justify-between border-b border-b-base px-12px py-10px'>
-              <span className='truncate text-13px font-600 text-t-primary'>{t('orchestrator.run.workspace.title')}</span>
-              <div
-                role='button'
-                tabIndex={0}
-                aria-label={t('orchestrator.run.workspace.collapse')}
-                title={t('orchestrator.run.workspace.collapse')}
-                onClick={toggleCollapsed}
-                onKeyDown={onKeyActivate(toggleCollapsed)}
-                className='flex size-26px shrink-0 items-center justify-center rd-7px text-t-tertiary transition-colors hover:bg-fill-2 hover:text-t-primary'
-              >
-                <ExpandRight theme='outline' size='15' strokeWidth={3} />
-              </div>
-            </div>
-            <div className='min-h-0 flex-1'>
-              <RunWorkspaceRail run={detail.run} />
-            </div>
-          </div>
-        ))}
+        !isMacRuntime &&
+        !isWindowsRuntime &&
+        rightSiderCollapsed &&
+        !isMobile && <DesktopWorkspaceToggle />}
     </div>
   );
 };

@@ -7,7 +7,9 @@
     "listEmpty": "还没有 Run，点上方「新建 Run」开始吧",
     "listLoadError": "加载 Run 失败",
     "collapse": "收起列表",
-    "expand": "展开列表"
+    "expand": "展开列表",
+    "titlebarShowList": "展开 Run 列表",
+    "titlebarHideList": "收起 Run 列表"
   },
   "empty": {
     "title": "选择一个 Run 开始",
