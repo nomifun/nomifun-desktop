@@ -805,8 +805,30 @@ async fn run_loop(
             //     we finish_run under the lock (the rerun, serialized after, then
             //     re-reads the now-terminal run status and re-activates + restarts).
             // Either way a run is never left non-running/terminal with a runnable
-            // pending task. We hold the lock only around this check + finish — never
-            // while awaiting a worker — so it cannot deadlock the rerun path.
+            // pending task.
+            //
+            // LOCK INVARIANT: the per-run lock guards ONLY pure DB mutations and the
+            // handle deregister — it is NEVER held across an await of a slow/external
+            // op (a worker await, or the B2 LLM `summarize`). The `completed` path
+            // therefore SPLITS into two lock scopes around the LLM summary, which is
+            // the only slow await on this path:
+            //   1. (first scope) take the lock, re-check `list_ready_tasks` (re-loop
+            //      if ready) + `list_tasks`; if `completed`, capture `total_tokens`
+            //      and DROP the lock, then await `compute_completed_summary` with NO
+            //      lock held (a multi-second / hanging LLM call must not stall a
+            //      concurrent rerun/adjust on this run);
+            //   2. (second scope) RE-ACQUIRE the lock and RE-VERIFY the run is still
+            //      completable — re-check `list_ready_tasks` AND `list_tasks`
+            //      all-terminal. A rerun/adjust that landed DURING the summarize
+            //      resets a task → ready work / not-all-terminal → drop + re-loop
+            //      (the reset wins, the loop re-drives, the computed summary is
+            //      discarded). Otherwise finish_run(`completed`) + deregister under
+            //      the re-acquired lock — the terminal write + deregister stay atomic.
+            // The `failed` path has NO LLM call, so it finishes + deregisters under
+            // the single first-scope lock hold (unchanged). Holding the lock only
+            // around DB checks + finish — never across an await — means it cannot
+            // deadlock the rerun path, and the re-acquire is a FRESH `lock().await`
+            // after the first guard is dropped (NOT nested), so no self-deadlock.
             //
             // The re-loop signal is the READY set (not "any pending task"): a
             // legitimately-FAILED run keeps its downstream tasks `pending` forever
@@ -816,62 +838,149 @@ async fn run_loop(
             // so at least one reset task becomes READY. Keying off readiness finishes
             // the failed run correctly while still re-driving a genuine rerun reset.
             let lock = deps.run_locks.for_run(run_id);
-            let _terminal_guard = lock.lock().await;
-            // A concurrent rerun reset a task to a now-RUNNABLE pending state under
-            // the lock just before us → there is real work to do; do not finish.
-            // Release the lock (drop the guard) and re-loop so the fill pass
-            // dispatches it. This is the atomic check-then-act that closes the
-            // strand race. A `list_ready_tasks` error here is treated as "no ready
-            // work" (fail toward the terminal decision below, which logs) — the
-            // statuses read still drive the conclusive branch.
-            let has_ready_work = deps
-                .run_repo
-                .list_ready_tasks(run_id)
-                .await
-                .map(|ready| !ready.is_empty())
-                .unwrap_or(false);
-            if has_ready_work {
-                drop(_terminal_guard);
-                continue;
+
+            // The terminal decision is made under the lock (first scope), but the
+            // `completed` branch only CAPTURES the inputs for the LLM summary here —
+            // it does NOT finish under this guard. We yield a decision out of the
+            // scope so the slow `summarize` await happens AFTER the guard is dropped.
+            enum TerminalDecision {
+                /// Concurrent rerun produced runnable work under the lock, or a read
+                /// failed conclusively in a way that warrants re-driving → re-loop.
+                ReLoop,
+                /// All terminal, completable → summarize (no lock) then re-verify.
+                /// Carries the tasks (for the digest) + token total.
+                Completed { tasks: Vec<OrchRunTaskRow>, total_tokens: Option<i64> },
+                /// A task failed → finished `failed` under this guard already.
+                FinishedFailed,
+                /// Stuck / list_tasks error → already logged; just break.
+                Break,
             }
-            match deps.run_repo.list_tasks(run_id).await {
-                Ok(tasks) => {
-                    let all_terminal = tasks
-                        .iter()
-                        .all(|t| t.status == "done" || t.status == "skipped");
-                    let any_failed = tasks.iter().any(|t| t.status == "failed");
-                    if !tasks.is_empty() && all_terminal {
-                        let total_tokens = sum_task_tokens(&tasks);
-                        // B2: synthesize a coherent run summary with a one-shot
-                        // lead call. FAIL-SOFT — `compute_completed_summary` returns
-                        // the mechanical `aggregate_summary` concat on ANY problem
-                        // (summarizer error, no derivable lead, blank result), so a
-                        // summary failure NEVER blocks/fails the completed run.
-                        let summary = compute_completed_summary(&deps, run_id, &run, &tasks).await;
-                        finish_run(&deps, run_id, "completed", Some(summary), total_tokens)
-                            .await;
-                        // Deregister our handle UNDER the lock so `is_running` flips
-                        // false atomically with the terminal status write — a rerun
-                        // serialized after us on this lock then observes a stopped
-                        // loop and the route restarts it (no variant-A strand).
-                        handles.remove_if(run_id, |_, h| h.generation == generation);
-                    } else if any_failed {
-                        let total_tokens = sum_task_tokens(&tasks);
-                        finish_run(&deps, run_id, "failed", None, total_tokens).await;
-                        handles.remove_if(run_id, |_, h| h.generation == generation);
-                    } else {
-                        // Stuck (no ready, no in-flight, not terminal) — break,
-                        // never spin.
-                        warn!(
-                            run_id,
-                            task_count = tasks.len(),
-                            "Run loop: no ready tasks and run not terminal — exiting to avoid spin"
-                        );
+
+            let decision = {
+                let _terminal_guard = lock.lock().await;
+                // A concurrent rerun reset a task to a now-RUNNABLE pending state
+                // under the lock just before us → there is real work to do; do not
+                // finish. Release the lock (drop the guard) and re-loop so the fill
+                // pass dispatches it. This is the atomic check-then-act that closes
+                // the strand race. A `list_ready_tasks` error here is treated as "no
+                // ready work" (fail toward the terminal decision below, which logs)
+                // — the statuses read still drive the conclusive branch.
+                let has_ready_work = deps
+                    .run_repo
+                    .list_ready_tasks(run_id)
+                    .await
+                    .map(|ready| !ready.is_empty())
+                    .unwrap_or(false);
+                if has_ready_work {
+                    TerminalDecision::ReLoop
+                } else {
+                    match deps.run_repo.list_tasks(run_id).await {
+                        Ok(tasks) => {
+                            let all_terminal = tasks
+                                .iter()
+                                .all(|t| t.status == "done" || t.status == "skipped");
+                            let any_failed = tasks.iter().any(|t| t.status == "failed");
+                            if !tasks.is_empty() && all_terminal {
+                                // Completable: capture inputs and DROP the guard at
+                                // the end of this scope — the LLM summarize runs
+                                // OUTSIDE the lock, then we re-acquire + re-verify.
+                                let total_tokens = sum_task_tokens(&tasks);
+                                TerminalDecision::Completed { tasks, total_tokens }
+                            } else if any_failed {
+                                // No LLM on the failed path → finish + deregister
+                                // under THIS held guard (atomic terminal-write +
+                                // deregister, as before).
+                                let total_tokens = sum_task_tokens(&tasks);
+                                finish_run(&deps, run_id, "failed", None, total_tokens).await;
+                                handles.remove_if(run_id, |_, h| h.generation == generation);
+                                TerminalDecision::FinishedFailed
+                            } else {
+                                // Stuck (no ready, no in-flight, not terminal) —
+                                // break, never spin.
+                                warn!(
+                                    run_id,
+                                    task_count = tasks.len(),
+                                    "Run loop: no ready tasks and run not terminal — exiting to avoid spin"
+                                );
+                                TerminalDecision::Break
+                            }
+                        }
+                        Err(e) => {
+                            warn!(run_id, error = %e, "Run loop: list_tasks failed — exiting");
+                            TerminalDecision::Break
+                        }
                     }
                 }
-                Err(e) => warn!(run_id, error = %e, "Run loop: list_tasks failed — exiting"),
+                // `_terminal_guard` drops HERE — the lock is released before any LLM
+                // await below.
+            };
+
+            match decision {
+                TerminalDecision::ReLoop => continue,
+                TerminalDecision::FinishedFailed | TerminalDecision::Break => break,
+                TerminalDecision::Completed { tasks, total_tokens } => {
+                    // B2: synthesize a coherent run summary with a one-shot lead
+                    // call — WITH NO LOCK HELD (the guard above was dropped). This is
+                    // the only slow/external await on the terminal path; holding the
+                    // per-run lock across it would stall a concurrent rerun/adjust
+                    // for the whole summarization (unbounded if the LLM hangs).
+                    // FAIL-SOFT — `compute_completed_summary` returns the mechanical
+                    // `aggregate_summary` concat on ANY problem (summarizer error, no
+                    // derivable lead, blank result), so a summary failure NEVER
+                    // blocks/fails the completed run.
+                    let summary = compute_completed_summary(&deps, run_id, &run, &tasks).await;
+
+                    // RE-ACQUIRE the lock (a FRESH `lock().await`, the first guard is
+                    // already dropped — not nested, so no self-deadlock) and
+                    // RE-VERIFY the run is STILL completable: a rerun/adjust may have
+                    // reset a task DURING the summarize above. Re-check ready work AND
+                    // all-terminal under the re-acquired lock — if the reset landed,
+                    // the reset WINS: drop + re-loop (discard the computed summary,
+                    // the loop re-drives). Only when the run is still genuinely
+                    // terminal do we commit finish + deregister, keeping the
+                    // strand-race closure intact (finish only commits under the lock
+                    // after the re-verify).
+                    let _terminal_guard = lock.lock().await;
+                    let ready_now = deps
+                        .run_repo
+                        .list_ready_tasks(run_id)
+                        .await
+                        .map(|ready| !ready.is_empty())
+                        .unwrap_or(false);
+                    if ready_now {
+                        drop(_terminal_guard);
+                        continue;
+                    }
+                    let still_terminal = match deps.run_repo.list_tasks(run_id).await {
+                        Ok(now) => {
+                            !now.is_empty()
+                                && now
+                                    .iter()
+                                    .all(|t| t.status == "done" || t.status == "skipped")
+                        }
+                        // A re-read error → do NOT finish on stale data; re-loop and
+                        // re-decide on the next pass (fail toward not-committing).
+                        Err(e) => {
+                            warn!(run_id, error = %e, "Run loop: list_tasks re-verify failed — re-looping");
+                            false
+                        }
+                    };
+                    if !still_terminal {
+                        // A concurrent rerun/adjust reset a task during summarize →
+                        // no longer all-terminal → the reset wins. Re-loop.
+                        drop(_terminal_guard);
+                        continue;
+                    }
+                    // Still terminal, no ready work → commit the completion.
+                    finish_run(&deps, run_id, "completed", Some(summary), total_tokens).await;
+                    // Deregister our handle UNDER the (re-acquired) lock so
+                    // `is_running` flips false atomically with the terminal status
+                    // write — a rerun serialized after us on this lock then observes
+                    // a stopped loop and the route restarts it (no variant-A strand).
+                    handles.remove_if(run_id, |_, h| h.generation == generation);
+                    break;
+                }
             }
-            break;
         }
 
         // (d) Park on the next worker to finish (NOT a poll — this awaits). The
@@ -1309,9 +1418,13 @@ const SUMMARY_TASK_OUTPUT_LEN: usize = 600;
 ///   error), or
 /// - the synthesized text comes back blank.
 ///
-/// On success it returns the synthesized prose. Called UNDER the run's terminal
-/// lock (the tasks are already conclusive at this point), just before `finish_run`
-/// writes the `completed` status + summary.
+/// On success it returns the synthesized prose. Called with NO lock held — the
+/// run loop DROPS the per-run terminal guard before awaiting this (a slow / hanging
+/// LLM call must not stall a concurrent rerun/adjust on the run), then RE-ACQUIRES
+/// the lock and RE-VERIFIES the run is still all-terminal with no ready work before
+/// `finish_run` writes the `completed` status + this summary. If a rerun/adjust
+/// reset a task during this call, the re-verify catches it and the loop re-drives,
+/// discarding the returned summary.
 async fn compute_completed_summary(
     deps: &Arc<RunEngineDeps>,
     run_id: &str,
@@ -7516,6 +7629,51 @@ mod tests {
         assert!(
             summary.contains("Run complete: 3/3 tasks done."),
             "default (noop) summarizer falls back to the concat: {summary}"
+        );
+    }
+
+    // CONCURRENCY-REGRESSION GUARD (B2 fix): the LLM `summarize` is awaited with the
+    // per-run terminal lock NOT held — the loop DROPS the first guard, awaits
+    // `compute_completed_summary`, then RE-ACQUIRES the lock and RE-VERIFIES the run
+    // is still all-terminal before committing the completion + deregistering.
+    //
+    // This pins the full drop→summarize(no lock)→re-acquire→re-verify→finish path:
+    // a completed run still gets its LLM summary WRITTEN (proving the second-scope
+    // commit ran with the summary computed outside the lock) AND its loop handle is
+    // deregistered (proving the finish_run + remove_if under the RE-ACQUIRED lock
+    // executed atomically — the strand-race closure survives the lock split). With a
+    // hanging/slow summarizer this path would previously have stalled any concurrent
+    // rerun for the whole summarization; the lock is now released across the await.
+    #[tokio::test]
+    async fn completed_run_summarizes_outside_lock_then_reverifies_and_finishes() {
+        let seen = Arc::new(Mutex::new(None));
+        let summarizer: Arc<dyn PlanProducer> = Arc::new(StubSummarizer {
+            text: "重取锁重校验后写入的综合总结。".to_string(),
+            seen: seen.clone(),
+        });
+        let h = harness_with_summarizer(summarizer).await;
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+
+        h.engine.start(run_id.clone());
+        let detail = drive_to_completion(&h.run_service, &run_id).await;
+
+        // The completion committed under the RE-ACQUIRED lock (second scope).
+        assert_eq!(detail.run.status, "completed", "run must complete via the re-verify path");
+        let summary = detail.run.summary.expect("run summary set on completion");
+        assert_eq!(
+            summary, "重取锁重校验后写入的综合总结。",
+            "the LLM summary computed OUTSIDE the lock must be the committed run summary"
+        );
+
+        // `summarize` was actually awaited (the drop→summarize step ran with no lock).
+        assert!(seen.lock().unwrap().is_some(), "summarize must have been called outside the lock");
+
+        // The loop handle was deregistered UNDER the re-acquired lock, atomically
+        // with the terminal write — the run is no longer registered as running.
+        assert!(
+            !h.engine.is_running(&run_id),
+            "completed run's loop must be deregistered after the second-scope finish"
         );
     }
 
