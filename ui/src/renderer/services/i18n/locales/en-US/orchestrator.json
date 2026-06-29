@@ -180,6 +180,26 @@
       "locked": "Lock assignment",
       "lockedHint": "When locked, the orchestrator won't auto-reassign this task on the next planning pass."
     },
+    "spec": {
+      "title": "Intent / prompt",
+      "placeholder": "Describe what this node should do…",
+      "save": "Save",
+      "saving": "Saving…",
+      "dirtyHint": "Click Rerun after saving to apply the new intent.",
+      "runningHint": "Task is running — pause it to edit.",
+      "empty": "(no intent yet)",
+      "saveOk": "Node intent saved",
+      "saveError": "Failed to save: {{error}}"
+    },
+    "rerun": {
+      "button": "Rerun",
+      "running": "Task is running — pause it first",
+      "confirm": "Rerun will reset this node and its downstream, then re-execute. Continue?",
+      "confirmOk": "Rerun",
+      "confirmCancel": "Cancel",
+      "ok": "Rerun started",
+      "error": "Rerun failed: {{error}}"
+    },
     "task": {
       "status": {
         "pending": "Pending",

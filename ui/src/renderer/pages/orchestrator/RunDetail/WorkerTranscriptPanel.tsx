@@ -6,8 +6,8 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Drawer, Input, Select, Spin, Switch, Tooltip } from '@arco-design/web-react';
-import { Comment, Send } from '@icon-park/react';
+import { Button, Drawer, Input, Popconfirm, Select, Spin, Switch, Tooltip } from '@arco-design/web-react';
+import { Comment, Redo, Send } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAssignment, TFleetMember } from '@/common/types/orchestrator/orchestratorTypes';
@@ -71,6 +71,12 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
   const [saving, setSaving] = useState(false);
   const [steerText, setSteerText] = useState('');
   const [steering, setSteering] = useState(false);
+  // Editable 意图/prompt draft (UC-2a-fe). Mirrors the task's `spec`; saved back
+  // via updateTaskSpec, then a later rerun re-executes the node with the new spec.
+  const [specDraft, setSpecDraft] = useState('');
+  const [specSaving, setSpecSaving] = useState(false);
+  // Guards the rerun button against double-click while the request is in flight.
+  const [rerunning, setRerunning] = useState(false);
 
   const task = open?.task ?? null;
   const assignment = open?.assignment ?? null;
@@ -78,11 +84,22 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
   // Steer is only meaningful for a task actively running on a worker with a live
   // conversation to inject into.
   const canSteer = task?.status === 'running' && conversationId !== undefined;
+  // The spec and rerun controls are gated on the same backend invariant: neither
+  // edits nor a reset are allowed while the node is actively running.
+  const isRunning = task?.status === 'running';
+  const specValue = task?.spec ?? '';
+  const specDirty = specDraft !== specValue;
 
-  // Reset the steer draft whenever the inspected task changes.
+  // Reset the steer + spec drafts whenever the inspected task changes.
   useEffect(() => {
     setSteerText('');
   }, [task?.id]);
+
+  // Re-seed the spec draft from the task whenever the inspected task changes OR
+  // the upstream spec value updates (e.g. after a save round-trips via refetch).
+  useEffect(() => {
+    setSpecDraft(specValue);
+  }, [task?.id, specValue]);
 
   useEffect(() => {
     if (!task || conversationId === undefined) {
@@ -151,6 +168,51 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
       message.error(t('orchestrator.run.steer.error', { error: String(e) }));
     } finally {
       setSteering(false);
+    }
+  };
+
+  // Persist an edited 意图/prompt (spec) for a non-running node, then refetch so
+  // the canvas + panel resync. The amended spec only takes effect on the next
+  // rerun (the hint under the editor spells this out). Backend rejects a blank
+  // spec or a running task — surfaced via message.error.
+  const saveSpec = async () => {
+    if (!open || isRunning) return;
+    const next = specDraft.trim();
+    if (!next || !specDirty) return;
+    setSpecSaving(true);
+    try {
+      await ipcBridge.orchestrator.runs.updateTaskSpec.invoke({
+        run_id: open.runId,
+        task_id: open.task.id,
+        updates: { spec: next },
+      });
+      message.success(t('orchestrator.run.spec.saveOk'));
+      await open.refetch();
+    } catch (e) {
+      message.error(t('orchestrator.run.spec.saveError', { error: String(e) }));
+    } finally {
+      setSpecSaving(false);
+    }
+  };
+
+  // Re-execute this node (and cascade-reset its settled downstream), re-activating
+  // a terminal run so the engine re-drives it. Backend rejects a running task with
+  // BadRequest — we also disable the trigger for `running` to mirror that. On
+  // success we refetch so the canvas reflects the reset + re-drive immediately.
+  const doRerun = async () => {
+    if (!open || isRunning) return;
+    setRerunning(true);
+    try {
+      await ipcBridge.orchestrator.runs.rerunTask.invoke({
+        run_id: open.runId,
+        task_id: open.task.id,
+      });
+      message.success(t('orchestrator.run.rerun.ok'));
+      await open.refetch();
+    } catch (e) {
+      message.error(t('orchestrator.run.rerun.error', { error: String(e) }));
+    } finally {
+      setRerunning(false);
     }
   };
 
@@ -380,6 +442,81 @@ const WorkerTranscriptPanel: React.FC<WorkerTranscriptPanelProps> = ({ open, onC
                 </div>
               </div>
             )}
+
+            {/* 意图/prompt 微调 + 重跑 (UC-2a-fe) — editable spec (read-only while
+                running) and a confirm-guarded manual rerun. Always shown for a
+                task regardless of assignment, so a failed/done/skipped/pending
+                node can be fine-tuned then re-executed. */}
+            <div className='mt-12px border-t border-t-base pt-12px'>
+              <div className='mb-4px flex items-center justify-between gap-8px'>
+                <span className='text-11px font-600 uppercase tracking-wide text-t-tertiary'>
+                  {t('orchestrator.run.spec.title')}
+                </span>
+                {isRunning ? (
+                  <span className='text-10px leading-none text-t-tertiary'>
+                    {t('orchestrator.run.spec.runningHint')}
+                  </span>
+                ) : specDirty ? (
+                  <span className='text-10px leading-none text-warning-6'>
+                    {t('orchestrator.run.spec.dirtyHint')}
+                  </span>
+                ) : null}
+              </div>
+              <Input.TextArea
+                value={specDraft}
+                disabled={isRunning || specSaving}
+                placeholder={t('orchestrator.run.spec.placeholder')}
+                autoSize={{ minRows: 2, maxRows: 8 }}
+                onChange={(v: string) => setSpecDraft(v)}
+              />
+
+              <div className='mt-8px flex items-center justify-between gap-8px'>
+                {/* Rerun — confirm-guarded; disabled (with a tooltip) while running. */}
+                <Tooltip
+                  content={t('orchestrator.run.rerun.running')}
+                  disabled={!isRunning}
+                  position='top'
+                >
+                  {/* Popconfirm is suppressed while running (the trigger is disabled). */}
+                  <Popconfirm
+                    focusLock
+                    disabled={isRunning || rerunning}
+                    title={t('orchestrator.run.rerun.confirm')}
+                    okText={t('orchestrator.run.rerun.confirmOk')}
+                    cancelText={t('orchestrator.run.rerun.confirmCancel')}
+                    onOk={() => void doRerun()}
+                  >
+                    <div
+                      role='button'
+                      tabIndex={isRunning ? -1 : 0}
+                      aria-label={t('orchestrator.run.rerun.button')}
+                      aria-disabled={isRunning || rerunning}
+                      className='flex h-28px shrink-0 cursor-pointer items-center gap-5px rd-8px border border-b-base px-10px text-12px font-500 text-t-secondary transition-colors hover:border-primary hover:text-primary'
+                      style={
+                        isRunning || rerunning
+                          ? { opacity: 0.5, cursor: 'not-allowed', pointerEvents: 'none' as const }
+                          : undefined
+                      }
+                    >
+                      <Redo theme='outline' size='13' strokeWidth={3} />
+                      <span>{t('orchestrator.run.rerun.button')}</span>
+                    </div>
+                  </Popconfirm>
+                </Tooltip>
+
+                {/* Save spec — only enabled for a non-running node with a dirty,
+                    non-blank draft. The new spec applies on the next rerun. */}
+                <Button
+                  size='small'
+                  type='primary'
+                  loading={specSaving}
+                  disabled={isRunning || !specDirty || specDraft.trim().length === 0}
+                  onClick={() => void saveSpec()}
+                >
+                  {specSaving ? t('orchestrator.run.spec.saving') : t('orchestrator.run.spec.save')}
+                </Button>
+              </div>
+            </div>
           </div>
         )}
 
