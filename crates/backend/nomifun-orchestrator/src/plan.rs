@@ -233,9 +233,10 @@ pub trait PlanProducer: Send + Sync {
     /// leaves the run untouched.
     ///
     /// `sink`(B2): same OPTIONAL lead-thinking sink as [`produce`](Self::produce).
-    /// NOTE: the production call site currently passes `None` (the adjust LLM call
-    /// is still inside the per-run lock; streaming it is deferred to B4, which
-    /// first moves the call out of the lock). The mechanism is in place here.
+    /// As of B4 the production call site streams via the engine's `phase="adjust"`
+    /// sink — the adjust LLM call now runs in `compute_adjusted_plan` OUTSIDE the
+    /// per-run lock (the lock only wraps `apply_adjusted_plan`'s pure-DB reconcile),
+    /// so streaming here never extends lock hold time.
     ///
     /// Default impl errors — only the production [`LlmPlanProducer`] and the test
     /// producers that exercise `adjust` override it (most planners only `produce`).
