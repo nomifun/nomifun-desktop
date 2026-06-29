@@ -117,3 +117,13 @@
 IPC：`ipcBridge.ts`。
 前端：`MemoriesTab.tsx / nomi/index.tsx / companion/index.tsx / companionNativeMenu.ts(+test) /`（必要时 Sider）。
 i18n：`locales/en-US/nomi.json`、`locales/zh-CN/nomi.json` + 重新生成 `i18n-keys.d.ts`。
+
+## 实现备注（落地时的取舍，与上文设计一致，细节微调）
+
+- **无需新增迁移**：旧行 `scope_companion_id` 为 NULL，`row_to_memory` 用 `try_get::<Option<String>>` 归一成 `''`，配合 `scope_kind='user' OR scope_companion_id=?` 查询即正确；省去回填迁移、不动 `STORE_VERSION`。
+- **`insert_memory` 保留为共享包装**：新增 `insert_memory_scoped(..., scope)`，`insert_memory(...)` = 共享包装，最小化对学习器/既有测试的冲击。
+- **私有写入跳过去重**：`add_memory`/对话保存在私有作用域下跳过 `find_similar_active` 合并，避免把私有记忆误并进共享或他人记忆。
+- **recall 作用域**：`CompanionMemorySink::recall` 增 `conversation_id`，由会话归属伙伴解析作用域（与注入一致）。
+- **对话内入口（5d）**：实现为悬浮窗「空闲时」低调气泡提示「📝 已记住：…」（避免覆盖进行中的回复气泡），编辑/管理经右键「打开记忆」直达 scope-aware 记忆页。
+- **预存且无关的破损**：集成测试 `nomifun-ai-agent/tests/factory_provider_integration.rs` 因更早提交给 `BuildTaskOptions` 增了 `conversation_created_at` 字段而未同步，本就编译失败（已 stash 验证与本改动无关），不在本次范围内修复。
+
