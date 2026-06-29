@@ -409,6 +409,17 @@ export const useRemoveMessageByMsgId = () => {
   );
 };
 
+export const useRemoveMessagesFrom = () => {
+  const update = useUpdateMessageList();
+
+  return useCallback(
+    (createdAt: number) => {
+      update((list) => list.filter((message) => (message.created_at ?? 0) < createdAt));
+    },
+    [update]
+  );
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
