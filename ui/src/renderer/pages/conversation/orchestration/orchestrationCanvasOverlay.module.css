@@ -1,0 +1,185 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* OrchestrationCanvasOverlay — the floating agent canvas for 「会话原生编排 v2」.
+ * A draggable glass-headed panel (expanded) + a small bottom-right chip
+ * (collapsed). All colors flow through CSS variables so the panel honors every
+ * one of the 5 themes; the glass header reuses `.chat-layout-header--glass`
+ * (imported by the component) so it reads identically to the conversation head. */
+
+/* ── Expanded panel ──────────────────────────────────────────────────────────
+ * Fixed-position floating card. Position is driven inline (drag state); the
+ * size + chrome live here. A soft rd-16 card on `--bg-1` with a layered shadow
+ * that lifts it off the conversation content beneath. */
+.panel {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  width: 760px;
+  height: 560px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  background: var(--bg-1);
+  border: 1px solid var(--border-base);
+  border-radius: 16px;
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.22),
+    0 6px 18px rgba(0, 0, 0, 0.12),
+    0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 6%, transparent);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* The drag handle = the glass header. `cursor: grab` invites the drag; the body
+ * controls keep their own cursors via `stopPropagation`. */
+.dragHandle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.dragging .dragHandle {
+  cursor: grabbing;
+}
+
+/* While dragging, kill text selection + pointer events on the body so the drag
+ * stays crisp (no accidental selection / hover churn under the cursor). */
+.dragging .body {
+  user-select: none;
+}
+
+/* Header — wraps the glass header tokens. Height/padding tuned to sit a touch
+ * tighter than the full conversation head (the overlay is a compact surface). */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-shrink: 0;
+  min-height: 48px;
+  padding: 8px 12px 10px 14px;
+  overflow: hidden;
+}
+
+/* Body — fills the remaining height; the active view (canvas | feed) owns its
+ * own scroll. Min-height 0 so a flex child can shrink and scroll internally. */
+.body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The canvas / feed view container — fills the body. */
+.viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── Collapsed chip ──────────────────────────────────────────────────────────
+ * A small floating pill anchored bottom-right: a status dot, a truncated goal,
+ * and (while planning) a soft pulse. Click → re-expand. */
+.chip {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 8px 14px 8px 12px;
+  background: color-mix(in srgb, var(--bg-1) 94%, transparent);
+  border: 1px solid var(--border-base);
+  border-radius: 100px;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.18),
+    0 2px 6px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  user-select: none;
+  transition:
+    transform 0.16s ease,
+    box-shadow 0.16s ease,
+    border-color 0.16s ease;
+  backdrop-filter: saturate(120%) blur(8px);
+  -webkit-backdrop-filter: saturate(120%) blur(8px);
+}
+
+.chip:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, rgb(var(--primary-6)) 40%, var(--border-base));
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.22),
+    0 3px 8px rgba(0, 0, 0, 0.12);
+}
+
+.chipDot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.chipLabel {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+/* The 「画布」glyph badge that leads the chip, primary-tinted. */
+.chipBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  color: #fff;
+  background: rgb(var(--primary-6));
+}
+
+/* The planning pulse ring around the status dot (mirrors the header indicator). */
+.chipPulse {
+  position: relative;
+}
+
+.chipPulse::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, rgb(var(--primary-6)) 60%, transparent);
+  animation: chipPulse 1.6s ease-out infinite;
+}
+
+@keyframes chipPulse {
+  0% {
+    transform: scale(0.7);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip {
+    transition: none;
+  }
+  .chipPulse::after {
+    animation: none;
+  }
+}

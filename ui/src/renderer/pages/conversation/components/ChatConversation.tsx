@@ -30,6 +30,7 @@ import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import { OrchestrationProvider } from '../orchestration/OrchestrationContext';
+import OrchestrationCanvasOverlay from '../orchestration/OrchestrationCanvasOverlay';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 // import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
 
@@ -199,6 +200,11 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
           agent_name={presetAssistantInfo?.name}
         />
       </ChatLayout>
+      {/* Floating agent canvas (会话原生编排 v2). A sibling of ChatLayout inside the
+          OrchestrationProvider — it self-gates on canvasOpen / runId, so it costs
+          nothing when the conversation isn't linked to a run, and never touches
+          ChatLayout / NomiChat internals. */}
+      <OrchestrationCanvasOverlay />
     </OrchestrationProvider>
   );
 };
