@@ -10,6 +10,8 @@ import type { IMcpServer } from '@/common/config/storage';
 import { resolveLocaleKey } from '@/common/utils';
 
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
+import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import { CUSTOM_AVATAR_IMAGE_MAP } from './constants';
 import AgentPillBar from './components/AgentPillBar';
@@ -219,6 +221,9 @@ const GuidPage: React.FC = () => {
     [mention.mentionMatchRegex, guidInput.setInput, mention.setMentionQuery, mention.setMentionOpen]
   );
 
+  const [sendKeyPref] = useConfig('chat.sendKey');
+  const sendKey = sendKeyPref ?? 'enter';
+
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
       if (
@@ -285,13 +290,13 @@ const GuidPage: React.FC = () => {
         mention.setMentionActiveIndex(0);
         return;
       }
-      if (event.key === 'Enter' && !event.shiftKey) {
+      if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
         if (!guidInput.input.trim()) return;
         send.sendMessageHandler();
       }
     },
-    [mention, guidInput.input, send.sendMessageHandler]
+    [mention, guidInput.input, send.sendMessageHandler, sendKey]
   );
 
   const handleSelectAgentFromPillBar = useCallback(

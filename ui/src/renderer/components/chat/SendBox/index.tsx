@@ -33,6 +33,7 @@ import { theme } from '@/platform';
 import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useCompositionInput } from '@renderer/hooks/chat/useCompositionInput';
+import { useConfig } from '@renderer/hooks/config/useConfig';
 import { useConversationExport } from '@renderer/hooks/file/useConversationExport';
 import { useDragUpload } from '@renderer/hooks/file/useDragUpload';
 import { useLatestRef } from '@renderer/hooks/ui/useLatestRef';
@@ -982,6 +983,8 @@ const SendBox: React.FC<{
 
   // 使用共享的输入法合成处理
   const { compositionHandlers, isComposingState, createKeyDownHandler } = useCompositionInput();
+  const [sendKeyPref] = useConfig('chat.sendKey');
+  const sendKey = sendKeyPref ?? 'enter';
 
   // 使用共享的PasteService集成
   const { onPaste, onFocus: handlePasteFocus } = usePasteService({
@@ -1711,26 +1714,31 @@ const SendBox: React.FC<{
               }}
               {...compositionHandlers}
               autoSize={isSingleLine ? false : { minRows: 1, maxRows: 10 }}
-              onKeyDown={createKeyDownHandler(sendMessageHandler, (event) => {
-                if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
-                  return true;
-                }
-                // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
-                // instead of enqueuing it. Plain Enter still sends; Shift+Enter
-                // still inserts a newline. Opt-in via onSteer + steerAvailable.
-                if (
-                  onSteer &&
-                  steerAvailable &&
-                  event.key === 'Enter' &&
-                  !event.shiftKey &&
-                  (event.metaKey || event.ctrlKey)
-                ) {
-                  event.preventDefault();
-                  steerMessageHandler();
-                  return true;
-                }
-                return false;
-              })}
+              onKeyDown={createKeyDownHandler(
+                sendMessageHandler,
+                (event) => {
+                  if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
+                    return true;
+                  }
+                  // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
+                  // instead of enqueuing it. Only in 'enter' mode — in 'mod-enter'
+                  // mode Mod+Enter IS the submit gesture. Opt-in via onSteer + steerAvailable.
+                  if (
+                    sendKey === 'enter' &&
+                    onSteer &&
+                    steerAvailable &&
+                    event.key === 'Enter' &&
+                    !event.shiftKey &&
+                    (event.metaKey || event.ctrlKey)
+                  ) {
+                    event.preventDefault();
+                    steerMessageHandler();
+                    return true;
+                  }
+                  return false;
+                },
+                sendKey
+              )}
             ></Input.TextArea>
           </div>
           {isSingleLine && (
