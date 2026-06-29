@@ -62,9 +62,11 @@
   overflow: hidden;
 }
 
-/* Custom node host: react-flow wraps each node in .react-flow__node; we render
-   our own card inside, so strip the default node chrome. */
-.nomi-dag-flow .react-flow__node-task {
+/* Custom node hosts: react-flow wraps each node in .react-flow__node-<type>; we
+   render our own card inside (task + the optional synthetic main node), so strip
+   the default node chrome for both. */
+.nomi-dag-flow .react-flow__node-task,
+.nomi-dag-flow .react-flow__node-main {
   background: transparent;
   border: none;
   padding: 0;
