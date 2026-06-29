@@ -30,7 +30,37 @@ pub use engine::{
     InputKind, ObserveOpts, OcrLine, Rect, Snapshot, SnapshotGen, Source, Target,
 };
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// Process-wide label for the host application, woven into permission-error
+/// guidance so the message names the *actual* app the user must grant (and
+/// restart) instead of a generic "this app". On a desktop host that ambiguity
+/// is actively harmful: computer-use runs IN-PROCESS inside the host app, but a
+/// model reading "this app" reliably misattributes it to the terminal/editor it
+/// imagines is hosting the session and sends the user to grant the wrong
+/// process. The host sets this once at startup (the desktop shell sets
+/// "NomiFun"); library/headless embeddings leave it unset and get "this app".
+static HOST_APP_LABEL: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set the host-application label used in permission-error guidance (e.g.
+/// "NomiFun"). Last writer wins; call once early in host startup. A poisoned
+/// lock is ignored — the default ("this app") is a safe fallback, never a panic.
+pub fn set_host_app_label(label: impl Into<String>) {
+    if let Ok(mut guard) = HOST_APP_LABEL.write() {
+        *guard = Some(label.into());
+    }
+}
+
+/// The host-application label for permission guidance, or `"this app"` when the
+/// host has not set one. Always returns an owned, non-empty string.
+pub fn host_app_label() -> String {
+    HOST_APP_LABEL
+        .read()
+        .ok()
+        .and_then(|g| g.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "this app".to_string())
+}
 
 /// Construct the platform's accessibility engine, or report why it is
 /// unavailable. The returned engine is `Send + Sync` and its methods are
@@ -60,6 +90,23 @@ pub fn create_engine() -> Result<Arc<dyn A11yEngine>, A11yError> {
                    Pixel-based computer-use still works."
                 .to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod host_label_tests {
+    use super::{host_app_label, set_host_app_label};
+
+    // The only test in this crate that touches the process-global label, so its
+    // steps observe each other deterministically under the parallel runner.
+    #[test]
+    fn label_defaults_then_reflects_set_and_ignores_empty() {
+        assert_eq!(host_app_label(), "this app", "default before any host sets it");
+        set_host_app_label("NomiFun");
+        assert_eq!(host_app_label(), "NomiFun");
+        // An empty label is ignored so a mis-set never blanks the guidance.
+        set_host_app_label("");
+        assert_eq!(host_app_label(), "this app");
     }
 }
 

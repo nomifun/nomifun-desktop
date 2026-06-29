@@ -1273,6 +1273,34 @@ export const systemSettings = {
 };
 
 // ---------------------------------------------------------------------------
+// Computer-use OS permissions — macOS TCC (Accessibility / Screen Recording).
+// Routed to the in-process backend, which probes/triggers the HOST process's
+// OWN grants, so `get` is the authoritative answer to "did my grant take effect
+// for the running app?" — a visibly-on System Settings toggle bound to a stale
+// code identity reports `false` here. Off macOS the booleans are null.
+// ---------------------------------------------------------------------------
+
+export type ComputerPermissionKind = 'accessibility' | 'screen_recording';
+
+export interface ComputerPermissionStatus {
+  accessibility: boolean | null;
+  screen_recording: boolean | null;
+  platform: 'macos' | 'windows' | 'linux' | 'other';
+  app_label: string;
+}
+
+export const computerPermissions = {
+  /** Live grant state for the running host process (safe to poll). */
+  get: httpGet<ComputerPermissionStatus, void>('/api/computer/permissions'),
+  /** Trigger the macOS prompt + register the app in the list; returns post-call status. */
+  request: httpPost<ComputerPermissionStatus, { kind: ComputerPermissionKind }>(
+    '/api/computer/permissions/request'
+  ),
+  /** Deep-link to the exact System Settings privacy pane for `kind`. */
+  openSettings: httpPost<void, { kind: ComputerPermissionKind }>('/api/computer/permissions/open-settings'),
+};
+
+// ---------------------------------------------------------------------------
 // System events — global WS broadcasts owned by the backend
 // ---------------------------------------------------------------------------
 
