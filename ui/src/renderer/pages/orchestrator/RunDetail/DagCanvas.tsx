@@ -17,9 +17,31 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import TaskNode, { normalizeTaskKind, type TaskFlowNode, type JudgeWinner, type LoopState, type VerifyVerdict } from './nodes/TaskNode';
+import MainNode, { type MainFlowNode } from './nodes/MainNode';
 
-/** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
+/** Stable nodeTypes refs so react-flow doesn't warn about a new object each
+ * render. Two frozen variants keep the backward-compatible path byte-identical:
+ * `NODE_TYPES` (task-only) is used when `onOpenMain` is absent — exactly as
+ * before — and `NODE_TYPES_WITH_MAIN` additionally registers the synthetic main
+ * node only when a consumer opts into it. */
 const NODE_TYPES = { task: TaskNode } as const;
+const NODE_TYPES_WITH_MAIN = { task: TaskNode, main: MainNode } as const;
+
+/** Stable id for the synthetic lead/main agent node injected above the root
+ * tasks when `onOpenMain` is provided. Underscore-fenced so it can never collide
+ * with a real task id. */
+const MAIN_NODE_ID = '__main__';
+
+/** Vertical offset (px) applied to the OUTPUT of {@link layoutDag} so every task
+ * node shifts down one row, freeing the top row for the synthetic main node.
+ * Applied ONLY when the main node is injected; `layoutDag` itself is never
+ * touched. Matches `layoutDag`'s own `ROW_STEP` so the main→root spacing reads
+ * as one consistent dependency layer. */
+const MAIN_ROW_OFFSET = 140;
+
+/** Any node this canvas can render — a task node, or (only when `onOpenMain` is
+ * given) the synthetic main node. */
+type DagFlowNode = TaskFlowNode | MainFlowNode;
 
 /** Neutral verdict for a verify node whose marker is absent / unparseable / still
  * settling — renders the pill in its neutral "verifying…" state instead of a
@@ -155,6 +177,31 @@ function hueForGroup(label: string): number {
   return hash;
 }
 
+/**
+ * The set of in-degree-0 ("root") task ids — tasks with no blocker among the
+ * run's real tasks. Mirrors {@link layoutDag}'s edge filter (only deps whose
+ * BOTH endpoints are real tasks count) so the roots we connect the synthetic
+ * main node to are exactly the tasks `layoutDag` places at its top layer.
+ * Used ONLY on the `onOpenMain`-provided path; never affects the default path.
+ */
+function computeRootTaskIds(
+  tasks: TRunTask[],
+  deps: { blocker_task_id: string; blocked_task_id: string }[]
+): Set<string> {
+  const taskIds = new Set(tasks.map((task) => task.id));
+  const hasBlocker = new Set<string>();
+  for (const dep of deps) {
+    if (taskIds.has(dep.blocker_task_id) && taskIds.has(dep.blocked_task_id)) {
+      hasBlocker.add(dep.blocked_task_id);
+    }
+  }
+  const roots = new Set<string>();
+  for (const id of taskIds) {
+    if (!hasBlocker.has(id)) roots.add(id);
+  }
+  return roots;
+}
+
 /** fitView tuning — shared by the static `fitView` prop (initial mount) and the
  * ResizeObserver-driven refit (see below). A small padding keeps the DAG from
  * wasting the narrow conversation rail's width, while a generous maxZoom lets a
@@ -252,6 +299,14 @@ export interface OpenTaskPayload {
 interface DagCanvasProps {
   runId: string;
   onOpenTask: (payload: OpenTaskPayload) => void;
+  /** When provided, render a synthetic lead/main agent node above the root tasks
+   * (wired to this callback). When ABSENT, the canvas behaves EXACTLY as before
+   * — no main node, no extra edges, no layout shift (backward compatibility for
+   * the still-living RunView consumer until F9). */
+  onOpenMain?: () => void;
+  /** When the main node is rendered, highlight it (the lead conversation is the
+   * currently-projected view). Ignored when `onOpenMain` is absent. */
+  mainActive?: boolean;
 }
 
 /**
@@ -274,7 +329,7 @@ interface DagCanvasProps {
  * `data-theme` attribute into `colorMode` + resolved colors via a MutationObserver
  * (template: MermaidBlock).
  */
-const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
+const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, mainActive }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
 
@@ -287,7 +342,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
   // becomes visible). The standalone orchestrator page is sized at mount, so it
   // simply gets a harmless extra refit. `wasVisibleRef` guards against thrashing
   // by only firing on the 0→visible edge.
-  const rfRef = useRef<ReactFlowInstance<TaskFlowNode, Edge> | null>(null);
+  const rfRef = useRef<ReactFlowInstance<DagFlowNode, Edge> | null>(null);
   const flowWrapRef = useRef<HTMLDivElement | null>(null);
   const wasVisibleRef = useRef(false);
   useEffect(() => {
@@ -370,7 +425,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
     [onOpenTask, assignmentByTask, fleetMembers, runId, refetch]
   );
 
-  const nodes = useMemo<TaskFlowNode[]>(() => {
+  const nodes = useMemo<DagFlowNode[]>(() => {
     const tasks = detail?.tasks ?? [];
     const deps = detail?.deps ?? [];
     if (tasks.length === 0) return [];
@@ -382,11 +437,19 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
       const group = parseGroupLabel(task.pattern_config);
       if (group && !hueByGroup.has(group)) hueByGroup.set(group, hueForGroup(group));
     }
-    return tasks.map((task) => {
+    // BACKWARD COMPAT: when no `onOpenMain` is given we shift NOTHING — `offsetY`
+    // is 0 so the position object is computed exactly as before (and the array
+    // below holds only task nodes, with no injected main / edges).
+    const withMain = onOpenMain != null;
+    const offsetY = withMain ? MAIN_ROW_OFFSET : 0;
+    const taskNodes: TaskFlowNode[] = tasks.map((task) => {
       const pos =
         task.graph_x != null && task.graph_y != null
-          ? { x: task.graph_x, y: task.graph_y }
-          : (fallback[task.id] ?? { x: 0, y: 0 });
+          ? { x: task.graph_x, y: task.graph_y + offsetY }
+          : (() => {
+              const base = fallback[task.id] ?? { x: 0, y: 0 };
+              return { x: base.x, y: base.y + offsetY };
+            })();
       const assignment = assignmentByTask.get(task.id);
       const member = assignment ? memberById.get(assignment.member_id) : undefined;
       // Friendly label from the fleet snapshot; fall back to the localized
@@ -460,13 +523,45 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
         },
       };
     });
-  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t]);
+
+    // BACKWARD COMPAT: without `onOpenMain` we return the task nodes untouched —
+    // identical array shape, positions, and ordering as before this prop existed.
+    if (!withMain || onOpenMain == null) return taskNodes;
+
+    // Center the main node horizontally over the in-degree-0 root tasks' top row
+    // (the layer that was originally at y=0, now shifted to y=MAIN_ROW_OFFSET).
+    const rootIds = computeRootTaskIds(tasks, deps);
+    const topRowXs = taskNodes
+      .filter((n) => rootIds.has(n.id) && n.position.y === offsetY)
+      .map((n) => n.position.x);
+    // Fall back to every node's x if the root row can't be isolated (e.g. a
+    // dependency cycle left no node at the top row) so the main node still
+    // centers sensibly instead of snapping to x=0.
+    const xsForCenter = topRowXs.length > 0 ? topRowXs : taskNodes.map((n) => n.position.x);
+    const minX = Math.min(...xsForCenter);
+    const maxX = Math.max(...xsForCenter);
+    const mainX = (minX + maxX) / 2;
+
+    const mainNode: MainFlowNode = {
+      id: MAIN_NODE_ID,
+      type: 'main',
+      position: { x: mainX, y: 0 },
+      initialWidth: MINIMAP_NODE_W,
+      initialHeight: MINIMAP_NODE_H,
+      data: {
+        label: t('orchestrator.run.canvas.mainNode', { defaultValue: 'main · 主 agent' }),
+        active: mainActive ?? false,
+        onOpen: onOpenMain,
+      },
+    };
+    return [mainNode, ...taskNodes];
+  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t, onOpenMain, mainActive]);
 
   const edges = useMemo<Edge[]>(() => {
     const tasks = detail?.tasks ?? [];
     const deps = detail?.deps ?? [];
     const statusById = new Map(tasks.map((task) => [task.id, task.status]));
-    return deps.map((dep) => {
+    const depEdges = deps.map((dep) => {
       const downstreamRunning = statusById.get(dep.blocked_task_id) === 'running';
       return {
         id: `${dep.blocker_task_id}->${dep.blocked_task_id}`,
@@ -479,7 +574,27 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
         },
       };
     });
-  }, [detail?.tasks, detail?.deps]);
+
+    // BACKWARD COMPAT: without `onOpenMain` the edges are exactly the dependency
+    // edges as before — no main→root wiring.
+    if (onOpenMain == null || tasks.length === 0) return depEdges;
+
+    // Connect the synthetic main node down to each in-degree-0 root task. Reuse
+    // the resting (non-running) edge style — `var(--border-base)` via flowColors'
+    // theme — so the main→root links read as the same calm dependency layer.
+    const rootIds = computeRootTaskIds(tasks, deps);
+    const mainEdges: Edge[] = [];
+    for (const rootId of rootIds) {
+      mainEdges.push({
+        id: `e-main-${rootId}`,
+        source: MAIN_NODE_ID,
+        target: rootId,
+        animated: false,
+        style: { stroke: 'var(--border-base)', strokeWidth: 1.5 },
+      });
+    }
+    return [...mainEdges, ...depEdges];
+  }, [detail?.tasks, detail?.deps, onOpenMain]);
 
   // First load with no detail yet.
   if (loading && !detail) {
@@ -532,7 +647,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask }) => {
             }}
             nodes={nodes}
             edges={edges}
-            nodeTypes={NODE_TYPES}
+            nodeTypes={onOpenMain != null ? NODE_TYPES_WITH_MAIN : NODE_TYPES}
             colorMode={theme}
             fitView
             fitViewOptions={FIT_VIEW_OPTIONS}
