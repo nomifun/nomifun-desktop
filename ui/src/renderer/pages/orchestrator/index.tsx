@@ -8,10 +8,16 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Input, Popconfirm, Spin } from '@arco-design/web-react';
-import { Comment, Delete, Edit, ExpandLeft, ExpandRight, Plus, Right, Workbench } from '@icon-park/react';
+import { Comment, Delete, Edit, Plus, Right, Workbench } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TRun } from '@/common/types/orchestrator/orchestratorTypes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+import { useContentSiderCollapse } from '@renderer/components/layout/ContentSider';
+import {
+  SESSION_SIDER_TOGGLE_EVENT,
+  dispatchSessionSiderStateEvent,
+} from '@renderer/utils/workspace/sessionSiderEvents';
+import { dispatchWorkspaceAvailabilityEvent } from '@renderer/utils/workspace/workspaceEvents';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import RunHistory from './RunHistory';
 import NewRunComposer, { type ReplanInitial } from './NewRunComposer';
@@ -205,16 +211,26 @@ const RowAction: React.FC<{
   </div>
 );
 
-/** localStorage key for the run-list rail collapse preference. */
-const RUNLIST_COLLAPSE_KEY = 'orchestrator-runlist-collapsed';
+/**
+ * localStorage key for the run-list rail collapse preference. Owned by the page
+ * via {@link useContentSiderCollapse}; the titlebar's session-sider toggle drives
+ * it over the shared {@link SESSION_SIDER_TOGGLE_EVENT} bus (an orchestrator-
+ * specific key so the run-list and the conversation session list never bleed
+ * collapse state into each other).
+ */
+const RUNLIST_COLLAPSE_KEY = 'nomifun:orchestrator-runlist-collapsed';
 
 /**
  * RunListRail — the master column: a prominent 「＋ 新建 Run」button atop a
  * scrollable list of the current user's runs (active + history, newest first via
  * {@link useMyRuns}). Each row carries rename / delete management actions.
  * Selecting a row is the page's primary navigation; the 「新建」button and any
- * open run live in the detail pane on the right. The rail collapses to a slim
- * strip (preference persisted) to give the canvas + right rail more room.
+ * open run live in the detail pane on the right.
+ *
+ * Collapse is owned by {@link OrchestratorPage} (titlebar session-sider toggle):
+ * when collapsed the page simply does not render this rail — mirroring the
+ * conversation Tab's {@link ConversationShell}, which hides its session list the
+ * same way. So this component no longer carries an in-panel collapse button.
  */
 const RunListRail: React.FC<{
   selectedRunId: string | undefined;
@@ -227,25 +243,6 @@ const RunListRail: React.FC<{
   const navigate = useNavigate();
   const { runs, isLoading, error, mutate } = useMyRuns();
   const [message, msgCtx] = useArcoMessage();
-
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(RUNLIST_COLLAPSE_KEY) === '1';
-    } catch {
-      return false;
-    }
-  });
-  const toggleCollapsed = useCallback(() => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(RUNLIST_COLLAPSE_KEY, next ? '1' : '0');
-      } catch {
-        /* ignore persistence failures */
-      }
-      return next;
-    });
-  }, []);
 
   const handleRename = useCallback(
     async (id: string, goal: string) => {
@@ -273,34 +270,14 @@ const RunListRail: React.FC<{
     [mutate, onRunDeleted, message, t]
   );
 
-  // Collapsed: a slim strip with just the new-run + expand affordances.
-  if (collapsed) {
-    return (
-      <div className='flex h-full w-48px shrink-0 flex-col items-center gap-8px border-r border-r-base bg-1 py-12px'>
-        {msgCtx}
-        <RailIconButton label={t('orchestrator.tab.expand')} onClick={toggleCollapsed}>
-          <ExpandRight theme='outline' size='16' strokeWidth={3} />
-        </RailIconButton>
-        <RailIconButton label={t('orchestrator.tab.newRun')} primary onClick={onNewRun}>
-          <Plus theme='outline' size='16' strokeWidth={4} />
-        </RailIconButton>
-      </div>
-    );
-  }
-
   return (
     <div className='flex h-full min-h-0 w-300px shrink-0 flex-col border-r border-r-base bg-1'>
       {msgCtx}
       {/* Header + new-run button */}
       <div className='shrink-0 px-16px pt-16px pb-12px'>
-        <div className='flex items-start gap-8px'>
-          <div className='min-w-0 flex-1'>
-            <div className='text-15px font-600 leading-tight text-t-primary'>{t('orchestrator.title')}</div>
-            <div className='mt-2px text-11px leading-15px text-t-tertiary'>{t('orchestrator.subtitle')}</div>
-          </div>
-          <RailIconButton label={t('orchestrator.tab.collapse')} onClick={toggleCollapsed}>
-            <ExpandLeft theme='outline' size='15' strokeWidth={3} />
-          </RailIconButton>
+        <div className='min-w-0'>
+          <div className='text-15px font-600 leading-tight text-t-primary'>{t('orchestrator.title')}</div>
+          <div className='mt-2px text-11px leading-15px text-t-tertiary'>{t('orchestrator.subtitle')}</div>
         </div>
         <div
           role='button'
@@ -365,36 +342,6 @@ const RunListRail: React.FC<{
   );
 };
 
-/** A square icon button used in the rail header / collapsed strip. */
-const RailIconButton: React.FC<{
-  label: string;
-  primary?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}> = ({ label, primary, onClick, children }) => (
-  <div
-    role='button'
-    tabIndex={0}
-    aria-label={label}
-    title={label}
-    onClick={onClick}
-    onKeyDown={(e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        onClick();
-      }
-    }}
-    className={
-      primary
-        ? 'flex size-30px shrink-0 cursor-pointer items-center justify-center rd-8px text-white transition-opacity hover:opacity-90'
-        : 'flex size-26px shrink-0 cursor-pointer items-center justify-center rd-7px text-t-tertiary transition-colors hover:bg-fill-2 hover:text-t-primary'
-    }
-    style={primary ? { background: 'rgb(var(--primary-6))' } : undefined}
-  >
-    {children}
-  </div>
-);
-
 /** The clean empty state shown when nothing is selected and not composing. */
 const EmptyDetail: React.FC = () => {
   const { t } = useTranslation();
@@ -448,6 +395,50 @@ const OrchestratorPage: React.FC = () => {
   // Live run detail — fed to AgentRoster (DagCanvas self-fetches its own copy).
   // Called unconditionally with `undefined` when no run is selected (hooks rule).
   const { detail, refetch } = useRunLive(selectedRunId ?? undefined);
+
+  // ── Run-list rail collapse (titlebar-driven) ────────────────────────────────
+  // The left Run-list rail collapse is owned here and driven by the titlebar's
+  // session-sider toggle over the shared SESSION_SIDER_TOGGLE_EVENT bus — exactly
+  // like ConversationShell owns its session list. We persist under an
+  // orchestrator-specific key and broadcast STATE so the titlebar icon stays in
+  // sync; when collapsed we simply don't render the rail (mirroring conversation,
+  // which hides its session list the same way). Desktop-only: the mobile branch
+  // returns a read-only list before any of this rail UI mounts, and the titlebar
+  // only exposes the toggle on the desktop orchestrator route.
+  const runListSider = useContentSiderCollapse(RUNLIST_COLLAPSE_KEY, false);
+  const runListCollapsed = !isMobile && runListSider.collapsed;
+  const toggleRunList = runListSider.toggle;
+
+  // Broadcast collapse state so the titlebar toggle reflects it (mount + change).
+  useEffect(() => {
+    if (isMobile) return;
+    dispatchSessionSiderStateEvent(runListSider.collapsed);
+  }, [isMobile, runListSider.collapsed]);
+
+  // The titlebar toggle drives collapse via the event bus (desktop only).
+  useEffect(() => {
+    if (typeof window === 'undefined' || isMobile) return undefined;
+    const handler = () => toggleRunList();
+    window.addEventListener(SESSION_SIDER_TOGGLE_EVENT, handler);
+    return () => window.removeEventListener(SESSION_SIDER_TOGGLE_EVENT, handler);
+  }, [isMobile, toggleRunList]);
+
+  // ── Workspace rail availability (titlebar right toggle) ──────────────────────
+  // The titlebar workspace button must only appear when a run-workspace rail is
+  // actually showing — i.e. a run is open (not composing/re-planning) and its
+  // detail carries a work_dir. We broadcast availability from the page (the
+  // single source of truth across all detail states), so the empty / compose /
+  // no-work_dir states correctly hide the button. RunView owns the collapse
+  // itself via useWorkspaceCollapse; this only governs the button's visibility.
+  const runWorkspaceAvailable =
+    !isMobile && !composing && !replanning && !!selectedRunId && (detail?.run.work_dir?.trim().length ?? 0) > 0;
+  useEffect(() => {
+    if (isMobile) return undefined;
+    dispatchWorkspaceAvailabilityEvent(runWorkspaceAvailable);
+    // On leaving the page, reset to unavailable so a stale "available" doesn't
+    // linger; the titlebar also resets to true off-route as a backstop.
+    return () => dispatchWorkspaceAvailabilityEvent(false);
+  }, [isMobile, runWorkspaceAvailable]);
 
   // Prefill for the re-plan editor: the run's current goal / autonomy, plus its
   // models reconstructed from the fleet snapshot (one ModelRef per member).
@@ -530,14 +521,17 @@ const OrchestratorPage: React.FC = () => {
 
   return (
     <div className='relative flex size-full min-h-0'>
-      <RunListRail
-        selectedRunId={selectedRunId}
-        composing={composing}
-        onNewRun={startComposing}
-        onSelectRun={selectRun}
-        onRunDeleted={handleRunDeleted}
-      />
-
+      {/* Run-list rail — hidden when collapsed (titlebar toggle re-expands it),
+          mirroring the conversation Tab's session list. */}
+      {!runListCollapsed && (
+        <RunListRail
+          selectedRunId={selectedRunId}
+          composing={composing}
+          onNewRun={startComposing}
+          onSelectRun={selectRun}
+          onRunDeleted={handleRunDeleted}
+        />
+      )}
       {/* Detail pane — three states. */}
       <div className='relative flex min-h-0 min-w-0 flex-1 flex-col' role='tabpanel' aria-label={t('orchestrator.title')}>
         {composing ? (

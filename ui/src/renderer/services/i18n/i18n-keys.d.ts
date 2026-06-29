@@ -2166,6 +2166,8 @@ export type I18nKey =
   | 'orchestrator.tab.listLoadError'
   | 'orchestrator.tab.listTitle'
   | 'orchestrator.tab.newRun'
+  | 'orchestrator.tab.titlebarHideList'
+  | 'orchestrator.tab.titlebarShowList'
   | 'orchestrator.title'
   | 'preview.addToChat'
   | 'preview.closeAll'

@@ -7,7 +7,9 @@
     "listEmpty": "No runs yet — click “New run” above to start one",
     "listLoadError": "Failed to load runs",
     "collapse": "Collapse list",
-    "expand": "Expand list"
+    "expand": "Expand list",
+    "titlebarShowList": "Show runs",
+    "titlebarHideList": "Hide runs"
   },
   "empty": {
     "title": "Select a run to begin",
