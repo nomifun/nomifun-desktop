@@ -1016,12 +1016,17 @@ pub fn build_orchestrator_state(
         run_repo.clone(),
         fleet_repo,
         ws_repo.clone(),
-        planner,
+        planner.clone(),
         emitter.clone(),
     ));
     let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo);
     engine_deps.cancel_conversation = cancel_conversation;
     engine_deps.steer_conversation = steer_conversation;
+    // B2: the engine summarizes a COMPLETED run with the SAME LlmPlanProducer the
+    // RunService plans with — a one-shot lead summary. Shared `Arc`, so the lead is
+    // resolved the same way (off the run's fleet snapshot). Fail-soft in the engine:
+    // a summary error falls back to the mechanical concat (never fails the run).
+    engine_deps.summarizer = planner;
     let engine = RunEngine::new(Arc::new(engine_deps));
     // Boot-resume: every persisted `running` run resumes its execution loop from
     // boot (the running set is in-memory but run status is persisted), so a run

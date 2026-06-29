@@ -49,12 +49,13 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use nomifun_api_types::FleetMember;
 use nomifun_common::AppError;
-use nomifun_db::models::OrchRunTaskRow;
+use nomifun_db::models::{OrchRunRow, OrchRunTaskRow};
 use nomifun_db::{IOrchWorkspaceRepository, IRunRepository};
 use nomifun_db::{UpdateRunParams, UpdateTaskParams};
 use tracing::{info, warn};
 
 use crate::events::OrchestratorRunEventEmitter;
+use crate::plan::PlanProducer;
 use crate::worker::{WorkerOutcome, WorkerRunner};
 
 /// Cancels an in-flight worker conversation so its turn ends as
@@ -109,6 +110,32 @@ impl ConversationSteerer for NoopConversationSteerer {
     async fn steer(&self, _conversation_id: i64, _text: &str) -> Result<(), AppError> {
         Err(AppError::BadRequest("steering is not wired in this engine".to_owned()))
     }
+}
+
+/// A [`PlanProducer`] used ONLY as the engine's default run-summarizer (B2): it
+/// supports neither `produce` nor `adjust` (those stay on the real planner held
+/// by `RunService`) and its `summarize` errors via the trait default. This is the
+/// default for [`RunEngineDeps::new`] so the all-mock engine tests need not wire a
+/// summarizer — the engine's fail-soft path simply falls back to the mechanical
+/// `aggregate_summary` whenever `summarize` errors. The app overrides this field
+/// with the same `LlmPlanProducer` it gives `RunService` (a real one-shot summary).
+pub struct NoopSummaryProducer;
+
+#[async_trait]
+impl PlanProducer for NoopSummaryProducer {
+    async fn produce(
+        &self,
+        _goal: &str,
+        _members: &[FleetMember],
+    ) -> Result<nomifun_api_types::PlannedDag, AppError> {
+        // The engine never calls `produce` on the summarizer (planning lives in
+        // RunService); error rather than fabricate a plan.
+        Err(AppError::BadRequest(
+            "NoopSummaryProducer is a summarize-only stub".to_string(),
+        ))
+    }
+    // `summarize` intentionally uses the trait default (errors) → the engine
+    // falls back to `aggregate_summary`.
 }
 
 /// Hard ceiling on a single worker task's turn.
@@ -202,6 +229,14 @@ pub struct RunEngineDeps {
     /// from `run_loop` (here, via `deps`) and `RunEngine::rerun_task` (via its
     /// `deps`), so BOTH critical sections take the same run's lock.
     pub run_locks: Arc<RunLocks>,
+    /// B2: the lead-model run-summarizer. When a run COMPLETES, the loop asks this
+    /// producer for a one-shot synthesized run summary (`PlanProducer::summarize`)
+    /// instead of writing the mechanical `aggregate_summary` concat. Defaults to
+    /// [`NoopSummaryProducer`] (whose `summarize` errors) so the engine FALLS BACK
+    /// to `aggregate_summary` — zero regression. `build_orchestrator_state` injects
+    /// the same `LlmPlanProducer` it gives `RunService` (a real one-shot summary).
+    /// FAIL-SOFT: any error here NEVER fails the run — it only loses the synthesis.
+    pub summarizer: Arc<dyn PlanProducer>,
 }
 
 impl RunEngineDeps {
@@ -226,6 +261,7 @@ impl RunEngineDeps {
             cancel_conversation: Arc::new(NoopConversationCanceller),
             steer_conversation: Arc::new(NoopConversationSteerer),
             run_locks: Arc::new(RunLocks::new()),
+            summarizer: Arc::new(NoopSummaryProducer),
         }
     }
 }
@@ -806,7 +842,13 @@ async fn run_loop(
                     let any_failed = tasks.iter().any(|t| t.status == "failed");
                     if !tasks.is_empty() && all_terminal {
                         let total_tokens = sum_task_tokens(&tasks);
-                        finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks)), total_tokens)
+                        // B2: synthesize a coherent run summary with a one-shot
+                        // lead call. FAIL-SOFT — `compute_completed_summary` returns
+                        // the mechanical `aggregate_summary` concat on ANY problem
+                        // (summarizer error, no derivable lead, blank result), so a
+                        // summary failure NEVER blocks/fails the completed run.
+                        let summary = compute_completed_summary(&deps, run_id, &run, &tasks).await;
+                        finish_run(&deps, run_id, "completed", Some(summary), total_tokens)
                             .await;
                         // Deregister our handle UNDER the lock so `is_running` flips
                         // false atomically with the terminal status write — a rerun
@@ -1250,6 +1292,92 @@ fn aggregate_summary(tasks: &[OrchRunTaskRow]) -> String {
         }
     }
     out
+}
+
+/// How many chars of each task's `output_summary` to surface in the B2 summary
+/// digest. Keeps a long deliverable from blowing the lead's prompt budget (CJK-
+/// safe truncation); the lead synthesizes from these short renderings.
+const SUMMARY_TASK_OUTPUT_LEN: usize = 600;
+
+/// B2: compute the run summary for a COMPLETED run — a one-shot lead-model
+/// synthesis with a **fail-soft** fallback to the mechanical [`aggregate_summary`]
+/// concat (the historical behavior). The summarization is best-effort
+/// observability and MUST NEVER fail or block the run, so EVERY failure mode
+/// degrades to the concat:
+/// - the run's `fleet_snapshot` is unparseable / empty (no lead derivable),
+/// - the [`PlanProducer::summarize`] call errors (default Noop, no provider, LLM
+///   error), or
+/// - the synthesized text comes back blank.
+///
+/// On success it returns the synthesized prose. Called UNDER the run's terminal
+/// lock (the tasks are already conclusive at this point), just before `finish_run`
+/// writes the `completed` status + summary.
+async fn compute_completed_summary(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    run: &OrchRunRow,
+    tasks: &[OrchRunTaskRow],
+) -> String {
+    // The lead model is derived (inside `summarize`) from the run's frozen fleet
+    // snapshot. If it does not parse / is empty, there is no lead to summarize with
+    // → fall back immediately (no point making the call).
+    let members: Vec<FleetMember> = match serde_json::from_str(&run.fleet_snapshot) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(run_id, error = %e, "B2 summary: fleet snapshot unparseable — using mechanical summary");
+            return aggregate_summary(tasks);
+        }
+    };
+
+    let digest = build_summary_digest(tasks);
+    match deps.summarizer.summarize(&run.goal, &digest, &members).await {
+        Ok(text) if !text.trim().is_empty() => text,
+        Ok(_) => {
+            // Producer returned blank → no synthesis; fall back (no regression).
+            warn!(run_id, "B2 summary: lead returned a blank summary — using mechanical summary");
+            aggregate_summary(tasks)
+        }
+        Err(e) => {
+            // Producer error (Noop default, no provider, LLM failure) → fall back.
+            // FAIL-SOFT: this NEVER fails the run; we just lose the synthesis.
+            warn!(run_id, error = %e, "B2 summary: lead summarize failed — using mechanical summary");
+            aggregate_summary(tasks)
+        }
+    }
+}
+
+/// Build the compact per-task digest the B2 summarizer reasons over: one line per
+/// task — `title | role | status | output` — with each task's `output_summary`
+/// collapsed to one line and CJK-safe truncated to [`SUMMARY_TASK_OUTPUT_LEN`].
+/// A task with no output renders `output=-`. Empty when there are no tasks.
+fn build_summary_digest(tasks: &[OrchRunTaskRow]) -> String {
+    let mut out = String::new();
+    for t in tasks {
+        let role = t.role.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("-");
+        let output = t
+            .output_summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(truncate_summary_output)
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "{} | role={role} | status={} | output={output}\n",
+            t.title, t.status
+        ));
+    }
+    out
+}
+
+/// Collapse a task's `output_summary` to one line and CJK-safe truncate it to
+/// [`SUMMARY_TASK_OUTPUT_LEN`] chars (mirrors `plan::truncate_summary`).
+fn truncate_summary_output(summary: &str) -> String {
+    let one_line: String = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= SUMMARY_TASK_OUTPUT_LEN {
+        return one_line;
+    }
+    let truncated: String = one_line.chars().take(SUMMARY_TASK_OUTPUT_LEN).collect();
+    format!("{truncated}…")
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -7220,5 +7348,240 @@ mod tests {
             }
         });
         let _ = drive_to_completion(&svc, &run_id).await;
+    }
+
+    // ── B2: run-level LLM synthesis summary (one-shot lead, fail-soft) ────────
+
+    /// A summarize-only stub producer that returns a FIXED synthesized summary,
+    /// recording the goal + digest + member count it was handed. `produce`/`adjust`
+    /// are never exercised on the summarizer path (the run is planned by the
+    /// harness's ChainPlanProducer), so they error.
+    struct StubSummarizer {
+        text: String,
+        seen: Arc<Mutex<Option<(String, String, usize)>>>,
+    }
+    #[async_trait]
+    impl PlanProducer for StubSummarizer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            Err(AppError::BadRequest("stub summarizer does not plan".to_string()))
+        }
+        async fn summarize(
+            &self,
+            goal: &str,
+            tasks_digest: &str,
+            members: &[FleetMember],
+        ) -> Result<String, AppError> {
+            *self.seen.lock().unwrap() =
+                Some((goal.to_string(), tasks_digest.to_string(), members.len()));
+            Ok(self.text.clone())
+        }
+    }
+
+    /// A summarize-only stub producer whose `summarize` always ERRORS — proves the
+    /// engine's fail-soft fallback to `aggregate_summary`.
+    struct ErroringSummarizer;
+    #[async_trait]
+    impl PlanProducer for ErroringSummarizer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            Err(AppError::BadRequest("stub summarizer does not plan".to_string()))
+        }
+        async fn summarize(
+            &self,
+            _goal: &str,
+            _tasks_digest: &str,
+            _members: &[FleetMember],
+        ) -> Result<String, AppError> {
+            Err(AppError::Internal("lead summarize boom".to_string()))
+        }
+    }
+
+    /// Build the full mock stack like [`harness`], but inject `summarizer` into the
+    /// engine deps (the B2 seam `build_orchestrator_state` wires in production).
+    async fn harness_with_summarizer(summarizer: Arc<dyn PlanProducer>) -> Harness {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster.clone());
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(777, "task output"));
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        engine_deps.summarizer = summarizer;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        Harness {
+            run_service,
+            engine,
+            run_repo,
+            fleet_repo,
+            ws_repo,
+            broadcaster,
+        }
+    }
+
+    // A completed run with a STUB summarizer returning a synth summary → the run
+    // `summary` is the LLM text (NOT the mechanical `aggregate_summary` concat).
+    // The summarizer is also handed the run goal, a task digest, and the fleet
+    // members (to derive the lead) — proving the one-shot synthesis wiring.
+    #[tokio::test]
+    async fn completed_run_uses_llm_synth_summary_over_concat() {
+        let seen = Arc::new(Mutex::new(None));
+        let summarizer: Arc<dyn PlanProducer> = Arc::new(StubSummarizer {
+            text: "综合总结：该运行完成了 A→B→C 链，产出连贯一致。".to_string(),
+            seen: seen.clone(),
+        });
+        let h = harness_with_summarizer(summarizer).await;
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+
+        h.engine.start(run_id.clone());
+        let detail = drive_to_completion(&h.run_service, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "run must complete");
+
+        let summary = detail.run.summary.expect("run summary set on completion");
+        assert_eq!(
+            summary, "综合总结：该运行完成了 A→B→C 链，产出连贯一致。",
+            "the run summary must be the LLM synthesis, not the concat"
+        );
+        assert!(
+            !summary.contains("Run complete:"),
+            "the mechanical concat header must NOT appear: {summary}"
+        );
+
+        // The summarizer saw the run goal, a non-empty digest, and the fleet members.
+        let (goal, digest, member_count) = seen.lock().unwrap().clone().expect("summarize called");
+        assert_eq!(goal, "build the chain", "goal threaded into summarize");
+        assert!(digest.contains("status=done"), "digest carries the task statuses: {digest}");
+        assert!(digest.contains("task output"), "digest carries the task outputs: {digest}");
+        assert_eq!(member_count, 1, "the run's single fleet member is handed to summarize");
+    }
+
+    // A summarizer that ERRORS → the run `summary` FALLS BACK to the mechanical
+    // `aggregate_summary` concat, and the run is still `completed` (the summary
+    // failure is fail-soft and NEVER fails the run).
+    #[tokio::test]
+    async fn completed_run_falls_back_to_concat_when_summarize_errors() {
+        let summarizer: Arc<dyn PlanProducer> = Arc::new(ErroringSummarizer);
+        let h = harness_with_summarizer(summarizer).await;
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+
+        h.engine.start(run_id.clone());
+        let detail = drive_to_completion(&h.run_service, &run_id).await;
+
+        // Fail-soft: the run still COMPLETES despite the summary error.
+        assert_eq!(detail.run.status, "completed", "summary error must NOT fail the run");
+        let summary = detail.run.summary.expect("run summary set on completion");
+        // The mechanical concat is the fallback (its distinctive count header).
+        assert!(
+            summary.contains("Run complete: 3/3 tasks done."),
+            "summary must fall back to aggregate_summary concat: {summary}"
+        );
+    }
+
+    // The DEFAULT engine summarizer (NoopSummaryProducer, whose `summarize`
+    // errors) → a completed run's summary is the mechanical concat. This pins the
+    // zero-regression contract: the default harness behaves exactly as before B2.
+    #[tokio::test]
+    async fn completed_run_default_noop_summarizer_uses_concat() {
+        let h = harness().await; // default RunEngineDeps → NoopSummaryProducer
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+
+        h.engine.start(run_id.clone());
+        let detail = drive_to_completion(&h.run_service, &run_id).await;
+        assert_eq!(detail.run.status, "completed");
+        let summary = detail.run.summary.expect("summary set");
+        assert!(
+            summary.contains("Run complete: 3/3 tasks done."),
+            "default (noop) summarizer falls back to the concat: {summary}"
+        );
+    }
+
+    // The B2 SUMMARY_SYSTEM prompt must instruct SYNTHESIS (not concatenation) and
+    // forbid JSON/fences, otherwise the lead never produces a usable run summary.
+    #[test]
+    fn summary_system_teaches_synthesis_not_concat() {
+        use crate::plan::SUMMARY_SYSTEM;
+        assert!(
+            SUMMARY_SYSTEM.contains("SYNTHESIZE") || SUMMARY_SYSTEM.contains("synthesize"),
+            "must instruct synthesis: {SUMMARY_SYSTEM}"
+        );
+        assert!(
+            SUMMARY_SYSTEM.contains("not merely concatenate")
+                || SUMMARY_SYSTEM.to_ascii_lowercase().contains("concatenate"),
+            "must warn against concatenation: {SUMMARY_SYSTEM}"
+        );
+        assert!(SUMMARY_SYSTEM.contains("GOAL"), "must reference the goal: {SUMMARY_SYSTEM}");
+        assert!(
+            SUMMARY_SYSTEM.contains("no JSON") || SUMMARY_SYSTEM.contains("JSON"),
+            "must forbid JSON output: {SUMMARY_SYSTEM}"
+        );
+    }
+
+    // build_summary_digest renders one line per task (title|role|status|output),
+    // and truncates a long output_summary CJK-safe.
+    #[test]
+    fn build_summary_digest_renders_tasks_and_truncates() {
+        let long_output = "段".repeat(800); // > SUMMARY_TASK_OUTPUT_LEN (600)
+        let tasks = vec![
+            summary_task("研究", "done", Some("找到三个来源")),
+            summary_task("写作", "done", Some(&long_output)),
+            summary_task("校对", "skipped", None),
+        ];
+        let digest = build_summary_digest(&tasks);
+        assert!(digest.contains("研究 | role=研究 | status=done | output=找到三个来源"), "{digest}");
+        assert!(digest.contains("校对 | role=研究 | status=skipped | output=-"), "no-output → -: {digest}");
+        // The 800-char output was truncated with an ellipsis.
+        assert!(digest.contains('…'), "long output truncated: {digest}");
+        assert!(
+            !digest.contains(&"段".repeat(700)),
+            "digest must not carry the full 800-char output"
+        );
+    }
+
+    /// Build a minimal completed-run task row for the digest test.
+    fn summary_task(title: &str, status: &str, output: Option<&str>) -> OrchRunTaskRow {
+        OrchRunTaskRow {
+            id: format!("rtask_{title}"),
+            run_id: "run_x".to_string(),
+            title: title.to_string(),
+            spec: "spec".to_string(),
+            task_profile: None,
+            status: status.to_string(),
+            conversation_id: None,
+            output_summary: output.map(str::to_string),
+            output_files: None,
+            attempt: 0,
+            tokens: None,
+            graph_x: None,
+            graph_y: None,
+            role: Some("研究".to_string()),
+            kind: "agent".to_string(),
+            pattern_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
     }
 }

@@ -65,6 +65,31 @@ pub trait PlanProducer: Send + Sync {
             "this PlanProducer does not support adjust".to_string(),
         ))
     }
+
+    /// B2: synthesize a coherent RUN-LEVEL summary from a completed run's task
+    /// outputs in ONE lead-model one-shot call (NO persistent session — exactly
+    /// the shape of [`produce`](Self::produce)). `tasks_digest` is a compact,
+    /// already-truncated rendering of the run goal + every task's title/role/
+    /// status/output (built by the engine via [`build_summary_user_prompt`]);
+    /// `members` is the run's fleet snapshot, used ONLY to derive the lead model
+    /// (the same `pick_lead` contract the planner uses). Returns the synthesized
+    /// summary text.
+    ///
+    /// Default impl ERRORS — only the production [`LlmPlanProducer`] (and the
+    /// summary tests' stub producers) override it. The engine treats ANY error
+    /// (or a blank result) as a signal to FALL BACK to the mechanical
+    /// `aggregate_summary` concat: the summarization is best-effort observability
+    /// and MUST NEVER fail or block a run.
+    async fn summarize(
+        &self,
+        _goal: &str,
+        _tasks_digest: &str,
+        _members: &[FleetMember],
+    ) -> Result<String, AppError> {
+        Err(AppError::BadRequest(
+            "this PlanProducer does not support summarize".to_string(),
+        ))
+    }
 }
 
 /// Production planner: a single structured LLM call against a "lead" model
@@ -197,6 +222,74 @@ impl PlanProducer for LlmPlanProducer {
         // not mangle the existing run — the caller surfaces the BadRequest.
         parse_adjusted_plan(&raw)
     }
+
+    async fn summarize(
+        &self,
+        goal: &str,
+        tasks_digest: &str,
+        members: &[FleetMember],
+    ) -> Result<String, AppError> {
+        // Same one-shot lead-call shape as `produce`/`adjust`: derive the lead
+        // from the fleet snapshot (the app wires `self.lead` empty), resolve its
+        // config, and ask for a synthesized run summary. NO persistent session —
+        // a single completion. The engine wraps this call fail-soft: any error
+        // here just means it falls back to the mechanical `aggregate_summary`.
+        let lead = pick_lead(members, &self.lead);
+        let model = lead.use_model.as_deref().unwrap_or(&lead.model);
+        let cfg = resolve_provider_config(
+            &self.provider_repo,
+            &self.encryption_key,
+            &lead.provider_id,
+            model,
+            self.workspace.as_path(),
+        )
+        .await?;
+
+        let user = build_summary_user_prompt(goal, tasks_digest);
+        let raw = one_shot_completion(
+            &cfg,
+            SUMMARY_SYSTEM,
+            vec![user_message(user)],
+            SUMMARY_MAX_TOKENS,
+        )
+        .await?;
+
+        // Trim and hand the synthesized text back. A blank result is left for the
+        // engine to detect (it falls back to the mechanical concat on blank too).
+        Ok(raw.trim().to_string())
+    }
+}
+
+/// How many tokens the lead may use for its one-shot run-summary completion.
+/// Smaller than the planning budget — a summary is prose, not a structured DAG.
+const SUMMARY_MAX_TOKENS: u32 = 1024;
+
+/// System prompt for B2 run-level summarization: instruct the lead to SYNTHESIZE
+/// (not concatenate) a coherent summary of a finished multi-agent run from its
+/// task outputs. Plain prose out — no JSON, no fences.
+pub const SUMMARY_SYSTEM: &str = "You are the lead agent of a multi-agent fleet writing the FINAL summary of a run that just completed. \
+You are given the run's GOAL and a digest of every task (its title, role, status, and a short output summary). \
+SYNTHESIZE a single coherent summary of what the run accomplished against the goal — do NOT merely concatenate the task outputs. \
+Resolve overlaps, weave the per-task results into a connected whole, lead with the overall outcome, then the key deliverables/findings, and note anything unfinished or skipped. \
+Write in the SAME language as the goal. Be concise (a few short paragraphs or a tight bullet list). \
+Output ONLY the summary prose — no preamble, no JSON, no markdown code fences.";
+
+/// Build the `summarize` user message: the run GOAL followed by the engine-built
+/// task digest. The digest is already compact + truncated (the engine renders it
+/// via the run's task rows), so this just frames it for the lead.
+pub fn build_summary_user_prompt(goal: &str, tasks_digest: &str) -> String {
+    let mut out = String::new();
+    out.push_str("GOAL:\n");
+    out.push_str(goal.trim());
+    out.push_str("\n\nTASKS (one per line — title | role | status | output):\n");
+    if tasks_digest.trim().is_empty() {
+        out.push_str("(no task outputs)\n");
+    } else {
+        out.push_str(tasks_digest.trim_end());
+        out.push('\n');
+    }
+    out.push_str("\nWrite the synthesized run summary now.");
+    out
 }
 
 /// System prompt: instruct the model to output ONLY a strict-JSON task DAG.
