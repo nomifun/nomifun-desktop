@@ -1048,6 +1048,28 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Link an orchestrator run to its originating conversation.
+    ///
+    /// Merges `extra.orchestrator_run_id` (only touching `extra` — never
+    /// model/name/pinned, never killing the agent task) so the frontend can
+    /// light up the canvas entry, then broadcasts `conversation.listChanged`
+    /// so the conversation list subscription re-fetches. This is the single
+    /// shared link-write point for both orchestrator launch paths (caps and
+    /// route), keeping the write DRY.
+    ///
+    /// An empty `conversation_id` (MCP / no-session callers) is a silent
+    /// no-op: returns `Ok(())` and broadcasts nothing.
+    #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id, run_id = %run_id))]
+    pub async fn link_orchestrator_run(&self, conversation_id: &str, run_id: &str) -> Result<(), AppError> {
+        if conversation_id.is_empty() {
+            return Ok(());
+        }
+        self.update_extra(conversation_id, serde_json::json!({ "orchestrator_run_id": run_id }))
+            .await?;
+        self.broadcast_list_changed(conversation_id, "updated", None);
+        Ok(())
+    }
+
     pub async fn save_acp_runtime_mode(&self, conversation_id: &str, mode: &str) -> Result<(), AppError> {
         let params = SaveRuntimeStateParams {
             current_mode_id: Some(Some(mode)),
