@@ -497,14 +497,31 @@ impl RunEngine {
     }
 
     /// UC-3a — **conversation-driven intelligent re-adjust** with the loop-vs-
-    /// reconcile race CLOSED. The engine-side entry the route calls instead of
-    /// [`RunService::adjust`](crate::run_service::RunService::adjust) directly: it
-    /// acquires the run's lock (the SAME [`RunLocks`] registry the `run_loop`
-    /// terminal check holds) and performs the WHOLE reconcile (clear deps + drop
-    /// unkept + insert/route new + rebuild deps) and the terminal-run re-activation
-    /// UNDER it — so the loop cannot conclude the run terminal (and write
-    /// `completed`/`failed`) in the gap between our mutation and re-activation,
-    /// stranding the run with freshly-added pending tasks and no driver.
+    /// reconcile race CLOSED **and the lead LLM call moved OUT of the per-run lock
+    /// (B4)**. The engine-side entry the route calls instead of
+    /// [`RunService::adjust`](crate::run_service::RunService::adjust) directly.
+    ///
+    /// **Lock invariant (B4 — the per-run lock MUST NOT span an LLM await):** the
+    /// adjust is split into two halves, mirroring the B2 summarize lock-split:
+    ///   1. [`compute_adjusted_plan`](crate::run_service::RunService::compute_adjusted_plan)
+    ///      runs LOCK-FREE — it snapshots the run, validates fast (404/403/empty
+    ///      intent/no-running), and awaits the lead LLM (streamed over a phase
+    ///      `"adjust"` throttle so the planning thought fans out live over WS). A
+    ///      multi-second / hanging lead call therefore NEVER stalls a concurrent
+    ///      rerun/loop on this run — the lock is simply not held across it.
+    ///   2. [`apply_adjusted_plan`](crate::run_service::RunService::apply_adjusted_plan)
+    ///      runs UNDER the per-run lock — it RE-READS the run state FRESH (NOT the
+    ///      compute snapshot), RE-VALIDATES (no-running / kept-exists / acyclic), then
+    ///      reconciles in one transaction + re-activates a terminal run. Zero LLM
+    ///      await under the lock. This serializes with the run loop's
+    ///      terminal-check-and-finish so the loop cannot conclude the run terminal
+    ///      (writing `completed`/`failed`) in the gap between our mutation and
+    ///      re-activation, stranding the run with freshly-added pending tasks.
+    ///
+    /// **TOCTOU:** the snapshot taken lock-free in step 1 is the LEAD's input only.
+    /// Step 2 re-reads + re-validates under the lock, so a rerun/loop that lands
+    /// during the LLM await is caught there (a vanished kept id / a newly-`running`
+    /// task → BadRequest, run UNCHANGED) — never trusted blindly.
     ///
     /// Returns the (possibly re-activated) run DTO; the CALLER (route) makes the
     /// engine-lifecycle decision (`run.status == "running" && !is_running →
@@ -518,9 +535,27 @@ impl RunEngine {
         run_id: &str,
         intent: &str,
     ) -> Result<nomifun_api_types::Run, AppError> {
+        // ① LOCK-FREE: compute the adjusted plan (snapshot + lead LLM), streaming the
+        // lead's adjust-phase thought over WS via a phase="adjust" throttle (same
+        // wiring as `run_service.plan()` and the engine's `compute_completed_summary`).
+        // The throttle coalesces deltas to avoid WS flooding; `flush()` after the call
+        // emits the residue (nothing dropped). NO per-run lock is held across this.
+        let throttle =
+            crate::plan::LeadThinkingThrottle::new(self.deps.emitter.clone(), run_id, "adjust");
+        let sink = throttle.sink();
+        let computed = run_service
+            .compute_adjusted_plan(user_id, run_id, intent, Some(&sink))
+            .await;
+        throttle.flush();
+        let adjusted = computed?;
+
+        // ② UNDER THE LOCK: apply the precomputed plan (pure DB — re-read FRESH +
+        // re-validate + reconcile + re-activate). Zero LLM await inside the guard.
         let lock = self.deps.run_locks.for_run(run_id);
-        let _adjust_guard = lock.lock().await;
-        run_service.adjust(user_id, run_id, intent).await
+        let guard = lock.lock().await;
+        let run = run_service.apply_adjusted_plan(user_id, run_id, adjusted).await;
+        drop(guard);
+        run
     }
 }
 
@@ -7035,6 +7070,326 @@ mod tests {
             second.deps.iter().any(|d| d.blocker_task_id == kept_id && d.blocked_task_id == new_task.id),
             "kept→new dep wired: {:?}",
             second.deps
+        );
+    }
+
+    // B4 CONCURRENCY-REGRESSION GUARD: the lead LLM call in `engine.adjust` is awaited
+    // with the per-run lock NOT held — `compute_adjusted_plan` (the LLM await) runs
+    // lock-free; only `apply_adjusted_plan` (pure DB) runs under the lock. This pins
+    // the invariant by injecting a planner whose `adjust` BLOCKS (parks on a Notify)
+    // for the whole "LLM call", spawning `engine.adjust` so it parks inside the
+    // lock-free compute, and proving a CONCURRENT `engine.rerun_task` (which DOES take
+    // the same per-run lock) is NOT blocked by the in-flight adjust — it acquires the
+    // lock, runs, and returns WELL BEFORE the parked adjust is released. If the lock
+    // spanned the LLM await (the pre-B4 monolith), the rerun would deadlock until the
+    // adjust's LLM unblocked; the bounded `timeout` would then fire and fail the test.
+    #[tokio::test]
+    async fn adjust_lead_llm_runs_outside_per_run_lock_no_block() {
+        use tokio::sync::Notify;
+
+        // A planner whose `produce` yields ONE task and whose `adjust` PARKS on a
+        // Notify (simulating a slow/hanging lead LLM) until the test releases it,
+        // recording (via a flag) that it entered the call so the test can wait for it.
+        struct BlockingAdjustProducer {
+            entered: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        #[async_trait]
+        impl PlanProducer for BlockingAdjustProducer {
+            async fn produce(
+                &self,
+                _goal: &str,
+                _members: &[FleetMember],
+                _sink: Option<&crate::plan::LeadThinkingSink>,
+            ) -> Result<PlannedDag, AppError> {
+                Ok(PlannedDag {
+                    tasks: vec![PlannedTask {
+                        title: "原始".to_string(),
+                        spec: "do the original work".to_string(),
+                        task_profile: None,
+                        depends_on: vec![],
+                        member_index: Some(0),
+                        rationale: None,
+                        role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
+                    }],
+                })
+            }
+            async fn adjust(
+                &self,
+                _intent: &str,
+                _tasks: &[nomifun_api_types::RunTask],
+                _deps: &[nomifun_api_types::RunTaskDep],
+                _members: &[FleetMember],
+                _sink: Option<&crate::plan::LeadThinkingSink>,
+            ) -> Result<crate::plan::AdjustedPlan, AppError> {
+                // Signal we are INSIDE the lead call, then PARK until released — this
+                // is the window the per-run lock must NOT be held across.
+                self.entered.notify_one();
+                self.release.notified().await;
+                // Return a no-op keep-everything plan (semantics irrelevant here).
+                Ok(crate::plan::AdjustedPlan { tasks: vec![] })
+            }
+        }
+
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let planner: Arc<dyn PlanProducer> = Arc::new(BlockingAdjustProducer {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let svc = RunService::new(run_repo.clone(), fleet_repo.clone(), ws_repo.clone(), planner, emitter.clone());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "adjust-lock fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "adjust-lock ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "adjust lock".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run");
+        svc.plan(&run.id).await.expect("plan");
+        let run_id = run.id;
+
+        // Drive the single task to completion so the loop deregisters (a quiescent
+        // run — no live worker, no loop — isolates the lock behavior under test).
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed", "initial run completes");
+        let task_id = first.tasks[0].id.clone();
+        for _ in 0..200 {
+            if !engine.is_running(&run_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!engine.is_running(&run_id), "completed run's loop deregistered");
+
+        // Spawn `engine.adjust` — it enters the LOCK-FREE `compute_adjusted_plan` and
+        // PARKS inside the lead `adjust` call (the LLM window).
+        let svc_for_adjust = svc.clone();
+        let engine_for_adjust = engine.clone();
+        let adjust_run_id = run_id.clone();
+        let adjust_handle = tokio::spawn(async move {
+            engine_for_adjust
+                .adjust(&svc_for_adjust, "u1", &adjust_run_id, "锁外验证")
+                .await
+        });
+
+        // Wait until the lead call is in-flight (the adjust is parked mid-LLM).
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("lead adjust call must have started");
+
+        // WHILE the adjust is parked mid-LLM, a concurrent `rerun_task` (which takes
+        // the SAME per-run lock) MUST NOT be blocked. If the lock spanned the LLM
+        // await, this would hang until `release` fires below → the timeout fails the
+        // test. It completes promptly because the lock is held ONLY around the pure-DB
+        // apply, never across the (still-parked) lead call.
+        let rerun = tokio::time::timeout(
+            Duration::from_secs(3),
+            engine.rerun_task(&svc, "u1", &run_id, &task_id),
+        )
+        .await
+        .expect("rerun must not be blocked by an in-flight (lock-free) adjust LLM")
+        .expect("rerun succeeds");
+        assert_eq!(rerun.status, "running", "rerun re-activated the completed run");
+
+        // Release the parked lead call so the adjust finishes (no leaked task / no
+        // deadlock). Its apply re-reads FRESH under the lock and reconciles the (now
+        // re-activated, single-task) run with a keep-everything plan — it succeeds
+        // (the rerun reset the task to `pending`, not `running`, so no reject).
+        release.notify_one();
+        let adjusted = tokio::time::timeout(Duration::from_secs(5), adjust_handle)
+            .await
+            .expect("adjust must finish after the lead call is released")
+            .expect("adjust task did not panic");
+        assert!(adjusted.is_ok(), "adjust completes cleanly: {adjusted:?}");
+    }
+
+    // B4: `engine.adjust` streams the lead's adjust-phase thought over WS — the
+    // `compute_adjusted_plan` half is handed a phase="adjust" throttle sink, so a
+    // planner that emits reasoning/text deltas through it produces
+    // `orchestrator.run.leadThinking` events carrying `phase:"adjust"`. This pins the
+    // B2-sink wiring on the adjust path (the production call site that B2 left as
+    // `None` pending this task).
+    #[tokio::test]
+    async fn adjust_streams_lead_thinking_phase_adjust() {
+        // A planner whose `adjust` drives the sink (when present) with a reasoning +
+        // text delta, then returns a keep-everything plan.
+        struct StreamingAdjustProducer;
+        #[async_trait]
+        impl PlanProducer for StreamingAdjustProducer {
+            async fn produce(
+                &self,
+                _goal: &str,
+                _members: &[FleetMember],
+                _sink: Option<&crate::plan::LeadThinkingSink>,
+            ) -> Result<PlannedDag, AppError> {
+                Ok(PlannedDag {
+                    tasks: vec![PlannedTask {
+                        title: "原始".to_string(),
+                        spec: "do the original work".to_string(),
+                        task_profile: None,
+                        depends_on: vec![],
+                        member_index: Some(0),
+                        rationale: None,
+                        role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
+                    }],
+                })
+            }
+            async fn adjust(
+                &self,
+                _intent: &str,
+                _tasks: &[nomifun_api_types::RunTask],
+                _deps: &[nomifun_api_types::RunTaskDep],
+                _members: &[FleetMember],
+                sink: Option<&crate::plan::LeadThinkingSink>,
+            ) -> Result<crate::plan::AdjustedPlan, AppError> {
+                if let Some(sink) = sink {
+                    // A long-enough chunk to trip the throttle's char threshold so it
+                    // flushes synchronously (the test does not rely on the timer).
+                    sink(crate::plan::LeadDeltaKind::Reasoning, &"思".repeat(60));
+                    sink(crate::plan::LeadDeltaKind::Text, &"x".repeat(60));
+                }
+                Ok(crate::plan::AdjustedPlan { tasks: vec![] })
+            }
+        }
+
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster.clone());
+        let planner: Arc<dyn PlanProducer> = Arc::new(StreamingAdjustProducer);
+        let svc = RunService::new(run_repo.clone(), fleet_repo.clone(), ws_repo.clone(), planner, emitter.clone());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "adjust-stream fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "adjust-stream ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "adjust stream".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run");
+        svc.plan(&run.id).await.expect("plan");
+        let run_id = run.id;
+
+        // Adjust (no need to run the engine loop — the run is `running` post-plan with
+        // a pending task, which adjust accepts; the lead call streams via the sink).
+        engine
+            .adjust(&svc, "u1", &run_id, "请优化")
+            .await
+            .expect("adjust");
+
+        // The recorder captured leadThinking events carrying phase="adjust" — at least
+        // one reasoning and one text chunk fanned out through the throttle.
+        let events = broadcaster.events.lock().unwrap().clone();
+        let adjust_thinking: Vec<&nomifun_api_types::WebSocketMessage<serde_json::Value>> = events
+            .iter()
+            .filter(|e| {
+                e.name == "orchestrator.run.leadThinking"
+                    && e.data.get("phase").and_then(|p| p.as_str()) == Some("adjust")
+            })
+            .collect();
+        assert!(
+            !adjust_thinking.is_empty(),
+            "adjust must emit phase=adjust leadThinking events; got names {:?}",
+            events.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        assert!(
+            adjust_thinking
+                .iter()
+                .any(|e| e.data.get("kind").and_then(|k| k.as_str()) == Some("reasoning")),
+            "a reasoning chunk must have streamed: {adjust_thinking:?}"
+        );
+        assert!(
+            adjust_thinking
+                .iter()
+                .any(|e| e.data.get("kind").and_then(|k| k.as_str()) == Some("text")),
+            "a text (draft heartbeat) chunk must have streamed: {adjust_thinking:?}"
+        );
+        // The run id is stamped on the event so the FE can filter by run.
+        assert!(
+            adjust_thinking
+                .iter()
+                .all(|e| e.data.get("run_id").and_then(|r| r.as_str()) == Some(run_id.as_str())),
+            "every leadThinking event carries the run id"
         );
     }
 
