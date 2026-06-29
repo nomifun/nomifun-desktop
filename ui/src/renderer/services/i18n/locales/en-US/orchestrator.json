@@ -71,6 +71,7 @@
       "synthesis": "Synthesis",
       "verify": "Verify",
       "judge": "Judge",
+      "loop": "Loop",
       "fanout": "Fan-out · {{label}}"
     },
     "verdict": {
@@ -82,6 +83,11 @@
       "winner": "Winner",
       "none": "No winner",
       "pending": "Judging…"
+    },
+    "loop": {
+      "done": "Done",
+      "failed": "Failed",
+      "iterating": "Iterating…"
     },
     "title": "Run History",
     "subtitle": "Browse every orchestration run you started — click any one to replay its task graph",

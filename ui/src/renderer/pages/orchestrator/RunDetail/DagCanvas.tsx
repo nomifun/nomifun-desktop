@@ -19,7 +19,7 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import RunDetailHeader from './RunDetailHeader';
-import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type JudgeWinner, type VerifyVerdict } from './nodes/TaskNode';
+import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type JudgeWinner, type LoopState, type VerifyVerdict } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
 const NODE_TYPES = { task: TaskNode } as const;
@@ -86,6 +86,42 @@ function parseJudgeWinner(outputSummary: string | null | undefined): JudgeWinner
     winner: winner != null && Number.isFinite(winner) ? winner : null,
     aggregate,
     judges: judgesMatch ? judgesMatch[1] : null,
+  };
+}
+
+/** Neutral state for a loop controller whose marker is absent / a transient
+ * `LOOP-STATE:` line / unparseable (still iterating) — renders the pill in its
+ * neutral "iterating…" state instead of a done/failed tone. */
+const NEUTRAL_LOOP: LoopState = { state: null, reason: null, iterations: null, maxIter: null };
+
+/** Leading `LOOP:` marker a loop CONTROLLER writes to its `output_summary` on
+ * stop (`render_loop_final` in engine.rs), e.g.
+ *   `LOOP: DONE (reason=max_iter, iterations=3, max_iter=3)`
+ *   `LOOP: FAILED (reason=body_failed, iterations=1, max_iter=5)`
+ * While still iterating, the controller stays `pending` and its summary holds a
+ * transient `LOOP-STATE: hashes=…` line (or is empty) — any non-`LOOP:` lead is
+ * treated as the neutral "iterating…" state. We pull the stop word + reason +
+ * the iterations/max_iter counts. */
+const LOOP_RE = /^LOOP:\s+(DONE|FAILED)\s+\(reason=([a-z_]+),\s*iterations=(\d+),\s*max_iter=(\d+)\)/;
+
+/**
+ * Parse a loop controller's `output_summary` into a {@link LoopState}. Defensive
+ * by design: a missing/empty summary, a transient `LOOP-STATE:` line (still
+ * iterating), or a malformed marker yields the neutral
+ * `{ state: null, reason: null, iterations: null, maxIter: null }` so the pill
+ * shows "iterating…" instead of ever throwing on the canvas.
+ */
+function parseLoopState(outputSummary: string | null | undefined): LoopState {
+  if (!outputSummary) return NEUTRAL_LOOP;
+  const m = LOOP_RE.exec(outputSummary.trim());
+  if (!m) return NEUTRAL_LOOP;
+  const iterations = Number.parseInt(m[3], 10);
+  const maxIter = Number.parseInt(m[4], 10);
+  return {
+    state: m[1] === 'DONE' ? 'done' : 'failed',
+    reason: m[2],
+    iterations: Number.isFinite(iterations) ? iterations : null,
+    maxIter: Number.isFinite(maxIter) ? maxIter : null,
   };
 }
 
@@ -295,6 +331,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
       const isSynthesis = taskKind === 'synthesis';
       const isVerify = taskKind === 'verify';
       const isJudge = taskKind === 'judge';
+      const isLoop = taskKind === 'loop';
       const groupLabel = parseGroupLabel(task.pattern_config);
       const groupHue = groupLabel ? hueByGroup.get(groupLabel) : undefined;
       return {
@@ -325,6 +362,15 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
                 winner: t('orchestrator.run.judge.winner'),
                 none: t('orchestrator.run.judge.none'),
                 pending: t('orchestrator.run.judge.pending'),
+              }
+            : undefined,
+          loopLabel: isLoop ? t('orchestrator.run.kind.loop') : undefined,
+          loopState: isLoop ? parseLoopState(task.output_summary) : undefined,
+          loopStateLabels: isLoop
+            ? {
+                done: t('orchestrator.run.loop.done'),
+                failed: t('orchestrator.run.loop.failed'),
+                iterating: t('orchestrator.run.loop.iterating'),
               }
             : undefined,
           groupLabel,
