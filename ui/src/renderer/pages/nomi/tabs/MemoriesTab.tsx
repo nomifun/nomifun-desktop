@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Empty, Input, Message, Modal, Popconfirm, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Empty, Input, Message, Modal, Popconfirm, Radio, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
 import { Pin } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { ICompanionMemory } from '@/common/adapter/ipcBridge';
@@ -22,16 +22,46 @@ const KIND_COLORS: Record<string, string> = {
   affective: 'purple',
 };
 
-const MemoriesTab: React.FC = () => {
+type ScopeKind = 'user' | 'companion';
+
+interface CompanionRef {
+  id: string;
+  name: string;
+}
+
+interface MemoriesTabProps {
+  /** The companion currently selected on the nomi page; scopes the default view. */
+  companionId?: string | null;
+  /** Roster, for the scope selector + per-row owner badges. */
+  companions?: CompanionRef[];
+}
+
+const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companions = [] }) => {
   const { t } = useTranslation();
   const [memories, setMemories] = useState<ICompanionMemory[]>([]);
   const [loading, setLoading] = useState(true);
   const [kind, setKind] = useState<string>('');
   const [q, setQ] = useState('');
   const [memStatus, setMemStatus] = useState('active');
+  // 'self' = shared + this companion's private (default when a companion is
+  // selected); 'all' = every companion's memories (cross-companion view).
+  const [scopeMode, setScopeMode] = useState<'self' | 'all'>(companionId ? 'self' : 'all');
+
   const [addVisible, setAddVisible] = useState(false);
   const [addKind, setAddKind] = useState<string>('knowledge');
   const [addContent, setAddContent] = useState('');
+  const [addScopeKind, setAddScopeKind] = useState<ScopeKind>(companionId ? 'companion' : 'user');
+  const [addScopeCompanionId, setAddScopeCompanionId] = useState<string>(companionId ?? '');
+
+  const [editTarget, setEditTarget] = useState<ICompanionMemory | null>(null);
+  const [editContent, setEditContent] = useState('');
+  const [editScopeKind, setEditScopeKind] = useState<ScopeKind>('user');
+  const [editScopeCompanionId, setEditScopeCompanionId] = useState<string>('');
+
+  const companionName = useCallback(
+    (id: string) => companions.find((c) => c.id === id)?.name || id,
+    [companions]
+  );
 
   const refreshSeq = useRef(0);
 
@@ -43,6 +73,9 @@ const MemoriesTab: React.FC = () => {
         kind: kind || undefined,
         q: q || undefined,
         status: memStatus,
+        // 'self' scopes to shared + selected companion's private; 'all' omits
+        // the filter so every companion's memories show.
+        scope_companion_id: scopeMode === 'self' && companionId ? companionId : undefined,
         limit: 200,
       });
       // Out-of-order guard: a slow stale response must not clobber the
@@ -53,7 +86,7 @@ const MemoriesTab: React.FC = () => {
     } finally {
       if (seq === refreshSeq.current) setLoading(false);
     }
-  }, [kind, q, memStatus]);
+  }, [kind, q, memStatus, scopeMode, companionId]);
 
   // Debounce keystroke-driven refetches; filter changes flush immediately
   // because the debounce window is short enough not to feel laggy.
@@ -62,10 +95,15 @@ const MemoriesTab: React.FC = () => {
     return () => clearTimeout(timer);
   }, [refresh]);
 
-  // nomi can now save memories mid-chat — reflect them live.
+  // nomi can save/edit/delete memories mid-chat or from another surface —
+  // reflect them live.
   useEffect(() => {
-    const unsub = ipcBridge.companion.onMemoryCreated.on(() => void refresh());
-    return unsub;
+    const unsubs = [
+      ipcBridge.companion.onMemoryCreated.on(() => void refresh()),
+      ipcBridge.companion.onMemoryUpdated.on(() => void refresh()),
+      ipcBridge.companion.onMemoryDeleted.on(() => void refresh()),
+    ];
+    return () => unsubs.forEach((u) => u());
   }, [refresh]);
 
   const togglePin = useCallback(
@@ -92,10 +130,23 @@ const MemoriesTab: React.FC = () => {
     [refresh]
   );
 
+  const openAdd = useCallback(() => {
+    setAddKind('knowledge');
+    setAddContent('');
+    setAddScopeKind(companionId ? 'companion' : 'user');
+    setAddScopeCompanionId(companionId ?? '');
+    setAddVisible(true);
+  }, [companionId]);
+
   const add = useCallback(async () => {
     if (!addContent.trim()) return;
     try {
-      await ipcBridge.companion.addMemory.invoke({ kind: addKind, content: addContent.trim() });
+      await ipcBridge.companion.addMemory.invoke({
+        kind: addKind,
+        content: addContent.trim(),
+        // '' (or omitted) = shared; a companion id = private to it.
+        scope_companion_id: addScopeKind === 'companion' ? addScopeCompanionId : '',
+      });
       setAddVisible(false);
       setAddContent('');
       void refresh();
@@ -103,7 +154,81 @@ const MemoriesTab: React.FC = () => {
     } catch (e) {
       Message.error(String(e));
     }
-  }, [addKind, addContent, refresh, t]);
+  }, [addKind, addContent, addScopeKind, addScopeCompanionId, refresh, t]);
+
+  const openEdit = useCallback((m: ICompanionMemory) => {
+    setEditTarget(m);
+    setEditContent(m.content);
+    setEditScopeKind(m.scope_kind === 'companion' ? 'companion' : 'user');
+    setEditScopeCompanionId(m.scope_companion_id || '');
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    if (!editTarget || !editContent.trim()) return;
+    try {
+      await ipcBridge.companion.updateMemory.invoke({
+        id: editTarget.id,
+        content: editContent.trim(),
+        scope_kind: editScopeKind,
+        scope_companion_id: editScopeKind === 'companion' ? editScopeCompanionId : '',
+      });
+      setEditTarget(null);
+      void refresh();
+      Message.success(t('nomi.memories.saved'));
+    } catch (e) {
+      Message.error(String(e));
+    }
+  }, [editTarget, editContent, editScopeKind, editScopeCompanionId, refresh, t]);
+
+  // A private scope requires a chosen companion; disable the OK button otherwise.
+  const addInvalid = !addContent.trim() || (addScopeKind === 'companion' && !addScopeCompanionId);
+  const editInvalid = !editContent.trim() || (editScopeKind === 'companion' && !editScopeCompanionId);
+
+  const scopeSelector = (
+    scopeKind: ScopeKind,
+    scopeCompanionId: string,
+    setScopeKind: (k: ScopeKind) => void,
+    setScopeCompanionId: (id: string) => void
+  ) => (
+    <div className='flex items-center gap-8px flex-wrap'>
+      <Radio.Group
+        type='button'
+        size='small'
+        value={scopeKind}
+        onChange={(v: ScopeKind) => {
+          setScopeKind(v);
+          if (v === 'companion' && !scopeCompanionId && companionId) setScopeCompanionId(companionId);
+        }}
+      >
+        <Radio value='user'>{t('nomi.memories.scopeShared')}</Radio>
+        <Radio value='companion'>{t('nomi.memories.scopePrivate')}</Radio>
+      </Radio.Group>
+      {scopeKind === 'companion' && (
+        <Select
+          size='small'
+          style={{ width: 180 }}
+          value={scopeCompanionId || undefined}
+          onChange={setScopeCompanionId}
+          placeholder={t('nomi.memories.scopePickCompanion')}
+        >
+          {companions.map((c) => (
+            <Select.Option key={c.id} value={c.id}>
+              {c.name || c.id}
+            </Select.Option>
+          ))}
+        </Select>
+      )}
+    </div>
+  );
+
+  const scopeBadge = (m: ICompanionMemory) =>
+    m.scope_kind === 'companion' ? (
+      <Tag color='arcoblue' bordered>
+        {t('nomi.memories.scopePrivateOf', { name: companionName(m.scope_companion_id) })}
+      </Tag>
+    ) : (
+      <Tag bordered>{t('nomi.memories.scopeShared')}</Tag>
+    );
 
   return (
     <div className='flex flex-col gap-12px py-8px'>
@@ -120,6 +245,12 @@ const MemoriesTab: React.FC = () => {
           <Select.Option value='active'>{t('nomi.memories.statusActive')}</Select.Option>
           <Select.Option value='archived'>{t('nomi.memories.statusArchived')}</Select.Option>
         </Select>
+        {companionId && (
+          <Radio.Group type='button' size='small' value={scopeMode} onChange={(v: 'self' | 'all') => setScopeMode(v)}>
+            <Radio value='self'>{t('nomi.memories.scopeFilterSelf')}</Radio>
+            <Radio value='all'>{t('nomi.memories.scopeFilterAll')}</Radio>
+          </Radio.Group>
+        )}
         <Input.Search
           style={{ width: 220 }}
           placeholder={t('nomi.memories.searchPlaceholder')}
@@ -127,7 +258,7 @@ const MemoriesTab: React.FC = () => {
           onChange={setQ}
           allowClear
         />
-        <Button type='primary' onClick={() => setAddVisible(true)}>
+        <Button type='primary' onClick={openAdd}>
           {t('nomi.memories.add')}
         </Button>
       </div>
@@ -145,6 +276,7 @@ const MemoriesTab: React.FC = () => {
               <div className='flex-1 min-w-0'>
                 <div className='text-13px text-t-primary break-words'>{m.content}</div>
                 <div className='mt-4px flex items-center gap-10px text-11px text-t-tertiary'>
+                  {scopeBadge(m)}
                   <span>
                     {t('nomi.memories.strength')} {(m.strength * 100).toFixed(0)}%
                   </span>
@@ -161,6 +293,9 @@ const MemoriesTab: React.FC = () => {
                     onClick={() => void togglePin(m)}
                   />
                 </Tooltip>
+                <Button size='mini' onClick={() => openEdit(m)}>
+                  {t('nomi.memories.edit')}
+                </Button>
                 <Button size='mini' onClick={() => void toggleArchive(m)}>
                   {m.status === 'active' ? t('nomi.memories.archive') : t('nomi.memories.restore')}
                 </Button>
@@ -174,12 +309,13 @@ const MemoriesTab: React.FC = () => {
           ))}
         </div>
       )}
+
       <Modal
         title={t('nomi.memories.add')}
         visible={addVisible}
         onOk={() => void add()}
         onCancel={() => setAddVisible(false)}
-        okButtonProps={{ disabled: !addContent.trim() }}
+        okButtonProps={{ disabled: addInvalid }}
       >
         <div className='flex flex-col gap-12px'>
           <Select value={addKind} onChange={setAddKind}>
@@ -189,12 +325,27 @@ const MemoriesTab: React.FC = () => {
               </Select.Option>
             ))}
           </Select>
+          {scopeSelector(addScopeKind, addScopeCompanionId, setAddScopeKind, setAddScopeCompanionId)}
           <Input.TextArea
             rows={4}
             value={addContent}
             onChange={setAddContent}
             placeholder={t('nomi.memories.addPlaceholder')}
           />
+        </div>
+      </Modal>
+
+      <Modal
+        title={t('nomi.memories.edit')}
+        visible={!!editTarget}
+        onOk={() => void saveEdit()}
+        onCancel={() => setEditTarget(null)}
+        okButtonProps={{ disabled: editInvalid }}
+      >
+        <div className='flex flex-col gap-12px'>
+          {scopeSelector(editScopeKind, editScopeCompanionId, setEditScopeKind, setEditScopeCompanionId)}
+          <Input.TextArea rows={5} value={editContent} onChange={setEditContent} />
+          <div className='text-11px text-t-tertiary'>{t('nomi.memories.editHint')}</div>
         </div>
       </Modal>
     </div>

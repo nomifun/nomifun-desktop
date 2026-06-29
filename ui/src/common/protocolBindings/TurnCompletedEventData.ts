@@ -12,11 +12,11 @@ elapsed_ms: number, input_tokens: number, output_tokens: number,
 /**
  * Tokens written into the provider prompt cache.
  */
-cache_creation_tokens: number,
+cache_creation_tokens: number, 
 /**
  * Tokens read back from the provider prompt cache.
  */
-cache_read_tokens: number,
+cache_read_tokens: number, 
 /**
  * Current context occupancy (last request's prompt tokens). Gauge numerator.
  */
