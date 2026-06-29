@@ -1102,6 +1102,11 @@ impl ConversationService {
         // Drop the in-memory knowledge signature so the map does not retain
         // entries for deleted conversations across a long-lived process.
         self.runtime_state.clear_knowledge_signature(&conv_id.to_string());
+        // Likewise drop any accumulated token total — an orchestrator worker
+        // conversation that errored before the worker `take`d it would otherwise
+        // linger here until process restart (a small in-memory leak). No-op for the
+        // common chat/companion conversation (which never records a token total).
+        self.runtime_state.clear_turn_tokens(&conv_id.to_string());
 
         info!("Conversation deleted");
         self.broadcast_list_changed(id, "deleted", source.as_ref());

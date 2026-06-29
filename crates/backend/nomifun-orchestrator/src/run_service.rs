@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     Assignment, CreateAdhocRunRequest, CreateRunRequest, FleetMember, ModelRange, PlannedDag,
-    ReassignRequest, ReplanRequest, Run, RunDetail, RunTask, RunTaskDep, TaskProfile,
+    PlannedTask, ReassignRequest, ReplanRequest, Run, RunDetail, RunTask, RunTaskDep, TaskProfile,
     WorkspaceEntry,
 };
 use nomifun_common::AppError;
@@ -250,6 +250,10 @@ impl RunService {
     /// indices can be resolved to the minted task ids. A planned task with no
     /// `member_index` (or an out-of-range one) defaults to member 0 — the engine
     /// requires an assignment to run a task, so defaulting is safer than skipping.
+    ///
+    /// The produced DAG is cycle-checked ([`planned_dag_has_cycle`], symmetric with
+    /// `adjust`'s guard) BEFORE any persist: a cyclic planner output would
+    /// soft-strand the run, so it degrades to the degenerate single-task plan.
     pub async fn plan(&self, run_id: &str) -> Result<(), AppError> {
         let run = self
             .run_repo
@@ -260,7 +264,25 @@ impl RunService {
 
         let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
 
-        let dag: PlannedDag = self.planner.produce(&run.goal, &members).await?;
+        let mut dag: PlannedDag = self.planner.produce(&run.goal, &members).await?;
+
+        // CYCLE GUARD (symmetric with `adjust`'s `reconcile_plan_has_cycle`): the
+        // planner's `depends_on` indices are range-validated when wiring edges below,
+        // but a back-referencing planner output (e.g. task 0 depends_on [2], task 2
+        // depends_on [0]) would persist a back-edge → a soft-strand the engine can
+        // never make ready (the same class `adjust` rejects). The initial-plan path
+        // had NO acyclicity check. We don't have a prior plan to fall back to here, so
+        // rejecting would strand the WHOLE run; instead we degrade to the degenerate
+        // single-task plan (the whole goal as one agent task) so the run still
+        // proceeds. The normal acyclic plan is untouched (the check returns false).
+        if planned_dag_has_cycle(&dag) {
+            tracing::warn!(
+                run_id,
+                task_count = dag.tasks.len(),
+                "planner produced a cyclic task DAG; falling back to a single-task plan"
+            );
+            dag = degenerate_plan(&run.goal);
+        }
 
         // 1. Create every task first (status `pending`); remember the minted ids
         //    in planned-index order so we can resolve dep edges + assignments.
@@ -1272,19 +1294,20 @@ impl RunService {
             .reconcile_run_plan(
                 run_id,
                 ReconcilePlan {
-                    delete_task_ids: delete_task_ids.clone(),
+                    delete_task_ids,
                     new_tasks,
                 },
             )
             .await
             .map_err(OrchestratorError::from)?;
 
-        // Emit the per-dropped-task "removed" signal AFTER the successful commit (so
-        // a rolled-back reconcile never emits a phantom removal), then plan-updated.
-        for dropped in &delete_task_ids {
-            self.emitter.emit_task_status(run_id, dropped, "removed");
-        }
-
+        // A dropped task simply disappears from the next RunDetail. We DON'T emit a
+        // per-task `task.statusChanged` for the deletion: `"removed"` is not a real
+        // task status (the statuses are pending/running/done/failed/skipped/cancelled),
+        // and the FE's `useRunLive` already refetches the WHOLE RunDetail on
+        // `planUpdated` below — so a deleted task vanishes from the refetched plan with
+        // no fake status involved. (Emitting `planUpdated` AFTER the successful commit
+        // means a rolled-back reconcile never signals a phantom plan change.)
         self.emitter.emit_run_plan_updated(run_id);
 
         // (5) RE-ACTIVATE a terminal run so the engine loop (the route then starts)
@@ -1657,7 +1680,81 @@ fn reconcile_plan_has_cycle(
     removed != total
 }
 
-/// A neutral default profile for tasks the planner left unprofiled: a `general`
+/// Acyclicity check for the INITIAL planned DAG (symmetric with the `adjust`
+/// path's [`reconcile_plan_has_cycle`], but over the planner's index-keyed graph
+/// instead of the kept-id/new-index reconcile graph). Nodes are the planned tasks
+/// (one per index); edges are `blocker → blocked`: each task `i`'s `depends_on`
+/// lists its blocker indices, so a `dep` on task `i` is an edge `dep → i`.
+///
+/// Pure + bounded: a Kahn topological sort (repeatedly drop a zero-in-degree
+/// node). If any node remains when none has zero in-degree, the remainder forms a
+/// cycle. A self-edge (`i` in its own `depends_on`) is an immediate cycle.
+/// Out-of-range `depends_on` indices contribute no edge (they're dropped — the
+/// caller already range-validates them when wiring edges, warning + skipping).
+fn planned_dag_has_cycle(dag: &PlannedDag) -> bool {
+    let total = dag.tasks.len();
+    if total == 0 {
+        return false;
+    }
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); total];
+    let mut in_degree: Vec<usize> = vec![0; total];
+    for (blocked, task) in dag.tasks.iter().enumerate() {
+        for &dep in &task.depends_on {
+            // Out-of-range dep: no edge (range-validated + skipped at wire time).
+            if dep >= total {
+                continue;
+            }
+            // A self-edge (a task depending on itself) is itself a cycle.
+            if dep == blocked {
+                return true;
+            }
+            adj[dep].push(blocked);
+            in_degree[blocked] += 1;
+        }
+    }
+
+    let mut queue: Vec<usize> = (0..total).filter(|&n| in_degree[n] == 0).collect();
+    let mut removed = 0usize;
+    while let Some(n) = queue.pop() {
+        removed += 1;
+        for &m in &adj[n] {
+            in_degree[m] -= 1;
+            if in_degree[m] == 0 {
+                queue.push(m);
+            }
+        }
+    }
+    removed != total
+}
+
+/// The degenerate single-task plan: the whole goal as one plain `agent` task
+/// assigned to member 0 (mirrors the planner's own unparseable-output fallback in
+/// `plan::fallback_dag`, kept here so the cyclic-plan guard can degrade without
+/// reaching into `plan`'s privates). Always acyclic (no `depends_on`), so the run
+/// still proceeds with something runnable.
+fn degenerate_plan(goal: &str) -> PlannedDag {
+    let trimmed = goal.trim();
+    // CJK-safe ~60-char title from the goal (a long goal becomes a short title).
+    let title: String = if trimmed.chars().count() <= 60 {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(60).collect();
+        format!("{head}…")
+    };
+    PlannedDag {
+        tasks: vec![PlannedTask {
+            title,
+            spec: goal.to_string(),
+            task_profile: None,
+            depends_on: vec![],
+            member_index: Some(0),
+            rationale: Some("fallback: planner produced a cyclic DAG".to_string()),
+            role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
+        }],
+    }
+}
 /// task with no special modality / reasoning / bulk requirements. The Router
 /// scores every member against this without hard-filtering anyone out.
 fn default_profile() -> TaskProfile {
@@ -1807,6 +1904,38 @@ mod tests {
     struct NoopBroadcaster;
     impl EventBroadcaster for NoopBroadcaster {
         fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+    }
+
+    /// Broadcaster that records every event's `(name, status)` so a test can assert
+    /// on the emitted event trail (e.g. that a deleted task emits `planUpdated`, not
+    /// a fake `task.statusChanged="removed"`). `status` is the payload's `status`
+    /// field (when present).
+    #[derive(Clone)]
+    struct RecordingBroadcaster {
+        events: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+    impl RecordingBroadcaster {
+        fn new() -> Self {
+            Self { events: Arc::new(Mutex::new(Vec::new())) }
+        }
+        fn names(&self) -> Vec<String> {
+            self.events.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+        }
+        /// All recorded `(name, status)` pairs whose payload carried a `status`.
+        fn statuses(&self) -> Vec<(String, String)> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|(n, s)| s.clone().map(|s| (n.clone(), s)))
+                .collect()
+        }
+    }
+    impl EventBroadcaster for RecordingBroadcaster {
+        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+            let status = event.data.get("status").and_then(|v| v.as_str()).map(str::to_string);
+            self.events.lock().unwrap().push((event.name.clone(), status));
+        }
     }
 
     /// A planner that returns a fixed [`PlannedDag`] regardless of goal/members,
@@ -3493,6 +3622,63 @@ mod tests {
         (svc, run.id)
     }
 
+    /// Like [`adjust_harness`] but wires a [`RecordingBroadcaster`] so a test can
+    /// assert on the emitted event trail. Returns the recorder too. Events from the
+    /// initial `plan` are CLEARED before returning so a test sees only its `adjust`.
+    async fn adjust_harness_recording(
+        initial: PlannedDag,
+        adjusted: AdjustedPlan,
+    ) -> (RunService, String, RecordingBroadcaster) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let recorder = RecordingBroadcaster::new();
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(recorder.clone()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(AdjustTestProducer::new(initial, adjusted));
+        let svc = RunService::new(run_repo, fleet_repo.clone(), ws_repo.clone(), planner, emitter);
+        let fleet = FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "adjust fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![member_input("agent_a", &["coding"], "high", "standard")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "adjust ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "do the thing".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: Some("supervised".to_string()),
+                    max_parallel: None,
+                },
+            )
+            .await
+            .expect("run create");
+        svc.plan(&run.id).await.expect("plan");
+        recorder.events.lock().unwrap().clear();
+        (svc, run.id, recorder)
+    }
+
     /// Mark a task `done` with an output summary (simulating a completed worker)
     /// so a KEEP test can assert the output survived reconcile.
     async fn mark_done(svc: &RunService, task_id: &str, output: &str) {
@@ -3669,6 +3855,45 @@ mod tests {
         assert!(
             !after.assignments.iter().any(|a| a.task_id == drop_id),
             "dropped task's assignment gone"
+        );
+    }
+
+    // C item 2: deleting a task during `adjust` emits `run.planUpdated` (the FE
+    // refetches the whole RunDetail on it, so the deleted task disappears) and does
+    // NOT emit a fake `task.statusChanged="removed"` (which is not a real task
+    // status). Asserts on the recorded event trail.
+    #[tokio::test]
+    async fn adjust_deleting_task_emits_plan_updated_not_fake_removed_status() {
+        let (svc, run_id, recorder) = adjust_harness_recording(
+            dag_with_titles(&["留", "弃"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let keep_id = before.tasks.iter().find(|t| t.title == "留").unwrap().id.clone();
+
+        let svc = restage_adjust(svc, AdjustedPlan { tasks: vec![keep(&keep_id)] });
+        svc.adjust("u1", &run_id, "删掉第二个").await.expect("adjust");
+
+        // The deletion was reflected via a planUpdated event.
+        let names = recorder.names();
+        assert!(
+            names.iter().any(|n| n == "orchestrator.run.planUpdated"),
+            "adjust must emit planUpdated so the FE refetches: {names:?}"
+        );
+        // NO event carried a fake "removed" task status.
+        let statuses = recorder.statuses();
+        assert!(
+            !statuses.iter().any(|(_, s)| s == "removed"),
+            "no fake \"removed\" status must be emitted: {statuses:?}"
+        );
+        // (Defensive) no `task.statusChanged` event at all references the deleted task
+        // with a removed status — the deletion is plan-level only.
+        assert!(
+            !statuses
+                .iter()
+                .any(|(n, s)| n == "orchestrator.task.statusChanged" && s == "removed"),
+            "task.statusChanged must never carry \"removed\": {statuses:?}"
         );
     }
 
@@ -3965,6 +4190,115 @@ mod tests {
         assert!(!reconcile_plan_has_cycle(&empty, &[mk(vec![])]));
         // A new task depending on a kept node → acyclic (kept has no out-edges).
         assert!(!reconcile_plan_has_cycle(&kept, &[mk(vec![DR::Kept("K".into())])]));
+    }
+
+    // C item 6: pure unit coverage of planned_dag_has_cycle (the initial-plan guard,
+    // symmetric with reconcile_plan_has_cycle but over the planner's index graph).
+    #[test]
+    fn planned_dag_has_cycle_unit() {
+        let mk = |deps: Vec<usize>| PlannedTask {
+            title: "t".into(),
+            spec: "s".into(),
+            task_profile: None,
+            depends_on: deps,
+            member_index: Some(0),
+            rationale: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        let dag = |tasks: Vec<PlannedTask>| PlannedDag { tasks };
+
+        // Empty / lone / clean chain → acyclic.
+        assert!(!planned_dag_has_cycle(&dag(vec![])));
+        assert!(!planned_dag_has_cycle(&dag(vec![mk(vec![])])));
+        // 0 → 1 → 2 clean chain (each depends on the prior) → acyclic.
+        assert!(!planned_dag_has_cycle(&dag(vec![mk(vec![]), mk(vec![0]), mk(vec![1])])));
+        // Self-edge (task 0 depends on itself) → cycle.
+        assert!(planned_dag_has_cycle(&dag(vec![mk(vec![0])])));
+        // 2-cycle: task 0 depends on [1], task 1 depends on [0] → cycle.
+        assert!(planned_dag_has_cycle(&dag(vec![mk(vec![1]), mk(vec![0])])));
+        // Back-edge in a 3-task chain: 0→[2] creates 2→0, plus 1→0, 2→1 → cycle.
+        assert!(planned_dag_has_cycle(&dag(vec![mk(vec![2]), mk(vec![0]), mk(vec![1])])));
+        // Out-of-range dep contributes no edge → acyclic (range-validated upstream).
+        assert!(!planned_dag_has_cycle(&dag(vec![mk(vec![9])])));
+    }
+
+    // C item 6: a CYCLIC initial planner output degrades to the degenerate
+    // single-task plan (the whole goal as one agent task) — so the run still
+    // proceeds and is NOT persisted as a back-edged cycle. (We don't have a prior
+    // plan to fall back to on the initial path, unlike `adjust` which rejects.)
+    #[tokio::test]
+    async fn plan_cyclic_dag_falls_back_to_single_task() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        // Two tasks forming a 2-cycle: task 0 depends on [1], task 1 depends on [0].
+        let mk = |title: &str, deps: Vec<usize>| PlannedTask {
+            title: title.into(),
+            spec: format!("spec-{title}"),
+            task_profile: None,
+            depends_on: deps,
+            member_index: Some(0),
+            rationale: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        let dag = PlannedDag { tasks: vec![mk("环A", vec![1]), mk("环B", vec![0])] };
+        let (svc, _repo, _snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan must succeed via fallback");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        // Degraded to exactly one task (the degenerate plan), with NO deps (so no
+        // cycle was persisted), and the original cyclic titles are gone.
+        assert_eq!(detail.tasks.len(), 1, "cyclic plan degrades to one task");
+        assert!(detail.deps.is_empty(), "no dep edges persisted (no cycle)");
+        assert!(
+            !detail.tasks.iter().any(|t| t.title == "环A" || t.title == "环B"),
+            "cyclic plan's tasks must not be persisted: {:?}",
+            detail.tasks.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
+        // The single fallback task is routed + the run flips to running (proceeds).
+        assert_eq!(detail.assignments.len(), 1, "fallback task is assigned");
+        assert_eq!(detail.run.status, "running", "run proceeds after fallback");
+    }
+
+    // C item 6 (regression guard): a normal ACYCLIC plan is UNCHANGED by the new
+    // cycle guard — both tasks persist and the dep edge is wired exactly as before.
+    #[tokio::test]
+    async fn plan_acyclic_dag_is_unchanged_by_cycle_guard() {
+        let members = vec![member_input("agent_a", &["coding"], "high", "standard")];
+        let mk = |title: &str, deps: Vec<usize>| PlannedTask {
+            title: title.into(),
+            spec: format!("spec-{title}"),
+            task_profile: None,
+            depends_on: deps,
+            member_index: Some(0),
+            rationale: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        // 上游 → 下游 (task 1 depends on task 0): a clean two-node DAG.
+        let dag = PlannedDag { tasks: vec![mk("上游", vec![]), mk("下游", vec![0])] };
+        let (svc, _repo, _snapshot, run_id) = harness(members, dag).await;
+
+        svc.plan(&run_id).await.expect("plan");
+
+        let detail = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(detail.tasks.len(), 2, "acyclic plan persists both tasks");
+        let up = detail.tasks.iter().find(|t| t.title == "上游").expect("上游");
+        let down = detail.tasks.iter().find(|t| t.title == "下游").expect("下游");
+        assert_eq!(
+            detail.deps.len(),
+            1,
+            "exactly the one planned edge is wired: {:?}",
+            detail.deps
+        );
+        assert!(
+            detail.deps.iter().any(|d| d.blocker_task_id == up.id && d.blocked_task_id == down.id),
+            "上游→下游 edge wired"
+        );
     }
 
 

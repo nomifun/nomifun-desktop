@@ -6,14 +6,8 @@
     "listTitle": "我的 Run",
     "listEmpty": "还没有 Run，点上方「新建 Run」开始吧",
     "listLoadError": "加载 Run 失败",
-    "collapse": "收起列表",
-    "expand": "展开列表",
     "titlebarShowList": "展开 Run 列表",
     "titlebarHideList": "收起 Run 列表"
-  },
-  "empty": {
-    "title": "选择一个 Run 开始",
-    "desc": "从左侧选择一个 Run 查看其任务图与执行详情，或点击「新建 Run」发起一次多智能体编排。"
   },
   "start": {
     "title": "发起一次多智能体编排",
@@ -129,9 +123,7 @@
       "running": "已运行 {{value}}"
     },
     "workspace": {
-      "title": "文件",
-      "collapse": "收起文件",
-      "expand": "展开文件"
+      "title": "文件"
     },
     "mobile": {
       "tasksLabel": "任务",
@@ -254,7 +246,6 @@
     },
     "feed": {
       "agentName": "编排主 Agent",
-      "you": "你",
       "decisionTitle": "编排决策",
       "decisionSubtitle": "已规划 {{count}} 个任务",
       "decisionIntro": "我已把目标拆解为以下任务编排，并为每个任务分派了最合适的 agent：",
