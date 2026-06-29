@@ -36,7 +36,8 @@ use nomifun_db::models::{
 };
 use nomifun_db::{
     CreateAssignmentParams, CreateRunParams, CreateTaskParams, IFleetRepository,
-    IOrchWorkspaceRepository, IRunRepository, UpdateRunParams, UpdateTaskParams,
+    IOrchWorkspaceRepository, IRunRepository, ReconcileDepRef, ReconcileNewTask, ReconcilePlan,
+    UpdateRunParams, UpdateTaskParams,
 };
 
 use crate::error::OrchestratorError;
@@ -401,6 +402,11 @@ impl RunService {
     /// planner's pre-assignment (honored when viable), `rationale` the planner's
     /// note (used only on the all-hard-filtered fallback). A snapshot with no
     /// members logs a warn + skips (the engine will fail the task).
+    ///
+    /// The routing DECISION (which member, score, rationale) is the pure
+    /// [`resolve_assignment_pick`] free fn — `adjust` reuses it to compute every
+    /// new task's pick IN MEMORY before the transactional reconcile, so this
+    /// method is only the persist-and-emit half.
     async fn assign_task(
         &self,
         run_id: &str,
@@ -410,30 +416,8 @@ impl RunService {
         member_index: Option<usize>,
         rationale: Option<&str>,
     ) -> Result<(), AppError> {
-        let profile = task_profile.cloned().unwrap_or_else(default_profile);
-        let ranked = rank_members(members, &profile);
-
-        // Decide the member index + the score/rationale to record.
-        let pick = if ranked.is_empty() {
-            // All hard-filtered: fall back so the task still gets assigned.
-            resolve_member(members, member_index).map(|m| AssignmentPick {
-                member_id: m.id.clone(),
-                score: None,
-                rationale: rationale.map(str::to_string),
-            })
-        } else {
-            // Honor a VIABLE pre-assignment (present in `ranked` = survived the
-            // hard filters); else fall back to the Router's top pick.
-            let planner_choice = member_index.and_then(|mi| ranked.iter().find(|c| c.member_index == mi));
-            let chosen = planner_choice.unwrap_or(&ranked[0]);
-            members.get(chosen.member_index).map(|m| AssignmentPick {
-                member_id: m.id.clone(),
-                score: Some(chosen.score),
-                rationale: Some(chosen.rationale.clone()),
-            })
-        };
-
-        let Some(pick) = pick else {
+        let Some(pick) = resolve_assignment_pick(members, task_profile, member_index, rationale)
+        else {
             tracing::warn!(
                 run_id,
                 task_id,
@@ -1079,8 +1063,26 @@ impl RunService {
     /// read is still flipped back to `running` (never stranded terminal-with-pending).
     ///
     /// Owner-scoped (404 missing / 403 not-owner). A bad adjusted plan (unparseable
-    /// / empty / referencing an unknown kept id) is surfaced as an error with the
-    /// run UNCHANGED (no partial mutation — every validation precedes the writes).
+    /// / empty / referencing an unknown kept id / forming a DEPENDENCY CYCLE) is
+    /// surfaced as an error with the run UNCHANGED (no partial mutation — every
+    /// validation precedes the writes).
+    ///
+    /// **Atomic reconcile (UC-3a 评审 Important-A):** the service resolves the WHOLE
+    /// reconcile IN MEMORY (the tasks to delete, the new tasks + their routed
+    /// assignments, the full dep set) and then applies it via ONE transactional repo
+    /// call ([`IRunRepository::reconcile_run_plan`]) — clear-deps + delete-unkept +
+    /// insert-new + rebuild-deps in a single `pool.begin()…commit()`. A mid-way DB
+    /// error rolls the whole thing back, so a failure leaves the run exactly as it
+    /// was (no durable half-reconciled state). The terminal-run re-activation stays
+    /// its OWN write AFTER the successful reconcile tx (it only flips terminal→running
+    /// once the reconcile committed).
+    ///
+    /// **Acyclicity pre-check (UC-3a 评审 Important-B):** after resolving the intended
+    /// final (kept + new) graph, a pure bounded cycle check ([`reconcile_plan_has_cycle`],
+    /// Kahn topological sort) runs BEFORE any write. A lead output forming mutual
+    /// new↔new deps or a new→kept→…→new cycle would otherwise persist a cycle the
+    /// engine can never make ready (a soft-strand); rejecting it here keeps the run
+    /// unchanged.
     pub async fn adjust(&self, user_id: &str, run_id: &str, intent: &str) -> Result<Run, AppError> {
         let intent = intent.trim();
         if intent.is_empty() {
@@ -1130,80 +1132,64 @@ impl RunService {
             }
         }
 
-        // ---- RECONCILE (all writes from here; preceded by full validation) ----
+        // ---- RESOLVE the adjusted plan IN MEMORY (no writes yet) ----
+        //
+        // Compute the whole reconcile up front so it can be (a) cycle-checked over
+        // the FULL final graph and (b) applied ATOMICALLY in one repo transaction
+        // (UC-3a 评审 Important-A + B). Nothing below this point writes until the
+        // single transactional `reconcile_run_plan` call.
 
-        // (1) Clear the run's dep edges (kept tasks lose their wiring but SURVIVE);
-        //     we rebuild all edges from the adjusted plan at the end.
-        self.run_repo
-            .clear_run_deps(run_id)
-            .await
-            .map_err(OrchestratorError::from)?;
+        // (a) DELETE list: every existing task the adjusted plan did NOT keep.
+        let delete_task_ids: Vec<String> = current_tasks
+            .iter()
+            .filter(|t| !kept_ids.contains(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
 
-        // (2) DROP every existing task the adjusted plan did NOT keep (cascades its
-        //     assignment; its deps are already cleared). KEEP tasks are untouched —
-        //     their status/output/conversation/tokens/assignment are preserved.
-        for t in &current_tasks {
-            if !kept_ids.contains(&t.id) {
-                self.run_repo
-                    .delete_task(&t.id)
-                    .await
-                    .map_err(OrchestratorError::from)?;
-                self.emitter.emit_task_status(run_id, &t.id, "removed");
-            }
+        // (b) Per-node identity map for resolving dep refs. A kept node maps to its
+        //     existing id; a NEW node maps to a synthetic key (its index among the
+        //     NEW tasks) — the repo mints the real id inside the tx and resolves the
+        //     index. `node_keys` is indexed by the adjusted plan's node order so a
+        //     `NewIndex(i)` ref (which indexes the PLAN's `tasks`) maps to node i.
+        enum NodeKey {
+            Kept(String),
+            New(usize),
         }
-
-        // (3) INSERT each NEW task (pending) + route it. Record a per-node id map so
-        //     dep refs resolve: a kept node maps to its existing id; a new node maps
-        //     to the freshly-minted id. The map is indexed by the adjusted plan's
-        //     node order (so a NewIndex(i) ref resolves to node i's id).
-        let mut node_ids: Vec<String> = Vec::with_capacity(plan.tasks.len());
+        let mut node_keys: Vec<NodeKey> = Vec::with_capacity(plan.tasks.len());
+        let mut new_idx: usize = 0;
         for node in &plan.tasks {
             match node {
                 crate::plan::AdjustedNode::Keep { keep } => {
-                    node_ids.push(keep.clone());
+                    node_keys.push(NodeKey::Kept(keep.clone()));
                 }
-                crate::plan::AdjustedNode::New(new_task) => {
-                    let created = self
-                        .run_repo
-                        .create_task(CreateTaskParams {
-                            run_id: run_id.to_string(),
-                            title: new_task.title.clone(),
-                            spec: new_task.spec.clone(),
-                            task_profile: None,
-                            status: "pending".to_string(),
-                            graph_x: None,
-                            graph_y: None,
-                            role: new_task.role.clone(),
-                            kind: new_task.kind.clone(),
-                            pattern_config: new_task.pattern_config.clone(),
-                        })
-                        .await
-                        .map_err(OrchestratorError::from)?;
-                    self.assign_task(run_id, &created.id, &members, None, None, None)
-                        .await?;
-                    node_ids.push(created.id);
+                crate::plan::AdjustedNode::New(_) => {
+                    node_keys.push(NodeKey::New(new_idx));
+                    new_idx += 1;
                 }
             }
         }
 
-        // (4) REBUILD deps from the adjusted plan: for each NEW node, wire every
-        //     `depends_on` ref → a concrete blocker task id. A kept-id string ref
-        //     resolves directly (validated above to exist); a new-index int ref
-        //     resolves via `node_ids[i]` (the node at that position). Out-of-range
-        //     indices are logged + skipped (fail-soft on a single bad edge — the
-        //     plan as a whole already parsed + validated). Kept nodes carry no
-        //     `depends_on` in the schema (their upstream is expressed by OTHER
-        //     nodes referencing them), so only NEW nodes contribute edges.
+        // (c) Build the NEW tasks (create params + precomputed routing pick + dep
+        //     refs) for the transactional reconcile. The routing DECISION is the
+        //     same pure pick `plan()` uses (`source = "auto"`); the repo persists it
+        //     with the freshly minted task id. A dep ref resolves to a Kept id
+        //     (validated above) or a NewIndex among the NEW tasks (the plan-node
+        //     index `i` maps through `node_keys[i]`). A non-kept id ref or an
+        //     out-of-range plan index is logged + skipped (fail-soft on a single bad
+        //     edge — the plan as a whole already parsed + validated).
+        let mut new_tasks: Vec<ReconcileNewTask> = Vec::with_capacity(new_idx);
         for (idx, node) in plan.tasks.iter().enumerate() {
             let crate::plan::AdjustedNode::New(new_task) = node else {
                 continue;
             };
-            let blocked_id = &node_ids[idx];
+            // Resolve this new task's dep refs to ReconcileDepRef (kept id / new
+            // index), the form the repo resolves inside the tx.
+            let mut depends_on: Vec<ReconcileDepRef> = Vec::new();
             for dep_ref in &new_task.depends_on {
-                let blocker_id = match dep_ref {
+                match dep_ref {
                     crate::plan::AdjustedDepRef::Kept(id) => {
                         if kept_ids.contains(id) {
-                            Some(id.clone())
+                            depends_on.push(ReconcileDepRef::Kept(id.clone()));
                         } else {
                             tracing::warn!(
                                 run_id,
@@ -1211,11 +1197,15 @@ impl RunService {
                                 dep_id = %id,
                                 "adjusted plan dep references a non-kept id; skipping edge"
                             );
-                            None
                         }
                     }
-                    crate::plan::AdjustedDepRef::NewIndex(i) => match node_ids.get(*i) {
-                        Some(id) => Some(id.clone()),
+                    crate::plan::AdjustedDepRef::NewIndex(i) => match node_keys.get(*i) {
+                        Some(NodeKey::New(ni)) => depends_on.push(ReconcileDepRef::NewIndex(*ni)),
+                        Some(NodeKey::Kept(id)) => {
+                            // A new-index ref that happens to point at a KEPT node:
+                            // resolve it to that kept id (still a valid edge).
+                            depends_on.push(ReconcileDepRef::Kept(id.clone()));
+                        }
                         None => {
                             tracing::warn!(
                                 run_id,
@@ -1223,20 +1213,76 @@ impl RunService {
                                 dep_index = *i,
                                 "adjusted plan dep references an out-of-range new index; skipping edge"
                             );
-                            None
                         }
                     },
-                };
-                if let Some(blocker_id) = blocker_id {
-                    // Guard against a self-edge (the table CHECKs blocker <> blocked).
-                    if &blocker_id != blocked_id {
-                        self.run_repo
-                            .add_dep(&blocker_id, blocked_id)
-                            .await
-                            .map_err(OrchestratorError::from)?;
-                    }
                 }
             }
+
+            let assignment = resolve_assignment_pick(&members, None, None, None).map(|pick| {
+                CreateAssignmentParams {
+                    // Placeholder; the repo overwrites task_id with the minted id.
+                    task_id: String::new(),
+                    member_id: pick.member_id,
+                    score: pick.score,
+                    rationale: pick.rationale,
+                    source: "auto".to_string(),
+                    locked: false,
+                }
+            });
+
+            new_tasks.push(ReconcileNewTask {
+                task: CreateTaskParams {
+                    run_id: run_id.to_string(),
+                    title: new_task.title.clone(),
+                    spec: new_task.spec.clone(),
+                    task_profile: None,
+                    status: "pending".to_string(),
+                    graph_x: None,
+                    graph_y: None,
+                    role: new_task.role.clone(),
+                    kind: new_task.kind.clone(),
+                    pattern_config: new_task.pattern_config.clone(),
+                },
+                assignment,
+                depends_on,
+            });
+        }
+
+        // (d) ACYCLICITY PRE-CHECK over the FULL resolved graph (kept + new), BEFORE
+        //     any write (UC-3a 评审 Important-B). A bad lead output (mutual new↔new
+        //     deps, or a new→kept→…→new cycle) would otherwise persist a cycle that
+        //     the engine can never make ready → the run soft-strands `running` with
+        //     un-runnable pending tasks. Reject it here so the run stays UNCHANGED
+        //     (same "run untouched on a bad adjusted plan" contract validate-kept
+        //     already honors). The check is pure + bounded (Kahn topological sort
+        //     over the resolved edge set; nodes are kept ids + new-task indices).
+        if reconcile_plan_has_cycle(&kept_ids, &new_tasks) {
+            return Err(OrchestratorError::BadRequest(
+                "调整计划存在循环依赖，已拒绝(run 未改动)".into(),
+            )
+            .into());
+        }
+
+        // ---- APPLY the reconcile ATOMICALLY (one transaction, all-or-nothing) ----
+        //
+        // The repo wraps clear-deps + delete-unkept + insert-new(+assignment) +
+        // rebuild-deps in a single `pool.begin()…commit()`: a mid-way DB error rolls
+        // the WHOLE thing back, so the run is unchanged on failure (Important-A).
+        self.run_repo
+            .reconcile_run_plan(
+                run_id,
+                ReconcilePlan {
+                    delete_task_ids: delete_task_ids.clone(),
+                    new_tasks,
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+
+        // Emit the per-dropped-task "removed" signal AFTER the successful commit (so
+        // a rolled-back reconcile never emits a phantom removal), then plan-updated.
+        for dropped in &delete_task_ids {
+            self.emitter.emit_task_status(run_id, dropped, "removed");
         }
 
         self.emitter.emit_run_plan_updated(run_id);
@@ -1487,6 +1533,128 @@ struct AssignmentPick {
     member_id: String,
     score: Option<f64>,
     rationale: Option<String>,
+}
+
+/// Decide which member a task should be assigned to (the PURE routing decision,
+/// no DB / no emit): the LLM-primary + Router-veto pick used by both
+/// [`RunService::assign_task`] (which then persists + emits) and
+/// [`RunService::adjust`] (which precomputes every new task's pick in memory so
+/// the transactional reconcile only persists). Returns `None` ONLY when the
+/// snapshot has no members (nothing to assign to). The logic is unchanged from
+/// the original inline `assign_task` body:
+/// - all members hard-filtered (`ranked` empty) → fall back to the planner's
+///   `member_index` (or member 0), recording no score + the planner's rationale;
+/// - else honor a VIABLE planner pick (present in `ranked` = survived the hard
+///   filters), recording the Router's score/rationale; otherwise the Router top.
+fn resolve_assignment_pick(
+    members: &[FleetMember],
+    task_profile: Option<&TaskProfile>,
+    member_index: Option<usize>,
+    rationale: Option<&str>,
+) -> Option<AssignmentPick> {
+    let profile = task_profile.cloned().unwrap_or_else(default_profile);
+    let ranked = rank_members(members, &profile);
+
+    if ranked.is_empty() {
+        // All hard-filtered: fall back so the task still gets assigned.
+        resolve_member(members, member_index).map(|m| AssignmentPick {
+            member_id: m.id.clone(),
+            score: None,
+            rationale: rationale.map(str::to_string),
+        })
+    } else {
+        // Honor a VIABLE pre-assignment (present in `ranked` = survived the hard
+        // filters); else fall back to the Router's top pick.
+        let planner_choice =
+            member_index.and_then(|mi| ranked.iter().find(|c| c.member_index == mi));
+        let chosen = planner_choice.unwrap_or(&ranked[0]);
+        members.get(chosen.member_index).map(|m| AssignmentPick {
+            member_id: m.id.clone(),
+            score: Some(chosen.score),
+            rationale: Some(chosen.rationale.clone()),
+        })
+    }
+}
+
+/// Detect a dependency CYCLE in a resolved conversational-reconcile plan, over
+/// the FULL final task graph (kept tasks + new tasks), BEFORE any write
+/// (UC-3a 评审 Important-B). A cycle would persist a DAG the engine can never make
+/// ready (a soft-strand: the run stays `running` with un-runnable pending tasks),
+/// so `adjust` rejects a cyclic plan and leaves the run unchanged.
+///
+/// **Nodes** are the kept task ids (each surviving kept task is a node) PLUS one
+/// node per NEW task (identified by its index in `new_tasks`). **Edges** are
+/// `blocker → blocked`: each new task `i`'s `depends_on` lists its blockers, so a
+/// `Kept(id)` ref is an edge `id → new#i` and a `NewIndex(j)` ref is `new#j →
+/// new#i`. Kept tasks declare no `depends_on` here (their old wiring was cleared;
+/// any upstream they regain is expressed by OTHER nodes referencing them), so they
+/// contribute no OUTGOING edges — a cycle therefore must run through at least one
+/// new task, but we still model kept nodes so a new→kept→new path is detected.
+///
+/// Pure + bounded: a Kahn topological sort (repeatedly remove a zero-in-degree
+/// node). If any node remains when no zero-in-degree node is left, the remaining
+/// nodes form a cycle. Self-edges (a `NewIndex(i)` on task `i`) are an immediate
+/// cycle. Out-of-range new indices cannot occur (the caller validated ranges).
+fn reconcile_plan_has_cycle(
+    kept_ids: &std::collections::HashSet<String>,
+    new_tasks: &[ReconcileNewTask],
+) -> bool {
+    use std::collections::HashMap;
+
+    // Assign every node a dense index: kept ids first, then one per new task.
+    // A new task `i` is keyed `new#i` so its node id is `kept_ids.len() + i`.
+    let mut node_index: HashMap<String, usize> = HashMap::new();
+    for id in kept_ids {
+        let n = node_index.len();
+        node_index.insert(id.clone(), n);
+    }
+    let kept_count = node_index.len();
+    let new_node = |i: usize| kept_count + i;
+    let total = kept_count + new_tasks.len();
+
+    // Build adjacency (blocker → [blocked]) + in-degrees over the resolved edges.
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); total];
+    let mut in_degree: Vec<usize> = vec![0; total];
+    for (i, nt) in new_tasks.iter().enumerate() {
+        let blocked = new_node(i);
+        for dep in &nt.depends_on {
+            let blocker = match dep {
+                ReconcileDepRef::Kept(id) => match node_index.get(id) {
+                    Some(&n) => n,
+                    // A kept ref the caller didn't include as a kept node can't form
+                    // a cycle (it has no outgoing edges); skip it defensively.
+                    None => continue,
+                },
+                ReconcileDepRef::NewIndex(j) => {
+                    if *j >= new_tasks.len() {
+                        continue; // out-of-range guarded upstream; skip defensively
+                    }
+                    new_node(*j)
+                }
+            };
+            // A self-edge (blocker == blocked) is itself a cycle.
+            if blocker == blocked {
+                return true;
+            }
+            adj[blocker].push(blocked);
+            in_degree[blocked] += 1;
+        }
+    }
+
+    // Kahn: pop zero-in-degree nodes; count how many we can remove. If fewer than
+    // `total` are removable, the rest are in a cycle.
+    let mut queue: Vec<usize> = (0..total).filter(|&n| in_degree[n] == 0).collect();
+    let mut removed = 0usize;
+    while let Some(n) = queue.pop() {
+        removed += 1;
+        for &m in &adj[n] {
+            in_degree[m] -= 1;
+            if in_degree[m] == 0 {
+                queue.push(m);
+            }
+        }
+    }
+    removed != total
 }
 
 /// A neutral default profile for tasks the planner left unprofiled: a `general`
@@ -3598,7 +3766,208 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
     }
 
-    /// Rebuild a RunService over the SAME repos/emitter as `svc` but with the
+    // UC-3a 评审 Important-B: an adjusted plan whose NEW tasks form a mutual cycle
+    // (new0 ↔ new1) is REJECTED before any write — the cycle check runs over the
+    // resolved graph and the run is left UNCHANGED. (Engine-wise such a cycle would
+    // soft-strand the run: neither task could ever become ready.)
+    #[tokio::test]
+    async fn adjust_rejects_new_new_cycle_run_unchanged() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["A", "B"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(before.tasks.len(), 2);
+        let before_ids: Vec<String> = before.tasks.iter().map(|t| t.id.clone()).collect();
+
+        // new[0] depends on new[1]; new[1] depends on new[0] → a 2-cycle.
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![
+                new_node("环A", vec![AdjustedDepRef::NewIndex(1)]),
+                new_node("环B", vec![AdjustedDepRef::NewIndex(0)]),
+            ],
+        });
+        let err = svc.adjust("u1", &run_id, "造个环").await.expect_err("cycle must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // The run is UNCHANGED: same two original tasks, no new tasks, deps intact.
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 2, "run unchanged on a cyclic plan");
+        for id in &before_ids {
+            assert!(after.tasks.iter().any(|t| &t.id == id), "task {id} survives");
+        }
+        assert!(!after.tasks.iter().any(|t| t.title == "环A" || t.title == "环B"), "no new task");
+        assert_eq!(after.deps.len(), before.deps.len(), "deps unchanged");
+    }
+
+    // UC-3a 评审 Important-B: a new↔kept cycle (kept → new → kept, the authoritative
+    // case the full-graph check catches that a "point earlier" constraint alone
+    // would miss) is REJECTED before any write; the run is UNCHANGED. Here we keep a
+    // done task K and add a new task N that BOTH depends on K (kept ref) AND that K
+    // is wired to depend on — but K depending on N can only be expressed via a new
+    // node referencing K while another new node K' creates the back-edge. We model
+    // the cycle as: new0 depends_on kept K AND new1; new1 depends_on new0 — a cycle
+    // among the new tasks that also threads through the kept reference, proving the
+    // check spans kept + new nodes.
+    #[tokio::test]
+    async fn adjust_rejects_new_kept_cycle_run_unchanged() {
+        let (svc, run_id) = adjust_harness(
+            single_task_dag(Some(0), None),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let kept_id = before.tasks[0].id.clone();
+        mark_done(&svc, &kept_id, "out").await;
+
+        // keep[0] = K; new[1] depends on [K, new#2]; new[2] depends on [new#1].
+        // new#1 ↔ new#2 form a cycle (each blocks the other), threaded with a kept
+        // ref so the full-graph (kept + new) check is what catches it.
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![
+                keep(&kept_id),
+                new_node("环1", vec![AdjustedDepRef::Kept(kept_id.clone()), AdjustedDepRef::NewIndex(2)]),
+                new_node("环2", vec![AdjustedDepRef::NewIndex(1)]),
+            ],
+        });
+        let err = svc.adjust("u1", &run_id, "环上加环").await.expect_err("cycle must reject");
+        assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
+
+        // The run is UNCHANGED: only the kept task, still done, no new tasks.
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 1, "run unchanged on a cyclic plan");
+        assert_eq!(after.tasks[0].id, kept_id, "kept task survives");
+        assert_eq!(after.tasks[0].status, "done", "kept task untouched");
+        assert!(after.deps.is_empty(), "no deps wired");
+    }
+
+    // A VALID acyclic adjusted plan still reconciles fine after the cycle check
+    // (regression guard: the check must not reject legitimate DAGs). kept → new[1]
+    // → new[2] is a clean chain.
+    #[tokio::test]
+    async fn adjust_accepts_acyclic_plan_after_cycle_check() {
+        let (svc, run_id) = adjust_harness(
+            single_task_dag(Some(0), None),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let kept_id = before.tasks[0].id.clone();
+        mark_done(&svc, &kept_id, "out").await;
+
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![
+                keep(&kept_id),
+                new_node("中", vec![AdjustedDepRef::Kept(kept_id.clone())]),
+                new_node("末", vec![AdjustedDepRef::NewIndex(1)]),
+            ],
+        });
+        svc.adjust("u1", &run_id, "正常扩展").await.expect("acyclic plan reconciles");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        assert_eq!(after.tasks.len(), 3, "kept + 2 new");
+        let mid = after.tasks.iter().find(|t| t.title == "中").expect("中").id.clone();
+        let last = after.tasks.iter().find(|t| t.title == "末").expect("末").id.clone();
+        let has = |b: &str, k: &str| after.deps.iter().any(|d| d.blocker_task_id == b && d.blocked_task_id == k);
+        assert!(has(&kept_id, &mid), "kept→中");
+        assert!(has(&mid, &last), "中→末");
+        assert_eq!(after.deps.len(), 2, "exactly the two acyclic edges: {:?}", after.deps);
+    }
+
+    // UC-3a 评审 Important-A (atomic commit): a successful adjust commits the WHOLE
+    // reconcile through the single transactional repo path — the dropped task is
+    // gone, the kept task + its output survive, the new task is inserted + routed,
+    // and the rebuilt edge is present, all in one consistent post-state. (The
+    // rollback half — a mid-tx error leaves the run unchanged — is asserted at the
+    // repo layer in `reconcile_run_plan_rolls_back_on_mid_transaction_error`.)
+    #[tokio::test]
+    async fn adjust_commits_whole_reconcile_atomically() {
+        let (svc, run_id) = adjust_harness(
+            dag_with_titles(&["留", "弃"]),
+            AdjustedPlan { tasks: vec![] },
+        )
+        .await;
+        let before = svc.get_detail(&run_id).await.expect("detail");
+        let keep_id = before.tasks.iter().find(|t| t.title == "留").unwrap().id.clone();
+        let drop_id = before.tasks.iter().find(|t| t.title == "弃").unwrap().id.clone();
+        mark_done(&svc, &keep_id, "保留产出").await;
+
+        // Keep 留 (done), drop 弃, add a new task depending on the kept one.
+        let svc = restage_adjust(svc, AdjustedPlan {
+            tasks: vec![keep(&keep_id), new_node("新", vec![AdjustedDepRef::Kept(keep_id.clone())])],
+        });
+        svc.adjust("u1", &run_id, "保留留删掉弃加新").await.expect("adjust commits");
+
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        // Whole reconcile committed consistently: kept survives done, drop gone,
+        // new inserted+routed, edge wired.
+        assert_eq!(after.tasks.len(), 2, "kept + new only");
+        let kept = after.tasks.iter().find(|t| t.id == keep_id).expect("kept survives");
+        assert_eq!(kept.status, "done", "kept not re-run");
+        assert_eq!(kept.output_summary.as_deref(), Some("保留产出"), "output preserved");
+        assert!(!after.tasks.iter().any(|t| t.id == drop_id), "dropped gone");
+        let new_task = after.tasks.iter().find(|t| t.title == "新").expect("new added");
+        assert_eq!(new_task.status, "pending");
+        assert!(
+            after.assignments.iter().any(|a| a.task_id == new_task.id && a.source == "auto"),
+            "new task routed atomically: {:?}",
+            after.assignments
+        );
+        assert!(
+            after.assignments.iter().any(|a| a.task_id == keep_id),
+            "kept assignment preserved"
+        );
+        assert!(
+            after.deps.iter().any(|d| d.blocker_task_id == keep_id && d.blocked_task_id == new_task.id),
+            "edge kept→new wired: {:?}",
+            after.deps
+        );
+        assert_eq!(after.deps.len(), 1, "exactly the rebuilt edge");
+    }
+
+    // Pure unit coverage of reconcile_plan_has_cycle: a self-edge (new#0 →
+    // new#0), a 2-cycle, and a new→kept→new path are cyclic; a clean chain and a
+    // lone new task with no deps are acyclic.
+    #[test]
+    fn reconcile_plan_has_cycle_unit() {
+        use nomifun_db::ReconcileDepRef as DR;
+        let kept: std::collections::HashSet<String> =
+            ["K".to_string()].into_iter().collect();
+        let mk = |deps: Vec<DR>| ReconcileNewTask {
+            task: CreateTaskParams {
+                run_id: "r".into(),
+                title: "t".into(),
+                spec: "s".into(),
+                task_profile: None,
+                status: "pending".into(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".into(),
+                pattern_config: None,
+            },
+            assignment: None,
+            depends_on: deps,
+        };
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Self-edge → cycle.
+        assert!(reconcile_plan_has_cycle(&empty, &[mk(vec![DR::NewIndex(0)])]));
+        // 2-cycle new0 ↔ new1 → cycle.
+        assert!(reconcile_plan_has_cycle(
+            &empty,
+            &[mk(vec![DR::NewIndex(1)]), mk(vec![DR::NewIndex(0)])]
+        ));
+        // Clean chain new0 → new1 (new1 depends on new0) → acyclic.
+        assert!(!reconcile_plan_has_cycle(&empty, &[mk(vec![]), mk(vec![DR::NewIndex(0)])]));
+        // Lone new task, no deps → acyclic.
+        assert!(!reconcile_plan_has_cycle(&empty, &[mk(vec![])]));
+        // A new task depending on a kept node → acyclic (kept has no out-edges).
+        assert!(!reconcile_plan_has_cycle(&kept, &[mk(vec![DR::Kept("K".into())])]));
+    }
+
+
     /// planner re-staged to return `adjusted` from `adjust` (so a test can stage a
     /// plan that references the REAL task ids minted by the first `plan`). The
     /// initial dag is irrelevant here (we never re-`plan`).

@@ -3,8 +3,8 @@ use sqlx::SqlitePool;
 
 use crate::models::{OrchAssignmentRow, OrchRunRow, OrchRunTaskDepRow, OrchRunTaskRow};
 use crate::repository::orch_run::{
-    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, UpdateRunParams,
-    UpdateTaskParams,
+    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, ReconcileDepRef,
+    ReconcilePlan, UpdateRunParams, UpdateTaskParams,
 };
 
 #[derive(Clone, Debug)]
@@ -385,6 +385,124 @@ impl IRunRepository for SqliteRunRepository {
         Ok(rows)
     }
 
+    async fn reconcile_run_plan(
+        &self,
+        run_id: &str,
+        plan: ReconcilePlan,
+    ) -> Result<(), sqlx::Error> {
+        // ONE transaction wraps the WHOLE reconcile (UC-3a 评审 Important-A): clear
+        // deps → delete un-kept → insert new (+ assignment) → rebuild deps. Any
+        // error short-circuits via `?`, the `tx` Drop rolls everything back (we
+        // only `commit()` at the very end), so a mid-way DB failure leaves the run
+        // unchanged — no durable half-reconciled state. Mirrors `set_assignment`'s
+        // coarse-transaction pattern; no sqlx type escapes this method.
+        let now = now_ms();
+        let mut tx = self.pool.begin().await?;
+
+        // (1) Clear the run's dep edges (kept tasks lose their wiring but survive).
+        sqlx::query(
+            "DELETE FROM orch_run_task_deps WHERE blocked_task_id IN (\
+                 SELECT id FROM orch_run_tasks WHERE run_id = ?\
+             )",
+        )
+        .bind(run_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // (2) Delete every un-kept task. The task-keyed ON DELETE CASCADE FKs sweep
+        //     out each task's (already-cleared) deps + its assignment.
+        for task_id in &plan.delete_task_ids {
+            sqlx::query("DELETE FROM orch_run_tasks WHERE id = ?")
+                .bind(task_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        // (3) Insert each NEW task (pending) + its pre-computed assignment. Mint the
+        //     ids HERE (inside the tx) and remember them in plan order so (4) can
+        //     resolve `NewIndex(i)` dep refs.
+        let mut new_ids: Vec<String> = Vec::with_capacity(plan.new_tasks.len());
+        for new_task in &plan.new_tasks {
+            let task_id = generate_prefixed_id("rtask");
+            let t = &new_task.task;
+            sqlx::query(
+                "INSERT INTO orch_run_tasks (\
+                    id, run_id, title, spec, task_profile, status, conversation_id, \
+                    output_summary, output_files, attempt, tokens, graph_x, graph_y, role, \
+                    kind, pattern_config, created_at, updated_at\
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&task_id)
+            .bind(run_id)
+            .bind(&t.title)
+            .bind(&t.spec)
+            .bind(&t.task_profile)
+            .bind(&t.status)
+            .bind(t.graph_x)
+            .bind(t.graph_y)
+            .bind(&t.role)
+            .bind(&t.kind)
+            .bind(&t.pattern_config)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            if let Some(asg) = &new_task.assignment {
+                let asg_id = generate_prefixed_id("asg");
+                let locked: i64 = if asg.locked { 1 } else { 0 };
+                sqlx::query(
+                    "INSERT INTO orch_assignments (\
+                        id, task_id, member_id, score, rationale, source, locked, created_at\
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&asg_id)
+                // The minted task id wins over whatever placeholder the service set.
+                .bind(&task_id)
+                .bind(&asg.member_id)
+                .bind(asg.score)
+                .bind(&asg.rationale)
+                .bind(&asg.source)
+                .bind(locked)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            new_ids.push(task_id);
+        }
+
+        // (4) Rebuild the dep edges from the plan: each new task's blockers resolve
+        //     to a kept id (verbatim) or a freshly minted new id (by index). A
+        //     self-edge is skipped (the table CHECKs blocker <> blocked); an
+        //     out-of-range NewIndex cannot occur (the service validated ranges).
+        for (idx, new_task) in plan.new_tasks.iter().enumerate() {
+            let blocked_id = &new_ids[idx];
+            for dep_ref in &new_task.depends_on {
+                let blocker_id = match dep_ref {
+                    ReconcileDepRef::Kept(id) => id.clone(),
+                    ReconcileDepRef::NewIndex(i) => match new_ids.get(*i) {
+                        Some(id) => id.clone(),
+                        None => continue,
+                    },
+                };
+                if &blocker_id == blocked_id {
+                    continue;
+                }
+                sqlx::query(
+                    "INSERT INTO orch_run_task_deps (blocker_task_id, blocked_task_id) VALUES (?, ?)",
+                )
+                .bind(&blocker_id)
+                .bind(blocked_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn list_ready_tasks(&self, run_id: &str) -> Result<Vec<OrchRunTaskRow>, sqlx::Error> {
         // Ready = pending AND no incomplete blocker. A task with zero dep rows
         // trivially satisfies the NOT EXISTS (the subquery is empty); a task
@@ -515,6 +633,7 @@ impl IRunRepository for SqliteRunRepository {
 mod tests {
     use super::*;
     use crate::database::init_database_memory;
+    use crate::repository::orch_run::ReconcileNewTask;
     use crate::repository::{
         CreateOrchWorkspaceParams, IOrchWorkspaceRepository, SqliteOrchWorkspaceRepository,
     };
@@ -1251,5 +1370,210 @@ mod tests {
         assert!(repo.get_task(&b.id).await.unwrap().is_some(), "task B kept");
         // The OTHER run's edge is untouched.
         assert_eq!(repo.list_deps(&other.id).await.unwrap().len(), 1, "other run's edge survives");
+    }
+
+    // UC-3a 评审 Important-A: reconcile_run_plan applies the WHOLE reconcile in ONE
+    // transaction. A successful call clears the run's deps, deletes the un-kept
+    // tasks (cascading their assignment), inserts the new tasks + their
+    // pre-computed assignment, and rebuilds the deps — all committed atomically.
+    #[tokio::test]
+    async fn reconcile_run_plan_applies_whole_reconcile_atomically() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "reconcile-atomic".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let mk = |title: &str| CreateTaskParams {
+            run_id: run.id.clone(),
+            title: title.into(),
+            spec: "s".into(),
+            task_profile: None,
+            status: "pending".into(),
+            graph_x: None,
+            graph_y: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        // Seed: keep + drop tasks, an edge keep→drop, and an assignment on each.
+        let keep = repo.create_task(mk("keep")).await.unwrap();
+        let drop = repo.create_task(mk("drop")).await.unwrap();
+        repo.add_dep(&keep.id, &drop.id).await.unwrap();
+        for t in [&keep, &drop] {
+            repo.create_assignment(CreateAssignmentParams {
+                task_id: t.id.clone(),
+                member_id: "fmem_x".into(),
+                score: None,
+                rationale: None,
+                source: "auto".into(),
+                locked: false,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Reconcile: drop the "drop" task; add one NEW task depending on the kept
+        // one (kept-id ref) with its own auto assignment.
+        let new_task = ReconcileNewTask {
+            task: CreateTaskParams {
+                run_id: run.id.clone(),
+                title: "new".into(),
+                spec: "ns".into(),
+                task_profile: None,
+                status: "pending".into(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".into(),
+                pattern_config: None,
+            },
+            assignment: Some(CreateAssignmentParams {
+                task_id: String::new(), // overwritten with the minted id
+                member_id: "fmem_new".into(),
+                score: Some(0.5),
+                rationale: Some("auto".into()),
+                source: "auto".into(),
+                locked: false,
+            }),
+            depends_on: vec![ReconcileDepRef::Kept(keep.id.clone())],
+        };
+        repo.reconcile_run_plan(
+            &run.id,
+            ReconcilePlan {
+                delete_task_ids: vec![drop.id.clone()],
+                new_tasks: vec![new_task],
+            },
+        )
+        .await
+        .expect("reconcile commits");
+
+        // The kept task survives WITH its assignment; the dropped task + assignment
+        // are gone; exactly one new task exists, routed; the new edge is wired.
+        let tasks = repo.list_tasks(&run.id).await.unwrap();
+        assert_eq!(tasks.len(), 2, "kept + new: {tasks:?}");
+        assert!(tasks.iter().any(|t| t.id == keep.id), "kept survives");
+        assert!(!tasks.iter().any(|t| t.id == drop.id), "dropped gone");
+        let new_row = tasks.iter().find(|t| t.title == "new").expect("new task");
+        assert_eq!(new_row.status, "pending");
+        assert!(repo.get_task(&drop.id).await.unwrap().is_none(), "drop row gone");
+        assert!(
+            repo.get_assignment_for_task(&drop.id).await.unwrap().is_none(),
+            "drop assignment cascaded"
+        );
+        assert!(
+            repo.get_assignment_for_task(&keep.id).await.unwrap().is_some(),
+            "kept assignment preserved"
+        );
+        let new_asg = repo
+            .get_assignment_for_task(&new_row.id)
+            .await
+            .unwrap()
+            .expect("new task routed");
+        assert_eq!(new_asg.member_id, "fmem_new", "new assignment uses minted task id");
+        let deps = repo.list_deps(&run.id).await.unwrap();
+        assert_eq!(deps.len(), 1, "exactly the rebuilt edge: {deps:?}");
+        assert_eq!(deps[0].blocker_task_id, keep.id);
+        assert_eq!(deps[0].blocked_task_id, new_row.id);
+    }
+
+    // UC-3a 评审 Important-A (rollback): a mid-transaction error rolls the WHOLE
+    // reconcile back — the run is left EXACTLY as it was (no half-state). We force a
+    // failure in the dep-rebuild phase (step 4, AFTER deletes + inserts) by wiring a
+    // NEW task's dep to a NON-EXISTENT kept id, which violates the
+    // orch_run_task_deps FK. The expected post-state: the "drop" task is STILL
+    // present (its delete rolled back), NO new task was persisted, and the original
+    // edge survives.
+    #[tokio::test]
+    async fn reconcile_run_plan_rolls_back_on_mid_transaction_error() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "reconcile-rollback".into(),
+                fleet_snapshot: "[]".into(),
+                autonomy: "supervised".into(),
+                max_parallel: None,
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let mk = |title: &str| CreateTaskParams {
+            run_id: run.id.clone(),
+            title: title.into(),
+            spec: "s".into(),
+            task_profile: None,
+            status: "pending".into(),
+            graph_x: None,
+            graph_y: None,
+            role: None,
+            kind: "agent".into(),
+            pattern_config: None,
+        };
+        let keep = repo.create_task(mk("keep")).await.unwrap();
+        let drop = repo.create_task(mk("drop")).await.unwrap();
+        repo.add_dep(&keep.id, &drop.id).await.unwrap();
+
+        // A NEW task whose dep references a NON-EXISTENT kept id → the dep INSERT in
+        // step (4) violates the FK and aborts the transaction.
+        let bad_new = ReconcileNewTask {
+            task: CreateTaskParams {
+                run_id: run.id.clone(),
+                title: "phantom".into(),
+                spec: "ns".into(),
+                task_profile: None,
+                status: "pending".into(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".into(),
+                pattern_config: None,
+            },
+            assignment: None,
+            depends_on: vec![ReconcileDepRef::Kept("rtask_does_not_exist".into())],
+        };
+        let err = repo
+            .reconcile_run_plan(
+                &run.id,
+                ReconcilePlan {
+                    delete_task_ids: vec![drop.id.clone()],
+                    new_tasks: vec![bad_new],
+                },
+            )
+            .await
+            .expect_err("FK violation must error");
+        // Any sqlx error is fine; the point is the rollback below.
+        let _ = err;
+
+        // ROLLBACK: the run is unchanged. The "drop" task still exists (its delete
+        // rolled back), NO new task persisted, and the original edge survives.
+        let tasks = repo.list_tasks(&run.id).await.unwrap();
+        assert_eq!(tasks.len(), 2, "no task added or removed: {tasks:?}");
+        assert!(tasks.iter().any(|t| t.id == keep.id), "keep present");
+        assert!(tasks.iter().any(|t| t.id == drop.id), "drop NOT deleted (rollback)");
+        assert!(
+            !tasks.iter().any(|t| t.title == "phantom"),
+            "no new task persisted (rollback)"
+        );
+        let deps = repo.list_deps(&run.id).await.unwrap();
+        assert_eq!(deps.len(), 1, "original edge survives: {deps:?}");
+        assert_eq!(deps[0].blocker_task_id, keep.id);
+        assert_eq!(deps[0].blocked_task_id, drop.id);
     }
 }

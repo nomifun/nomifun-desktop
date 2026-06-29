@@ -68,8 +68,8 @@ pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use orch_fleet::{CreateFleetParams, IFleetRepository, NewFleetMember, UpdateFleetParams};
 pub use orch_run::{
-    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, UpdateRunParams,
-    UpdateTaskParams,
+    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, ReconcileDepRef,
+    ReconcileNewTask, ReconcilePlan, UpdateRunParams, UpdateTaskParams,
 };
 pub use orch_workspace::{
     CreateOrchWorkspaceParams, IOrchWorkspaceRepository, UpdateOrchWorkspaceParams,
