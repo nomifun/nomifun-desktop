@@ -19,6 +19,15 @@ pub struct ListRequirementsParams {
     pub owner_kind: Option<String>,
     /// Substring search over title + content (case-insensitive).
     pub q: Option<String>,
+    /// Sort column (whitelisted in the repository). Recognized values:
+    /// `"id" | "created_at" | "updated_at" | "status"`. Any other value — or
+    /// `None` — falls back to the default queue order
+    /// (`sort_seq ASC, priority DESC, created_at ASC`). User input is never
+    /// interpolated into SQL; it only selects a fixed, hard-coded column.
+    pub order_by: Option<String>,
+    /// Sort direction: `"asc" | "desc"`. Defaults to `desc` for an explicit
+    /// `order_by`. Ignored when `order_by` is absent/unrecognized.
+    pub order: Option<String>,
     /// 1-based page index. Defaults to 1 when None.
     pub page: Option<u32>,
     /// Page size. Defaults to 20 when None.

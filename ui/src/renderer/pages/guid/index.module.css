@@ -350,6 +350,303 @@
   border-color: #3a3a3a;
 }
 
+.guidResourceCards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.guidResourceCard {
+  min-width: 0;
+  height: 144px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  color: var(--color-text-1);
+  background: color-mix(in srgb, var(--bg-2) 76%, transparent);
+  box-sizing: border-box;
+  text-align: left;
+  font-family: inherit;
+  outline: none;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+button.guidResourceCard {
+  cursor: pointer;
+}
+
+button.guidResourceCard:hover,
+button.guidResourceCard:focus-visible {
+  border-color: rgba(var(--primary-6), 0.32);
+  background: color-mix(in srgb, var(--bg-2) 90%, transparent);
+  box-shadow: 0 10px 26px rgba(var(--primary-6), 0.08);
+  transform: translateY(-1px);
+}
+
+.guidResourceCardHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.guidResourceIcon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: rgb(var(--primary-6));
+  background: rgba(var(--primary-6), 0.08);
+}
+
+.guidResourceTitle {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guidResourceDescription {
+  color: var(--color-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.guidResourceAction {
+  margin-top: auto;
+  color: rgb(var(--primary-6));
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.guidCompanionPoster {
+  position: relative;
+  min-width: 0;
+  min-height: 292px;
+  display: grid;
+  grid-template-columns: minmax(190px, 0.84fr) minmax(0, 1.16fr);
+  gap: 18px;
+  padding: 22px 24px 18px;
+  border: 1px solid color-mix(in srgb, rgba(var(--primary-6), 0.2) 38%, var(--color-border-2));
+  border-radius: 18px;
+  color: var(--color-text-1);
+  background:
+    linear-gradient(135deg, rgba(255, 239, 244, 0.92), rgba(244, 249, 255, 0.88) 52%, rgba(255, 250, 239, 0.76)),
+    var(--bg-2);
+  box-shadow: 0 18px 44px rgba(219, 72, 119, 0.09);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+:global([data-theme='dark']) .guidCompanionPoster {
+  background:
+    linear-gradient(135deg, rgba(92, 35, 54, 0.42), rgba(39, 49, 66, 0.78) 52%, rgba(74, 58, 30, 0.42)),
+    #262626;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22);
+}
+
+.guidCompanionPoster::before {
+  content: '';
+  position: absolute;
+  inset: auto 26px 26px 26px;
+  height: 108px;
+  border-radius: 999px 999px 30px 30px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.68), rgba(255, 255, 255, 0));
+  opacity: 0.84;
+  pointer-events: none;
+}
+
+:global([data-theme='dark']) .guidCompanionPoster::before {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0));
+}
+
+.guidCompanionPosterCopy {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-self: center;
+  gap: 8px;
+}
+
+.guidCompanionPosterEyebrow {
+  color: rgb(var(--primary-6));
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+}
+
+.guidCompanionPosterTitle {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 30px;
+  letter-spacing: 0;
+}
+
+.guidCompanionPosterDescription {
+  max-width: 260px;
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.guidCompanionPosterStage {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  min-height: 226px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: clamp(2px, 1.6vw, 12px);
+  padding: 8px 0 2px;
+  box-sizing: border-box;
+}
+
+.guidCompanionPosterHorizon {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 16px;
+  height: 28px;
+  border-radius: 999px;
+  background: radial-gradient(ellipse at center, rgba(255, 150, 183, 0.2), rgba(255, 150, 183, 0));
+  pointer-events: none;
+}
+
+.guidCompanionPosterFigure {
+  --poster-index: 0;
+  --poster-y: 0px;
+  position: relative;
+  z-index: calc(2 + var(--poster-index));
+  min-width: 0;
+  display: flex;
+  flex: 0 1 122px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin: 0;
+  transform: translateY(var(--poster-y));
+}
+
+.guidCompanionPosterFigurePrimary {
+  flex-basis: 150px;
+  transform: translateY(-4px);
+}
+
+.guidCompanionPosterAvatar {
+  height: 166px;
+  max-width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  filter: drop-shadow(0 16px 18px rgba(64, 39, 50, 0.16));
+}
+
+.guidCompanionPosterFigure:not(.guidCompanionPosterFigurePrimary) .guidCompanionPosterAvatar {
+  height: 144px;
+}
+
+:global([data-theme='dark']) .guidCompanionPosterAvatar {
+  filter: drop-shadow(0 16px 20px rgba(0, 0, 0, 0.34));
+}
+
+.guidCompanionPosterName {
+  max-width: 118px;
+  overflow: hidden;
+  padding: 4px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  border-radius: 999px;
+  color: var(--color-text-1);
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 8px 18px rgba(64, 39, 50, 0.08);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global([data-theme='dark']) .guidCompanionPosterName {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@media (max-width: 768px) {
+  .guidResourceCards {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    margin-top: 16px;
+  }
+
+  .guidResourceCard {
+    height: auto;
+    min-height: 112px;
+  }
+
+  .guidCompanionPoster {
+    min-height: 356px;
+    grid-template-columns: 1fr;
+    gap: 14px;
+    padding: 18px 16px 16px;
+  }
+
+  .guidCompanionPosterCopy {
+    align-self: stretch;
+    text-align: left;
+  }
+
+  .guidCompanionPosterDescription {
+    max-width: none;
+  }
+
+  .guidCompanionPosterStage {
+    min-height: 220px;
+    justify-content: center;
+    gap: 0;
+  }
+
+  .guidCompanionPosterFigure {
+    flex-basis: 108px;
+  }
+
+  .guidCompanionPosterFigurePrimary {
+    flex-basis: 130px;
+  }
+
+  .guidCompanionPosterAvatar {
+    height: 154px;
+  }
+
+  .guidCompanionPosterFigure:not(.guidCompanionPosterFigurePrimary) .guidCompanionPosterAvatar {
+    height: 132px;
+  }
+}
+
 .entryStrip {
   display: flex;
   align-items: center;
@@ -1597,17 +1894,34 @@
 /* 移动端容器滚动支持 */
 .guidContainer {
   height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  -webkit-overflow-scrolling: touch;
+}
+
+.guidPrimaryStage {
+  width: 100%;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   padding: 10px;
-  position: relative;
+  box-sizing: border-box;
 }
 
 /* 整体内容块略往上移，减轻「重心偏下」的感觉 */
-.guidContainer .guidLayout {
+.guidPrimaryStage .guidLayout {
   margin-top: -5vh;
+}
+
+.guidDiscoveryArea {
+  width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 22px 26px calc(132px + env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
 }
 
 /* 高级控件悬挂在内容区右上角 —— 与正常会话 ChatLayout header 右侧一致
@@ -1655,16 +1969,19 @@
 }
 
 @media (max-width: 768px) {
-  .guidContainer {
+  .guidPrimaryStage {
     justify-content: flex-start;
-    overflow-y: auto;
-    overflow-x: hidden;
     padding-top: 20px;
-    -webkit-overflow-scrolling: touch;
+    min-height: auto;
   }
 
-  .guidContainer .guidLayout {
+  .guidPrimaryStage .guidLayout {
     margin-top: 0;
+  }
+
+  .guidDiscoveryArea {
+    width: clamp(var(--app-min-width, 360px), calc(100% - 20px), 100%);
+    padding: 16px 20px calc(108px + env(safe-area-inset-bottom, 0px));
   }
 }
 

@@ -73,6 +73,7 @@ fn make_factory(
         computer_mcp_config: None,
         browser_mcp_config: None,
         client_prefs: None,
+        settings_repo: None,
         companion_prompt: None,
         companion_skill_sink: None,
         skill_manager: AcpSkillManager::new(skill_paths),

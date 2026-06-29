@@ -1273,6 +1273,27 @@ impl AgentEngine {
         }
     }
 
+    /// Stamp the owning-conversation token onto the current session and persist
+    /// it. Idempotent (no-op when already equal, or when `token` is `None`).
+    /// Called right after a session is created or resumed so the
+    /// per-conversation-instance identity (see [`crate::session::Session::owner_token`])
+    /// is written to disk — resume paths reject a stale session left by a prior
+    /// conversation that reused this id.
+    pub fn stamp_owner_token(&mut self, token: Option<String>) {
+        let Some(token) = token else { return };
+        let needs = match &self.current_session {
+            Some(s) => s.owner_token.as_deref() != Some(token.as_str()),
+            None => false,
+        };
+        if !needs {
+            return;
+        }
+        if let Some(s) = &mut self.current_session {
+            s.owner_token = Some(token);
+        }
+        self.save_session();
+    }
+
     /// Clear the conversation context: drop all in-memory messages, reset
     /// compaction state and accumulated token usage, and persist the now-empty
     /// session so a process restart does not reload the old history.

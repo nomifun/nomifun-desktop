@@ -15,6 +15,22 @@
   "viewKanban": "看板",
   "loadError": "加载需求失败",
   "retry": "重试",
+  "sort": {
+    "label": "排序",
+    "default": "默认顺序",
+    "byId": "ID",
+    "byCreatedAt": "创建时间",
+    "byUpdatedAt": "更新时间",
+    "byStatus": "状态",
+    "asc": "升序",
+    "desc": "降序"
+  },
+  "selection": {
+    "selectAllPage": "全选本页",
+    "clear": "清除",
+    "totalCount": "共 {{count}} 条",
+    "selectedCount": "已选 {{count}} 项"
+  },
   "columns": {
     "seq": "编号",
     "id": "ID",
@@ -76,6 +92,7 @@
   },
   "autowork": {
     "label": "自动工作",
+    "startSession": "开始自动工作",
     "hint": "在当前会话中按次序自动完成某个标签下的需求。",
     "tagLabel": "标签",
     "selectTag": "请选择标签",
