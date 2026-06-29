@@ -7,6 +7,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Branch, Comment, Down, Gavel, Lock, Merge, Refresh, Robot, Shield } from '@icon-park/react';
+// The decision feed is the DEFAULT (对话) view, where the DAG canvas/roster (which
+// own dag-canvas.css, incl. the `nomi-dag-pulse` running-dot animation) are NOT
+// mounted — import the stylesheet here so the feed's status pulse works standalone.
+import './dag-canvas.css';
 import type {
   TAssignment,
   TFleetMember,
