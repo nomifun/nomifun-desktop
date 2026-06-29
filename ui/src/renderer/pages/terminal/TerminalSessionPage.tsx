@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Input, Message } from '@arco-design/web-react';
-import { Refresh, EditOne, Terminal as TerminalIcon } from '@icon-park/react';
+import { Refresh, EditOne, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
@@ -414,7 +414,7 @@ const TerminalSessionPage: React.FC = () => {
               <Button
                 size='small'
                 loading={fallingBack}
-                icon={<TerminalIcon size='14' />}
+                icon={<Terminal size='14' />}
                 onClick={handleFallbackShell}
                 title={t('terminal.fallbackShellTip')}
               >
