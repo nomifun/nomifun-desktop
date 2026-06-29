@@ -2754,6 +2754,10 @@ export interface ICompanionMemory {
   created_at: number;
   updated_at: number;
   last_reinforced_at: number;
+  /** `'user'` = shared (all companions) / `'companion'` = private to one. */
+  scope_kind: 'user' | 'companion';
+  /** Owning companion id when private; `''` when shared. */
+  scope_companion_id: string;
 }
 
 export interface ICompanionSuggestion {
@@ -2990,22 +2994,35 @@ export interface ICompanionDeletedEvent {
 }
 
 export const companion = {
-  listMemories: httpGet<ICompanionMemory[], { kind?: string; q?: string; status?: string; limit?: number; offset?: number }>(
-    (p) => {
-      const params = new URLSearchParams();
-      if (p?.kind) params.set('kind', p.kind);
-      if (p?.q) params.set('q', p.q);
-      if (p?.status) params.set('status', p.status);
-      if (p?.limit) params.set('limit', String(p.limit));
-      if (p?.offset) params.set('offset', String(p.offset));
-      const qs = params.toString();
-      return `/api/companion/memories${qs ? `?${qs}` : ''}`;
-    }
+  listMemories: httpGet<
+    ICompanionMemory[],
+    { kind?: string; q?: string; status?: string; scope_companion_id?: string; limit?: number; offset?: number }
+  >((p) => {
+    const params = new URLSearchParams();
+    if (p?.kind) params.set('kind', p.kind);
+    if (p?.q) params.set('q', p.q);
+    if (p?.status) params.set('status', p.status);
+    if (p?.scope_companion_id) params.set('scope_companion_id', p.scope_companion_id);
+    if (p?.limit) params.set('limit', String(p.limit));
+    if (p?.offset) params.set('offset', String(p.offset));
+    const qs = params.toString();
+    return `/api/companion/memories${qs ? `?${qs}` : ''}`;
+  }),
+  addMemory: httpPost<ICompanionMemory, { kind: string; content: string; tags?: string[]; scope_companion_id?: string }>(
+    '/api/companion/memories'
   ),
-  addMemory: httpPost<ICompanionMemory, { kind: string; content: string; tags?: string[] }>('/api/companion/memories'),
-  updateMemory: httpPut<void, { id: string; content?: string; pinned?: boolean; status?: string }>(
+  updateMemory: httpPut<
+    void,
+    { id: string; content?: string; pinned?: boolean; status?: string; scope_kind?: string; scope_companion_id?: string }
+  >(
     (p) => `/api/companion/memories/${p.id}`,
-    (p) => ({ content: p.content, pinned: p.pinned, status: p.status })
+    (p) => ({
+      content: p.content,
+      pinned: p.pinned,
+      status: p.status,
+      scope_kind: p.scope_kind,
+      scope_companion_id: p.scope_companion_id,
+    })
   ),
   deleteMemory: httpDelete<void, { id: string }>((p) => `/api/companion/memories/${p.id}`),
   listSuggestions: httpGet<ICompanionSuggestion[], { status?: string; limit?: number }>((p) => {
@@ -3141,6 +3158,8 @@ export const companion = {
   onMoodChanged: wsEmitter<{ mood: string; companion_id?: string }>('companion.mood-changed'),
   onConfigUpdated: wsEmitter<ICompanionConfigUpdatedEvent>('companion.config-updated'),
   onMemoryCreated: wsEmitter<ICompanionMemory>('companion.memory-created'),
+  onMemoryUpdated: wsEmitter<ICompanionMemory>('companion.memory-updated'),
+  onMemoryDeleted: wsEmitter<{ id: string }>('companion.memory-deleted'),
   onSkillDrafted: wsEmitter<ICompanionSkillEvent>('companion.skill-drafted'),
   onSkillLearned: wsEmitter<ICompanionSkillEvent>('companion.skill-learned'),
   onSkillArchived: wsEmitter<ICompanionSkillEvent>('companion.skill-archived'),

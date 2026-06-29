@@ -590,6 +590,15 @@ const CompanionPage: React.FC = () => {
         }
       })();
     });
+    // The companion just saved a memory of its own (private to it): a low-key
+    // bubble note, but only when idle so it never clobbers an in-flight reply.
+    // Editing/managing is a right-click away (打开记忆 → the scope-aware tab).
+    const unsubMemoryCreated = ipcBridge.companion.onMemoryCreated.on((m) => {
+      if (!companionId || m.scope_companion_id !== companionId) return;
+      if (turnActiveRef.current) return;
+      const brief = m.content.length > 40 ? `${m.content.slice(0, 40)}…` : m.content;
+      popBubble(t('nomi.companion.memorySavedToast', { brief }));
+    });
     // Streamed companion reply → live bubble updates. The companion thread is
     // a real nomi conversation; message.stream is a global broadcast, so we
     // filter to the active thread ONLY (no turn-ownership gate — see the
@@ -842,6 +851,7 @@ const CompanionPage: React.FC = () => {
       unsubSuggestionDecided();
       unsubConfig();
       unsubDeleted();
+      unsubMemoryCreated();
       unsubUserCreated();
       unsubStream();
       if (bubbleTimer.current) clearTimeout(bubbleTimer.current);
@@ -1305,6 +1315,14 @@ const CompanionPage: React.FC = () => {
     (action: CompanionMenuAction) => {
       if (action === 'open-chat') {
         void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=chat` : '/nomi?tab=chat');
+        return;
+      }
+      if (action === 'open-memories') {
+        // Lands on the scope-aware Memories tab for this companion (shared +
+        // its own private). Memories live in the companion domain now.
+        void openMainAt(
+          companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=memories` : '/nomi?tab=memories'
+        );
         return;
       }
       if (action === 'open-config') {
