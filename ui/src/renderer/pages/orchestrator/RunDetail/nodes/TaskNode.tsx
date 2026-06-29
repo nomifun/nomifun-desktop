@@ -6,7 +6,7 @@
 
 import React from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { Branch, CheckOne, CloseOne, Gavel, Lock, Merge, Shield, Trophy } from '@icon-park/react';
+import { Branch, CheckOne, CloseOne, Gavel, Lock, Merge, Refresh, Shield, Trophy } from '@icon-park/react';
 
 /** Task status → theme-var color + a slow-pulse hint for the running state. */
 export interface TaskStatusMeta {
@@ -62,6 +62,13 @@ export const TASK_KIND_VERIFY = 'verify';
  * "judging…" state). Unknown kinds collapse to `'agent'` (no badge). */
 export const TASK_KIND_JUDGE = 'judge';
 
+/** The loop task kind — a synchronous controller that iterates a body task
+ * (bounded by `max_iter`) and writes a LOOP marker to its `output_summary` on
+ * stop. Renders a refresh/cycle badge + an iteration/stop-state pill (done /
+ * failed / neutral "iterating…"). The body's per-iteration count surfaces via
+ * the existing `attempt` retry badge. Unknown kinds collapse to `'agent'`. */
+export const TASK_KIND_LOOP = 'loop';
+
 /**
  * Normalize a raw `TRunTask.kind` defensively. The wire value defaults to
  * `'agent'` on the backend, but legacy / malformed values must never crash the
@@ -69,10 +76,11 @@ export const TASK_KIND_JUDGE = 'judge';
  */
 export function normalizeTaskKind(
   kind: string | null | undefined
-): 'agent' | 'synthesis' | 'verify' | 'judge' {
+): 'agent' | 'synthesis' | 'verify' | 'judge' | 'loop' {
   if (kind === TASK_KIND_SYNTHESIS) return 'synthesis';
   if (kind === TASK_KIND_VERIFY) return 'verify';
   if (kind === TASK_KIND_JUDGE) return 'judge';
+  if (kind === TASK_KIND_LOOP) return 'loop';
   return 'agent';
 }
 
@@ -91,6 +99,13 @@ const VERIFY_ACCENT = 'rgb(var(--primary-6))';
  * winner pill carries the success/neutral semantics separately, so the badge
  * must NOT borrow a status color. Defined in every theme preset. */
 const JUDGE_ACCENT = 'var(--brand)';
+
+/** Accent for the loop-kind badge — uses the brand tone (same structural family
+ * as the synthesis / judge badges) so the cycle glyph reads as a controller
+ * role. The iteration/stop pill carries the success/danger/neutral semantics
+ * separately, so the badge must NOT borrow a status color. Defined in every
+ * theme preset. */
+const LOOP_ACCENT = 'var(--brand)';
 
 /** A parsed judge result, ready for the winner pill. `winner === null` means the
  * marker said `none`, was absent, or was unparseable (or the node hasn't settled
@@ -113,6 +128,22 @@ export interface VerifyVerdict {
   tally: string | null;
 }
 
+/** A parsed loop controller state, ready for the pill. `state === null` means the
+ * marker was absent / a transient `LOOP-STATE:` line / unparseable (or the loop
+ * is still iterating) → neutral "iterating…" state. */
+export interface LoopState {
+  /** 'done' = loop stopped successfully · 'failed' = body failed · null = still
+   * iterating / unparseable. */
+  state: 'done' | 'failed' | null;
+  /** Stop reason from the marker (`max_iter` | `predicate` | `dry` |
+   * `body_failed` | `no_body`), else null. */
+  reason: string | null;
+  /** Completed iteration count parsed from the marker, else null. */
+  iterations: number | null;
+  /** The configured hard cap (`max_iter`) parsed from the marker, else null. */
+  maxIter: number | null;
+}
+
 /** The data payload DagCanvas attaches to each task node. */
 export interface TaskNodeData extends Record<string, unknown> {
   title: string;
@@ -128,6 +159,8 @@ export interface TaskNodeData extends Record<string, unknown> {
   verifyLabel?: string;
   /** Localized "judge" label for the judge-kind badge (computed in DagCanvas). */
   judgeLabel?: string;
+  /** Localized "loop" label for the loop-kind badge (computed in DagCanvas). */
+  loopLabel?: string;
   /** Parsed pass/fail verdict for a `verify` node (from its `output_summary`).
    * Present only for verify-kind nodes; rendered as a verdict pill. A `pass` of
    * `null` shows the neutral "verifying…" state (marker absent / unparseable). */
@@ -140,6 +173,13 @@ export interface TaskNodeData extends Record<string, unknown> {
   judgeWinner?: JudgeWinner;
   /** Localized labels for the winner pill — winner / none / pending text. */
   judgeWinnerLabels?: { winner: string; none: string; pending: string };
+  /** Parsed iteration/stop state for a `loop` controller node (from its
+   * `output_summary`). Present only for loop-kind nodes; rendered as a state
+   * pill. A `state` of `null` shows the neutral "iterating…" state (marker
+   * absent / transient `LOOP-STATE:` line / unparseable). */
+  loopState?: LoopState;
+  /** Localized labels for the loop pill — done / failed / iterating text. */
+  loopStateLabels?: { done: string; failed: string; iterating: string };
   /** Fan-out group label parsed from `pattern_config` (`{"group":"<label>"}`).
    * Present only for sibling tasks the planner fanned out in parallel. */
   groupLabel?: string;
@@ -179,6 +219,7 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
   const isSynthesis = kind === 'synthesis';
   const isVerify = kind === 'verify';
   const isJudge = kind === 'judge';
+  const isLoop = kind === 'loop';
   // A fan-out group needs a label AND a resolved hue; either missing → no group
   // affordance (defensive against half-parsed config).
   const inGroup = data.groupLabel != null && data.groupHue != null;
@@ -272,6 +313,20 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
             {data.judgeLabel}
           </span>
         )}
+        {isLoop && (
+          <span
+            className='nomi-dag-kind-badge inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+            style={{
+              color: LOOP_ACCENT,
+              background: `color-mix(in srgb, ${LOOP_ACCENT} 14%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${LOOP_ACCENT} 32%, transparent)`,
+            }}
+            title={data.loopLabel}
+          >
+            <Refresh theme='outline' size='10' strokeWidth={4} className='line-height-0' />
+            {data.loopLabel}
+          </span>
+        )}
       </div>
 
       {/* Meta row: status label + verdict pill + assignment chip + retry badge + fan-out group chip */}
@@ -344,6 +399,50 @@ function TaskNodeImpl({ data, selected }: NodeProps<TaskFlowNode>) {
             >
               {hasWinner && (
                 <Trophy theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              <span className='truncate'>{text}</span>
+            </span>
+          );
+        })()}
+        {isLoop && data.loopState && (() => {
+          const { state, reason, iterations, maxIter } = data.loopState;
+          const labels = data.loopStateLabels;
+          // state==='done' → success · state==='failed' → danger · null → neutral
+          // "iterating…" (defined --text-secondary / --color-fill-1 / --border-light
+          // — never undefined var(--text-tertiary) / var(--fill-1)).
+          const tone =
+            state === 'done' ? 'var(--success)' : state === 'failed' ? 'var(--danger)' : 'var(--text-secondary)';
+          // DONE shows the iteration tally (N/M) + reason; FAILED shows the reason;
+          // null shows the neutral "iterating…" label. Reason is best-effort extra.
+          const reasonSuffix = reason ? ` · ${reason}` : '';
+          const text =
+            state === 'done'
+              ? `${labels?.done ?? ''}${iterations != null && maxIter != null ? ` ${iterations}/${maxIter}` : ''}${reasonSuffix}`
+              : state === 'failed'
+                ? `${labels?.failed ?? ''}${reasonSuffix}`
+                : (labels?.iterating ?? '');
+          return (
+            <span
+              className='inline-flex shrink-0 items-center gap-3px rd-100px px-6px py-2px text-10px font-600 leading-none'
+              style={
+                state === null
+                  ? { color: tone, background: 'var(--color-fill-1)', border: '1px solid var(--border-light)' }
+                  : {
+                      color: tone,
+                      background: `color-mix(in srgb, ${tone} 14%, transparent)`,
+                      border: `1px solid color-mix(in srgb, ${tone} 32%, transparent)`,
+                    }
+              }
+              title={text}
+            >
+              {state === 'done' && (
+                <CheckOne theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              {state === 'failed' && (
+                <CloseOne theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
+              )}
+              {state === null && (
+                <Refresh theme='outline' size='10' strokeWidth={4} className='shrink-0 line-height-0' />
               )}
               <span className='truncate'>{text}</span>
             </span>

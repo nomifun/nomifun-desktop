@@ -71,6 +71,7 @@
       "synthesis": "汇总",
       "verify": "校验",
       "judge": "评审",
+      "loop": "循环",
       "fanout": "扇出 · {{label}}"
     },
     "verdict": {
@@ -82,6 +83,11 @@
       "winner": "优胜",
       "none": "无优胜",
       "pending": "评审中…"
+    },
+    "loop": {
+      "done": "完成",
+      "failed": "失败",
+      "iterating": "迭代中…"
     },
     "title": "Run 历史",
     "subtitle": "查看你发起过的全部编排 Run，点击任意一条复盘其任务图",
