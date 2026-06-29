@@ -777,6 +777,7 @@ async fn dispatch_task(
                             tokens: None,
                             graph_x: None,
                             graph_y: None,
+                            pattern_config: None,
                         },
                     )
                     .await;
@@ -838,6 +839,7 @@ async fn settle_task_outcome(
                         tokens: None,
                         graph_x: None,
                         graph_y: None,
+                        pattern_config: None,
                     },
                 )
                 .await;
@@ -910,6 +912,33 @@ async fn collect_upstream_outputs(
         .collect()
 }
 
+/// The `pattern_config` JSON field a `loop` body carries to its NEXT re-run with
+/// the PRIOR round's output text (written by [`settle_loop_task`] on CONTINUE).
+/// Its presence is what gates the "上一轮产出" brief section — a task without it
+/// (any normal task, and the loop body's first iteration) is unaffected.
+const LOOP_PRIOR_OUTPUT_KEY: &str = "loop_prior_output";
+
+/// The `pattern_config` JSON field a `loop` body carries with its NEXT (1-based)
+/// iteration number, alongside [`LOOP_PRIOR_OUTPUT_KEY`]. Informational (the
+/// brief does not require it); kept so a consumer/UI can read the round.
+const LOOP_ITERATION_KEY: &str = "loop_iteration";
+
+/// Extract the carried prior-round output from a body task's `pattern_config`
+/// (the [`LOOP_PRIOR_OUTPUT_KEY`] string). Returns `None` (no carry → fresh
+/// brief) when the config is absent / blank / not a JSON object / lacks the key /
+/// the value is blank. The brief section is gated SOLELY on `Some(_)` here, so a
+/// task without this field gets the exact pre-existing brief (zero regression).
+fn loop_prior_output(pattern_config: Option<&str>) -> Option<String> {
+    let raw = pattern_config.map(str::trim).filter(|s| !s.is_empty())?;
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let prior = value.get(LOOP_PRIOR_OUTPUT_KEY).and_then(serde_json::Value::as_str)?;
+    let prior = prior.trim();
+    if prior.is_empty() {
+        return None;
+    }
+    Some(prior.to_string())
+}
+
 /// Compose the worker's brief: role hint + task title/spec + completed upstream
 /// outputs (injected as context). Sent as the conversation `system_prompt`.
 ///
@@ -933,6 +962,16 @@ fn compose_brief(
 /// The unchanged `agent`-kind brief: role hint + task title/spec + completed
 /// upstream outputs as build-on context. This is byte-for-byte the pre-023
 /// `compose_brief` body — the agent path must not regress.
+///
+/// **loop 迭代回看 (UC-1d, 评审 Important).** A `loop` body's re-run carries the
+/// PRIOR round's output forward via its `pattern_config` (`loop_prior_output`,
+/// written by [`settle_loop_task`] on CONTINUE — the loop controller is
+/// downstream of the body so it is NOT in `upstream`). When that field is
+/// present, a clear "上一轮产出" section is APPENDED so the body refines the prior
+/// round (a real iterative refinement loop, not a fresh start each round). The
+/// section is gated SOLELY on the field's presence: a task without
+/// `loop_prior_output` (every normal agent/synthesis/verify/judge task, AND the
+/// loop body's FIRST iteration which has no prior) is byte-for-byte unchanged.
 fn compose_agent_brief(
     role_hint: Option<&str>,
     task: &OrchRunTaskRow,
@@ -961,6 +1000,13 @@ fn compose_agent_brief(
             out.push_str(summary);
             out.push('\n');
         }
+    }
+    // loop 迭代回看: APPEND the prior round's output when this body re-run carries
+    // it (gated on the field — zero effect on any task without it).
+    if let Some(prior) = loop_prior_output(task.pattern_config.as_deref()) {
+        out.push_str("\n上一轮产出(请在此基础上改进/迭代):\n");
+        out.push_str(&prior);
+        out.push('\n');
     }
     out
 }
@@ -1306,6 +1352,7 @@ async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &Orch
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await;
@@ -1729,6 +1776,7 @@ async fn settle_judge_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchR
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await;
@@ -2018,6 +2066,41 @@ fn render_loop_state(hashes: &[u64]) -> String {
     format!("{LOOP_STATE_PREFIX}{csv}")
 }
 
+/// Build the body's NEXT-round `pattern_config` on CONTINUE: MERGE
+/// [`LOOP_PRIOR_OUTPUT_KEY`] = the round-just-finished output + [`LOOP_ITERATION_KEY`]
+/// = the next (1-based) iteration into the body's EXISTING pattern_config object
+/// (preserving any prior keys, e.g. a fan-out `group` tag), so the body's next
+/// brief refines the prior round (see [`compose_agent_brief`]). When the prior
+/// output is blank there is nothing useful to carry → returns `None` (the body
+/// re-runs with a fresh brief, as the FIRST iteration does). The existing config
+/// is parsed fail-soft: a non-object / unparseable config is replaced by a fresh
+/// object carrying only the two loop fields (never errors).
+fn build_body_loop_carry(
+    existing_pattern_config: Option<&str>,
+    prior_output: Option<&str>,
+    next_iteration: u64,
+) -> Option<String> {
+    let prior = prior_output.map(str::trim).filter(|s| !s.is_empty())?;
+    // Start from the existing config object (preserve its keys) or a fresh object.
+    let mut obj = existing_pattern_config
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.insert(
+        LOOP_PRIOR_OUTPUT_KEY.to_string(),
+        serde_json::Value::String(prior.to_string()),
+    );
+    obj.insert(
+        LOOP_ITERATION_KEY.to_string(),
+        serde_json::Value::Number(next_iteration.into()),
+    );
+    // serde_json::to_string on a Map never fails for these value kinds; fall back
+    // to None on the impossible error (no unwrap in prod).
+    serde_json::to_string(&serde_json::Value::Object(obj)).ok()
+}
+
 /// Render the controller's FINAL `output_summary` on STOP — a machine-leading
 /// marker (`LOOP: STOPPED (reason=..., iterations=N, max_iter=M)`) followed by the
 /// body's last output (the loop's result), so both a downstream consumer and the
@@ -2156,13 +2239,28 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                         tokens: None,
                         graph_x: None,
                         graph_y: None,
+                        pattern_config: None,
                     },
                 )
                 .await;
+            // loop 迭代回看 (评审 Important): carry the round-just-finished output
+            // forward into the body's `pattern_config` so its NEXT brief refines it
+            // (the loop controller is DOWNSTREAM of the body, so the body never
+            // sees it via `upstream` — this is the only channel). The next 1-based
+            // iteration is `body.attempt + 2` (the round about to run). A blank
+            // prior output → no carry (the body re-runs fresh, like iteration 0).
+            // `Some(None)` clears the body's prior carry when there is nothing to
+            // forward, so a stale carry never leaks into a fresh round.
+            let body_carry = build_body_loop_carry(
+                body.pattern_config.as_deref(),
+                body.output_summary.as_deref(),
+                (body.attempt.max(0) as u64) + 2,
+            );
             // RESET the body: pending + clear output_summary/conversation_id +
-            // attempt+1. This un-`done`s the controller's only blocker, so the
-            // controller leaves the ready set until the body re-completes (a real
-            // worker round) — the monotonic progress that bounds the loop.
+            // attempt+1, and set the prior-output carry on its pattern_config. This
+            // un-`done`s the controller's only blocker, so the controller leaves the
+            // ready set until the body re-completes (a real worker round) — the
+            // monotonic progress that bounds the loop.
             let _ = deps
                 .run_repo
                 .update_task(
@@ -2176,6 +2274,9 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                         tokens: None,
                         graph_x: None,
                         graph_y: None,
+                        // Carry the prior round's output forward (or clear a stale
+                        // carry when there is nothing to forward).
+                        pattern_config: Some(body_carry),
                     },
                 )
                 .await;
@@ -2216,6 +2317,7 @@ async fn finish_loop_controller(
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await;
@@ -2275,6 +2377,7 @@ async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &s
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await;
@@ -2299,6 +2402,7 @@ async fn mark_task_failed(
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await;
@@ -5075,6 +5179,115 @@ mod tests {
         assert!(f.contains("reason=body_failed"), "failure reason: {f}");
     }
 
+    // ── loop 迭代回看 (UC-1d, 评审 Important): prior-round output carry + inject ──
+
+    #[test]
+    fn loop_prior_output_parses_only_a_present_nonblank_field() {
+        // Present + non-blank → Some.
+        assert_eq!(
+            loop_prior_output(Some(r#"{"loop_prior_output":"上一轮草稿"}"#)),
+            Some("上一轮草稿".to_string())
+        );
+        // Coexists with an unrelated key (e.g. a fan-out group tag) → still parsed.
+        assert_eq!(
+            loop_prior_output(Some(r#"{"group":"g","loop_prior_output":"draft"}"#)),
+            Some("draft".to_string())
+        );
+        // Absent / blank config / not-JSON / missing key / blank value / non-string
+        // value → None (no carry → fresh brief).
+        for raw in [
+            None,
+            Some("   "),
+            Some("not json"),
+            Some(r#"{"group":"g"}"#),
+            Some(r#"{"loop_prior_output":"   "}"#),
+            Some(r#"{"loop_prior_output":123}"#),
+        ] {
+            assert_eq!(loop_prior_output(raw), None, "no carry for {raw:?}");
+        }
+    }
+
+    #[test]
+    fn build_body_loop_carry_merges_and_preserves_existing_keys() {
+        // Fresh body (no existing config) → a new object carrying the two loop
+        // fields.
+        let carry = build_body_loop_carry(None, Some("round 1 output"), 2).expect("carry");
+        let v: serde_json::Value = serde_json::from_str(&carry).unwrap();
+        assert_eq!(v.get("loop_prior_output").and_then(|x| x.as_str()), Some("round 1 output"));
+        assert_eq!(v.get("loop_iteration").and_then(|x| x.as_u64()), Some(2));
+
+        // Existing config (e.g. a fan-out group) is PRESERVED while the loop fields
+        // are merged in.
+        let carry =
+            build_body_loop_carry(Some(r#"{"group":"cands"}"#), Some("o"), 3).expect("carry");
+        let v: serde_json::Value = serde_json::from_str(&carry).unwrap();
+        assert_eq!(v.get("group").and_then(|x| x.as_str()), Some("cands"), "existing key kept");
+        assert_eq!(v.get("loop_prior_output").and_then(|x| x.as_str()), Some("o"));
+        assert_eq!(v.get("loop_iteration").and_then(|x| x.as_u64()), Some(3));
+
+        // A blank prior output → None (nothing useful to carry → fresh next brief).
+        assert_eq!(build_body_loop_carry(None, Some("   "), 2), None);
+        assert_eq!(build_body_loop_carry(None, None, 2), None);
+
+        // The merged config round-trips through `loop_prior_output` (the injector).
+        let carry = build_body_loop_carry(None, Some("the prior"), 2).unwrap();
+        assert_eq!(loop_prior_output(Some(&carry)), Some("the prior".to_string()));
+    }
+
+    #[test]
+    fn compose_brief_loop_body_iter_ge_1_carries_prior_output() {
+        // A body re-run carrying `loop_prior_output` gets a clear 上一轮产出 section
+        // appended so it refines the prior round.
+        let mut body = task_row_with_kind("agent", "Refine draft", "polish it");
+        body.pattern_config = build_body_loop_carry(None, Some("草稿第一版"), 2);
+        let brief = compose_brief(Some("写手"), &body, &[]);
+        assert!(
+            brief.contains("上一轮产出(请在此基础上改进/迭代):"),
+            "iter>=1 body brief carries the prior-output section: {brief}"
+        );
+        assert!(brief.contains("草稿第一版"), "the prior round's text is injected: {brief}");
+        // The normal framing is still present (role/task/spec).
+        assert!(brief.contains("ROLE: 写手"));
+        assert!(brief.contains("TASK: Refine draft"));
+        assert!(brief.contains("polish it"));
+    }
+
+    #[test]
+    fn compose_brief_loop_body_first_iteration_has_no_prior_section() {
+        // The FIRST iteration (attempt 0) has NO carry (pattern_config is None) → a
+        // normal fresh brief, identical to a plain agent task (zero carry, zero
+        // section). build_body_loop_carry is never invoked for the first run.
+        let body = task_row_with_kind("agent", "Refine draft", "polish it");
+        assert_eq!(body.pattern_config, None, "first iteration body has no carry");
+        let brief = compose_brief(Some("写手"), &body, &[]);
+        assert!(
+            !brief.contains("上一轮产出"),
+            "first iteration brief must NOT carry a prior-output section: {brief}"
+        );
+    }
+
+    #[test]
+    fn compose_brief_non_loop_task_is_byte_for_byte_unchanged() {
+        // ZERO-REGRESSION: a task WITHOUT loop_prior_output (every normal
+        // agent/synthesis/verify/judge task, and the loop body's first iteration)
+        // gets the EXACT pre-existing brief. We assert byte-for-byte against the
+        // legacy framing AND that a config without the carry key adds nothing.
+        let task = task_row_with_kind("agent", "Synthesize", "write the report");
+        let upstream = vec![("Gather".to_string(), "found 12 sources".to_string())];
+        let expected = "ROLE: writer\n\nTASK: Synthesize\nSPEC:\nwrite the report\n\nUPSTREAM RESULTS (completed dependencies you can build on):\n- Gather: found 12 sources\n";
+        // No pattern_config at all.
+        assert_eq!(compose_brief(Some("writer"), &task, &upstream), expected);
+        // A pattern_config that does NOT carry the loop key (e.g. a fan-out group)
+        // is also a no-op for the brief — same bytes.
+        let mut tagged = task.clone();
+        tagged.pattern_config = Some(r#"{"group":"g"}"#.to_string());
+        assert_eq!(
+            compose_brief(Some("writer"), &tagged, &upstream),
+            expected,
+            "a non-carry pattern_config must not perturb the brief"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // loop 模式 (UC-1d): end-to-end engine drive. A loop controller settles in the
     // FILL step (no worker dispatch). On CONTINUE it RESETS the body to re-run in
@@ -5096,6 +5309,9 @@ mod tests {
         run_counts: Mutex<std::collections::HashMap<String, usize>>,
         start_order: Mutex<Vec<String>>,
         seen_specs: Mutex<Vec<String>>,
+        /// Briefs the BODY saw, in run order (one per body round). Lets a test
+        /// assert the prior round's output is carried into a later iteration.
+        body_briefs: Mutex<Vec<String>>,
         /// Body title to recognize (the body is identified by title here).
         body_title: String,
         /// Per-ROUND outputs for the body, applied by run order (round n = index n-1).
@@ -5109,6 +5325,7 @@ mod tests {
                 run_counts: Mutex::new(std::collections::HashMap::new()),
                 start_order: Mutex::new(vec![]),
                 seen_specs: Mutex::new(vec![]),
+                body_briefs: Mutex::new(vec![]),
                 body_title: body_title.to_string(),
                 rounds: rounds.into_iter().map(str::to_string).collect(),
                 fail_on_round,
@@ -5134,6 +5351,7 @@ mod tests {
             // The brief identifies the task by title (compose_brief leads with TASK:).
             let is_body = brief.contains(&format!("TASK: {}", self.body_title));
             if is_body {
+                self.body_briefs.lock().unwrap().push(brief.to_string());
                 let round = {
                     let mut counts = self.run_counts.lock().unwrap();
                     let n = counts.entry(task_id.to_string()).or_insert(0);
@@ -5382,6 +5600,68 @@ mod tests {
         assert!(summary.contains("reason=dry"), "dry stop reason: {summary}");
         assert!(summary.contains("iterations=3"), "3 iterations: {summary}");
         assert_eq!(by_title("Publish").status, "done", "downstream runs after the loop");
+
+        // dry-stop is REACHABLE because the body now refines the prior round: each
+        // iteration >=1 sees the previous round's output in its brief, so when it
+        // repeats that output the round-hash converges (here r2==r3 → dry). Confirm
+        // the carry actually happened (round 2 saw round 1's "a"; round 3 saw "b").
+        let briefs = worker.body_briefs.lock().unwrap().clone();
+        assert_eq!(briefs.len(), 3, "the body ran 3 rounds");
+        assert!(!briefs[0].contains("上一轮产出"), "round 1 (attempt 0) has no carry: {}", briefs[0]);
+        assert!(briefs[1].contains("上一轮产出"), "round 2 carries the prior round: {}", briefs[1]);
+        assert!(briefs[1].contains('a'), "round 2 sees round 1's output 'a': {}", briefs[1]);
+        assert!(briefs[2].contains("上一轮产出"), "round 3 carries the prior round: {}", briefs[2]);
+        assert!(briefs[2].contains('b'), "round 3 sees round 2's output 'b': {}", briefs[2]);
+    }
+
+    #[tokio::test]
+    async fn loop_body_iteration_carries_prior_round_output_into_brief() {
+        // 评审 Important: a refinement loop's body must SEE its prior round's output.
+        // max_iter=3 (cap-only, never-firing early stop) so the body runs exactly 3
+        // rounds with DISTINCT outputs; assert each iteration >=1 carries the
+        // PRECEDING round's output text in its brief (a true refinement loop), and
+        // the first iteration does NOT (fresh start).
+        let (svc, engine, worker, run_id) = loop_harness(
+            r#"{"max_iter":3,"stop":{"kind":"max_iter"}}"#,
+            vec!["第一版草稿", "第二版改进", "第三版定稿"],
+            None,
+        )
+        .await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed");
+        assert_eq!(body_run_count(&worker, &detail), 3, "body ran exactly max_iter=3 rounds");
+
+        let briefs = worker.body_briefs.lock().unwrap().clone();
+        assert_eq!(briefs.len(), 3, "three body briefs recorded");
+
+        // Iteration 0 (first round): NO prior-output section — a fresh brief.
+        assert!(
+            !briefs[0].contains("上一轮产出"),
+            "first iteration must NOT carry a prior-output section: {}",
+            briefs[0]
+        );
+        assert!(!briefs[0].contains("第一版草稿"), "first brief has no prior text: {}", briefs[0]);
+
+        // Iteration 1: carries iteration 0's output ("第一版草稿").
+        assert!(
+            briefs[1].contains("上一轮产出(请在此基础上改进/迭代):"),
+            "iter 1 brief carries the section: {}",
+            briefs[1]
+        );
+        assert!(briefs[1].contains("第一版草稿"), "iter 1 sees round 0's output: {}", briefs[1]);
+        assert!(!briefs[1].contains("第二版改进"), "iter 1 cannot see its own future output: {}", briefs[1]);
+
+        // Iteration 2: carries iteration 1's output ("第二版改进").
+        assert!(briefs[2].contains("上一轮产出"), "iter 2 brief carries the section: {}", briefs[2]);
+        assert!(briefs[2].contains("第二版改进"), "iter 2 sees round 1's output: {}", briefs[2]);
+
+        // The body row's final pattern_config carries the LAST reset's prior output
+        // (round 1's "第二版改进", written when CONTINUE reset it for round 2) — the
+        // carry channel is the body's pattern_config, not upstream.
+        let body = detail.tasks.iter().find(|t| t.title == "Refine").unwrap();
+        let carried = loop_prior_output(body.pattern_config.as_deref());
+        assert_eq!(carried, Some("第二版改进".to_string()), "body pattern_config carries the prior output");
     }
 
     #[tokio::test]
