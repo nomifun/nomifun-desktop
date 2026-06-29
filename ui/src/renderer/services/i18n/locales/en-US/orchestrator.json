@@ -239,6 +239,11 @@
       "lastApplied": "Last intent: {{intent}}",
       "error": "Failed to adjust orchestration: {{error}}"
     },
+    "header": {
+      "rename": "Click to rename the orchestration goal",
+      "renamePlaceholder": "Enter the orchestration goal…",
+      "planning": "Planning"
+    },
     "view": {
       "conversation": "Dialogue",
       "canvas": "Canvas",
