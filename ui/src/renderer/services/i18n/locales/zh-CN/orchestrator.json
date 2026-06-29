@@ -70,12 +70,18 @@
     "kind": {
       "synthesis": "汇总",
       "verify": "校验",
+      "judge": "评审",
       "fanout": "扇出 · {{label}}"
     },
     "verdict": {
       "pass": "通过",
       "fail": "未通过",
       "pending": "校验中…"
+    },
+    "judge": {
+      "winner": "优胜",
+      "none": "无优胜",
+      "pending": "评审中…"
     },
     "title": "Run 历史",
     "subtitle": "查看你发起过的全部编排 Run，点击任意一条复盘其任务图",

@@ -70,12 +70,18 @@
     "kind": {
       "synthesis": "Synthesis",
       "verify": "Verify",
+      "judge": "Judge",
       "fanout": "Fan-out · {{label}}"
     },
     "verdict": {
       "pass": "Pass",
       "fail": "Fail",
       "pending": "Verifying…"
+    },
+    "judge": {
+      "winner": "Winner",
+      "none": "No winner",
+      "pending": "Judging…"
     },
     "title": "Run History",
     "subtitle": "Browse every orchestration run you started — click any one to replay its task graph",
