@@ -12,12 +12,18 @@ import { useTranslation } from 'react-i18next';
 import ChatWorkspace from '../Workspace';
 import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
 import OrchestrationRailTab from '../orchestration/OrchestrationRailTab';
+import { useOrchestrationSafe } from '../orchestration/OrchestrationContext';
 
 const ChatSlider: React.FC<{
   conversation?: TChatConversation;
 }> = ({ conversation }) => {
   const [messageApi, messageContext] = useArcoMessage({ maxCount: 1 });
   const { t } = useTranslation();
+  // F5 carry-forward fix: the 「编排」tab is only meaningful when an
+  // OrchestrationProvider is in scope (the main conversation surface). The
+  // companion 聊天 tab renders ChatSlider WITHOUT a provider → `orch == null` →
+  // the tab is omitted there. Hook is called unconditionally (Rules of Hooks).
+  const orch = useOrchestrationSafe();
 
   let workspaceNode: React.ReactNode = null;
   if (conversation?.type === 'acp' && conversation.extra?.workspace) {
@@ -55,11 +61,15 @@ const ChatSlider: React.FC<{
         eventPrefix='nomi'
         messageApi={messageApi}
         extraTabs={[
-          {
-            key: 'orchestration',
-            title: t('conversation.orchestration.tab', { defaultValue: '编排' }),
-            content: <OrchestrationRailTab />,
-          },
+          ...(orch != null
+            ? [
+                {
+                  key: 'orchestration',
+                  title: t('conversation.orchestration.tab', { defaultValue: '编排' }),
+                  content: <OrchestrationRailTab />,
+                },
+              ]
+            : []),
           {
             key: 'nomi-session-metrics',
             title: t('conversation.sessionMetrics.tab'),
