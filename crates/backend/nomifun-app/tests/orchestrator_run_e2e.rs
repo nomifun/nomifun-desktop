@@ -77,6 +77,8 @@ impl PlanProducer for ChainPlanProducer {
                     member_index: Some(0),
                     rationale: Some("first".to_string()),
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "Synthesize".to_string(),
@@ -86,6 +88,8 @@ impl PlanProducer for ChainPlanProducer {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
             ],
         })
@@ -370,6 +374,8 @@ impl PlanProducer for DiamondPlanProducer {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "B".to_string(),
@@ -379,6 +385,8 @@ impl PlanProducer for DiamondPlanProducer {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "C".to_string(),
@@ -388,6 +396,8 @@ impl PlanProducer for DiamondPlanProducer {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
             ],
         })

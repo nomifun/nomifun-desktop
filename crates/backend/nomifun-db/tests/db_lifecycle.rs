@@ -289,7 +289,7 @@ async fn pre_baseline_database_is_renamed_and_rebuilt() {
         .unwrap();
     sqlx::query(
         "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
-         VALUES (23, 'entity seq', TRUE, X'00', 0)",
+         VALUES (24, 'entity seq', TRUE, X'00', 0)",
     )
     .execute(db.pool())
     .await

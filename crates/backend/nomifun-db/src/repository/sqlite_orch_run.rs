@@ -185,8 +185,8 @@ impl IRunRepository for SqliteRunRepository {
             "INSERT INTO orch_run_tasks (\
                 id, run_id, title, spec, task_profile, status, conversation_id, \
                 output_summary, output_files, attempt, tokens, graph_x, graph_y, role, \
-                created_at, updated_at\
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, ?)",
+                kind, pattern_config, created_at, updated_at\
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 0, NULL, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&p.run_id)
@@ -197,6 +197,8 @@ impl IRunRepository for SqliteRunRepository {
         .bind(p.graph_x)
         .bind(p.graph_y)
         .bind(&p.role)
+        .bind(&p.kind)
+        .bind(&p.pattern_config)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -216,6 +218,8 @@ impl IRunRepository for SqliteRunRepository {
             graph_x: p.graph_x,
             graph_y: p.graph_y,
             role: p.role,
+            kind: p.kind,
+            pattern_config: p.pattern_config,
             created_at: now,
             updated_at: now,
         })
@@ -549,6 +553,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".into(),
+            pattern_config: None,
         };
         let a = repo.create_task(mk("A")).await.unwrap();
         let b = repo.create_task(mk("B")).await.unwrap();
@@ -672,6 +678,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".into(),
+            pattern_config: None,
         };
         // p1, p2 are independent blockers of c; standalone has no deps.
         let p1 = repo.create_task(mk("p1")).await.unwrap();
@@ -846,6 +854,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".into(),
+            pattern_config: None,
         };
         let a = repo.create_task(mk("A")).await.unwrap();
         let b = repo.create_task(mk("B")).await.unwrap();
@@ -887,6 +897,8 @@ mod tests {
                 graph_x: None,
                 graph_y: None,
                 role: None,
+            kind: "agent".into(),
+            pattern_config: None,
             })
             .await
             .unwrap();
@@ -996,6 +1008,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".into(),
+            pattern_config: None,
         };
         let a = repo.create_task(mk(run.id.clone(), "A")).await.unwrap();
         let b = repo.create_task(mk(run.id.clone(), "B")).await.unwrap();

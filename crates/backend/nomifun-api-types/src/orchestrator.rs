@@ -285,10 +285,28 @@ pub struct RunTask {
     /// for tasks planned before this column existed.
     #[serde(default)]
     pub role: Option<String>,
+    /// Task mode (ultracode 模式增强, 迁移 023). `"agent"`(默认)= 现状单 agent;
+    /// `"synthesis"` = 综合上游产出为最终结果。`#[serde(default = "default_task_kind")]`
+    /// so legacy rows (and plans without `kind`) deserialize as `"agent"` —
+    /// zero-regression.
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
+    /// Optional per-kind config as a raw JSON string (迁移 023), e.g. fan-out
+    /// 兄弟任务共享的分组标签 `{"group":"<label>"}`。`None` when unused (like
+    /// `task_profile`, kept as opaque JSON text so the wire/DB stay stable).
+    #[serde(default)]
+    pub pattern_config: Option<String>,
     /// Creation / last-update timestamps (epoch ms). Surfaced so the UI can show
     /// per-task pacing (用时 / 相对时间) in the roster and inspector.
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// The serde default for a task's `kind`: `"agent"` (现状单 agent，零回归).
+/// Used by both [`RunTask`] and [`PlannedTask`] so legacy rows/plans without a
+/// `kind` deserialize as a normal agent task.
+fn default_task_kind() -> String {
+    "agent".to_string()
 }
 
 /// A blocker→blocked edge in the task DAG. Mirrors `OrchRunTaskDepRow`.
@@ -468,6 +486,22 @@ pub struct PlannedTask {
     /// so old plans without it deserialize to `None`.
     #[serde(default)]
     pub role: Option<String>,
+    /// Task mode the planner chose (ultracode 模式增强, 迁移 023):
+    /// - `"agent"`(默认)— 一个 agent 执行一个任务(现状)。
+    /// - `"synthesis"` — 把依赖任务的输出综合/合并为最终结果。
+    ///
+    /// `#[serde(default = "default_task_kind")]` so a plan without `kind`
+    /// (legacy / fallback) deserializes as `"agent"` — zero-regression. An
+    /// unknown value is also accepted as-is here; the engine treats anything
+    /// other than the known kinds as `"agent"` (fail-soft).
+    #[serde(default = "default_task_kind")]
+    pub kind: String,
+    /// Optional per-kind config as raw JSON text. Fan-out is expressed via
+    /// PLANNING (not a new kind): sibling `agent` tasks share a group tag
+    /// `{"group":"<label>"}` here, and a downstream task depends on all of them.
+    /// `None` when the task needs no extra config.
+    #[serde(default)]
+    pub pattern_config: Option<String>,
 }
 
 /// The planned task DAG: the PlanProducer output / `nomi_run_plan` input.
@@ -598,6 +632,8 @@ mod tests {
                     member_index: None,
                     rationale: Some("breadth-first collection".to_string()),
                     role: Some("调研".to_string()),
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 },
                 PlannedTask {
                     title: "Synthesize report".to_string(),
@@ -607,6 +643,8 @@ mod tests {
                     member_index: Some(1),
                     rationale: None,
                     role: None,
+                    kind: "synthesis".to_string(),
+                    pattern_config: None,
                 },
             ],
         };
@@ -619,6 +657,8 @@ mod tests {
         assert!(back.tasks[0].depends_on.is_empty());
         assert_eq!(back.tasks[0].member_index, None);
         assert_eq!(back.tasks[0].role.as_deref(), Some("调研"));
+        assert_eq!(back.tasks[0].kind, "agent", "default agent kind round-trips");
+        assert!(back.tasks[0].pattern_config.is_none());
         let profile = back.tasks[0].task_profile.as_ref().expect("profile");
         assert_eq!(profile.kind, "research");
         assert!(profile.needs_long_context);
@@ -631,6 +671,7 @@ mod tests {
         assert!(back.tasks[1].task_profile.is_none());
         assert_eq!(back.tasks[1].rationale, None);
         assert_eq!(back.tasks[1].role, None);
+        assert_eq!(back.tasks[1].kind, "synthesis", "synthesis kind round-trips");
     }
 
     #[test]
@@ -771,6 +812,10 @@ mod tests {
                     graph_x: Some(10.5),
                     graph_y: Some(20.0),
                     role: Some("研究".to_string()),
+                    kind: "synthesis".to_string(),
+                    pattern_config: Some("{\"group\":\"variants\"}".to_string()),
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_400_000,
                 },
                 RunTask {
                     id: "task_2".to_string(),
@@ -787,6 +832,10 @@ mod tests {
                     graph_x: None,
                     graph_y: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_000_000,
                 },
             ],
             deps: vec![RunTaskDep {
@@ -848,6 +897,9 @@ mod tests {
         let t1_profile = t1.task_profile.as_ref().expect("t1 profile");
         assert!(t1_profile.needs_high_reasoning);
         assert!(!t1_profile.bulk);
+        // kind + pattern_config round-trip (synthesis task carrying a group tag).
+        assert_eq!(t1.kind, "synthesis");
+        assert_eq!(t1.pattern_config.as_deref(), Some("{\"group\":\"variants\"}"));
 
         let t2 = &back.tasks[1];
         assert_eq!(t2.id, "task_2");
@@ -856,6 +908,9 @@ mod tests {
         assert!(t2.output_files.is_empty());
         assert!(t2.task_profile.is_none());
         assert_eq!(t2.attempt, 0);
+        // Default agent kind round-trips; no pattern_config.
+        assert_eq!(t2.kind, "agent");
+        assert!(t2.pattern_config.is_none());
 
         // Deps.
         assert_eq!(back.deps.len(), 1);
@@ -1047,5 +1102,53 @@ mod tests {
         let json = serde_json::to_string(&with_role).expect("serialize");
         let back: PlannedTask = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.role.as_deref(), Some("前端"));
+    }
+
+    // ── 迁移 023: PlannedTask/RunTask.kind + pattern_config (ultracode 模式增强) ──
+
+    /// A `PlannedTask` carrying `kind:"synthesis"` + a fan-out group `pattern_config`
+    /// deserializes them; an old plan JSON WITHOUT `kind` defaults to `"agent"`
+    /// (zero-regression: existing plans must keep parsing as a normal agent task).
+    #[test]
+    fn planned_task_kind_deserializes_and_defaults_to_agent() {
+        // Explicit synthesis kind + a pattern_config blob → carried through.
+        let synth: PlannedTask = serde_json::from_str(
+            r#"{"title":"汇总","spec":"合并以上产出","kind":"synthesis","pattern_config":"{\"group\":\"shards\"}"}"#,
+        )
+        .expect("synthesis plan parses");
+        assert_eq!(synth.kind, "synthesis");
+        assert_eq!(synth.pattern_config.as_deref(), Some("{\"group\":\"shards\"}"));
+
+        // A legacy plan WITHOUT `kind`/`pattern_config` → kind defaults to "agent",
+        // pattern_config to None. This is the zero-regression invariant.
+        let legacy: PlannedTask = serde_json::from_str(
+            r#"{"title":"做事","spec":"执行","depends_on":[],"member_index":0}"#,
+        )
+        .expect("legacy plan without kind parses");
+        assert_eq!(legacy.kind, "agent", "missing kind must default to agent");
+        assert!(legacy.pattern_config.is_none());
+
+        // Round-trips unchanged.
+        let json = serde_json::to_string(&synth).expect("serialize");
+        let back: PlannedTask = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.kind, "synthesis");
+        assert_eq!(back.pattern_config.as_deref(), Some("{\"group\":\"shards\"}"));
+    }
+
+    /// A whole legacy `PlannedDag` JSON (no `kind` on any task) deserializes with
+    /// every task defaulting to `"agent"` — the engine's agent path stays the
+    /// default for any pre-023 plan.
+    #[test]
+    fn legacy_plan_dag_without_kind_all_tasks_default_agent() {
+        let raw = r#"{"tasks":[
+            {"title":"A","spec":"do A","depends_on":[]},
+            {"title":"B","spec":"do B","depends_on":[0]}
+        ]}"#;
+        let dag: PlannedDag = serde_json::from_str(raw).expect("legacy dag parses");
+        assert_eq!(dag.tasks.len(), 2);
+        for t in &dag.tasks {
+            assert_eq!(t.kind, "agent", "every legacy task defaults to agent kind");
+            assert!(t.pattern_config.is_none());
+        }
     }
 }

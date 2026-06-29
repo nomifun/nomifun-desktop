@@ -716,6 +716,15 @@ async fn settle_task_outcome(
                         output_summary: Some(o.text),
                         output_files: None,
                         attempt: None,
+                        // TODO(迁移 023 token 接通): write the worker's token usage here
+                        // once it is surfaced. `WorkerOutcome` and
+                        // `ConversationRuntimeSummary` currently expose NO token count
+                        // (only conversation_id / final text / is_processing), so there
+                        // is nothing real to write yet — wiring it would require
+                        // threading per-turn usage out of the conversation/agent layer
+                        // into `WorkerOutcome.tokens`. Deferred (don't fabricate); the
+                        // `orch_run_tasks.tokens` column + the RunTask DTO/UI field are
+                        // already plumbed and will light up once that source exists.
                         tokens: None,
                         graph_x: None,
                         graph_y: None,
@@ -793,7 +802,28 @@ async fn collect_upstream_outputs(
 
 /// Compose the worker's brief: role hint + task title/spec + completed upstream
 /// outputs (injected as context). Sent as the conversation `system_prompt`.
+///
+/// **Kind-aware (迁移 023).** For `kind == "synthesis"` the brief is framed as an
+/// explicit synthesis instruction — the upstream dependency outputs are the
+/// PRIMARY material to merge, not just background context — while the `agent`
+/// kind (the default, and anything unknown) keeps the exact previous framing
+/// (zero regression). The upstream gathering is identical for both kinds; only
+/// the framing differs.
 fn compose_brief(
+    role_hint: Option<&str>,
+    task: &OrchRunTaskRow,
+    upstream: &[(String, String)],
+) -> String {
+    if task.kind == "synthesis" {
+        return compose_synthesis_brief(role_hint, task, upstream);
+    }
+    compose_agent_brief(role_hint, task, upstream)
+}
+
+/// The unchanged `agent`-kind brief: role hint + task title/spec + completed
+/// upstream outputs as build-on context. This is byte-for-byte the pre-023
+/// `compose_brief` body — the agent path must not regress.
+fn compose_agent_brief(
     role_hint: Option<&str>,
     task: &OrchRunTaskRow,
     upstream: &[(String, String)],
@@ -814,6 +844,50 @@ fn compose_brief(
     }
     if !upstream.is_empty() {
         out.push_str("\nUPSTREAM RESULTS (completed dependencies you can build on):\n");
+        for (title, summary) in upstream {
+            out.push_str("- ");
+            out.push_str(title);
+            out.push_str(": ");
+            out.push_str(summary);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The `synthesis`-kind brief: an explicit instruction to MERGE the dependency
+/// outputs into one coherent final result. The upstream outputs lead (they are
+/// the material being synthesized), and the task spec states what the merged
+/// result should be. Replaces `aggregate_summary`'s mechanical concatenation for
+/// a synthesis task — here a real worker reasons over the upstream outputs.
+fn compose_synthesis_brief(
+    role_hint: Option<&str>,
+    task: &OrchRunTaskRow,
+    upstream: &[(String, String)],
+) -> String {
+    let mut out = String::new();
+    if let Some(role) = role_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("ROLE: ");
+        out.push_str(role);
+        out.push_str("\n\n");
+    }
+    out.push_str("SYNTHESIS TASK: ");
+    out.push_str(&task.title);
+    out.push('\n');
+    out.push_str(
+        "综合/合并以下上游产出，按任务要求产出最终结果（不要简单拼接，要消解冲突、去重并形成连贯整体）。\n",
+    );
+    if !task.spec.trim().is_empty() {
+        out.push_str("SPEC:\n");
+        out.push_str(&task.spec);
+        out.push('\n');
+    }
+    if upstream.is_empty() {
+        // Defensive: a synthesis task with no resolved upstream still runs (it just
+        // has nothing to merge) — note it so the worker does not hallucinate inputs.
+        out.push_str("\n(注意：没有可合并的上游产出。)\n");
+    } else {
+        out.push_str("\nUPSTREAM OUTPUTS TO SYNTHESIZE (合并对象):\n");
         for (title, summary) in upstream {
             out.push_str("- ");
             out.push_str(title);
@@ -978,6 +1052,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: Some("first".to_string()),
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                     PlannedTask {
                         title: "B".to_string(),
@@ -987,6 +1063,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                     PlannedTask {
                         title: "C".to_string(),
@@ -996,6 +1074,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                 ],
             })
@@ -1367,6 +1447,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1376,6 +1458,90 @@ mod tests {
         assert!(brief.contains("TASK: Synthesize"));
         assert!(brief.contains("write the report"));
         assert!(brief.contains("Gather: found 12 sources"));
+    }
+
+    /// Build an `OrchRunTaskRow` with the given `kind` (other fields fixed) — used
+    /// by the kind-aware compose_brief tests.
+    fn task_row_with_kind(kind: &str, title: &str, spec: &str) -> OrchRunTaskRow {
+        OrchRunTaskRow {
+            id: "rtask_k".to_string(),
+            run_id: "run_1".to_string(),
+            title: title.to_string(),
+            spec: spec.to_string(),
+            task_profile: None,
+            status: "pending".to_string(),
+            conversation_id: None,
+            output_summary: None,
+            output_files: None,
+            attempt: 0,
+            tokens: None,
+            graph_x: None,
+            graph_y: None,
+            role: None,
+            kind: kind.to_string(),
+            pattern_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    // 迁移 023: a `synthesis`-kind task's brief is framed as an explicit merge
+    // instruction (NOT the agent "build on" framing) AND it still carries the
+    // dependency outputs (the material to synthesize). The framing must DIFFER
+    // from the agent brief for the same task/upstream.
+    #[test]
+    fn compose_brief_synthesis_framing_differs_and_merges_deps() {
+        let upstream = vec![
+            ("Draft A".to_string(), "草稿A的要点".to_string()),
+            ("Draft B".to_string(), "草稿B的要点".to_string()),
+        ];
+
+        let synth_task = task_row_with_kind("synthesis", "合并草稿", "写出最终稿");
+        let synth_brief = compose_brief(Some("写手"), &synth_task, &upstream);
+
+        // Synthesis-specific framing present.
+        assert!(
+            synth_brief.contains("综合") && synth_brief.contains("合并"),
+            "synthesis brief must instruct to 综合/合并: {synth_brief}"
+        );
+        assert!(
+            synth_brief.contains("SYNTHESIS TASK"),
+            "synthesis brief uses the SYNTHESIS framing: {synth_brief}"
+        );
+        // The dependency outputs are merged into the brief (the material to combine).
+        assert!(synth_brief.contains("Draft A: 草稿A的要点"), "dep A output present: {synth_brief}");
+        assert!(synth_brief.contains("Draft B: 草稿B的要点"), "dep B output present: {synth_brief}");
+        // The role + spec are still surfaced.
+        assert!(synth_brief.contains("ROLE: 写手"));
+        assert!(synth_brief.contains("写出最终稿"));
+
+        // The SAME task as an `agent` kind produces the OLD framing (no synthesis
+        // instruction, the plain TASK/UPSTREAM RESULTS labels) — proving the
+        // branches diverge and agent is unchanged.
+        let agent_task = task_row_with_kind("agent", "合并草稿", "写出最终稿");
+        let agent_brief = compose_brief(Some("写手"), &agent_task, &upstream);
+        assert_ne!(synth_brief, agent_brief, "synthesis framing must differ from agent");
+        assert!(agent_brief.contains("TASK: 合并草稿"), "agent keeps TASK framing: {agent_brief}");
+        assert!(
+            agent_brief.contains("UPSTREAM RESULTS"),
+            "agent keeps the build-on framing: {agent_brief}"
+        );
+        assert!(
+            !agent_brief.contains("SYNTHESIS TASK"),
+            "agent brief must NOT carry synthesis framing: {agent_brief}"
+        );
+    }
+
+    // ZERO-REGRESSION: the agent-kind brief is byte-for-byte the legacy framing —
+    // assert it matches the explicit expected string for a known task/upstream, so
+    // any drift in the agent path is caught.
+    #[test]
+    fn compose_brief_agent_kind_is_unchanged_legacy_framing() {
+        let task = task_row_with_kind("agent", "Synthesize", "write the report");
+        let upstream = vec![("Gather".to_string(), "found 12 sources".to_string())];
+        let brief = compose_brief(Some("writer"), &task, &upstream);
+        let expected = "ROLE: writer\n\nTASK: Synthesize\nSPEC:\nwrite the report\n\nUPSTREAM RESULTS (completed dependencies you can build on):\n- Gather: found 12 sources\n";
+        assert_eq!(brief, expected, "agent-kind brief must match the pre-023 framing exactly");
     }
 
     #[test]
@@ -1395,6 +1561,8 @@ mod tests {
             graph_x: None,
             graph_y: None,
             role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1438,6 +1606,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                     PlannedTask {
                         title: "B".to_string(),
@@ -1447,6 +1617,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                     PlannedTask {
                         title: "C".to_string(),
@@ -1456,6 +1628,8 @@ mod tests {
                         member_index: Some(0),
                         rationale: None,
                         role: None,
+                        kind: "agent".to_string(),
+                        pattern_config: None,
                     },
                 ],
             })

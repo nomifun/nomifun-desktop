@@ -990,6 +990,8 @@ mod tests {
                     member_index: Some(0),
                     rationale: None,
                     role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
                 }],
             })
         }

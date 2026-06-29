@@ -86,6 +86,13 @@ pub struct OrchRunTaskRow {
     /// Short Chinese role the planner named for this task (P5 沉淀捕获, 迁移 022).
     /// Nullable: tasks planned before this column exist read back as `None`.
     pub role: Option<String>,
+    /// Task mode (ultracode 模式增强, 迁移 023). `'agent'`(默认)= 现状单 agent;
+    /// `'synthesis'` = 综合上游产出为最终结果。`NOT NULL DEFAULT 'agent'` →
+    /// 旧行读回 `"agent"`。
+    pub kind: String,
+    /// Optional per-kind config JSON (迁移 023, nullable), e.g. fan-out 兄弟任务
+    /// 共享的分组标签 `{"group":"<label>"}`。未用时 `None`。
+    pub pattern_config: Option<String>, // JSON
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }
@@ -229,5 +236,40 @@ mod tests {
             .find(|(n, _)| n == "role")
             .expect("orch_run_tasks should have a role column");
         assert_eq!(role.1, 0, "role should be nullable (notnull==0)");
+    }
+
+    /// 迁移 023:orch_run_tasks 加 `kind`(NOT NULL DEFAULT 'agent')+
+    /// `pattern_config`(可空 JSON)。ultracode 模式增强地基:旧行 kind 默认
+    /// 'agent'(零回归),pattern_config 为 NULL。
+    #[tokio::test]
+    async fn migration_023_adds_kind_and_pattern_config_to_orch_run_tasks() {
+        let db = init_database_memory()
+            .await
+            .expect("db init runs all migrations");
+        let pool = db.pool();
+
+        let cols: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT name, \"notnull\", dflt_value FROM pragma_table_info('orch_run_tasks')",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+
+        let kind = cols
+            .iter()
+            .find(|(n, _, _)| n == "kind")
+            .expect("orch_run_tasks should have a kind column");
+        assert_eq!(kind.1, 1, "kind should be NOT NULL (notnull==1)");
+        assert!(
+            kind.2.as_deref().unwrap_or_default().contains("agent"),
+            "kind default should be 'agent', got {:?}",
+            kind.2
+        );
+
+        let pattern_config = cols
+            .iter()
+            .find(|(n, _, _)| n == "pattern_config")
+            .expect("orch_run_tasks should have a pattern_config column");
+        assert_eq!(pattern_config.1, 0, "pattern_config should be nullable (notnull==0)");
     }
 }

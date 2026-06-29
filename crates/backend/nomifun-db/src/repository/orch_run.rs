@@ -52,6 +52,13 @@ pub struct CreateTaskParams {
     pub graph_y: Option<f64>,
     /// Short Chinese role the planner named for this task (P5 沉淀捕获). Nullable.
     pub role: Option<String>,
+    /// Task mode (ultracode 模式增强, 迁移 023). `"agent"`(默认现状)|
+    /// `"synthesis"`。The service passes the planner's `kind` here; an empty/legacy
+    /// plan yields `"agent"`.
+    pub kind: String,
+    /// Optional per-kind config JSON (迁移 023, nullable), e.g. fan-out 分组
+    /// `{"group":"<label>"}`。`None` when unused.
+    pub pattern_config: Option<String>, // JSON
 }
 
 /// Parameters for a partial task update. `None` = leave the column unchanged.
