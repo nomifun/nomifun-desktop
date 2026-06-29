@@ -235,6 +235,26 @@
       "lastApplied": "Last intent: {{intent}}",
       "error": "Failed to adjust orchestration: {{error}}"
     },
+    "view": {
+      "conversation": "Dialogue",
+      "canvas": "Canvas",
+      "conversationHint": "See the lead agent's orchestration decisions and your adjustment dialogue",
+      "canvasHint": "See the full task-graph structure"
+    },
+    "feed": {
+      "agentName": "Lead orchestrator",
+      "you": "You",
+      "decisionTitle": "Orchestration decision",
+      "decisionSubtitle": "{{count}} task(s) planned",
+      "decisionIntro": "I broke the goal down into the orchestration below and assigned the best-fit agent to each task:",
+      "intentReply": "Re-adjusted the orchestration per your intent: kept {{kept}} · added {{added}} · removed {{removed}}.",
+      "rationaleFallback": "Auto-assigned by strengths and load",
+      "outputLabel": "Output",
+      "openTask": "Open this task's worker transcript",
+      "groupFanout": "Parallel fan-out · {{label}}",
+      "empty": "The fleet is forming its orchestration decision — the lead agent's breakdown and assignments will appear here shortly.",
+      "scrollLatest": "Jump to latest"
+    },
     "precipitate": {
       "title": "Save roles as assistants",
       "subtitle": "{{count}} role(s) from this run can be saved as assistants for reuse",

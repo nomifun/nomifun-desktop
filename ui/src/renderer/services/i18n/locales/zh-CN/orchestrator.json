@@ -235,6 +235,26 @@
       "lastApplied": "上次意图：{{intent}}",
       "error": "调整编排失败：{{error}}"
     },
+    "view": {
+      "conversation": "对话",
+      "canvas": "编排画布",
+      "conversationHint": "查看主 agent 的编排决策与你的调整对话",
+      "canvasHint": "查看完整任务图结构"
+    },
+    "feed": {
+      "agentName": "编排主 Agent",
+      "you": "你",
+      "decisionTitle": "编排决策",
+      "decisionSubtitle": "已规划 {{count}} 个任务",
+      "decisionIntro": "我已把目标拆解为以下任务编排，并为每个任务分派了最合适的 agent：",
+      "intentReply": "已按你的意图重新调整编排：保留 {{kept}} · 新增 {{added}} · 移除 {{removed}}。",
+      "rationaleFallback": "按强项与负载自动分派",
+      "outputLabel": "产出",
+      "openTask": "查看该任务的 worker 记录",
+      "groupFanout": "并行扇出 · {{label}}",
+      "empty": "编队正在拟定编排决策，稍候即可看到主 agent 的拆解与分派。",
+      "scrollLatest": "回到最新"
+    },
     "precipitate": {
       "title": "沉淀为助手",
       "subtitle": "这个 Run 里有 {{count}} 个角色可一键保存为助手，下次直接复用",

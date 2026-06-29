@@ -19,6 +19,13 @@ export interface RunIntentBoxProps {
   detail: TRunDetail | null | undefined;
   /** Re-pull the run detail after a successful adjust (the run re-adjusts + re-drives). */
   refetch: () => Promise<void>;
+  /**
+   * Fired after an intent is successfully applied — surfaces the submitted intent
+   * + its kept/added/removed diff so the conversation (对话) view can append it as
+   * a dialogue turn. Optional: a caller that omits it gets the box's prior
+   * behavior unchanged (the inline last-applied hint + the success toast).
+   */
+  onApplied?: (intent: string, summary: AdjustSummary) => void;
 }
 
 /** The kept / added / removed diff computed by comparing the run's task-id set
@@ -64,7 +71,7 @@ function diffTaskIds(before: Set<string>, after: Set<string>): AdjustSummary {
  * Backend BadRequest cases (a `running` task, a cyclic plan) carry a
  * human-readable message we surface verbatim via {@link useArcoMessage}.
  */
-const RunIntentBox: React.FC<RunIntentBoxProps> = ({ runId, detail, refetch }) => {
+const RunIntentBox: React.FC<RunIntentBoxProps> = ({ runId, detail, refetch, onApplied }) => {
   const { t } = useTranslation();
   const [message, msgCtx] = useArcoMessage();
 
@@ -109,6 +116,9 @@ const RunIntentBox: React.FC<RunIntentBoxProps> = ({ runId, detail, refetch }) =
       await refetch();
       setLastApplied({ intent: value, summary });
       setIntent('');
+      // Surface the applied intent + diff to the conversation view (no-op in the
+      // canvas view, which doesn't pass the callback).
+      onApplied?.(value, summary);
       message.success(t('orchestrator.run.intent.summary', { ...summary }));
     } catch (e) {
       // The BadRequest cases are real + user-facing (a running task → 「请先暂停
@@ -123,7 +133,7 @@ const RunIntentBox: React.FC<RunIntentBoxProps> = ({ runId, detail, refetch }) =
     } finally {
       setSubmitting(false);
     }
-  }, [intent, submitting, runId, refetch, message, t]);
+  }, [intent, submitting, runId, refetch, message, t, onApplied]);
 
   return (
     <div className='shrink-0 border-t border-t-base bg-1 px-16px pb-14px pt-12px'>
