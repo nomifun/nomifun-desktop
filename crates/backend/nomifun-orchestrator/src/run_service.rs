@@ -1131,7 +1131,43 @@ impl RunService {
     /// new↔new deps or a new→kept→…→new cycle would otherwise persist a cycle the
     /// engine can never make ready (a soft-strand); rejecting it here keeps the run
     /// unchanged.
+    /// **B4 — the production adjust entry is now SPLIT into two halves** so the lead
+    /// LLM call can run OUTSIDE the per-run lock (Global Constraint: the per-run lock
+    /// MUST NOT span an LLM await). This wrapper preserves the single-call semantics
+    /// for the tests + any non-engine caller (compute → apply, no lock); the engine
+    /// (`RunEngine::adjust`) calls the two halves directly, wrapping ONLY
+    /// [`apply_adjusted_plan`](Self::apply_adjusted_plan) in the lock while
+    /// [`compute_adjusted_plan`](Self::compute_adjusted_plan) (the LLM await) runs
+    /// lock-free. Behavior of this wrapper is byte-identical to the pre-B4 monolith
+    /// (`sink=None`): same validation order, same reconcile, same re-activation.
     pub async fn adjust(&self, user_id: &str, run_id: &str, intent: &str) -> Result<Run, AppError> {
+        let adjusted = self.compute_adjusted_plan(user_id, run_id, intent, None).await?;
+        self.apply_adjusted_plan(user_id, run_id, adjusted).await
+    }
+
+    /// **B4 half 1 — LOCK-FREE.** Snapshot the run's current state, ask the lead to
+    /// judge keep-vs-redo (the LLM await — streamed over `sink` when `Some`), and
+    /// return the parsed [`AdjustedPlan`] IN MEMORY. NOTHING is written here. This is
+    /// the half [`RunEngine::adjust`] runs OUTSIDE the per-run lock so a multi-second
+    /// (or hanging) lead call never stalls a concurrent rerun/loop on the same run.
+    ///
+    /// Fast-fail guards (BEFORE the LLM, mutating nothing): empty intent → BadRequest;
+    /// missing run → 404; not-owner → 403; any `running` task → BadRequest ("运行中").
+    /// A garbled adjusted plan surfaces as the lead's error (still nothing mutated).
+    ///
+    /// **TOCTOU:** the snapshot taken here is for the LEAD's input only — it is NOT
+    /// trusted by [`apply_adjusted_plan`](Self::apply_adjusted_plan), which re-reads
+    /// the run state FRESH under the lock and re-validates (kept-exists / no-running /
+    /// acyclic) before any write. A concurrent rerun/loop that lands between this
+    /// snapshot and the apply is caught there (mirrors the B2 summarize fresh-guard
+    /// re-verify), so the run is never corrupted by a stale-snapshot adjust.
+    pub async fn compute_adjusted_plan(
+        &self,
+        user_id: &str,
+        run_id: &str,
+        intent: &str,
+        sink: Option<&crate::plan::LeadThinkingSink>,
+    ) -> Result<crate::plan::AdjustedPlan, AppError> {
         let intent = intent.trim();
         if intent.is_empty() {
             return Err(OrchestratorError::BadRequest("意图不能为空".into()).into());
@@ -1139,13 +1175,14 @@ impl RunService {
         // 404 (missing) / 403 (not owner) BEFORE any read of run internals.
         let run = self.owned_run(user_id, run_id).await?;
 
-        // Snapshot the CURRENT run state for the lead + for validation/reconcile.
+        // Snapshot the CURRENT run state for the lead (input only — apply re-reads).
         let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
         let current_tasks = self.run_repo.list_tasks(run_id).await.map_err(OrchestratorError::from)?;
         let current_deps = self.run_repo.list_deps(run_id).await.map_err(OrchestratorError::from)?;
 
         // SAFETY: refuse to re-adjust while any worker is in-flight. Checked BEFORE
-        // calling the lead so we fail fast and mutate nothing.
+        // calling the lead so we fail fast and mutate nothing. (Re-checked under the
+        // lock in `apply_adjusted_plan` against a FRESH read — this is the fast path.)
         if current_tasks.iter().any(|t| t.status == "running") {
             return Err(OrchestratorError::BadRequest(
                 "运行中，请先暂停再重调".into(),
@@ -1159,23 +1196,59 @@ impl RunService {
             current_deps.iter().cloned().map(dep_row_to_dto).collect();
 
         // The lead JUDGES keep-vs-redo. Fail-soft TO AN ERROR: a garbled adjusted
-        // plan returns BadRequest (the run is still untouched at this point).
-        //
-        // B2 NOTE: `sink=None` here ON PURPOSE — this adjust LLM call is still
-        // INSIDE the per-run lock (`engine.adjust` holds it across this await today),
-        // and the Global Constraint is that the per-run lock MUST NOT span an LLM
-        // await for longer than necessary, let alone fan out per-token work under it.
-        // Wiring a real streaming sink for adjust is B4's job: B4 first moves this
-        // call OUT of the lock (compute-then-apply split), then passes a phase="adjust"
-        // sink. The trait mechanism is in place; only the production wiring waits.
+        // plan returns BadRequest (the run is still untouched — nothing is written in
+        // this method). B4: this LLM await runs LOCK-FREE (the engine holds NO per-run
+        // lock here); `sink` streams the lead's adjust-phase thought over WS when set.
         let plan = self
             .planner
-            .adjust(intent, &task_dtos, &dep_dtos, &members, None)
+            .adjust(intent, &task_dtos, &dep_dtos, &members, sink)
             .await?;
+        Ok(plan)
+    }
 
-        // VALIDATE every kept id exists in the current run BEFORE mutating — an
-        // adjusted plan that references a stale/foreign id is a bad plan; reject it
-        // so we never delete real tasks chasing an unresolvable keep.
+    /// **B4 half 2 — LOCK-INTERNAL, pure DB.** Apply a precomputed [`AdjustedPlan`]
+    /// (from [`compute_adjusted_plan`](Self::compute_adjusted_plan)) to the run:
+    /// RE-VALIDATE against a FRESH read, reconcile in ONE transaction, and re-activate
+    /// a terminal run. CONTAINS NO LLM await — the engine runs this UNDER the per-run
+    /// lock, so it serializes with the run loop's terminal-check-and-finish.
+    ///
+    /// **Re-validation (TOCTOU close):** the run state is re-read FRESH here (NOT the
+    /// compute-phase snapshot) and re-checked before any write — owner (404/403), no
+    /// `running` task (a rerun/loop may have started one during the LLM await →
+    /// BadRequest, run untouched), every kept id still EXISTS (a concurrent rerun/loop
+    /// may have changed the task set → a vanished kept id is a BadRequest, run
+    /// untouched), and the resolved (kept+new) graph is ACYCLIC (Kahn). This mirrors
+    /// the B2 summarize fresh-guard re-verify: the apply trusts the lock-held fresh
+    /// read, not the stale compute snapshot.
+    pub async fn apply_adjusted_plan(
+        &self,
+        user_id: &str,
+        run_id: &str,
+        plan: crate::plan::AdjustedPlan,
+    ) -> Result<Run, AppError> {
+        // 404 (missing) / 403 (not owner) on a FRESH read under the lock.
+        let run = self.owned_run(user_id, run_id).await?;
+
+        // RE-SNAPSHOT the run state FRESH (do NOT trust the compute-phase snapshot):
+        // a concurrent rerun/loop may have mutated tasks during the lock-free LLM
+        // await. Every validation below runs against THIS fresh read.
+        let current_tasks = self.run_repo.list_tasks(run_id).await.map_err(OrchestratorError::from)?;
+
+        // SAFETY (re-check under the lock): refuse to reconcile while any worker is
+        // in-flight. A rerun/resume may have started a task AFTER `compute`'s fast
+        // check — reject here so we never delete/rewire a task with a live worker
+        // (the Phase-2 live-clobber hazard). Run is left UNCHANGED.
+        if current_tasks.iter().any(|t| t.status == "running") {
+            return Err(OrchestratorError::BadRequest(
+                "运行中，请先暂停再重调".into(),
+            )
+            .into());
+        }
+
+        // VALIDATE every kept id exists in the (FRESH) current run BEFORE mutating —
+        // an adjusted plan that references a stale/foreign id (or one a concurrent
+        // rerun/loop dropped during the LLM await) is a bad plan; reject it so we
+        // never delete real tasks chasing an unresolvable keep. Run left UNCHANGED.
         let current_ids: std::collections::HashSet<&str> =
             current_tasks.iter().map(|t| t.id.as_str()).collect();
         let mut kept_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1190,6 +1263,9 @@ impl RunService {
                 kept_ids.insert(keep.clone());
             }
         }
+
+        // The fleet snapshot (for routing the NEW tasks) comes off the fresh run row.
+        let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
 
         // ---- RESOLVE the adjusted plan IN MEMORY (no writes yet) ----
         //
