@@ -1,0 +1,221 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Input } from '@arco-design/web-react';
+import { Send } from '@icon-park/react';
+import { ipcBridge } from '@/common';
+import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import type { TRunDetail } from '@/common/types/orchestrator/orchestratorTypes';
+import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+
+export interface RunIntentBoxProps {
+  runId: string;
+  /** Live run detail — read to snapshot the CURRENT task-id set for the diff. */
+  detail: TRunDetail | null | undefined;
+  /** Re-pull the run detail after a successful adjust (the run re-adjusts + re-drives). */
+  refetch: () => Promise<void>;
+}
+
+/** The kept / added / removed diff computed by comparing the run's task-id set
+ * before the adjust against the set after the live refetch. */
+interface AdjustSummary {
+  kept: number;
+  added: number;
+  removed: number;
+}
+
+/**
+ * Diff two task-id sets into a {@link AdjustSummary}:
+ *  - kept    — ids present in BOTH before & after (the main agent reused the work);
+ *  - added   — ids in after but not before (newly inserted tasks);
+ *  - removed — ids in before but not after (dropped / re-decomposed away).
+ */
+function diffTaskIds(before: Set<string>, after: Set<string>): AdjustSummary {
+  let kept = 0;
+  let added = 0;
+  for (const id of after) {
+    if (before.has(id)) kept += 1;
+    else added += 1;
+  }
+  let removed = 0;
+  for (const id of before) {
+    if (!after.has(id)) removed += 1;
+  }
+  return { kept, added, removed };
+}
+
+/**
+ * RunIntentBox — the headline conversational surface of 「智能编排」: a docked
+ * intent bar at the bottom of the run view where the user types, in natural
+ * language, how they want the orchestration changed (「研究太浅，加一道校验和
+ * 第二个研究员」). On submit it captures the run's current task-id set, calls
+ * {@link ipcBridge.orchestrator.runs.adjustRun} (the one-shot main agent
+ * intelligently re-adjusts the live DAG — keeping completed work that still
+ * serves the intent, adding new nodes, re-decomposing others), force-refreshes
+ * the run, and surfaces a transient 「保留 N · 新增 M · 移除 K」summary computed
+ * by diffing the refetched task-id set against the captured one.
+ *
+ * Guards a double-submit (disabled while in-flight); an empty intent is a no-op.
+ * Backend BadRequest cases (a `running` task, a cyclic plan) carry a
+ * human-readable message we surface verbatim via {@link useArcoMessage}.
+ */
+const RunIntentBox: React.FC<RunIntentBoxProps> = ({ runId, detail, refetch }) => {
+  const { t } = useTranslation();
+  const [message, msgCtx] = useArcoMessage();
+
+  const [intent, setIntent] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  // The last intent that was successfully applied + its diff, shown as a subtle
+  // inline hint above the input (the DAG + the toast are the primary feedback).
+  const [lastApplied, setLastApplied] = useState<{ intent: string; summary: AdjustSummary } | null>(null);
+
+  // Snapshot the CURRENT task-id set lazily at submit time (not memoized) so the
+  // diff is taken against exactly what was on the canvas when the user pressed send.
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+
+  const trimmed = intent.trim();
+  const canSubmit = trimmed.length > 0 && !submitting;
+
+  const summaryLine = useMemo(() => {
+    if (!lastApplied) return null;
+    const { kept, added, removed } = lastApplied.summary;
+    return t('orchestrator.run.intent.summary', { kept, added, removed });
+  }, [lastApplied, t]);
+
+  const handleSubmit = useCallback(async () => {
+    const value = intent.trim();
+    if (!value || submitting) return;
+
+    // Capture the task-id set *before* the adjust for the kept/added/removed diff.
+    const before = new Set((detailRef.current?.tasks ?? []).map((task) => task.id));
+
+    setSubmitting(true);
+    try {
+      await ipcBridge.orchestrator.runs.adjustRun.invoke({ run_id: runId, intent: value });
+      // Fetch the authoritative post-adjust detail directly for the diff: a bare
+      // `refetch()` updates `detail` via React state (not visible until the next
+      // render), so we can't read the fresh task set off the ref synchronously.
+      // We pull it ourselves for the diff, then `refetch()` to update the live view.
+      const after = await ipcBridge.orchestrator.runs.get.invoke({ id: runId });
+      const afterIds = new Set((after?.tasks ?? []).map((task) => task.id));
+      const summary = diffTaskIds(before, afterIds);
+      // Force the live view to re-pull (the run re-adjusts + re-drives).
+      await refetch();
+      setLastApplied({ intent: value, summary });
+      setIntent('');
+      message.success(t('orchestrator.run.intent.summary', { ...summary }));
+    } catch (e) {
+      // The BadRequest cases are real + user-facing (a running task → 「请先暂停
+      // 再重调」; a cyclic plan → 「调整计划存在循环依赖…」). The backend supplies
+      // the human message; surface it verbatim, falling back to the raw error.
+      const backendMsg = isBackendHttpError(e) && e.backendMessage ? e.backendMessage : '';
+      message.error(
+        backendMsg
+          ? t('orchestrator.run.intent.error', { error: backendMsg })
+          : t('orchestrator.run.intent.error', { error: String(e) })
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }, [intent, submitting, runId, refetch, message, t]);
+
+  return (
+    <div className='shrink-0 border-t border-t-base bg-1 px-16px pb-14px pt-12px'>
+      {msgCtx}
+
+      {/* Subtle 「意图历史」hint — the last intent applied + its diff. */}
+      {lastApplied && summaryLine && (
+        <div className='mb-8px flex items-center gap-8px overflow-hidden text-11px leading-tight text-t-tertiary'>
+          <span
+            className='inline-flex shrink-0 items-center rd-full px-7px py-2px text-10px font-600 tabular-nums'
+            style={{
+              color: 'rgb(var(--primary-6))',
+              background: 'color-mix(in srgb, rgb(var(--primary-6)) 12%, transparent)',
+            }}
+          >
+            {summaryLine}
+          </span>
+          <span className='min-w-0 flex-1 truncate' title={lastApplied.intent}>
+            {t('orchestrator.run.intent.lastApplied', { intent: lastApplied.intent })}
+          </span>
+        </div>
+      )}
+
+      {/* Conversational input: a docked card with a multi-line textarea + a
+          circular send affordance, tinted with the orchestrator's primary hue. */}
+      <div
+        className='flex items-end gap-10px rd-14px px-12px py-10px transition-colors'
+        style={{
+          background: 'var(--bg-2)',
+          border: `1px solid ${submitting ? 'rgb(var(--primary-6))' : 'var(--border-base)'}`,
+          boxShadow: submitting
+            ? '0 0 0 3px color-mix(in srgb, rgb(var(--primary-6)) 16%, transparent)'
+            : undefined,
+        }}
+      >
+        <div className='min-w-0 flex-1'>
+          <div className='mb-4px flex items-center gap-5px text-11px font-600 leading-none text-primary-6'>
+            <Send theme='outline' size='12' strokeWidth={3} />
+            <span>{t('orchestrator.run.intent.label')}</span>
+          </div>
+          <Input.TextArea
+            value={intent}
+            onChange={setIntent}
+            disabled={submitting}
+            autoSize={{ minRows: 1, maxRows: 5 }}
+            placeholder={t('orchestrator.run.intent.placeholder')}
+            // Enter sends; Shift+Enter inserts a newline (mirrors the steer composer).
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                void handleSubmit();
+              }
+            }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              boxShadow: 'none',
+              padding: 0,
+              resize: 'none',
+              fontSize: 13,
+            }}
+          />
+        </div>
+
+        <div
+          role='button'
+          tabIndex={0}
+          aria-label={t('orchestrator.run.intent.send')}
+          aria-disabled={!canSubmit}
+          title={t('orchestrator.run.intent.send')}
+          onClick={canSubmit ? () => void handleSubmit() : undefined}
+          onKeyDown={(e) => {
+            if ((e.key === 'Enter' || e.key === ' ') && canSubmit) {
+              e.preventDefault();
+              void handleSubmit();
+            }
+          }}
+          className='flex size-32px shrink-0 items-center justify-center rd-10px text-white transition-all'
+          style={{
+            background: canSubmit ? 'rgb(var(--primary-6))' : 'var(--bg-4)',
+            color: canSubmit ? '#fff' : 'var(--color-text-3)',
+            cursor: canSubmit ? 'pointer' : 'not-allowed',
+            opacity: submitting ? 0.7 : 1,
+          }}
+        >
+          <Send theme='outline' size='16' strokeWidth={3} style={submitting ? { animation: 'nomi-intent-pulse 1.1s ease-in-out infinite' } : undefined} />
+        </div>
+      </div>
+
+      <style>{`@keyframes nomi-intent-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }`}</style>
+    </div>
+  );
+};
+
+export default RunIntentBox;

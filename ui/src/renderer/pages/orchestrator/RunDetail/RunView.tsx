@@ -11,6 +11,7 @@ import type { TRunDetail } from '@/common/types/orchestrator/orchestratorTypes';
 import AppLoader from '@/renderer/components/layout/AppLoader';
 import { PreviewPanel, PreviewProvider, usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import AgentRoster from './AgentRoster';
+import RunIntentBox from './RunIntentBox';
 import RunWorkspaceRail from './RunWorkspaceRail';
 import type { OpenTaskPayload } from './DagCanvas';
 
@@ -98,6 +99,14 @@ const RunViewInner: React.FC<RunViewProps> = ({
             <DagCanvas runId={runId} onBack={onBack} onOpenTask={onSelectTask} onReplan={onReplan} />
           </Suspense>
         </div>
+
+        {/* Intent box (UC-3b) — the headline conversational surface: the user
+            tells the orchestrator, in natural language, how to re-adjust the
+            live plan; the main agent intelligently re-decomposes + re-drives,
+            and a kept/新增/移除 summary reports what changed. Docked at the
+            bottom of the main column so the DAG above stays the focal point.
+            Only shown once the run detail has loaded. */}
+        {detail && <RunIntentBox runId={runId} detail={detail} refetch={refetch} />}
       </div>
 
       {/* Preview column — opens when a rail file is clicked. */}
