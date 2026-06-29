@@ -575,11 +575,16 @@ impl RunService {
     /// holding the row and will `update_task(done)` when it returns). The user must
     /// pause/stop the run first. (This is the validated reverted-workflow lesson.)
     ///
-    /// **Cascade safety:** the BFS over the dep edges only resets *settled*
-    /// dependents (`done`/`failed`/`skipped`) — a `running` dependent is SKIPPED
-    /// (left untouched), never reset, for the same live-worker reason; a `pending`
-    /// dependent is already going to run, so it needs no reset. The walk is bounded
-    /// by a `seen` guard over the (acyclic) graph.
+    /// **Cascade safety:** the BFS over the dep edges resets *settled* dependents
+    /// (`done`/`failed`/`skipped`, kind-aware on `pattern_config`) and descends into
+    /// their dependents. A `running` dependent is a HARD BOUNDARY (UC-2a 评审
+    /// Important-2): it is SKIPPED (never clobbered — its live worker would settle
+    /// over the reset) AND the walk does NOT descend past it, so its downstream is
+    /// NOT re-run against the running node's stale (pre-rerun) output; that subtree
+    /// is left to the live loop / a later rerun. A `pending` dependent needs no
+    /// reset (it is already going to run) but is not a stale-output boundary, so the
+    /// walk keeps descending through it. The walk is bounded by a `seen` guard over
+    /// the (acyclic) graph.
     ///
     /// **Re-activation:** if the run is terminal (`completed`/`failed`/`cancelled`)
     /// it is flipped back to `running` + emitted, so the boot-resume-style loop the
@@ -587,6 +592,16 @@ impl RunService {
     /// run is left as-is (the live loop re-picks the reset tasks on its next sweep);
     /// the route still pokes the engine so an exited loop respawns. Returns the run
     /// DTO so the route can mirror `approve`/`replan`'s engine-lifecycle handling.
+    /// **Concurrency (UC-2a 评审 Critical):** this method MUST run under the
+    /// engine's per-run lock — call it via
+    /// [`RunEngine::rerun_task`](crate::engine::RunEngine::rerun_task), NOT directly
+    /// in production, so the reset + re-activation is serialized with the run-loop's
+    /// terminal-check-and-finish. Calling it lock-free races the loop: the loop
+    /// could write `completed`/`failed` between our `owned_run` read and the
+    /// re-activation, stranding the run terminal-with-a-pending-task (boot-resume
+    /// only re-lists `running`, so it is never recovered). The re-activation block
+    /// below therefore re-reads the run status FRESH (never the stale top-of-method
+    /// snapshot).
     pub async fn rerun_task(&self, user_id: &str, run_id: &str, task_id: &str) -> Result<Run, AppError> {
         let run = self.owned_run(user_id, run_id).await?;
 
@@ -611,12 +626,21 @@ impl RunService {
         }
 
         // RESET the target task (status→pending, clear output/conv, attempt+1).
-        self.reset_task(task_id, task.attempt).await?;
+        // Pass the kind so a pattern node (verify/judge/loop) keeps its policy in
+        // `pattern_config` (Important-1).
+        self.reset_task(task_id, task.attempt, &task.kind).await?;
         self.emitter.emit_task_status(run_id, task_id, "pending");
 
         // CASCADE: transitively reset the target's SETTLED dependents so they
-        // re-run with the new upstream output. A `running` dependent is skipped
-        // (never clobbered); a `pending` one needs no reset.
+        // re-run with the new upstream output. A `running` dependent is a HARD
+        // BOUNDARY — we skip it AND do NOT descend past it (UC-2a 评审 Important-2):
+        // its in-flight worker will settle against the STALE pre-rerun upstream, so
+        // resetting ITS downstream would re-run them against that stale lineage.
+        // That subtree is left to the live loop / a later rerun. We only descend
+        // through nodes we actually reset (settled→pending) or that were already
+        // `pending` (harmless — they have not produced output yet); a `pending`
+        // node is enqueued so a genuinely-mixed frontier still reaches deeper
+        // settled nodes.
         let dep_edges = self
             .run_repo
             .list_deps(run_id)
@@ -632,21 +656,42 @@ impl RunService {
             if !seen.insert(tid.clone()) {
                 continue;
             }
+            // Default: if we cannot read the node, do not descend past it (treat an
+            // unreadable node as an opaque boundary rather than blindly cascading).
+            let mut descend = false;
             if let Some(dep_task) = self
                 .run_repo
                 .get_task(&tid)
                 .await
                 .map_err(OrchestratorError::from)?
             {
-                // Only reset a SETTLED dependent; never touch a running one.
-                if matches!(dep_task.status.as_str(), "done" | "failed" | "skipped") {
-                    self.reset_task(&tid, dep_task.attempt).await?;
-                    self.emitter.emit_task_status(run_id, &tid, "pending");
+                match dep_task.status.as_str() {
+                    // Settled dependent → reset it (kind-aware pattern_config) and
+                    // descend into ITS dependents (the reset propagates downstream).
+                    "done" | "failed" | "skipped" => {
+                        self.reset_task(&tid, dep_task.attempt, &dep_task.kind).await?;
+                        self.emitter.emit_task_status(run_id, &tid, "pending");
+                        descend = true;
+                    }
+                    // Running dependent → BOUNDARY: skip (never clobber the live
+                    // worker) AND do NOT enqueue its dependents (no stale-lineage
+                    // re-run downstream). Leave the subtree to the live loop.
+                    "running" => {
+                        descend = false;
+                    }
+                    // Pending dependent → needs no reset (already going to run), but
+                    // it is NOT a stale-output boundary (it has produced nothing), so
+                    // keep descending to reach any settled nodes beyond it.
+                    _ => {
+                        descend = true;
+                    }
                 }
             }
-            // Enqueue this task's own dependents (transitive cascade).
-            for d in dep_edges.iter().filter(|d| d.blocker_task_id == tid) {
-                frontier.push(d.blocked_task_id.clone());
+            // Enqueue this task's own dependents only when we descended through it.
+            if descend {
+                for d in dep_edges.iter().filter(|d| d.blocker_task_id == tid) {
+                    frontier.push(d.blocked_task_id.clone());
+                }
             }
         }
 
@@ -654,7 +699,25 @@ impl RunService {
         // loop (which the route then starts) has a live run to drive — `run_loop`
         // fills the now-pending ready tasks and re-settles. An already-running run
         // needs no flip (its loop re-picks the reset tasks).
-        if matches!(run.status.as_str(), "completed" | "failed" | "cancelled") {
+        //
+        // **Re-read the run status FRESH here (do NOT use the top-of-method `run`
+        // snapshot).** Under the engine's per-run lock (this method runs through
+        // `RunEngine::rerun_task`), the loop's terminal-check-and-finish is mutually
+        // exclusive with this block — but the loop may have written
+        // `completed`/`failed` AFTER our `owned_run` read and BEFORE we acquired the
+        // lock. The stale snapshot would then read `running`, skip the flip, and
+        // leave the run TERMINAL with a freshly-reset pending task and no loop (the
+        // 评审 Critical variant B — never recovered, as boot-resume only lists
+        // `running`). The fresh read closes that window: whatever the loop committed
+        // before us is visible, so a now-terminal run is correctly re-activated.
+        let current_status = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .map(|r| r.status)
+            .unwrap_or_else(|| run.status.clone());
+        if matches!(current_status.as_str(), "completed" | "failed" | "cancelled") {
             self.run_repo
                 .update_run(
                     run_id,
@@ -736,12 +799,41 @@ impl RunService {
     }
 
     /// RESET a settled task for re-execution: status→`pending`, clear
-    /// `output_summary` + `conversation_id` (and `output_files` + any loop carry on
-    /// `pattern_config`), and bump `attempt`. Shared by the target reset + the
-    /// cascade walk in [`rerun_task`]. Mirrors the engine's `settle_loop_task`
+    /// `output_summary` + `conversation_id` (and `output_files`), and bump
+    /// `attempt`. Shared by the target reset + the cascade walk in
+    /// [`rerun_task`](Self::rerun_task). Mirrors the engine's `settle_loop_task`
     /// CONTINUE reset (the validated reset shape: pending + clear output/conv +
     /// attempt+1) so a re-run task is indistinguishable from a fresh dispatch.
-    async fn reset_task(&self, task_id: &str, prior_attempt: i64) -> Result<(), AppError> {
+    ///
+    /// **`pattern_config` is KIND-AWARE (UC-2a 评审 Important-1).** The
+    /// `pattern_config` column means two completely different things by node kind:
+    /// - for an `agent` task it carries ONLY the transient loop-body carry
+    ///   (`loop_prior_output` / `loop_iteration`, written by the engine's loop
+    ///   controller on CONTINUE) — that stale carry MUST be cleared on reset so a
+    ///   re-run starts from the (possibly amended) spec, not a prior round's brief;
+    /// - for a `verify` / `judge` / `loop` PATTERN node it carries the node's
+    ///   POLICY (`VotePolicy` / `JudgePolicy` / `LoopConfig` — unanimous/threshold,
+    ///   custom aggregate, `max_iter`/stop) which the engine RE-PARSES on every
+    ///   settle. Wiping it would silently revert the policy to its default on a
+    ///   rerun (unanimous→majority, custom judge→mean, custom max_iter→cap-only).
+    ///
+    /// So we clear `pattern_config` ONLY for the `agent` kind (dropping the loop
+    /// carry); for `verify`/`judge`/`loop` we leave it intact (omit the field from
+    /// the update) to PRESERVE the policy.
+    async fn reset_task(
+        &self,
+        task_id: &str,
+        prior_attempt: i64,
+        kind: &str,
+    ) -> Result<(), AppError> {
+        // Pattern nodes (verify/judge/loop) store POLICY in pattern_config — keep
+        // it. An agent task's pattern_config is only the stale loop-body carry —
+        // clear it. `None` here means "leave the column unchanged".
+        let pattern_config = if kind == "agent" {
+            Some(None)
+        } else {
+            None
+        };
         self.run_repo
             .update_task(
                 task_id,
@@ -751,9 +843,7 @@ impl RunService {
                     output_summary: Some(None),
                     output_files: Some(None),
                     attempt: Some(prior_attempt + 1),
-                    // Clear any stale loop carry so a re-run starts from the (possibly
-                    // amended) spec, not a prior round's brief.
-                    pattern_config: Some(None),
+                    pattern_config,
                     ..Default::default()
                 },
             )

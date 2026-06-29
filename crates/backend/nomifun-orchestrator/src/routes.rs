@@ -442,25 +442,34 @@ async fn reassign_task(
     Ok(Json(ApiResponse::success()))
 }
 
-/// Re-execute a single node (UC-2a, owner-scoped). The service RESETS the task +
-/// its settled dependents to `pending`, RE-ACTIVATES a terminal run back to
-/// `running`, and returns the (possibly re-activated) run. The route then drives
-/// the engine: only `engine.start` when the loop is NOT already running (mirrors
-/// `resume_run`) — an unconditional start would `stop()` first, cancelling any
-/// in-flight worker conversations of an already-running run (the work the reject-
-/// running guard meant to preserve). A re-activated terminal run had no live loop,
-/// so it is (re)spawned here; an alive loop self-re-picks the reset pending tasks
-/// on its next sweep. The service rejects re-running a `running` task (400).
+/// Re-execute a single node (UC-2a, owner-scoped). Goes through
+/// [`RunEngine::rerun_task`](crate::engine::RunEngine::rerun_task) so the service's
+/// RESET + cascade + RE-ACTIVATION runs UNDER the engine's per-run lock (the SAME
+/// lock the run-loop's terminal-check-and-finish holds) — this closes the 评审
+/// Critical re-activation race (a lock-free reset could be overwritten by a loop
+/// that concurrently writes `completed`/`failed`, stranding the run). The lock is
+/// released before the engine-lifecycle decision below: only `engine.start` when
+/// the loop is NOT already running (mirrors `resume_run`) — an unconditional start
+/// would `stop()` first, cancelling any in-flight worker conversations of an
+/// already-running run. A re-activated terminal run had its loop deregister its
+/// handle under the lock as it finished, so `!is_running` here is authoritative and
+/// the fresh loop is (re)spawned; an alive loop self-re-picks the reset pending
+/// tasks on its next sweep. The service rejects re-running a `running` task (400).
 async fn rerun_task(
     State(state): State<OrchestratorRouterState>,
     Extension(user): Extension<CurrentUser>,
     Path((run_id, task_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.run_service.rerun_task(&user.id, &run_id, &task_id).await?;
-    // Re-activated terminal run's loop has exited → (re)spawn it; an alive loop
-    // re-picks the reset tasks itself, so do not stop+restart it (would clobber
-    // any in-flight worker of an already-running run).
-    if !state.engine.is_running(&run_id) {
+    let run = state
+        .engine
+        .rerun_task(&state.run_service, &user.id, &run_id, &task_id)
+        .await?;
+    // Re-activated terminal run's loop has exited (it deregistered under the lock)
+    // → (re)spawn it; an alive loop re-picks the reset tasks itself, so do not
+    // stop+restart it (would clobber any in-flight worker of an already-running
+    // run). The `run.status == "running"` guard avoids starting a loop for a run
+    // the reset left non-`running` (e.g. a no-op rerun edge).
+    if run.status == "running" && !state.engine.is_running(&run_id) {
         state.engine.start(run_id);
     }
     Ok(Json(ApiResponse::success()))

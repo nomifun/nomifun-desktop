@@ -117,6 +117,55 @@ pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Fallback concurrency cap when neither the run nor the fleet snapshot pins one.
 pub const DEFAULT_MAX_PARALLEL: usize = 4;
 
+/// Per-run async lock registry serializing the run-loop's **terminal-check +
+/// finish** against the rerun path's **reset + re-activation** (UC-2a 评审
+/// Critical). Both critical sections take the SAME run's lock, so the race window
+/// — where a rerun resets a task to `pending` while the loop concludes the run is
+/// terminal and writes `completed`/`failed` (stranding the run with a pending task
+/// and no live loop) — is closed:
+///
+/// - Under the lock, the loop re-reads the task statuses and ONLY calls
+///   `finish_run` if they are still all-terminal; a concurrently-reset `pending`
+///   task makes it re-loop (re-pick the task) instead of finishing.
+/// - Under the SAME lock, the rerun re-reads the run status (no stale snapshot)
+///   and decides re-activation atomically with the reset.
+///
+/// The map lives on [`RunEngineDeps`] so it is reachable from BOTH the free-
+/// function [`run_loop`] (via `deps.run_locks`) and the [`RunEngine::rerun_task`]
+/// path (via `self.deps.run_locks`) — a single shared registry, no second source
+/// of truth. Locks are created on first access and kept thereafter (the set of run
+/// ids in a process is bounded; a stale entry is a cheap idle `Mutex`).
+///
+/// **No deadlock:** the loop holds a run lock ONLY around the terminal check +
+/// `finish_run` (it NEVER awaits a worker future while holding it); the rerun path
+/// holds it ONLY around the reset + re-activation DB writes (it NEVER calls
+/// `engine.start` while holding it). The two holders never nest, and `start` takes
+/// no lock — so they cannot wait on each other in a cycle.
+#[derive(Default)]
+pub struct RunLocks {
+    locks: DashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl RunLocks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get (creating on miss) the per-run lock. The returned `Arc<Mutex<()>>` is
+    /// cloned out of the map so the caller can `.lock().await` without holding a
+    /// `DashMap` shard guard across the await (which would risk a cross-shard
+    /// deadlock and pin a shard).
+    pub fn for_run(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        if let Some(existing) = self.locks.get(run_id) {
+            return existing.clone();
+        }
+        self.locks
+            .entry(run_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+}
+
 /// How long the run loop idles (between paused-status re-checks) when the run is
 /// `paused` and has no in-flight workers. A bounded sleep — NOT a busy-spin: the
 /// loop yields the runtime each tick, then re-reads the status so a `resume` is
@@ -148,6 +197,11 @@ pub struct RunEngineDeps {
     /// (P3b). Defaults to [`NoopConversationSteerer`] (which errors); the app sets
     /// a real one wrapping `ConversationService::steer_message`.
     pub steer_conversation: Arc<dyn ConversationSteerer>,
+    /// Per-run lock registry serializing the loop's terminal-check+finish with the
+    /// rerun reset+re-activation (UC-2a 评审 Critical — see [`RunLocks`]). Reachable
+    /// from `run_loop` (here, via `deps`) and `RunEngine::rerun_task` (via its
+    /// `deps`), so BOTH critical sections take the same run's lock.
+    pub run_locks: Arc<RunLocks>,
 }
 
 impl RunEngineDeps {
@@ -171,6 +225,7 @@ impl RunEngineDeps {
             ws_repo,
             cancel_conversation: Arc::new(NoopConversationCanceller),
             steer_conversation: Arc::new(NoopConversationSteerer),
+            run_locks: Arc::new(RunLocks::new()),
         }
     }
 }
@@ -240,12 +295,12 @@ impl RunEngine {
         let join = tokio::spawn(async move {
             // Drop runs on normal exit AND panic-unwind → handle always removed.
             let _guard = HandleGuard {
-                handles,
+                handles: handles.clone(),
                 run_id: guard_run_id,
                 generation,
             };
             info!(run_id = %loop_run_id, "Run engine loop started");
-            run_loop(deps, &loop_run_id, cancelled_for_task).await;
+            run_loop(deps, &loop_run_id, cancelled_for_task, handles, generation).await;
             info!(run_id = %loop_run_id, "Run engine loop exited");
         });
 
@@ -374,12 +429,57 @@ impl RunEngine {
         };
         self.deps.steer_conversation.steer(conv_id, text).await
     }
+
+    /// Re-execute a single node (UC-2a) with the loop-vs-rerun race CLOSED. This is
+    /// the engine-side entry the route calls instead of `RunService::rerun_task`
+    /// directly: it acquires the run's lock (the SAME [`RunLocks`] registry the
+    /// `run_loop` terminal check holds — see [`RunLocks`]) and performs the reset +
+    /// cascade + re-activation UNDER it, so the loop cannot conclude the run is
+    /// terminal (and write `completed`/`failed`) in the gap between our reset and
+    /// re-activation.
+    ///
+    /// Returns the (possibly re-activated) run DTO. The CALLER (route) then makes
+    /// the engine-lifecycle decision — `if run.status == "running" && !is_running →
+    /// engine.start` — OUTSIDE this lock. We deliberately do NOT call `start` here:
+    /// `start` first `stop`s (aborting the prior loop task, which may be parked
+    /// holding this very lock at its terminal check); calling `start` while WE hold
+    /// the lock is technically safe (the aborted task's guard drops on unwind), but
+    /// keeping `start` strictly outside the lock keeps the no-deadlock invariant
+    /// trivially obvious — the lock is only ever held around pure DB mutations on
+    /// both sides, never across a `start`/`stop`/worker await.
+    pub async fn rerun_task(
+        &self,
+        run_service: &crate::run_service::RunService,
+        user_id: &str,
+        run_id: &str,
+        task_id: &str,
+    ) -> Result<nomifun_api_types::Run, AppError> {
+        let lock = self.deps.run_locks.for_run(run_id);
+        let _rerun_guard = lock.lock().await;
+        run_service.rerun_task(user_id, run_id, task_id).await
+    }
 }
 
 /// The bounded-parallel run loop: dispatch up to `cap` ready tasks concurrently,
 /// awaiting in-flight workers, until the run reaches a terminal state, then
 /// settle the run row + emit and exit.
-async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicBool>) {
+///
+/// `handles` + `generation` let the loop DEREGISTER its own handle UNDER the run
+/// lock at the moment it `finish_run`s (closing the UC-2a 评审 Critical variant-A
+/// window: a rerun that lands between the status write and the [`HandleGuard`]
+/// drop would otherwise see `is_running == true` and skip the restart). Removing
+/// the handle inside the same lock the terminal check holds makes
+/// `is_running()` flip false ATOMICALLY with the terminal status write, so the
+/// rerun (serialized after on the lock) observes a stopped loop and the route
+/// `engine.start`s a fresh one. The `HandleGuard` still covers the panic / early-
+/// return paths (its remove is idempotent + generation-guarded).
+async fn run_loop(
+    deps: Arc<RunEngineDeps>,
+    run_id: &str,
+    cancelled: Arc<AtomicBool>,
+    handles: Arc<DashMap<String, RunHandle>>,
+    generation: u64,
+) {
     // Resolve the run once for cap + workspace; if the run row is unreadable we
     // cannot drive anything — bail (the handle guard still deregisters).
     let run = match deps.run_repo.get_run(run_id).await {
@@ -628,8 +728,49 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
                 tokio::time::sleep(PAUSE_POLL_INTERVAL).await;
                 continue;
             }
-            // Not paused: the task statuses are conclusive (with zero workers in
-            // flight they cannot change underneath us — no busy-spin).
+            // Not paused: with zero workers in flight the task statuses are
+            // conclusive — EXCEPT for one concurrent mutator: a `rerun_task` may
+            // reset a settled task back to `pending` (and re-activate the run). To
+            // make the "all terminal? → finish" decision atomic with that reset, we
+            // take the run's lock and RE-READ under it (the reads above the lock can
+            // be stale w.r.t. a reset that lands in the gap). The rerun path holds
+            // the SAME lock across reset + re-activation, so under the lock exactly
+            // one of two states is observable:
+            //   - a reset already committed and produced RUNNABLE work → re-loop so
+            //     the fill pass dispatches it (the live loop keeps driving), OR
+            //   - no runnable work remains → the statuses are genuinely terminal →
+            //     we finish_run under the lock (the rerun, serialized after, then
+            //     re-reads the now-terminal run status and re-activates + restarts).
+            // Either way a run is never left non-running/terminal with a runnable
+            // pending task. We hold the lock only around this check + finish — never
+            // while awaiting a worker — so it cannot deadlock the rerun path.
+            //
+            // The re-loop signal is the READY set (not "any pending task"): a
+            // legitimately-FAILED run keeps its downstream tasks `pending` forever
+            // (their blocker is `failed`, never `done`, so they are never ready) —
+            // those must NOT block the `failed` finish. A rerun, by contrast, resets
+            // a settled task whose blockers are done (or resets the whole subtree),
+            // so at least one reset task becomes READY. Keying off readiness finishes
+            // the failed run correctly while still re-driving a genuine rerun reset.
+            let lock = deps.run_locks.for_run(run_id);
+            let _terminal_guard = lock.lock().await;
+            // A concurrent rerun reset a task to a now-RUNNABLE pending state under
+            // the lock just before us → there is real work to do; do not finish.
+            // Release the lock (drop the guard) and re-loop so the fill pass
+            // dispatches it. This is the atomic check-then-act that closes the
+            // strand race. A `list_ready_tasks` error here is treated as "no ready
+            // work" (fail toward the terminal decision below, which logs) — the
+            // statuses read still drive the conclusive branch.
+            let has_ready_work = deps
+                .run_repo
+                .list_ready_tasks(run_id)
+                .await
+                .map(|ready| !ready.is_empty())
+                .unwrap_or(false);
+            if has_ready_work {
+                drop(_terminal_guard);
+                continue;
+            }
             match deps.run_repo.list_tasks(run_id).await {
                 Ok(tasks) => {
                     let all_terminal = tasks
@@ -639,8 +780,14 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
                     if !tasks.is_empty() && all_terminal {
                         finish_run(&deps, run_id, "completed", Some(aggregate_summary(&tasks)))
                             .await;
+                        // Deregister our handle UNDER the lock so `is_running` flips
+                        // false atomically with the terminal status write — a rerun
+                        // serialized after us on this lock then observes a stopped
+                        // loop and the route restarts it (no variant-A strand).
+                        handles.remove_if(run_id, |_, h| h.generation == generation);
                     } else if any_failed {
                         finish_run(&deps, run_id, "failed", None).await;
+                        handles.remove_if(run_id, |_, h| h.generation == generation);
                     } else {
                         // Stuck (no ready, no in-flight, not terminal) — break,
                         // never spin.
@@ -5872,7 +6019,7 @@ mod tests {
         let (a_attempt, b_attempt, c_attempt) = (a.attempt, b.attempt, c.attempt);
 
         // Rerun the ROOT task A → it + its transitive dependents (B, C) reset.
-        let run_after = svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun A");
+        let run_after = engine.rerun_task(&svc, "u1", &run_id, &a.id).await.expect("rerun A");
         assert_eq!(run_after.status, "running", "completed run re-activated to running");
 
         // Immediately after reset (before the loop re-drives), A/B/C are pending and
@@ -5916,7 +6063,7 @@ mod tests {
         let b = first.tasks.iter().find(|t| t.title == "B").unwrap().clone();
         let c = first.tasks.iter().find(|t| t.title == "C").unwrap().clone();
 
-        svc.rerun_task("u1", &run_id, &c.id).await.expect("rerun C");
+        engine.rerun_task(&svc, "u1", &run_id, &c.id).await.expect("rerun C");
 
         let reset = svc.get_detail(&run_id).await.expect("detail");
         let a2 = reset.tasks.iter().find(|t| t.title == "A").unwrap();
@@ -5986,7 +6133,7 @@ mod tests {
         assert_eq!(a.status, "failed", "A failed");
 
         // Rerun the failed A → re-activates the failed run + re-executes.
-        let run_after = svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun failed A");
+        let run_after = engine.rerun_task(&svc, "u1", &run_id, &a.id).await.expect("rerun failed A");
         assert_eq!(run_after.status, "running", "failed run re-activated to running");
         engine.start(run_id.clone());
         let second = drive_to_completion(&svc, &run_id).await;
@@ -6043,8 +6190,8 @@ mod tests {
         }
         let running_id = running_id.expect("a task is running");
 
-        let err = svc
-            .rerun_task("u1", &run_id, &running_id)
+        let err = engine
+            .rerun_task(&svc, "u1", &run_id, &running_id)
             .await
             .expect_err("rerun of a running task must reject");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
@@ -6092,7 +6239,7 @@ mod tests {
         let a_edited = after_edit.tasks.iter().find(|t| t.title == "A").unwrap();
         assert_eq!(a_edited.spec, "重新做 A（改进版）", "spec persisted");
 
-        svc.rerun_task("u1", &run_id, &a.id).await.expect("rerun A");
+        engine.rerun_task(&svc, "u1", &run_id, &a.id).await.expect("rerun A");
         engine.start(run_id.clone());
         let second = drive_to_completion(&svc, &run_id).await;
         assert_eq!(second.run.status, "completed");
@@ -6182,7 +6329,7 @@ mod tests {
         let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
 
         // Wrong user → 403 for both controls.
-        let err = svc.rerun_task("intruder", &run_id, &a.id).await.expect_err("cross-user rerun");
+        let err = engine.rerun_task(&svc, "intruder", &run_id, &a.id).await.expect_err("cross-user rerun");
         assert!(matches!(err, AppError::Forbidden(_)), "rerun cross-user is 403, got: {err:?}");
         let err = svc
             .update_task_spec("intruder", &run_id, &a.id, "盗改")
@@ -6191,7 +6338,7 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden(_)), "spec cross-user is 403, got: {err:?}");
 
         // Missing run → 404 for both.
-        let err = svc.rerun_task("u1", "run_missing", &a.id).await.expect_err("missing run rerun");
+        let err = engine.rerun_task(&svc, "u1", "run_missing", &a.id).await.expect_err("missing run rerun");
         assert!(matches!(err, AppError::NotFound(_)), "rerun missing is 404, got: {err:?}");
         let err = svc
             .update_task_spec("u1", "run_missing", &a.id, "x")
@@ -6204,5 +6351,504 @@ mod tests {
         let a_after = detail.tasks.iter().find(|t| t.title == "A").unwrap();
         assert_eq!(a_after.status, "done", "non-owner ops did not reset A");
         assert_eq!(a_after.spec, "do A", "non-owner edit did not change the spec");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UC-2a 评审 Critical: the re-activation status-vs-loop race (per-run lock).
+    // Plus Important-1 (reset preserves pattern node policy) and Important-2 (the
+    // cascade does not descend past a running boundary).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // C1(a) — variant-A reactivation path THROUGH the route-level decision. Rerun a
+    // task on a COMPLETED run, then apply the EXACT route gate
+    // (`if run.status=="running" && !is_running → engine.start`); the run must
+    // re-drive to `completed` with a LIVE loop (no strand). Because `engine.rerun_task`
+    // deregisters the finished loop's handle UNDER the run lock as it writes the
+    // terminal status, `is_running` is authoritative here and the fresh loop is
+    // (re)spawned — the run never sits `running`-with-pending-tasks-and-no-driver.
+    #[tokio::test]
+    async fn rerun_completed_run_redrives_with_live_loop_no_strand() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(900, "out"));
+        let (svc, engine, run_id) = rerun_chain_harness(worker).await;
+
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        // The completed loop has deregistered its handle (terminal under the lock).
+        // Poll briefly: the handle is removed under the lock as finish_run runs.
+        for _ in 0..200 {
+            if !engine.is_running(&run_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!engine.is_running(&run_id), "completed run's loop deregistered");
+        let a = first.tasks.iter().find(|t| t.title == "A").unwrap().clone();
+
+        // Route path: rerun under the engine lock, then apply the route's gate.
+        let run = engine
+            .rerun_task(&svc, "u1", &run_id, &a.id)
+            .await
+            .expect("rerun A");
+        assert_eq!(run.status, "running", "completed run re-activated to running");
+        // EXACT route decision — only start when running AND no live loop.
+        let started = run.status == "running" && !engine.is_running(&run_id);
+        assert!(started, "route must (re)start the loop for a re-activated run with no live driver");
+        engine.start(run_id.clone());
+
+        // The re-activated run re-drives to completion — a LIVE loop drove it, the
+        // run was NOT stranded `running`-with-pending-and-no-loop.
+        let second = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(second.run.status, "completed", "re-activated run completes (no strand)");
+        for t in &second.tasks {
+            assert_eq!(t.status, "done", "task {} re-executed to done", t.title);
+        }
+    }
+
+    // C1(b) — logic-level invariant: a rerun that resets a settled task while the
+    // run is STILL `running` (a live worker in flight elsewhere) must leave the run
+    // running-with-a-live-driver (never terminal-with-a-pending-task). This is the
+    // reachable shape of variant B: the live loop is awaiting a gated worker; we
+    // rerun a DIFFERENT, already-done task. Under the per-run lock the reset is
+    // serialized with the loop's terminal check, so the loop either has not finished
+    // (it is awaiting the gated worker — `running`) or, once released, re-picks the
+    // reset task. The run must converge to `completed` with every task `done`.
+    //
+    // COVERAGE LIMIT: a true thread-interleaving where the reset lands in the exact
+    // microsecond between the loop's terminal `list_tasks` read and `finish_run` is
+    // not deterministically reproducible from the test harness (it depends on the
+    // multi-thread scheduler). This test pins the OBSERVABLE invariant — no strand,
+    // run converges with a live driver — across the reachable concurrent shape; the
+    // exact-interleaving guarantee rests on the lock holding the
+    // re-read-statuses-and-finish critical section (asserted by construction in
+    // `run_loop`, exercised here end-to-end).
+    #[tokio::test]
+    async fn rerun_while_running_never_strands_run() {
+        // A→B→C chain. We gate B's worker so that when we rerun A, the run is still
+        // `running` (B in flight). cap=1 forces strict A→B→C ordering.
+        struct GateBWorker {
+            gate: Arc<tokio::sync::Notify>,
+            calls: Arc<Mutex<Vec<String>>>,
+            run_repo: Arc<SqliteRunRepository>,
+        }
+        #[async_trait]
+        impl WorkerRunner for GateBWorker {
+            async fn run(
+                &self,
+                _member: &FleetMember,
+                _workspace_dir: Option<&str>,
+                run_id: &str,
+                task_id: &str,
+                _brief: &str,
+                _task_spec: &str,
+                _timeout: Duration,
+                on_started: Box<dyn FnOnce(i64) + Send>,
+            ) -> Result<WorkerOutcome, AppError> {
+                on_started(900);
+                // Block ONLY the SECOND task (B) on its FIRST visit, so the run is
+                // still `running` while we rerun A. Resolve the title via the repo.
+                let title = self
+                    .run_repo
+                    .list_tasks(run_id)
+                    .await
+                    .ok()
+                    .and_then(|ts| ts.into_iter().find(|t| t.id == task_id).map(|t| t.title))
+                    .unwrap_or_default();
+                let first_b = {
+                    let mut c = self.calls.lock().unwrap();
+                    c.push(title.clone());
+                    title == "B" && c.iter().filter(|t| *t == "B").count() == 1
+                };
+                if first_b {
+                    self.gate.notified().await;
+                }
+                Ok(WorkerOutcome {
+                    conversation_id: 900,
+                    text: Some(format!("output of {task_id}")),
+                    ok: true,
+                })
+            }
+        }
+
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let svc = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(GateBWorker {
+            gate: gate.clone(),
+            calls: Arc::new(Mutex::new(vec![])),
+            run_repo: run_repo.clone(),
+        });
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "strand fleet".to_string(),
+                    description: None,
+                    max_parallel: Some(1), // cap=1 → strict A→B→C
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "strand ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "strand chain".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        svc.plan(&run.id).await.expect("plan");
+        let run_id = run.id;
+
+        engine.start(run_id.clone());
+
+        // Wait until B is `running` (A done, B in flight, run still `running`).
+        let mut a_id = None;
+        for _ in 0..300 {
+            let d = svc.get_detail(&run_id).await.expect("detail");
+            let b_running = d.tasks.iter().any(|t| t.title == "B" && t.status == "running");
+            if b_running {
+                a_id = d.tasks.iter().find(|t| t.title == "A").map(|t| t.id.clone());
+                assert_eq!(d.run.status, "running", "run is still running while B is in flight");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let a_id = a_id.expect("A resolved while B is running");
+
+        // Rerun the DONE task A while the run is running (B in flight). The cascade
+        // resets A (root) → its dependents B,C. B is `running` → it is a BOUNDARY
+        // (skipped, not descended): C is NOT reset off B here (Important-2). A is
+        // reset to pending. The run stays `running` (re-read status under the lock).
+        let run_after = engine.rerun_task(&svc, "u1", &run_id, &a_id).await.expect("rerun A");
+        assert_eq!(run_after.status, "running", "run stays running (not re-activated)");
+        // Route gate: run is running AND a live loop exists → do NOT restart.
+        assert!(engine.is_running(&run_id), "the live loop is still registered (not stranded)");
+
+        // Release B's gate so the run can drain. The live loop must re-pick the
+        // reset A and converge — never leaving the run terminal with a pending task.
+        tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..40 {
+                    gate.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let final_detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(final_detail.run.status, "completed", "run converges (no strand)");
+        for t in &final_detail.tasks {
+            assert_eq!(t.status, "done", "task {} done at convergence", t.title);
+        }
+    }
+
+    // Important-1: rerunning a `verify` (unanimous) node PRESERVES its
+    // `pattern_config` policy — the reset must NOT wipe it back to the
+    // majority default.
+    #[tokio::test]
+    async fn rerun_verify_preserves_vote_policy() {
+        let cfg = r#"{"vote":"unanimous"}"#;
+        let (svc, engine, _w, run_id) = verify_harness(vec![true, true, true], Some(cfg)).await;
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        let gate = first.tasks.iter().find(|t| t.title == "Gate").unwrap().clone();
+        assert_eq!(gate.kind, "verify");
+        assert_eq!(gate.pattern_config.as_deref(), Some(cfg), "policy present before rerun");
+
+        // Rerun the verify node: its policy must SURVIVE the reset.
+        engine.rerun_task(&svc, "u1", &run_id, &gate.id).await.expect("rerun Gate");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        let gate2 = after.tasks.iter().find(|t| t.title == "Gate").unwrap();
+        assert_eq!(gate2.status, "pending", "verify reset to pending");
+        assert_eq!(
+            gate2.pattern_config.as_deref(),
+            Some(cfg),
+            "verify pattern_config (VotePolicy) PRESERVED across reset"
+        );
+    }
+
+    // Important-1: rerunning a `judge` (custom aggregate) node PRESERVES its policy.
+    #[tokio::test]
+    async fn rerun_judge_preserves_aggregate_policy() {
+        let cfg = r#"{"aggregate":"borda"}"#;
+        let (svc, engine, _w, run_id) =
+            judge_harness(2, vec!["0:1,1:5", "0:2,1:4"], Some(cfg)).await;
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        let pick = first.tasks.iter().find(|t| t.title == "Pick").unwrap().clone();
+        assert_eq!(pick.kind, "judge");
+        assert_eq!(pick.pattern_config.as_deref(), Some(cfg), "policy present before rerun");
+
+        engine.rerun_task(&svc, "u1", &run_id, &pick.id).await.expect("rerun Pick");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        let pick2 = after.tasks.iter().find(|t| t.title == "Pick").unwrap();
+        assert_eq!(pick2.status, "pending", "judge reset to pending");
+        assert_eq!(
+            pick2.pattern_config.as_deref(),
+            Some(cfg),
+            "judge pattern_config (JudgePolicy) PRESERVED across reset"
+        );
+    }
+
+    // Important-1: rerunning a `loop` CONTROLLER node PRESERVES its policy
+    // (custom max_iter / stop), while a rerun of the loop BODY (an `agent` task)
+    // CLEARS the transient loop carry on pattern_config.
+    #[tokio::test]
+    async fn rerun_loop_controller_preserves_policy_body_clears_carry() {
+        // max_iter=3, cap-only (no early stop) → the loop iterates to its hard cap,
+        // so the body re-runs and carries `loop_prior_output` forward each round.
+        let cfg = r#"{"max_iter":3}"#;
+        let (svc, engine, _w, run_id) =
+            loop_harness(cfg, vec!["round-1", "round-2", "round-3"], None).await;
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed");
+        let controller = first.tasks.iter().find(|t| t.title == "Loop").unwrap().clone();
+        let body = first.tasks.iter().find(|t| t.title == "Refine").unwrap().clone();
+        assert_eq!(controller.kind, "loop");
+        assert_eq!(
+            controller.pattern_config.as_deref(),
+            Some(cfg),
+            "loop controller policy present before rerun"
+        );
+        // The body iterated to the cap → it carries a loop_prior_output on its
+        // pattern_config (set by the controller's CONTINUE reset).
+        assert!(
+            body.pattern_config
+                .as_deref()
+                .map(|s| s.contains("loop_prior_output"))
+                .unwrap_or(false),
+            "loop body carries loop_prior_output after iterating: {:?}",
+            body.pattern_config
+        );
+
+        // Rerun the loop CONTROLLER → its policy must survive.
+        engine.rerun_task(&svc, "u1", &run_id, &controller.id).await.expect("rerun Loop");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        let controller2 = after.tasks.iter().find(|t| t.title == "Loop").unwrap();
+        assert_eq!(controller2.status, "pending", "loop controller reset");
+        assert_eq!(
+            controller2.pattern_config.as_deref(),
+            Some(cfg),
+            "loop controller pattern_config (LoopConfig: max_iter/stop) PRESERVED"
+        );
+        // The cascade reset the loop BODY too (it is a settled dependent of the
+        // controller via the loop's edges) — being an `agent` kind, its stale loop
+        // carry was CLEARED.
+        let body2 = after.tasks.iter().find(|t| t.title == "Refine").unwrap();
+        // Whether or not the body is a downstream of the controller in the cascade,
+        // an explicit body rerun must clear the carry. Assert via a direct body
+        // rerun to make the contract unambiguous.
+        engine.rerun_task(&svc, "u1", &run_id, &body2.id).await.expect("rerun body");
+        let after2 = svc.get_detail(&run_id).await.expect("detail");
+        let body3 = after2.tasks.iter().find(|t| t.title == "Refine").unwrap();
+        assert_eq!(body3.status, "pending", "loop body reset");
+        assert_eq!(
+            body3.pattern_config, None,
+            "loop body (agent kind) pattern_config CLEARED (stale loop_prior_output dropped): {:?}",
+            body3.pattern_config
+        );
+    }
+
+    // Important-2: a cascade that hits a `running` intermediate dependent SKIPS it
+    // AND does NOT descend past it — its downstream is left untouched (no stale-
+    // lineage re-run). A→B→C chain; gate B so it is `running`; rerun A. B (running)
+    // must be skipped and C (downstream of the running B) must NOT be reset.
+    #[tokio::test]
+    async fn cascade_stops_at_running_boundary() {
+        struct GateMiddleWorker {
+            gate: Arc<tokio::sync::Notify>,
+            run_repo: Arc<SqliteRunRepository>,
+        }
+        #[async_trait]
+        impl WorkerRunner for GateMiddleWorker {
+            async fn run(
+                &self,
+                _member: &FleetMember,
+                _workspace_dir: Option<&str>,
+                run_id: &str,
+                task_id: &str,
+                _brief: &str,
+                _task_spec: &str,
+                _timeout: Duration,
+                on_started: Box<dyn FnOnce(i64) + Send>,
+            ) -> Result<WorkerOutcome, AppError> {
+                on_started(900);
+                let title = self
+                    .run_repo
+                    .list_tasks(run_id)
+                    .await
+                    .ok()
+                    .and_then(|ts| ts.into_iter().find(|t| t.id == task_id).map(|t| t.title))
+                    .unwrap_or_default();
+                // Block B forever (until released) so it stays `running` across the
+                // rerun. A and C complete immediately.
+                if title == "B" {
+                    self.gate.notified().await;
+                }
+                Ok(WorkerOutcome {
+                    conversation_id: 900,
+                    text: Some(format!("output of {task_id}")),
+                    ok: true,
+                })
+            }
+        }
+
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let svc = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let worker: Arc<dyn WorkerRunner> = Arc::new(GateMiddleWorker {
+            gate: gate.clone(),
+            run_repo: run_repo.clone(),
+        });
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "boundary fleet".to_string(),
+                    description: None,
+                    max_parallel: Some(1),
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "boundary ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = svc
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "boundary chain".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run");
+        svc.plan(&run.id).await.expect("plan");
+        let run_id = run.id;
+
+        engine.start(run_id.clone());
+
+        // Wait until A is done and B is running.
+        let (mut a_id, mut a_attempt_before, mut c_attempt_before) = (None, None, None);
+        for _ in 0..300 {
+            let d = svc.get_detail(&run_id).await.expect("detail");
+            let a_done = d.tasks.iter().any(|t| t.title == "A" && t.status == "done");
+            let b_running = d.tasks.iter().any(|t| t.title == "B" && t.status == "running");
+            if a_done && b_running {
+                let a = d.tasks.iter().find(|t| t.title == "A").unwrap();
+                a_id = Some(a.id.clone());
+                a_attempt_before = Some(a.attempt);
+                c_attempt_before = d.tasks.iter().find(|t| t.title == "C").map(|t| t.attempt);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let a_id = a_id.expect("A done while B running");
+        let a_attempt_before = a_attempt_before.expect("A attempt read");
+        let c_attempt_before = c_attempt_before.expect("C attempt read");
+
+        // Rerun A: cascade reaches B (running → boundary: skipped, NOT descended) so
+        // C is NOT reset (it sits beyond the running B).
+        engine.rerun_task(&svc, "u1", &run_id, &a_id).await.expect("rerun A");
+        let after = svc.get_detail(&run_id).await.expect("detail");
+        let a = after.tasks.iter().find(|t| t.title == "A").unwrap();
+        let b = after.tasks.iter().find(|t| t.title == "B").unwrap();
+        let c = after.tasks.iter().find(|t| t.title == "C").unwrap();
+        // The rerun DID run (target A reset → attempt bumped, pending) — so the
+        // cascade machinery executed; C being untouched is a real boundary decision.
+        assert_eq!(a.status, "pending", "target A reset to pending");
+        assert_eq!(a.attempt, a_attempt_before + 1, "target A attempt bumped (rerun ran)");
+        assert_eq!(b.status, "running", "running B left untouched (skipped, not clobbered)");
+        assert_eq!(
+            c.attempt, c_attempt_before,
+            "C beyond the running boundary was NOT reset (attempt unchanged): no stale-lineage re-run"
+        );
+        // C is naturally `pending` (it never ran — its blocker B is still running),
+        // but it must NOT have been TOUCHED by the cascade: the reset bumps `attempt`
+        // and emits a `pending` status event. The unchanged attempt above is the
+        // authoritative proof the cascade stopped at the running B boundary and did
+        // not descend to C (a reset would have bumped it to `c_attempt_before + 1`).
+        assert!(
+            c.output_summary.is_none() && c.conversation_id.is_none(),
+            "C never ran and was not reset-with-output (clean pending beyond the boundary)"
+        );
+
+        // Cleanup: release B so the run can drain and not leak the blocked worker.
+        tokio::spawn({
+            let gate = gate.clone();
+            async move {
+                for _ in 0..40 {
+                    gate.notify_one();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let _ = drive_to_completion(&svc, &run_id).await;
     }
 }
