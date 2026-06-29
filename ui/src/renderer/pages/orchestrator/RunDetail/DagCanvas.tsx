@@ -19,7 +19,7 @@ import { layoutDag } from './layoutDag';
 import { memberLogo, memberShortLabel } from './memberLabel';
 import RolePrecipitationPanel from './RolePrecipitationPanel';
 import RunDetailHeader from './RunDetailHeader';
-import TaskNode, { normalizeTaskKind, taskStatusMeta, type TaskFlowNode, type JudgeWinner, type LoopState, type VerifyVerdict } from './nodes/TaskNode';
+import TaskNode, { normalizeTaskKind, type TaskFlowNode, type JudgeWinner, type LoopState, type VerifyVerdict } from './nodes/TaskNode';
 
 /** Stable nodeTypes ref so react-flow doesn't warn about a new object each render. */
 const NODE_TYPES = { task: TaskNode } as const;
@@ -164,8 +164,84 @@ function hueForGroup(label: string): number {
  * small (1-2 node) graph grow to a legible size instead of staying pinned tiny. */
 const FIT_VIEW_OPTIONS = { padding: 0.12, maxZoom: 1.6 } as const;
 
+/**
+ * Size hints stamped onto every node object as `initialWidth`/`initialHeight`.
+ *
+ * WHY this exists — the MiniMap was rendering BLANK. react-flow's MiniMapNode
+ * (`@xyflow/react` v12) reads each node's size off the *user* node object via
+ * `getNodeDimensions` (= `measured?.w ?? width ?? initialWidth ?? 0`) and, when
+ * that resolves to 0, `nodeHasDimensions` is false and the wrapper returns
+ * `null` — so no `<rect>` is emitted at all. Our nodes get their size purely
+ * from the `w-220px` UnoCSS class on the rendered card; the measured dimensions
+ * are written to the *internal* node, never back onto the user node objects the
+ * minimap reads (this canvas drives `nodes` as controlled props with no
+ * `onNodesChange` write-back). Result: the minimap sees 0×0 forever → blank.
+ *
+ * `initialWidth`/`initialHeight` (NOT `width`/`height`) are the right knob: they
+ * give `getNodeDimensions`/`nodeHasDimensions` a non-zero size so the minimap
+ * rect renders, but `getNodeInlineStyleDimensions` only applies `initialWidth/
+ * Height` to the rendered DOM *before first measurement* and then defers to the
+ * CSS-driven natural size — so the main canvas card keeps its `w-220px` +
+ * auto-height (no clipping, no fixed-height distortion of the meta-chip rows).
+ * The width mirrors the card (`w-220px`); the height is a representative card
+ * height — its only effect is the minimap rect's aspect ratio. */
+const MINIMAP_NODE_W = 220;
+const MINIMAP_NODE_H = 96;
+
 /** Statuses that count as "done" for the aggregate progress pill. */
 const DONE_STATUSES = new Set(['done', 'completed', 'skipped', 'cancelled']);
+
+/**
+ * The MiniMap's LITERAL mirror of {@link taskStatusMeta}.
+ *
+ * The minimap's `nodeColor` becomes the SVG `<rect>`'s `fill`, and react-flow
+ * resolves it as a plain JS prop — CSS-var expressions (`var(--success)`,
+ * `rgb(var(--primary-6))`, …) are fragile / unresolved in that context, exactly
+ * like the mask/bg/stroke we already hex-mirror into `flowColors`. Worse, two of
+ * the status colors are near-background light greys — `pending → var(--bg-6)`
+ * and `skipped/cancelled → var(--text-disabled)` — which VANISH against the
+ * light minimap bg (`#f9fafb`), so even a perfectly-sized rect would look blank
+ * on a fresh all-pending run.
+ *
+ * So we resolve every status to a theme-aware LITERAL that contrasts with the
+ * minimap bg on BOTH themes: running = brand blue, done = green, failed = red,
+ * needs_review/blocked = amber, skipped/cancelled = a muted-but-VISIBLE grey,
+ * pending = a visible grey (never near-white). Keep this set in lockstep with
+ * `taskStatusMeta`'s switch. */
+const MINIMAP_STATUS_COLORS: Record<'light' | 'dark', Record<string, string>> = {
+  light: {
+    running: '#2f6bff', // brand blue
+    done: '#16a34a',
+    completed: '#16a34a',
+    failed: '#dc2626',
+    error: '#dc2626',
+    needs_review: '#d97706', // amber
+    blocked: '#d97706',
+    skipped: '#94a3b8', // muted but visible grey on #f9fafb
+    cancelled: '#94a3b8',
+    pending: '#b4bccb', // visible grey (not near-white)
+  },
+  dark: {
+    running: '#5b8bff',
+    done: '#22c55e',
+    completed: '#22c55e',
+    failed: '#f04438',
+    error: '#f04438',
+    needs_review: '#f59e0b',
+    blocked: '#f59e0b',
+    skipped: '#64748b', // muted but visible grey on #1a1a1a
+    cancelled: '#64748b',
+    pending: '#5a6273', // visible grey (not near-black)
+  },
+};
+
+/** Resolve a task status to its minimap-literal color for the active theme,
+ * falling back to the `pending` grey for any unknown status (mirrors
+ * `taskStatusMeta`'s default arm). */
+function miniMapNodeColor(status: string, theme: 'light' | 'dark'): string {
+  const map = MINIMAP_STATUS_COLORS[theme];
+  return map[status] ?? map.pending;
+}
 
 /** Payload handed up when a DAG node is clicked — everything the task inspector
  * needs to show the assignment rationale and offer reassign/lock, without the
@@ -338,6 +414,12 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
         id: task.id,
         type: 'task',
         position: pos,
+        // Size hints so the MiniMap can render this node's rect (see
+        // MINIMAP_NODE_W/H). `initialWidth/Height` give react-flow a non-zero
+        // size for the minimap WITHOUT pinning the rendered card's DOM size, so
+        // the card keeps its `w-220px` + auto-height on the main canvas.
+        initialWidth: MINIMAP_NODE_W,
+        initialHeight: MINIMAP_NODE_H,
         data: {
           title: task.title || t('orchestrator.run.detail.untitledTask'),
           status: task.status,
@@ -578,7 +660,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onBack, onOpenTask, embedd
               zoomable
               maskColor={flowColors.minimapMask}
               style={{ background: flowColors.minimapBg, border: `1px solid ${flowColors.minimapStroke}` }}
-              nodeColor={(n) => taskStatusMeta(String((n.data as { status?: string }).status ?? '')).color}
+              nodeColor={(n) => miniMapNodeColor(String((n.data as { status?: string }).status ?? ''), theme)}
               nodeStrokeWidth={2}
             />
           </ReactFlow>
