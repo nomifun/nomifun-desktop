@@ -477,6 +477,20 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
         // driven unblocking is observed. A list error is not fatal mid-flight
         // (workers may still be running) — log and proceed to the await branch;
         // the next fill retries.
+        // (b) Fill: dispatch ready tasks up to the free slots — SKIPPED while
+        // paused (no new workers dispatch). Re-query every fill so completion-
+        // driven unblocking is observed. A list error is not fatal mid-flight
+        // (workers may still be running) — log and proceed to the await branch;
+        // the next fill retries.
+        //
+        // `settled_verify` records whether this fill pass settled a `verify`
+        // aggregator synchronously. A settle is genuine forward progress (a task
+        // went pending→done and may have unblocked downstream), so when it happens
+        // we re-loop to re-fill BEFORE the terminal decision — otherwise a verify
+        // that settles with no worker in flight would be misread as a "stuck"
+        // graph (its downstream is freshly ready but not yet dispatched). This is
+        // NOT a busy-spin: it only re-loops because a task actually transitioned.
+        let mut settled_verify = false;
         if !paused && inflight.len() < cap {
             match deps.run_repo.list_ready_tasks(run_id).await {
                 Ok(ready) => {
@@ -489,6 +503,20 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
                         .take(free)
                         .collect();
                     for task in to_dispatch {
+                        // verify 模式 (UC-1b): a `verify` aggregator is settled
+                        // SYNCHRONOUSLY here — NOT dispatched to a worker. It reads
+                        // its skeptic deps' outputs, tallies a verdict, writes it,
+                        // marks itself `done`, and gates downstream on FAIL. It never
+                        // enters the in-flight set (no worker, no spin); because it is
+                        // only reached when already in the ready set (all skeptics
+                        // `done`), it settles in this single fill pass. We then
+                        // re-loop (settled_verify) to re-fill, observing the verdict
+                        // (downstream proceeds on PASS, is `skipped` on FAIL).
+                        if task.kind == "verify" {
+                            settle_verify_task(&deps, run_id, &task).await;
+                            settled_verify = true;
+                            continue;
+                        }
                         let fut = dispatch_task(&deps, run_id, task, workspace_dir.clone()).await;
                         if let Some((task_id, fut)) = fut {
                             in_progress.insert(task_id);
@@ -504,6 +532,14 @@ async fn run_loop(deps: Arc<RunEngineDeps>, run_id: &str, cancelled: Arc<AtomicB
                     warn!(run_id, error = %e, "Run loop: list_ready_tasks failed — will retry after next completion");
                 }
             }
+        }
+
+        // A verify settled this pass → re-loop to re-fill on the newly-unblocked
+        // (or freshly-skipped) downstream before any terminal decision. Bounded:
+        // each verify settles exactly once (it is `done` afterward, never returned
+        // by `list_ready_tasks` again), so this cannot loop forever.
+        if settled_verify {
+            continue;
         }
 
         // (c) No in-flight worker → either idle on the paused gate OR make the
@@ -916,6 +952,343 @@ fn aggregate_summary(tasks: &[OrchRunTaskRow]) -> String {
         }
     }
     out
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// verify 模式 (UC-1b): N skeptic agent tasks → a no-LLM `verify` aggregator
+// that tallies their pass/fail verdicts by a vote policy and gates downstream.
+//
+// The aggregator is NOT a worker dispatch: it is settled SYNCHRONOUSLY in the
+// run loop's fill step (see `settle_verify_task`), reading its dependency
+// tasks' `output_summary` and computing a verdict. It never enters the in-flight
+// worker set, never spins (it settles in one pass once its deps are done), and
+// its `conversation_id` stays None (there is no worker conversation).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// The vote policy for a `verify` aggregator, read from its `pattern_config`
+/// JSON (`{"vote": ...}`). Defaults to [`VotePolicy::Majority`] when the config
+/// is absent, blank, malformed, or carries an unknown `vote` value — fail-soft,
+/// matching `parse_plan`'s tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VotePolicy {
+    /// Pass iff strictly more than half the skeptics voted pass (> N/2).
+    Majority,
+    /// Pass iff EVERY skeptic voted pass (and there is at least one skeptic).
+    Unanimous,
+    /// Pass iff at least `n` skeptics voted pass.
+    Threshold(usize),
+}
+
+impl VotePolicy {
+    /// Parse the policy from a `verify` task's `pattern_config` raw JSON string.
+    /// Fail-soft: any problem (None / blank / not JSON / unknown shape) yields
+    /// [`VotePolicy::Majority`], the safe default. Accepted `vote` shapes:
+    /// - `"majority"` → Majority
+    /// - `"unanimous"` → Unanimous
+    /// - `{"threshold": N}` → Threshold(N)
+    fn parse(pattern_config: Option<&str>) -> Self {
+        let Some(raw) = pattern_config.map(str::trim).filter(|s| !s.is_empty()) else {
+            return VotePolicy::Majority;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return VotePolicy::Majority;
+        };
+        let Some(vote) = value.get("vote") else {
+            return VotePolicy::Majority;
+        };
+        // String form: "majority" | "unanimous".
+        if let Some(s) = vote.as_str() {
+            return match s.trim().to_ascii_lowercase().as_str() {
+                "unanimous" => VotePolicy::Unanimous,
+                // "majority" and anything unknown both fall to the safe default.
+                _ => VotePolicy::Majority,
+            };
+        }
+        // Object form: {"threshold": N}.
+        if let Some(n) = vote.get("threshold").and_then(serde_json::Value::as_u64) {
+            return VotePolicy::Threshold(n as usize);
+        }
+        VotePolicy::Majority
+    }
+
+    /// Does `pass_count` of `total` skeptic verdicts satisfy this policy?
+    fn passes(self, pass_count: usize, total: usize) -> bool {
+        match self {
+            // Strict majority: more than half. With 0 skeptics, 0 > 0 is false →
+            // a verify with no skeptic deps fails (fail-safe).
+            VotePolicy::Majority => pass_count * 2 > total,
+            // Every skeptic passed AND there was at least one skeptic.
+            VotePolicy::Unanimous => total > 0 && pass_count == total,
+            // At least `n` passes. A Threshold(0) trivially passes (the planner
+            // is responsible for a sensible threshold; we do not second-guess it).
+            VotePolicy::Threshold(n) => pass_count >= n,
+        }
+    }
+}
+
+/// Parse a single skeptic's `output_summary` into a pass/fail verdict.
+///
+/// **Fail-safe: an unparseable / missing output counts as FAIL.** Unvalidated
+/// or unreadable skeptic output must never be treated as approval.
+///
+/// Order of preference:
+/// 1. A JSON object anywhere in the text carrying a boolean `"pass"` field
+///    (e.g. `{"pass": true, "critique": "..."}`) — the skeptic prompt asks for
+///    exactly this shape. Quote/escape-aware extraction via [`first_json_object`].
+/// 2. Fallback to text scanning: an explicit `FAIL` wins over `PASS` (a skeptic
+///    that says both is treated conservatively as a fail). Matched
+///    case-insensitively as a whole-ish token.
+/// 3. Neither → FAIL.
+fn parse_verdict_pass(output_summary: Option<&str>) -> bool {
+    let Some(text) = output_summary.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false; // missing/blank output → fail-safe
+    };
+
+    // 1) Prefer a JSON `{"pass": bool}` anywhere in the text.
+    if let Some(json) = first_json_object(text) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
+            if let Some(pass) = value.get("pass").and_then(serde_json::Value::as_bool) {
+                return pass;
+            }
+        }
+    }
+
+    // 2) Text fallback: FAIL beats PASS (conservative), else look for PASS.
+    let upper = text.to_ascii_uppercase();
+    if upper.contains("FAIL") {
+        return false;
+    }
+    if upper.contains("PASS") {
+        return true;
+    }
+
+    // 3) Unrecognizable → fail-safe.
+    false
+}
+
+/// Extract the first balanced top-level `{...}` substring from `text`,
+/// quote/escape-aware (so braces inside string values don't confuse the
+/// counter). Mirrors `plan::extract_json_object` but kept local to the engine
+/// (the verify aggregator must not depend on the planner module). Returns `None`
+/// when no balanced object is present.
+fn first_json_object(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let start = text.find('{')?;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for i in start..bytes.len() {
+        let c = bytes[i] as char;
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The computed result of a `verify` aggregator over its skeptic dependencies.
+struct VerifyVerdict {
+    pass: bool,
+    pass_count: usize,
+    total: usize,
+    /// `(skeptic title, pass, output_summary)` per dependency, in dep order —
+    /// for the human-readable summary written to the verify task.
+    critiques: Vec<(String, bool, String)>,
+}
+
+/// Tally a `verify` aggregator's verdict from its skeptic dependency tasks.
+///
+/// `deps_in_order` are the verify task's blocker tasks (the skeptics), each with
+/// its `output_summary`. Each is parsed via [`parse_verdict_pass`] (fail-safe);
+/// the pass count is then judged against `policy`. Pure (no I/O) so it is unit-
+/// testable in isolation.
+fn tally_verify(deps_in_order: &[OrchRunTaskRow], policy: VotePolicy) -> VerifyVerdict {
+    let mut pass_count = 0usize;
+    let mut critiques: Vec<(String, bool, String)> = Vec::new();
+    for t in deps_in_order {
+        let pass = parse_verdict_pass(t.output_summary.as_deref());
+        if pass {
+            pass_count += 1;
+        }
+        critiques.push((
+            t.title.clone(),
+            pass,
+            t.output_summary.clone().unwrap_or_default(),
+        ));
+    }
+    let total = deps_in_order.len();
+    VerifyVerdict {
+        pass: policy.passes(pass_count, total),
+        pass_count,
+        total,
+        critiques,
+    }
+}
+
+/// Render a `verify` verdict into the aggregator task's `output_summary` — a
+/// machine-leading line (`VERDICT: PASS|FAIL (k/n, policy=...)`) followed by the
+/// per-skeptic critiques, so both the engine/downstream and the UI can read it.
+fn render_verify_summary(verdict: &VerifyVerdict, policy: VotePolicy) -> String {
+    let policy_label = match policy {
+        VotePolicy::Majority => "majority".to_string(),
+        VotePolicy::Unanimous => "unanimous".to_string(),
+        VotePolicy::Threshold(n) => format!("threshold:{n}"),
+    };
+    let mut out = format!(
+        "VERDICT: {} ({}/{} skeptics passed, policy={})\n",
+        if verdict.pass { "PASS" } else { "FAIL" },
+        verdict.pass_count,
+        verdict.total,
+        policy_label,
+    );
+    if verdict.critiques.is_empty() {
+        out.push_str("(no skeptic verdicts to aggregate)\n");
+    } else {
+        out.push_str("\nSKEPTIC VERDICTS:\n");
+        for (title, pass, critique) in &verdict.critiques {
+            out.push_str(&format!(
+                "- {} → {}: {}\n",
+                title,
+                if *pass { "PASS" } else { "FAIL" },
+                critique.trim(),
+            ));
+        }
+    }
+    out
+}
+
+/// Settle a ready `verify` aggregator task SYNCHRONOUSLY (no worker dispatch):
+/// read its skeptic dependency outputs, tally a verdict by the task's vote
+/// policy, write the verdict to the task's `output_summary`, mark it `done`, and
+/// — on a FAIL verdict — GATE downstream by marking the verify task's transitive
+/// dependents `skipped` so unvalidated work never proceeds.
+///
+/// **Gate design (skip dependents, NOT mark-verify-failed):** the verify task
+/// itself is marked `done` (it successfully computed a verdict — that is its
+/// job; a fail verdict is a valid outcome, not a task failure). Its downstream
+/// dependents are marked `skipped`. This is the cleaner option because:
+/// - the run can still reach `completed` (all tasks `done`/`skipped`) — the
+///   verification ran correctly and gated correctly; the RUN did not fail;
+/// - the verify node stays `done` with the FAIL verdict in its `output_summary`
+///   (high observability — the user sees WHY downstream was skipped);
+/// - it does not rely on `list_ready_tasks`' `status != 'done'` blocker gating
+///   leaving dependents stuck `pending` forever (which would make the loop
+///   declare the graph "stuck" and break, an ambiguous terminal state).
+///
+/// Bounded + no spin: the task is read once, tallied once, and transitioned once
+/// (the skip walk is a finite BFS over the dep edges). It is invoked only when
+/// the task is already in the ready set (all skeptics `done`), so it settles in a
+/// single fill pass.
+async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRunTaskRow) {
+    // Resolve the skeptic dependencies (this task's blockers), in task order, so
+    // the verdict tally + summary are deterministic.
+    let dep_edges = deps.run_repo.list_deps(run_id).await.unwrap_or_default();
+    let blocker_ids: HashSet<String> = dep_edges
+        .iter()
+        .filter(|d| d.blocked_task_id == task.id)
+        .map(|d| d.blocker_task_id.clone())
+        .collect();
+    let all_tasks = deps.run_repo.list_tasks(run_id).await.unwrap_or_default();
+    let skeptics: Vec<OrchRunTaskRow> = all_tasks
+        .iter()
+        .filter(|t| blocker_ids.contains(&t.id))
+        .cloned()
+        .collect();
+
+    let policy = VotePolicy::parse(task.pattern_config.as_deref());
+    let verdict = tally_verify(&skeptics, policy);
+    let summary = render_verify_summary(&verdict, policy);
+
+    // Persist the verdict + mark the aggregator `done` (conversation_id stays
+    // None — there is no worker conversation for a verify task).
+    let _ = deps
+        .run_repo
+        .update_task(
+            &task.id,
+            UpdateTaskParams {
+                status: Some("done".to_string()),
+                conversation_id: None,
+                output_summary: Some(Some(summary)),
+                output_files: None,
+                attempt: None,
+                tokens: None,
+                graph_x: None,
+                graph_y: None,
+            },
+        )
+        .await;
+    deps.emitter.emit_task_status(run_id, &task.id, "done");
+    info!(
+        run_id,
+        task_id = %task.id,
+        pass = verdict.pass,
+        pass_count = verdict.pass_count,
+        total = verdict.total,
+        "verify aggregator settled"
+    );
+
+    // FAIL → gate downstream: mark the verify task's transitive dependents
+    // `skipped`. PASS → do nothing (downstream proceeds normally).
+    if !verdict.pass {
+        skip_downstream(deps, run_id, &task.id, &dep_edges).await;
+    }
+}
+
+/// Mark every task transitively downstream of `from_task_id` (its dependents,
+/// their dependents, …) as `skipped`. Used by the verify gate on a FAIL verdict
+/// so unvalidated work does not run.
+///
+/// Bounded: a finite BFS over the (acyclic) dep edges, visiting each task at most
+/// once (`seen` guard). Only `pending` tasks are skipped (a `running`/`done`
+/// task is left alone — downstream of a verify cannot be `running`/`done` yet,
+/// since the verify only just settled, but the guard keeps this defensive).
+async fn skip_downstream(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    from_task_id: &str,
+    dep_edges: &[nomifun_db::models::OrchRunTaskDepRow],
+) {
+    // Adjacency: blocker → [blocked] (downstream successors).
+    let mut frontier: Vec<String> = dep_edges
+        .iter()
+        .filter(|d| d.blocker_task_id == from_task_id)
+        .map(|d| d.blocked_task_id.clone())
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(tid) = frontier.pop() {
+        if !seen.insert(tid.clone()) {
+            continue;
+        }
+        // Skip only a still-pending task (do not clobber a terminal/running one).
+        if let Ok(Some(t)) = deps.run_repo.get_task(&tid).await {
+            if t.status == "pending" {
+                update_task_status(deps, &tid, "skipped").await;
+                deps.emitter.emit_task_status(run_id, &tid, "skipped");
+            }
+        }
+        // Enqueue this task's own dependents (transitive gate).
+        for d in dep_edges.iter().filter(|d| d.blocker_task_id == tid) {
+            frontier.push(d.blocked_task_id.clone());
+        }
+    }
 }
 
 async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &str) {
@@ -1574,6 +1947,165 @@ mod tests {
         assert!(summary.contains("2/2"));
         assert!(summary.contains("did A"));
         assert!(summary.contains("did B"));
+    }
+
+    // ── verify 模式 (UC-1b): vote-policy parse, verdict parse (fail-safe), tally ──
+
+    /// Build a skeptic task row carrying the given `output_summary` (the verdict
+    /// material the verify aggregator reads).
+    fn skeptic_with(title: &str, output: Option<&str>) -> OrchRunTaskRow {
+        let mut t = task_row_with_kind("agent", title, "critically evaluate");
+        t.id = format!("rtask_{title}");
+        t.status = "done".to_string();
+        t.output_summary = output.map(str::to_string);
+        t
+    }
+
+    #[test]
+    fn vote_policy_parse_is_fail_soft_to_majority() {
+        // Explicit shapes.
+        assert_eq!(VotePolicy::parse(Some(r#"{"vote":"majority"}"#)), VotePolicy::Majority);
+        assert_eq!(VotePolicy::parse(Some(r#"{"vote":"unanimous"}"#)), VotePolicy::Unanimous);
+        assert_eq!(VotePolicy::parse(Some(r#"{"vote":"UNANIMOUS"}"#)), VotePolicy::Unanimous);
+        assert_eq!(
+            VotePolicy::parse(Some(r#"{"vote":{"threshold":2}}"#)),
+            VotePolicy::Threshold(2)
+        );
+        // Fail-soft: absent / blank / not-JSON / no `vote` / unknown string → Majority.
+        assert_eq!(VotePolicy::parse(None), VotePolicy::Majority);
+        assert_eq!(VotePolicy::parse(Some("   ")), VotePolicy::Majority);
+        assert_eq!(VotePolicy::parse(Some("not json")), VotePolicy::Majority);
+        assert_eq!(VotePolicy::parse(Some(r#"{"group":"x"}"#)), VotePolicy::Majority);
+        assert_eq!(VotePolicy::parse(Some(r#"{"vote":"weird"}"#)), VotePolicy::Majority);
+    }
+
+    #[test]
+    fn vote_policy_passes_thresholds() {
+        // Majority = strictly more than half.
+        assert!(VotePolicy::Majority.passes(2, 3), "2/3 is a majority");
+        assert!(!VotePolicy::Majority.passes(1, 3), "1/3 is not");
+        assert!(!VotePolicy::Majority.passes(1, 2), "1/2 is a TIE, not a majority");
+        assert!(VotePolicy::Majority.passes(2, 2), "2/2 is a majority");
+        assert!(!VotePolicy::Majority.passes(0, 0), "0 skeptics never passes (fail-safe)");
+        // Unanimous = all, with at least one skeptic.
+        assert!(VotePolicy::Unanimous.passes(3, 3));
+        assert!(!VotePolicy::Unanimous.passes(2, 3));
+        assert!(!VotePolicy::Unanimous.passes(0, 0), "unanimous with 0 skeptics fails");
+        // Threshold(n) = at least n.
+        assert!(VotePolicy::Threshold(2).passes(2, 5));
+        assert!(VotePolicy::Threshold(2).passes(3, 5));
+        assert!(!VotePolicy::Threshold(2).passes(1, 5));
+    }
+
+    #[test]
+    fn parse_verdict_prefers_json_pass_field() {
+        assert!(parse_verdict_pass(Some(r#"{"pass": true, "critique": "looks good"}"#)));
+        assert!(!parse_verdict_pass(Some(r#"{"pass": false, "critique": "broken auth"}"#)));
+        // JSON embedded in prose still found.
+        assert!(parse_verdict_pass(Some(
+            "After review: {\"pass\": true, \"critique\": \"ok\"} done."
+        )));
+    }
+
+    #[test]
+    fn parse_verdict_text_fallback_fail_beats_pass() {
+        // No JSON pass field → text scan. FAIL is conservative and wins.
+        assert!(!parse_verdict_pass(Some("Verdict: FAIL — the logic is wrong")));
+        assert!(parse_verdict_pass(Some("Verdict: PASS — all good")));
+        // Both present → FAIL wins (conservative).
+        assert!(!parse_verdict_pass(Some("It could PASS but I must FAIL it")));
+    }
+
+    #[test]
+    fn parse_verdict_unparseable_defaults_to_fail() {
+        // The fail-safe invariant: missing / blank / unrecognizable → FAIL.
+        assert!(!parse_verdict_pass(None), "missing output → fail-safe");
+        assert!(!parse_verdict_pass(Some("   ")), "blank output → fail-safe");
+        assert!(!parse_verdict_pass(Some("hmm, not sure")), "no verdict token → fail-safe");
+        // Malformed JSON with no PASS/FAIL token → fail-safe.
+        assert!(!parse_verdict_pass(Some(r#"{"pas": tru"#)), "broken JSON → fail-safe");
+        // JSON without a `pass` field, no text token → fail-safe.
+        assert!(!parse_verdict_pass(Some(r#"{"critique":"meh"}"#)));
+    }
+
+    #[test]
+    fn tally_verify_majority_pass_and_fail() {
+        // 3 skeptics, 2 pass → majority PASS.
+        let pass_case = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some(r#"{"pass":true}"#)),
+            skeptic_with("S3", Some(r#"{"pass":false,"critique":"nit"}"#)),
+        ];
+        let v = tally_verify(&pass_case, VotePolicy::Majority);
+        assert!(v.pass, "2/3 majority passes");
+        assert_eq!(v.pass_count, 2);
+        assert_eq!(v.total, 3);
+
+        // 3 skeptics, 1 pass → majority FAIL.
+        let fail_case = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some(r#"{"pass":false}"#)),
+            skeptic_with("S3", Some(r#"{"pass":false}"#)),
+        ];
+        let v = tally_verify(&fail_case, VotePolicy::Majority);
+        assert!(!v.pass, "1/3 fails majority");
+        assert_eq!(v.pass_count, 1);
+    }
+
+    #[test]
+    fn tally_verify_unanimous_and_threshold() {
+        let all_pass = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some("PASS")),
+        ];
+        assert!(tally_verify(&all_pass, VotePolicy::Unanimous).pass, "all pass → unanimous");
+
+        let one_fail = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some("FAIL")),
+        ];
+        assert!(!tally_verify(&one_fail, VotePolicy::Unanimous).pass, "one fail breaks unanimous");
+
+        // Threshold(1): a single pass among 3 satisfies it.
+        let one_pass = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some("FAIL")),
+            skeptic_with("S3", Some(r#"{"pass":false}"#)),
+        ];
+        assert!(tally_verify(&one_pass, VotePolicy::Threshold(1)).pass, "1 pass ≥ threshold 1");
+        assert!(!tally_verify(&one_pass, VotePolicy::Threshold(2)).pass, "1 pass < threshold 2");
+    }
+
+    #[test]
+    fn tally_verify_unparseable_skeptic_counts_as_fail() {
+        // One skeptic produced garbage (fail-safe FAIL), the other a clean pass.
+        // Under majority, 1/2 is a tie → FAIL (the garbage vote correctly drags it).
+        let mixed = vec![
+            skeptic_with("S1", Some(r#"{"pass":true}"#)),
+            skeptic_with("S2", Some("the worker timed out, no verdict")),
+        ];
+        let v = tally_verify(&mixed, VotePolicy::Majority);
+        assert_eq!(v.pass_count, 1, "the unparseable skeptic counts as fail");
+        assert!(!v.pass, "1/2 (tie) fails majority — unvalidated output never approves");
+    }
+
+    #[test]
+    fn render_verify_summary_leads_with_machine_verdict() {
+        let v = tally_verify(
+            &[
+                skeptic_with("S1", Some(r#"{"pass":true,"critique":"ok"}"#)),
+                skeptic_with("S2", Some(r#"{"pass":false,"critique":"边界未处理"}"#)),
+            ],
+            VotePolicy::Majority,
+        );
+        let s = render_verify_summary(&v, VotePolicy::Majority);
+        assert!(s.starts_with("VERDICT: FAIL"), "summary leads with the verdict: {s}");
+        assert!(s.contains("1/2"), "tally surfaced: {s}");
+        assert!(s.contains("policy=majority"), "policy surfaced: {s}");
+        // Per-skeptic critiques collected.
+        assert!(s.contains("S1 → PASS"), "skeptic verdict surfaced: {s}");
+        assert!(s.contains("S2 → FAIL"), "skeptic verdict surfaced: {s}");
+        assert!(s.contains("边界未处理"), "critique text collected: {s}");
     }
 
     // -------------------------------------------------------------------------
@@ -2549,5 +3081,338 @@ mod tests {
             .await
             .expect_err("unknown task must 404");
         assert!(matches!(err, AppError::NotFound(_)), "got: {err:?}");
+    }
+
+    // -------------------------------------------------------------------------
+    // verify 模式 (UC-1b): end-to-end engine drive. A verify aggregator settles
+    // in the FILL step (no worker dispatch, no in-flight slot), tallies its
+    // skeptic deps' verdicts, and gates downstream on FAIL (skip dependents) /
+    // lets downstream proceed on PASS.
+    // -------------------------------------------------------------------------
+
+    /// A worker whose output text is keyed by the task SPEC so a test can make a
+    /// skeptic "pass" or "fail" deterministically. Convention:
+    /// - spec contains "EMIT:PASS" → output `{"pass":true,"critique":"ok"}`;
+    /// - spec contains "EMIT:FAIL" → output `{"pass":false,"critique":"nope"}`;
+    /// - otherwise → a plain "did <spec>" output (a normal agent worker).
+    ///
+    /// Also records its per-task start order, so the test can assert the verify
+    /// aggregator NEVER reached a worker (no spin, no dispatch).
+    struct VerdictWorkerRunner {
+        start_order: Mutex<Vec<String>>,
+        seen_specs: Mutex<Vec<String>>,
+    }
+    impl VerdictWorkerRunner {
+        fn new() -> Self {
+            Self {
+                start_order: Mutex::new(vec![]),
+                seen_specs: Mutex::new(vec![]),
+            }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for VerdictWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            self.start_order.lock().unwrap().push(task_id.to_string());
+            self.seen_specs.lock().unwrap().push(task_spec.to_string());
+            on_started(900);
+            let text = if task_spec.contains("EMIT:PASS") {
+                r#"{"pass":true,"critique":"ok"}"#.to_string()
+            } else if task_spec.contains("EMIT:FAIL") {
+                r#"{"pass":false,"critique":"nope"}"#.to_string()
+            } else {
+                format!("did {task_spec}")
+            };
+            Ok(WorkerOutcome {
+                conversation_id: 900,
+                text: Some(text),
+                ok: true,
+            })
+        }
+    }
+
+    /// Plan: Build(0) → 3 skeptics(1,2,3 dep on 0) → Gate(4 verify, dep on 1,2,3)
+    /// → Deploy(5 dep on 4). Each skeptic's spec is driven by `skeptic_verdicts`
+    /// (true → "EMIT:PASS", false → "EMIT:FAIL"); the verify task's vote policy is
+    /// `vote_config` (raw pattern_config JSON, or None for the default majority).
+    struct VerifyPlanProducer {
+        skeptic_verdicts: Vec<bool>,
+        vote_config: Option<String>,
+    }
+    #[async_trait]
+    impl PlanProducer for VerifyPlanProducer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            let mut tasks = vec![PlannedTask {
+                title: "Build".to_string(),
+                spec: "build the feature".to_string(),
+                task_profile: None,
+                depends_on: vec![],
+                member_index: Some(0),
+                rationale: None,
+                role: None,
+                kind: "agent".to_string(),
+                pattern_config: None,
+            }];
+            // Skeptic tasks 1..=N, each depending on Build (index 0).
+            let mut skeptic_indices = vec![];
+            for (i, pass) in self.skeptic_verdicts.iter().enumerate() {
+                let idx = tasks.len();
+                skeptic_indices.push(idx);
+                tasks.push(PlannedTask {
+                    title: format!("Skeptic {}", i + 1),
+                    spec: format!(
+                        "critically evaluate Build; output JSON verdict. EMIT:{}",
+                        if *pass { "PASS" } else { "FAIL" }
+                    ),
+                    task_profile: None,
+                    depends_on: vec![0],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
+                });
+            }
+            // Verify aggregator depending on every skeptic.
+            let verify_idx = tasks.len();
+            tasks.push(PlannedTask {
+                title: "Gate".to_string(),
+                spec: "aggregate skeptic verdicts".to_string(),
+                task_profile: None,
+                depends_on: skeptic_indices,
+                member_index: Some(0),
+                rationale: None,
+                role: None,
+                kind: "verify".to_string(),
+                pattern_config: self.vote_config.clone(),
+            });
+            // Downstream task gated on the verify verdict.
+            tasks.push(PlannedTask {
+                title: "Deploy".to_string(),
+                spec: "deploy the validated feature".to_string(),
+                task_profile: None,
+                depends_on: vec![verify_idx],
+                member_index: Some(0),
+                rationale: None,
+                role: None,
+                kind: "agent".to_string(),
+                pattern_config: None,
+            });
+            Ok(PlannedDag { tasks })
+        }
+    }
+
+    /// Seed + plan a verify run over a single-member fleet. Returns
+    /// (RunService, RunEngine, the verdict worker, run id).
+    async fn verify_harness(
+        skeptic_verdicts: Vec<bool>,
+        vote_config: Option<&str>,
+    ) -> (RunService, RunEngine, Arc<VerdictWorkerRunner>, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(VerifyPlanProducer {
+            skeptic_verdicts,
+            vote_config: vote_config.map(str::to_string),
+        });
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let worker = Arc::new(VerdictWorkerRunner::new());
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.default_max_parallel = 4;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "verify fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "verify ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "build, verify, deploy".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None, // supervised → running after plan
+                    max_parallel: Some(4),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, worker, run.id)
+    }
+
+    #[tokio::test]
+    async fn verify_pass_lets_downstream_proceed() {
+        // 3 skeptics, all PASS → majority PASS → Deploy runs; run completes.
+        let (svc, engine, worker, run_id) = verify_harness(vec![true, true, true], None).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "PASS verdict → run completes");
+
+        let by_title = |t: &str| detail.tasks.iter().find(|x| x.title == t).cloned().unwrap();
+        let gate = by_title("Gate");
+        // The verify aggregator is `done` with a PASS verdict and NO worker conv.
+        assert_eq!(gate.kind, "verify");
+        assert_eq!(gate.status, "done", "verify settled done");
+        assert_eq!(gate.conversation_id, None, "verify has no worker conversation");
+        let gate_summary = gate.output_summary.as_deref().unwrap_or("");
+        assert!(gate_summary.starts_with("VERDICT: PASS"), "PASS verdict: {gate_summary}");
+        assert!(gate_summary.contains("3/3"), "3/3 tally: {gate_summary}");
+
+        // Downstream Deploy actually ran (it is `done`, not skipped).
+        let deploy = by_title("Deploy");
+        assert_eq!(deploy.status, "done", "downstream proceeds on PASS");
+
+        // The verify task NEVER reached the worker (no dispatch / no spin): the
+        // worker saw exactly Build + 3 skeptics + Deploy = 5 tasks, never "Gate".
+        let started = worker.start_order.lock().unwrap().clone();
+        assert_eq!(started.len(), 5, "worker ran 5 tasks (verify excluded): {started:?}");
+        let specs = worker.seen_specs.lock().unwrap().clone();
+        assert!(
+            !specs.iter().any(|s| s.contains("aggregate skeptic verdicts")),
+            "the verify task's spec must never reach a worker: {specs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_fail_gates_downstream_via_skip() {
+        // 3 skeptics, 1 PASS / 2 FAIL → majority FAIL → Deploy skipped; the run
+        // still COMPLETES (all tasks done/skipped — verification ran + gated
+        // correctly, the run did not fail).
+        let (svc, engine, worker, run_id) = verify_harness(vec![true, false, false], None).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(
+            detail.run.status, "completed",
+            "FAIL verdict gates downstream but the run still completes (done/skipped)"
+        );
+
+        let by_title = |t: &str| detail.tasks.iter().find(|x| x.title == t).cloned().unwrap();
+        let gate = by_title("Gate");
+        assert_eq!(gate.status, "done", "verify itself is done (it computed a verdict)");
+        assert_eq!(gate.conversation_id, None, "verify has no worker conversation");
+        let gate_summary = gate.output_summary.as_deref().unwrap_or("");
+        assert!(gate_summary.starts_with("VERDICT: FAIL"), "FAIL verdict: {gate_summary}");
+        assert!(gate_summary.contains("1/3"), "1/3 tally: {gate_summary}");
+
+        // Downstream Deploy was GATED → skipped, and never reached the worker.
+        let deploy = by_title("Deploy");
+        assert_eq!(deploy.status, "skipped", "downstream gated (skipped) on FAIL");
+        assert_eq!(deploy.conversation_id, None, "skipped downstream never dispatched");
+
+        let specs = worker.seen_specs.lock().unwrap().clone();
+        assert!(
+            !specs.iter().any(|s| s.contains("deploy the validated feature")),
+            "gated downstream must never reach a worker: {specs:?}"
+        );
+        // Build + 3 skeptics ran (4 tasks); verify + Deploy did not.
+        assert_eq!(worker.start_order.lock().unwrap().len(), 4, "Build + 3 skeptics only");
+    }
+
+    #[tokio::test]
+    async fn verify_unanimous_one_skeptic_fail_gates() {
+        // Unanimous policy: 2 PASS, 1 unparseable-skeptic-as-FAIL would gate, but
+        // here we use 3 PASS to prove unanimous PASS proceeds, then a 2/3 case for
+        // the fail. First: unanimous PASS → Deploy runs.
+        let (svc, engine, _w, run_id) =
+            verify_harness(vec![true, true, true], Some(r#"{"vote":"unanimous"}"#)).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed");
+        let deploy = detail.tasks.iter().find(|t| t.title == "Deploy").unwrap();
+        assert_eq!(deploy.status, "done", "unanimous PASS → downstream proceeds");
+
+        // Second: unanimous with one FAIL → gate.
+        let (svc2, engine2, _w2, run_id2) =
+            verify_harness(vec![true, true, false], Some(r#"{"vote":"unanimous"}"#)).await;
+        engine2.start(run_id2.clone());
+        let detail2 = drive_to_completion(&svc2, &run_id2).await;
+        assert_eq!(detail2.run.status, "completed", "still completes (done/skipped)");
+        let gate2 = detail2.tasks.iter().find(|t| t.title == "Gate").unwrap();
+        assert!(
+            gate2.output_summary.as_deref().unwrap_or("").starts_with("VERDICT: FAIL"),
+            "unanimous broken by one fail"
+        );
+        let deploy2 = detail2.tasks.iter().find(|t| t.title == "Deploy").unwrap();
+        assert_eq!(deploy2.status, "skipped", "unanimous FAIL gates downstream");
+    }
+
+    #[tokio::test]
+    async fn verify_threshold_policy_tallies() {
+        // Threshold(2): exactly 2 of 3 skeptics pass → PASS (≥ 2) → Deploy runs.
+        let (svc, engine, _w, run_id) =
+            verify_harness(vec![true, true, false], Some(r#"{"vote":{"threshold":2}}"#)).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed");
+        let gate = detail.tasks.iter().find(|t| t.title == "Gate").unwrap();
+        let summary = gate.output_summary.as_deref().unwrap_or("");
+        assert!(summary.starts_with("VERDICT: PASS"), "2 ≥ threshold 2: {summary}");
+        assert!(summary.contains("threshold:2"), "policy surfaced: {summary}");
+        let deploy = detail.tasks.iter().find(|t| t.title == "Deploy").unwrap();
+        assert_eq!(deploy.status, "done", "threshold met → downstream proceeds");
+    }
+
+    #[tokio::test]
+    async fn verify_zero_regression_plain_agent_chain_still_runs() {
+        // ZERO-REGRESSION: a plain agent chain (no verify task) drives to
+        // completion exactly as before — the verify branch must not perturb the
+        // ordinary path.
+        let h = harness().await;
+        let run_id = seed_run(&h).await;
+        h.run_service.plan(&run_id).await.expect("plan");
+        h.engine.start(run_id.clone());
+        let detail = drive_to_completion(&h.run_service, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "plain agent chain unaffected");
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done", "task {} done", t.title);
+            assert_eq!(t.kind, "agent", "no verify kind injected");
+        }
     }
 }
