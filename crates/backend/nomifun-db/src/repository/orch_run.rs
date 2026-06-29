@@ -64,6 +64,7 @@ pub struct CreateTaskParams {
 /// Parameters for a partial task update. `None` = leave the column unchanged.
 /// Nullable columns use the double-`Option` skip/NULL/set encoding;
 /// `status`/`attempt`/`graph_x`/`graph_y` are plain skip-on-`None`.
+#[derive(Default)]
 pub struct UpdateTaskParams {
     pub status: Option<String>,
     pub conversation_id: Option<Option<i64>>,
@@ -73,6 +74,10 @@ pub struct UpdateTaskParams {
     pub tokens: Option<Option<i64>>,
     pub graph_x: Option<f64>,
     pub graph_y: Option<f64>,
+    /// Nullable per-kind config JSON (skip/NULL/set). Used by the `loop` body
+    /// re-run to carry the prior round's output forward (see the orchestrator
+    /// engine's `settle_loop_task`).
+    pub pattern_config: Option<Option<String>>,
 }
 
 /// Parameters for creating an assignment (member → task). `id` is minted

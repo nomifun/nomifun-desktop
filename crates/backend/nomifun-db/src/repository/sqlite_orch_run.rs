@@ -271,6 +271,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.graph_y.is_some() {
             sets.push("graph_y = ?");
         }
+        if p.pattern_config.is_some() {
+            sets.push("pattern_config = ?");
+        }
         if sets.is_empty() {
             return Ok(());
         }
@@ -301,6 +304,9 @@ impl IRunRepository for SqliteRunRepository {
         }
         if let Some(graph_y) = &p.graph_y {
             q = q.bind(graph_y);
+        }
+        if let Some(pattern_config) = &p.pattern_config {
+            q = q.bind(pattern_config);
         }
         q = q.bind(now_ms());
         q = q.bind(id);
@@ -508,6 +514,7 @@ mod tests {
                 tokens: None,
                 graph_x: None,
                 graph_y: None,
+                pattern_config: None,
             },
         )
         .await
