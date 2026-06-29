@@ -75,6 +75,23 @@
     "loadingMore": "正在加载更多...",
     "untitled": "未命名会话"
   },
+  "emptyCards": {
+    "docsTitle": "使用介绍文档",
+    "docsDescription": "查看安装、项目、会话、设置和常见工作流说明。",
+    "docsAction": "打开文档",
+    "videoTitle": "宣传视频",
+    "videoDescription": "用一个短视频了解 NomiFun 如何组织你的工作台。",
+    "videoAction": "观看视频",
+    "feedbackTitle": "反馈与社区",
+    "feedbackDescription": "遇到问题、想提建议或参与共建，可以通过官网联系页反馈。",
+    "feedbackAction": "联系我们"
+  },
+  "companionPoster": {
+    "eyebrow": "桌面伙伴",
+    "title": "伙伴就在桌面边上",
+    "description": "看看你的伙伴们待命时的样子，开始工作后它们会在桌面陪你处理会话、文件和任务。",
+    "emptyDescription": "先看看 NomiFun 伙伴的样子。创建自己的伙伴后，这里会展示你的专属形象。"
+  },
   "dropdown": {
     "cliAgents": "CLI Agents",
     "presetAssistants": "预设助手"

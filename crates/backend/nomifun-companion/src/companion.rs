@@ -91,9 +91,15 @@ pub async fn build_companion_system_prompt(
         memories
     };
     let flavor = crate::prompt::persona_flavor(&profile.persona.preset);
+    // NOTE: the persona prompt deliberately does NOT pin a reply language. The
+    // companion must answer in the app's UI language, which is decided live at
+    // agent-build time and appended as a final directive in
+    // `nomifun-ai-agent::factory::nomi` (read from system settings). Re-adding a
+    // hardcoded 「用中文」 here would freeze the language into the persisted prompt
+    // and reintroduce the always-Chinese bug.
     let mut system = format!(
         "你是 {name}，一只住在主人电脑里的电子伙伴伙伴。{flavor}\n\
-         你和主人对话时用中文，语气符合你的人格；回复简洁直接，先结论后细节。\n\
+         你和主人对话时语气符合你的人格；回复简洁直接，先结论后细节。\n\
          你拥有完整的工具能力（读写文件、执行命令、技能、计划模式等），主人请你做事时大胆去做。\n\
          但行事前遵守两条规则：\
          ① 任何创建类操作（会话/定时任务/需求等）之前，先用对应的 list 工具查重；已有同名或同义的项就不要重复创建，除非主人在本轮对话中明确要求再建一个。\
@@ -916,6 +922,27 @@ mod tests {
         )
         .unwrap();
         assert!(s.recent_events(5).await.unwrap().contains("Rust 编译错误"));
+    }
+
+    #[tokio::test]
+    async fn companion_system_prompt_does_not_force_a_reply_language() {
+        // Regression (always-Chinese bug): the persona prompt must NOT pin a
+        // reply language. The old hardcoded 「你和主人对话时用中文」 made the
+        // companion answer in Chinese regardless of the app language. Reply
+        // language is now decided at agent-build time from the app setting
+        // (nomifun-ai-agent::factory::nomi), so baking it here would freeze it
+        // into the persisted prompt and reintroduce the bug.
+        let store = CompanionStore::open_memory().await.unwrap();
+        let profile = CompanionProfileConfig::new("毛球", "ink");
+        for platform in [None, Some("telegram")] {
+            let prompt = build_companion_system_prompt(&store, &profile, platform).await;
+            assert!(
+                !prompt.contains("用中文"),
+                "{platform:?}: persona must not force Chinese: {prompt}"
+            );
+            // The language-neutral persona guidance is retained.
+            assert!(prompt.contains("回复简洁直接，先结论后细节"), "{platform:?}");
+        }
     }
 
     #[tokio::test]

@@ -123,6 +123,7 @@ impl ProviderHealthCheckService {
             browser_visual_fallback: false,
             goal: None,
             browser_secret_vault: None,
+            owner_token: None,
         })
     }
 }
@@ -547,6 +548,7 @@ mod tests {
             browser_visual_fallback: false,
             goal: None,
             browser_secret_vault: None,
+            owner_token: None,
         };
 
         assert!(should_use_openai_model_probe("custom", &config));

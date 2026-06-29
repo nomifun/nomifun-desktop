@@ -2208,12 +2208,19 @@ export interface IRequirement {
   attachments?: IAttachment[];
 }
 
+/** Whitelisted sort columns for the requirements list (server validates too). */
+export type RequirementOrderBy = 'id' | 'created_at' | 'updated_at' | 'status';
+
 export interface IListRequirementsParams {
   tag?: string;
   status?: RequirementStatus;
   /** Filter by owning session id (conversation id or terminal session id, INTEGER). */
   owner_session_id?: number;
   q?: string;
+  /** Sort column; omit for the default queue order (sort_seq, priority, created_at). */
+  order_by?: RequirementOrderBy;
+  /** Sort direction; server defaults to 'desc' when order_by is set. */
+  order?: 'asc' | 'desc';
   page?: number;
   page_size?: number;
 }
@@ -2309,6 +2316,8 @@ export const requirements = {
     if (p?.status) q.set('status', p.status);
     if (p?.owner_session_id != null) q.set('owner_session_id', String(p.owner_session_id));
     if (p?.q) q.set('q', p.q);
+    if (p?.order_by) q.set('order_by', p.order_by);
+    if (p?.order) q.set('order', p.order);
     if (p?.page != null) q.set('page', String(p.page));
     if (p?.page_size != null) q.set('page_size', String(p.page_size));
     const qs = q.toString();

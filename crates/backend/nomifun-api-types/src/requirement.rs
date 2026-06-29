@@ -162,6 +162,13 @@ pub struct ListRequirementsQuery {
     pub conversation_id: Option<i64>,
     #[serde(default)]
     pub q: Option<String>,
+    /// Sort column. Whitelisted server-side to `id | created_at | updated_at |
+    /// status`; any other value falls back to the default queue order.
+    #[serde(default)]
+    pub order_by: Option<String>,
+    /// Sort direction: `asc | desc` (default `desc` for an explicit `order_by`).
+    #[serde(default)]
+    pub order: Option<String>,
     #[serde(default)]
     pub page: Option<u32>,
     #[serde(default)]

@@ -18,7 +18,7 @@ import { Button, Input, Popconfirm, Select } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
-import type { ITagSummary, RequirementStatus } from '@/common/adapter/ipcBridge';
+import type { ITagSummary, RequirementOrderBy, RequirementStatus } from '@/common/adapter/ipcBridge';
 
 const STATUS_OPTIONS: RequirementStatus[] = [
   'pending',
@@ -29,13 +29,21 @@ const STATUS_OPTIONS: RequirementStatus[] = [
   'cancelled',
 ];
 
+// Sentinel value for the "default queue order" option (Arco Select needs a
+// concrete value; we map it back to `undefined` on change).
+const DEFAULT_SORT = '__default__';
+
 interface RequirementFiltersProps {
   tag?: string;
   status?: RequirementStatus;
   search: string;
+  orderBy?: RequirementOrderBy;
+  order: 'asc' | 'desc';
   onTagChange: (t?: string) => void;
   onStatusChange: (s?: RequirementStatus) => void;
   onSearchChange: (q: string) => void;
+  onOrderByChange: (o?: RequirementOrderBy) => void;
+  onOrderChange: (dir: 'asc' | 'desc') => void;
   tagOptions: ITagSummary[];
   selectedCount: number;
   onBatchDelete: () => void; // shown only when selectedCount>0, as a stable bar
@@ -52,9 +60,13 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   tag,
   status,
   search,
+  orderBy,
+  order,
   onTagChange,
   onStatusChange,
   onSearchChange,
+  onOrderByChange,
+  onOrderChange,
   tagOptions,
   selectedCount,
   onBatchDelete,
@@ -97,6 +109,36 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
           onChange={(v) => onSearchChange(v)}
           onSearch={(v) => onSearchChange(v)}
         />
+
+        {/* Sort: field picker + direction toggle. Floats right on wide rows,
+            wraps below on narrow widths. Direction is disabled while the field
+            is the default queue order. */}
+        <div className='ml-auto flex items-center gap-8px'>
+          <span className='whitespace-nowrap text-13px text-[var(--color-text-3)]'>
+            {t('requirements.sort.label')}
+          </span>
+          <Select
+            className='max-w-full'
+            style={{ width: 140 }}
+            value={orderBy ?? DEFAULT_SORT}
+            onChange={(v) => onOrderByChange(v === DEFAULT_SORT ? undefined : (v as RequirementOrderBy))}
+            options={[
+              { label: t('requirements.sort.default'), value: DEFAULT_SORT },
+              { label: t('requirements.sort.byId'), value: 'id' },
+              { label: t('requirements.sort.byCreatedAt'), value: 'created_at' },
+              { label: t('requirements.sort.byUpdatedAt'), value: 'updated_at' },
+              { label: t('requirements.sort.byStatus'), value: 'status' },
+            ]}
+          />
+          <Button
+            shape='round'
+            disabled={!orderBy}
+            onClick={() => onOrderChange(order === 'asc' ? 'desc' : 'asc')}
+            title={t(order === 'asc' ? 'requirements.sort.asc' : 'requirements.sort.desc')}
+          >
+            {order === 'asc' ? '↑' : '↓'} {t(order === 'asc' ? 'requirements.sort.asc' : 'requirements.sort.desc')}
+          </Button>
+        </div>
       </div>
 
       {/* Stable batch-action bar — its own surface, only mounted when there is

@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures_util::future::BoxFuture;
+use nomi_agent::session::SessionManager;
 use nomifun_common::{
     AgentKillReason, AgentType, AppError, ConversationStatus, ErrorChain, OnConversationDelete, TimestampMs, now_ms,
 };
@@ -199,6 +201,49 @@ impl OnConversationDelete for WorkerTaskManagerImpl {
     }
 }
 
+/// Conversation-delete hook that removes a conversation's on-disk nomi state:
+/// the global `nomi-sessions/*_{id}.json` file (+ index entry) and any
+/// auto-provisioned `{label}-temp-{id}` workspace under `work_dir/conversations`.
+///
+/// Without this, those files outlive the conversation. The session dir is keyed
+/// only by the reusable integer conversation id, so an orphan could later be
+/// resumed by a brand-new conversation that reuses the id (e.g. after a DB
+/// rebaseline) — the cross-conversation "memory bleed" this guards against,
+/// complementing the per-session `owner_token` check in the nomi factory.
+/// Best-effort: every failure is logged, never fatal.
+pub struct NomiSessionFilesCascade {
+    pub data_dir: PathBuf,
+    pub work_dir: PathBuf,
+}
+
+#[async_trait]
+impl OnConversationDelete for NomiSessionFilesCascade {
+    async fn on_conversation_deleted(&self, conversation_id: i64) {
+        let id = conversation_id.to_string();
+
+        // 1) nomi session transcript file + index entry.
+        let mgr = SessionManager::new(self.data_dir.join("nomi-sessions"), 100);
+        if let Err(e) = mgr.delete_session(&id) {
+            warn!(conversation_id, error = %e, "Failed to delete nomi session file on conversation delete (non-fatal)");
+        }
+
+        // 2) auto-provisioned temp workspace(s) named `{label}-temp-{id}`. Exact
+        //    suffix match is id-safe (`-temp-3` never matches `-temp-13`).
+        let conv_dir = self.work_dir.join("conversations");
+        let suffix = format!("-temp-{id}");
+        if let Ok(entries) = std::fs::read_dir(&conv_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().ends_with(&suffix) && entry.path().is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                        warn!(conversation_id, error = %e, "Failed to remove temp workspace on conversation delete (non-fatal)");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +339,7 @@ mod tests {
             },
             conversation_id: conversation_id.into(),
             extra: serde_json::Value::Null,
+            conversation_created_at: None,
         }
     }
 

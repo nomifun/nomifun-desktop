@@ -123,6 +123,8 @@ async fn list(deps: Arc<GatewayDeps>, p: RequirementListParams) -> Value {
         status,
         conversation_id: None,
         q: p.query,
+        order_by: None,
+        order: None,
         page: p.page,
         page_size: p.page_size,
     };
@@ -145,6 +147,8 @@ async fn create(deps: Arc<GatewayDeps>, p: RequirementCreateParams) -> Value {
         status: None,
         conversation_id: None,
         q: None,
+        order_by: None,
+        order: None,
         page: Some(1),
         page_size: Some(DEDUP_SCAN_PAGE_SIZE),
     };

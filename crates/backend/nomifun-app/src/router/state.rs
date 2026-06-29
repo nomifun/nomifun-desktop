@@ -347,6 +347,16 @@ pub fn build_conversation_state(
     conversation_service.with_delete_hook(Arc::new(IdmmRecordCascade {
         records: Arc::new(SqliteIdmmInterventionRepository::new(services.database.pool().clone())),
     }) as Arc<dyn OnConversationDelete>);
+    // Remove the conversation's on-disk nomi session file + auto-provisioned
+    // temp workspace so a future conversation reusing this integer id cannot
+    // resume stale state (cross-conversation memory bleed). Pairs with the
+    // per-session `owner_token` validation in the nomi factory.
+    conversation_service.with_delete_hook(Arc::new(
+        nomifun_ai_agent::task_manager::NomiSessionFilesCascade {
+            data_dir: services.data_dir.clone(),
+            work_dir: services.work_dir.clone(),
+        },
+    ) as Arc<dyn OnConversationDelete>);
     if let Some(hook) = services.task_manager_delete_hook.clone() {
         conversation_service.with_delete_hook(hook);
     }

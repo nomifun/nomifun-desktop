@@ -40,6 +40,11 @@ pub struct BuildTaskOptions {
     /// Type-specific extra parameters (JSON object).
     #[serde(default)]
     pub extra: serde_json::Value,
+    /// Owning conversation row's `created_at` (ms). Stable per conversation
+    /// INSTANCE — used to stamp/validate the nomi session's `owner_token` so a
+    /// reused integer id never resumes a stale session. `None` skips validation.
+    #[serde(default)]
+    pub conversation_created_at: Option<i64>,
 }
 
 /// Provider-specific compat overrides resolved in the factory.
@@ -118,6 +123,12 @@ pub struct NomiResolvedConfig {
     /// unrestricted egress (current behavior). The raw key is carried (not a
     /// `nomi_browser` type) so this crate needs no `nomi-browser` dependency.
     pub browser_secret_vault: Option<BrowserSecretVault>,
+    /// Stable identity of the owning conversation INSTANCE (the conversation
+    /// row's `created_at`, stringified). Threaded to the nomi manager so it can
+    /// stamp/validate the session's `owner_token` and refuse to resume a stale
+    /// session left by a prior conversation that reused this integer id. `None`
+    /// = caller did not supply it (validation skipped — legacy/safe).
+    pub owner_token: Option<String>,
 }
 
 /// **P3-X2**: the shared browser secret vault location + its machine-bound key
@@ -209,6 +220,7 @@ mod tests {
             },
             conversation_id: "conv-1".into(),
             extra: json!({ "backend": "claude" }),
+            conversation_created_at: None,
         };
         let json = serde_json::to_value(&opts).unwrap();
         assert_eq!(json["agent_type"], "acp");

@@ -17,6 +17,36 @@ impl SqliteRequirementRepository {
     }
 }
 
+/// Build a safe `ORDER BY` clause for the requirements list.
+///
+/// `order_by` is matched against a hard-coded whitelist of columns — user input
+/// only *selects* a fixed column name and is NEVER interpolated into SQL, so a
+/// value like `"title; DROP TABLE …"` simply misses the whitelist and falls
+/// back to the default queue order. `order` is constrained to `ASC|DESC`
+/// (default `DESC` for an explicit sort). For non-unique sort columns an
+/// `id <dir>` tiebreaker is appended so pagination is deterministic.
+fn build_order_clause(order_by: Option<&str>, order: Option<&str>) -> String {
+    const DEFAULT: &str = "ORDER BY sort_seq ASC, priority DESC, created_at ASC";
+    let col = match order_by {
+        Some("id") => "id",
+        Some("created_at") => "created_at",
+        Some("updated_at") => "updated_at",
+        Some("status") => "status",
+        // Unknown column or no explicit sort → default queue order.
+        _ => return DEFAULT.to_string(),
+    };
+    let dir = match order.map(str::to_ascii_lowercase).as_deref() {
+        Some("asc") => "ASC",
+        _ => "DESC",
+    };
+    if col == "id" {
+        // `id` is unique — no tiebreaker needed.
+        format!("ORDER BY id {dir}")
+    } else {
+        format!("ORDER BY {col} {dir}, id {dir}")
+    }
+}
+
 #[async_trait::async_trait]
 impl IRequirementRepository for SqliteRequirementRepository {
     async fn insert(&self, row: &RequirementRow) -> Result<i64, DbError> {
@@ -201,8 +231,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
         let offset = (page - 1) * page_size;
 
         let page_sql = format!(
-            "SELECT * FROM requirements{where_clause} \
-             ORDER BY sort_seq ASC, priority DESC, created_at ASC LIMIT ? OFFSET ?"
+            "SELECT * FROM requirements{where_clause} {order_clause} LIMIT ? OFFSET ?",
+            order_clause = build_order_clause(params.order_by.as_deref(), params.order.as_deref())
         );
         let mut page_query = sqlx::query_as::<_, RequirementRow>(&page_sql);
         for bind in &binds {
@@ -477,6 +507,99 @@ mod tests {
         assert_eq!(total, 2);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, id1); // lowest sort_seq first
+    }
+
+    #[tokio::test]
+    async fn list_sorts_by_whitelisted_field_and_direction() {
+        let (repo, _db) = setup().await;
+
+        // Three rows with distinct created_at / updated_at / status, inserted in
+        // id order (id1 < id2 < id3). sort_seq is deliberately NOT id-aligned so
+        // a fallback to the default order would be distinguishable.
+        let mut r1 = make_row("s", "00000003");
+        r1.created_at = 100;
+        r1.updated_at = 300;
+        r1.status = "pending".into();
+        let mut r2 = make_row("s", "00000001");
+        r2.created_at = 300;
+        r2.updated_at = 100;
+        r2.status = "done".into();
+        let mut r3 = make_row("s", "00000002");
+        r3.created_at = 200;
+        r3.updated_at = 200;
+        r3.status = "cancelled".into();
+        let id1 = repo.insert(&r1).await.unwrap();
+        let id2 = repo.insert(&r2).await.unwrap();
+        let id3 = repo.insert(&r3).await.unwrap();
+
+        let sort = |order_by: &str, order: &str| ListRequirementsParams {
+            order_by: Some(order_by.into()),
+            order: Some(order.into()),
+            page_size: Some(100),
+            ..Default::default()
+        };
+        let ids = |rows: &[RequirementRow]| rows.iter().map(|r| r.id).collect::<Vec<_>>();
+
+        // id asc / desc
+        let (rows, _) = repo.list(&sort("id", "asc")).await.unwrap();
+        assert_eq!(ids(&rows), vec![id1, id2, id3]);
+        let (rows, _) = repo.list(&sort("id", "desc")).await.unwrap();
+        assert_eq!(ids(&rows), vec![id3, id2, id1]);
+
+        // created_at desc → r2(300) > r3(200) > r1(100)
+        let (rows, _) = repo.list(&sort("created_at", "desc")).await.unwrap();
+        assert_eq!(ids(&rows), vec![id2, id3, id1]);
+
+        // updated_at asc → r2(100) < r3(200) < r1(300)
+        let (rows, _) = repo.list(&sort("updated_at", "asc")).await.unwrap();
+        assert_eq!(ids(&rows), vec![id2, id3, id1]);
+
+        // status asc (alphabetical): cancelled(r3) < done(r2) < pending(r1)
+        let (rows, _) = repo.list(&sort("status", "asc")).await.unwrap();
+        assert_eq!(ids(&rows), vec![id3, id2, id1]);
+    }
+
+    #[tokio::test]
+    async fn list_status_sort_breaks_ties_by_id() {
+        let (repo, _db) = setup().await;
+        // All three share status "pending" (make_row default) → the secondary
+        // `id` tiebreaker decides, in the SAME direction as the primary sort.
+        let id1 = repo.insert(&make_row("s", "1")).await.unwrap();
+        let id2 = repo.insert(&make_row("s", "2")).await.unwrap();
+        let id3 = repo.insert(&make_row("s", "3")).await.unwrap();
+
+        let (rows, _) = repo
+            .list(&ListRequirementsParams {
+                order_by: Some("status".into()),
+                order: Some("desc".into()),
+                page_size: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![id3, id2, id1]);
+    }
+
+    #[tokio::test]
+    async fn list_unknown_order_by_falls_back_and_resists_injection() {
+        let (repo, _db) = setup().await;
+        // Default order is sort_seq ASC; insert so the lower sort_seq has the
+        // HIGHER id, making the fallback distinguishable from id-order.
+        repo.insert(&make_row("s", "00000002")).await.unwrap();
+        let id_low_seq = repo.insert(&make_row("s", "00000001")).await.unwrap();
+
+        let (rows, total) = repo
+            .list(&ListRequirementsParams {
+                // Not in the whitelist + an injection attempt: must be ignored.
+                order_by: Some("title; DROP TABLE requirements".into()),
+                order: Some("asc".into()),
+                page_size: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(total, 2, "table intact — the injection string never reached SQL");
+        assert_eq!(rows[0].id, id_low_seq, "fell back to default sort_seq ASC order");
     }
 
     #[tokio::test]

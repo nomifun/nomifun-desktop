@@ -15,6 +15,15 @@ pub struct Session {
     pub cwd: String,
     pub total_usage: TokenUsage,
     pub messages: Vec<Message>,
+    /// Stable identity of the conversation INSTANCE that owns this session
+    /// (e.g. the conversation row's `created_at`). The session directory is
+    /// keyed by the reusable integer `conversation_id`, so after a delete +
+    /// id reuse (or a DB rebaseline) a new conversation can land on an old
+    /// session file. Resume paths compare this token and start fresh on a
+    /// mismatch instead of inheriting a stranger's history. `None` = legacy
+    /// session written before this field existed (accepted, then migrated).
+    #[serde(default)]
+    pub owner_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +84,7 @@ impl SessionManager {
             cwd: cwd.to_string(),
             total_usage: TokenUsage::default(),
             messages: Vec::new(),
+            owner_token: None,
         };
         self.save(&session)?;
         self.update_index(&session)?;
@@ -219,6 +229,57 @@ impl SessionManager {
         std::fs::write(index_path, json)?;
         Ok(())
     }
+
+    /// Remove a session by id: delete its `*_{id}.json` file(s) and drop its
+    /// index entry. Best-effort and idempotent. Called when a conversation is
+    /// deleted so a future conversation that reuses this integer id cannot
+    /// resume the stale session (defense-in-depth alongside `owner_token`).
+    pub fn delete_session(&self, id: &str) -> anyhow::Result<()> {
+        let pattern = format!("*_{}.json", id);
+        if let Ok(paths) = glob::glob(self.directory.join(&pattern).to_string_lossy().as_ref()) {
+            for path in paths.flatten() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        let index_path = self.directory.join("index.json");
+        if index_path.exists() {
+            let mut index = self.load_index()?;
+            let before = index.sessions.len();
+            index.sessions.retain(|s| s.id != id);
+            if index.sessions.len() != before {
+                let json = serde_json::to_string_pretty(&index)?;
+                std::fs::write(index_path, json)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Decide whether a loaded session may be resumed for the conversation instance
+/// identified by `expected_owner` / `conv_created_ms` (see [`Session::owner_token`]).
+/// Rejects either (a) a session stamped for a DIFFERENT instance, or (b) a
+/// session created BEFORE the conversation instance — an orphan left by a prior
+/// holder of this reused id (covers legacy `None`-token files after a DB
+/// rebaseline; a legitimate session is created when the conversation's first
+/// turn runs, i.e. at/after the conversation row, so it never predates it).
+/// A legacy session that postdates the conversation is accepted and migrated.
+pub fn session_belongs_to(
+    session_owner: Option<&str>,
+    session_created_ms: i64,
+    expected_owner: Option<&str>,
+    conv_created_ms: Option<i64>,
+) -> bool {
+    if let (Some(stamped), Some(expected)) = (session_owner, expected_owner)
+        && stamped != expected
+    {
+        return false;
+    }
+    if let Some(conv_ms) = conv_created_ms
+        && session_created_ms < conv_ms
+    {
+        return false;
+    }
+    true
 }
 
 fn generate_short_id() -> String {
@@ -354,5 +415,48 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2));
         let id2 = generate_short_id();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn session_belongs_to_matrix() {
+        let conv = 1_782_638_611_752i64; // conversation instance created_at (ms)
+        let after = conv + 5_000; // a legitimate session is created at/after that
+        // Same stamped instance, session postdates conv → accept.
+        assert!(session_belongs_to(Some("1782638611752"), after, Some("1782638611752"), Some(conv)));
+        // Stamped for a different instance → reject.
+        assert!(!session_belongs_to(Some("1700000000000"), after, Some("1782638611752"), Some(conv)));
+        // Legacy (no stamp) but session predates the conversation → orphan, reject.
+        assert!(!session_belongs_to(None, conv - 1, Some("1782638611752"), Some(conv)));
+        // Legacy (no stamp) and session postdates the conversation → accept (migrate).
+        assert!(session_belongs_to(None, after, Some("1782638611752"), Some(conv)));
+        // No expected conversation identity → skip validation (accept).
+        assert!(session_belongs_to(None, 0, None, None));
+    }
+
+    #[test]
+    fn delete_session_removes_only_target_file_and_index_entry() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+
+        // Two sessions with explicit ids (mirrors conversation_id-keyed sessions).
+        manager.create("openai", "gpt-4", "/tmp", Some("3")).unwrap();
+        manager.create("openai", "gpt-4", "/tmp", Some("7")).unwrap();
+
+        manager.delete_session("3").unwrap();
+
+        // The deleted session is gone; the sibling survives.
+        assert!(manager.load("3").is_err(), "deleted session must not load");
+        assert!(manager.load("7").is_ok(), "sibling session must survive");
+        let ids: Vec<String> = manager.list().unwrap().into_iter().map(|m| m.id).collect();
+        assert!(!ids.contains(&"3".to_string()), "index must drop the deleted id");
+        assert!(ids.contains(&"7".to_string()), "index must keep the sibling id");
+    }
+
+    #[test]
+    fn delete_session_is_idempotent_when_absent() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        // No sessions / no index yet — must not error.
+        assert!(manager.delete_session("3").is_ok());
     }
 }

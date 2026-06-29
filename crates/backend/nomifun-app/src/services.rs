@@ -605,6 +605,12 @@ impl AppServices {
                 database.pool().clone(),
             ))
                 as Arc<dyn nomifun_db::IClientPreferenceRepository>),
+            // System settings repo: lets the nomi factory read the app UI language
+            // live per build so companion-owned sessions reply in the app's
+            // language instead of the old hardcoded Chinese (mirrors client_prefs).
+            settings_repo: Some(Arc::new(nomifun_db::SqliteSettingsRepository::new(
+                database.pool().clone(),
+            )) as Arc<dyn nomifun_db::ISettingsRepository>),
             mcp_server_repo: Some(mcp_server_repo),
             requirement_sink: Some(requirement_sink),
             // Native cron tools: agent schedules/lists/deletes its own recurring
