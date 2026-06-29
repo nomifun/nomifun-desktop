@@ -2268,6 +2268,14 @@ enum StopCriteria {
     /// Stop early once `quiet_rounds` consecutive rounds produced the SAME body
     /// output (no further change). `quiet_rounds` is clamped to >= 1.
     Dry { quiet_rounds: usize },
+    /// Stop early once the body's output PASSES a verdict check — a
+    /// verdict-gated loop: "iterate until the result is approved". The body is
+    /// expected to SELF-ASSESS each round and emit a verdict the engine parses via
+    /// [`parse_verdict_pass`] (JSON `{"pass":true}` preferred, a `PASS` text marker
+    /// fallback). Fail-safe: an unparseable / not-yet-approved output is treated as
+    /// NOT approved → CONTINUE (still hard-capped by `max_iter`, so it always
+    /// terminates — there is NO unbounded path).
+    Approved,
 }
 
 /// A parsed `loop` controller config: the HARD cap + the early-stop criterion.
@@ -2341,6 +2349,13 @@ impl LoopConfig {
                     .max(1) as usize;
                 StopCriteria::Dry { quiet_rounds: k }
             }
+            // Verdict-gated: stop once the body's self-assessed output PASSES the
+            // verdict check (reusing `parse_verdict_pass`). Needs no extra config —
+            // the body emits the verdict, the engine reads it. Aliases accepted so
+            // a slightly-different planner phrasing still lands here (still bounded
+            // by max_iter either way — an unrecognized kind only degrades to
+            // cap-only, never unbounded).
+            "approved" | "verdict" | "verify" => StopCriteria::Approved,
             // "max_iter" and anything unknown both fall to the safe cap-only stop.
             _ => StopCriteria::MaxIter,
         }
@@ -2445,6 +2460,18 @@ fn decide_loop(
                     .all(|h| *h == this_hash)
             {
                 LoopDecision::Stop { reason: "dry" }
+            } else {
+                LoopDecision::Continue
+            }
+        }
+        StopCriteria::Approved => {
+            // Verdict-gated: REUSE `parse_verdict_pass` over the body's latest
+            // output. PASS → the body's work is approved → STOP early (reason
+            // `approved`). Otherwise (not-yet-approved, or fail-safe on an
+            // unparseable output) → CONTINUE — still bounded by the HARD `max_iter`
+            // cap checked FIRST above, so the loop ALWAYS terminates.
+            if parse_verdict_pass(body_output) {
+                LoopDecision::Stop { reason: "approved" }
             } else {
                 LoopDecision::Continue
             }
@@ -5625,6 +5652,257 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // B4: deep pattern COMPOSITION e2e — fan-out → judge → synthesis. A fan-out
+    // group of candidate agents feeds N judges; a `judge` aggregator (no-LLM)
+    // picks the winner; a `synthesis` consumer depends on the judge and produces
+    // the final deliverable from the winner. This is a plain task structure on the
+    // existing engine (patterns are just tasks + deps) — it proves the engine
+    // EXECUTES the composition end-to-end, driving to completion.
+    // -------------------------------------------------------------------------
+
+    /// A worker for the composition e2e. Records each task's brief (so the test can
+    /// assert the synthesis saw the judge's WINNER marker as upstream context) and
+    /// keys judge output by a "BALLOT:" marker in the spec (like BallotWorkerRunner).
+    struct CompositionWorkerRunner {
+        briefs: Mutex<Vec<(String, String)>>, // (task_spec, brief)
+        start_order: Mutex<Vec<String>>,
+    }
+    impl CompositionWorkerRunner {
+        fn new() -> Self {
+            Self { briefs: Mutex::new(vec![]), start_order: Mutex::new(vec![]) }
+        }
+    }
+    #[async_trait]
+    impl WorkerRunner for CompositionWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            brief: &str,
+            task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            self.start_order.lock().unwrap().push(task_id.to_string());
+            self.briefs.lock().unwrap().push((task_spec.to_string(), brief.to_string()));
+            on_started(900);
+            let text = if let Some(idx) = task_spec.find("BALLOT:") {
+                task_spec[idx + "BALLOT:".len()..].trim().to_string()
+            } else {
+                format!("did {task_spec}")
+            };
+            Ok(WorkerOutcome { conversation_id: 900, text: Some(text), ok: true, tokens: None })
+        }
+    }
+
+    /// Plan a fan-out → judge → synthesis COMPOSITION: M candidate agent siblings
+    /// sharing a fan-out group tag → N judge agent tasks (each depends on ALL
+    /// candidates, emitting its ballot) → ONE `judge` aggregator (depends on all
+    /// judges) → ONE `synthesis` consumer (depends on the judge).
+    struct CompositionPlanProducer {
+        candidates: usize,
+        judge_ballots: Vec<String>,
+    }
+    #[async_trait]
+    impl PlanProducer for CompositionPlanProducer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+        ) -> Result<PlannedDag, AppError> {
+            let mut tasks = vec![];
+            let mut candidate_indices = vec![];
+            for c in 0..self.candidates {
+                candidate_indices.push(tasks.len());
+                tasks.push(PlannedTask {
+                    title: format!("Candidate {c}"),
+                    spec: format!("produce alternative {c}"),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: Some("{\"group\":\"candidates\"}".to_string()),
+                });
+            }
+            let mut judge_indices = vec![];
+            for (j, ballot) in self.judge_ballots.iter().enumerate() {
+                judge_indices.push(tasks.len());
+                tasks.push(PlannedTask {
+                    title: format!("Judge {}", j + 1),
+                    spec: format!("score every candidate. BALLOT:{ballot}"),
+                    task_profile: None,
+                    depends_on: candidate_indices.clone(),
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
+                });
+            }
+            let judge_idx = tasks.len();
+            tasks.push(PlannedTask {
+                title: "Pick".to_string(),
+                spec: "aggregate judge ballots".to_string(),
+                task_profile: None,
+                depends_on: judge_indices,
+                member_index: Some(0),
+                rationale: None,
+                role: None,
+                kind: "judge".to_string(),
+                pattern_config: Some("{\"aggregate\":\"mean\"}".to_string()),
+            });
+            // The COMPOSITION's closing step: a synthesis consuming the judge winner.
+            tasks.push(PlannedTask {
+                title: "Finalize".to_string(),
+                spec: "synthesize the final deliverable from the winning candidate".to_string(),
+                task_profile: None,
+                depends_on: vec![judge_idx],
+                member_index: Some(0),
+                rationale: None,
+                role: None,
+                kind: "synthesis".to_string(),
+                pattern_config: None,
+            });
+            Ok(PlannedDag { tasks })
+        }
+    }
+
+    async fn composition_harness(
+        candidates: usize,
+        judge_ballots: Vec<&str>,
+    ) -> (RunService, RunEngine, Arc<CompositionWorkerRunner>, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(CompositionPlanProducer {
+            candidates,
+            judge_ballots: judge_ballots.iter().map(|s| s.to_string()).collect(),
+        });
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+        let worker = Arc::new(CompositionWorkerRunner::new());
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.default_max_parallel = 4;
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "composition fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "composition ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "explore alternatives, pick the best, finalize".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(4),
+                },
+            )
+            .await
+            .expect("run");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, worker, run.id)
+    }
+
+    #[tokio::test]
+    async fn composition_fanout_judge_synthesis_drives_to_completion() {
+        // 3 candidates, 2 judges. Means: c0=0.8, c1=0.3, c2=0.55 → winner c0. The
+        // judge (no-LLM) settles to a WINNER marker; the synthesis consumer then
+        // runs WITH the judge's winner as upstream context. The whole composition
+        // drives to completion.
+        let (svc, engine, worker, run_id) = composition_harness(
+            3,
+            vec![r#"{"scores":[0.9,0.2,0.5]}"#, r#"{"scores":[0.7,0.4,0.6]}"#],
+        )
+        .await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "fan-out→judge→synthesis completes");
+
+        let by_title = |t: &str| detail.tasks.iter().find(|x| x.title == t).cloned().unwrap();
+
+        // Every task in the composition reached a terminal `done` state.
+        for t in &detail.tasks {
+            assert_eq!(t.status, "done", "composition task {} done", t.title);
+        }
+
+        // The fan-out candidates are agent siblings sharing the group tag.
+        for c in 0..3 {
+            let cand = by_title(&format!("Candidate {c}"));
+            assert_eq!(cand.kind, "agent");
+            assert_eq!(
+                cand.pattern_config.as_deref(),
+                Some("{\"group\":\"candidates\"}"),
+                "candidate {c} carries the fan-out group tag"
+            );
+        }
+
+        // The judge (no-LLM) picked the winner c0 and never reached a worker.
+        let pick = by_title("Pick");
+        assert_eq!(pick.kind, "judge");
+        assert_eq!(pick.conversation_id, None, "judge has no worker conversation");
+        let pick_summary = pick.output_summary.as_deref().unwrap_or("");
+        assert!(pick_summary.starts_with("WINNER: candidate 0"), "judge picks c0: {pick_summary}");
+
+        // The synthesis consumer ran (real worker) AND saw the judge's WINNER marker
+        // as upstream context — proving the judge→synthesis edge actually fed data.
+        let finalize = by_title("Finalize");
+        assert_eq!(finalize.kind, "synthesis");
+        assert_eq!(finalize.status, "done", "synthesis consumer completed");
+        let briefs = worker.briefs.lock().unwrap().clone();
+        let synth_brief = briefs
+            .iter()
+            .find(|(spec, _)| spec.contains("synthesize the final deliverable"))
+            .map(|(_, brief)| brief.clone())
+            .expect("synthesis worker ran");
+        assert!(
+            synth_brief.contains("WINNER: candidate 0"),
+            "synthesis saw the judge's winner marker upstream: {synth_brief}"
+        );
+
+        // The judge aggregator NEVER reached a worker: 3 candidates + 2 judges + 1
+        // synthesis = 6 worker runs (judge excluded — it settles no-LLM).
+        let started = worker.start_order.lock().unwrap().clone();
+        assert_eq!(started.len(), 6, "worker ran 6 tasks (judge excluded): {started:?}");
+    }
+
     // ── loop 模式 (UC-1d): config parse, stop decision (HARD cap wins), dry state ──
 
     #[test]
@@ -5670,6 +5948,15 @@ mod tests {
         // dry quiet_rounds omitted → defaults to 1 (clamped >= 1).
         let c = LoopConfig::parse(Some(r#"{"max_iter":3,"stop":{"kind":"dry"}}"#));
         assert_eq!(c.stop, StopCriteria::Dry { quiet_rounds: 1 });
+
+        // B4: the verdict-gated stop — {"kind":"approved"} (+ aliases) parses to
+        // StopCriteria::Approved; max_iter stays the hard cap.
+        for kind in ["approved", "verdict", "verify"] {
+            let raw = format!(r#"{{"max_iter":4,"stop":{{"kind":"{kind}"}}}}"#);
+            let c = LoopConfig::parse(Some(&raw));
+            assert_eq!(c.max_iter, 4, "approved keeps the cap for kind={kind}");
+            assert_eq!(c.stop, StopCriteria::Approved, "kind={kind} → Approved");
+        }
     }
 
     #[test]
@@ -5747,6 +6034,49 @@ mod tests {
             decide_loop(&cfg3, 4, Some("draft B"), &[h_a, h_b, h_b]),
             LoopDecision::Stop { reason: "dry" }
         );
+    }
+
+    #[test]
+    fn decide_loop_approved_stops_on_verdict_pass_under_the_cap() {
+        // B4 verdict-gated stop: REUSE parse_verdict_pass over the body output.
+        // Under the cap, a not-yet-approved (or unparseable) output CONTINUEs; a
+        // PASS verdict STOPs early (reason "approved").
+        let cfg = LoopConfig { max_iter: 10, stop: StopCriteria::Approved };
+        // Body says FAIL → not approved → CONTINUE.
+        assert_eq!(
+            decide_loop(&cfg, 1, Some(r#"{"pass":false,"critique":"needs work"}"#), &[]),
+            LoopDecision::Continue
+        );
+        // Fail-safe: an unparseable / verdict-less output is NOT approval → CONTINUE.
+        assert_eq!(decide_loop(&cfg, 2, Some("still drafting, no verdict yet"), &[]), LoopDecision::Continue);
+        assert_eq!(decide_loop(&cfg, 3, None, &[]), LoopDecision::Continue, "missing output → not approved");
+        // Body emits a PASS verdict → APPROVED → STOP early (still under the cap).
+        assert_eq!(
+            decide_loop(&cfg, 4, Some(r#"{"pass":true,"critique":"good"}"#), &[]),
+            LoopDecision::Stop { reason: "approved" }
+        );
+        // The text PASS marker fallback also approves.
+        assert_eq!(
+            decide_loop(&cfg, 5, Some("Self-review: PASS — done"), &[]),
+            LoopDecision::Stop { reason: "approved" }
+        );
+    }
+
+    #[test]
+    fn decide_loop_approved_hard_cap_wins_when_never_approved() {
+        // BREAK-NEVER-SPIN: a body that NEVER approves itself must STOP exactly at
+        // the max_iter cap. The cap is checked FIRST in decide_loop, so the
+        // verdict-gated stop can never run unbounded. max_iter=3.
+        let cfg = LoopConfig { max_iter: 3, stop: StopCriteria::Approved };
+        assert_eq!(decide_loop(&cfg, 1, Some(r#"{"pass":false}"#), &[]), LoopDecision::Continue);
+        assert_eq!(decide_loop(&cfg, 2, Some(r#"{"pass":false}"#), &[]), LoopDecision::Continue);
+        assert_eq!(
+            decide_loop(&cfg, 3, Some(r#"{"pass":false}"#), &[]),
+            LoopDecision::Stop { reason: "max_iter" },
+            "the hard cap forces STOP even though the body never approves"
+        );
+        // Defensive: never exceeds the cap.
+        assert_eq!(decide_loop(&cfg, 99, Some(r#"{"pass":false}"#), &[]), LoopDecision::Stop { reason: "max_iter" });
     }
 
     #[test]
@@ -6331,6 +6661,85 @@ mod tests {
             assert_eq!(t.status, "done", "task {} done", t.title);
             assert_eq!(t.kind, "agent", "no loop kind injected");
         }
+    }
+
+    // ── B4: verdict-gated loop stop (iterate until approved, max_iter backstop) ──
+
+    #[tokio::test]
+    async fn loop_approved_stops_when_body_self_verifies_pass() {
+        // VERDICT-GATED STOP: the body emits a FAIL verdict for the first 2 rounds,
+        // then a PASS verdict on round 3 → the loop STOPs at approval (round 3),
+        // BEFORE the max_iter=6 cap. Reuses parse_verdict_pass over the body output.
+        let (svc, engine, worker, run_id) = loop_harness(
+            r#"{"max_iter":6,"stop":{"kind":"approved"}}"#,
+            vec![
+                r#"draft v1 — self-review: {"pass":false,"critique":"rough"}"#,
+                r#"draft v2 — self-review: {"pass":false,"critique":"closer"}"#,
+                r#"draft v3 — self-review: {"pass":true,"critique":"good enough"}"#,
+                "round4-should-not-happen",
+            ],
+            None,
+        )
+        .await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "verdict-gated loop drives to completion");
+
+        let by_title = |t: &str| detail.tasks.iter().find(|x| x.title == t).cloned().unwrap();
+        // Body ran EXACTLY 3 times (stopped at approval, before the cap of 6).
+        assert_eq!(body_run_count(&worker, &detail), 3, "loop stops at approval after 3 rounds");
+        let body = by_title("Refine");
+        assert_eq!(body.attempt, 2, "body attempt is 2 (3rd round, 0-based) at approval");
+        let ctrl = by_title("Loop");
+        assert_eq!(ctrl.kind, "loop");
+        assert_eq!(ctrl.status, "done", "loop controller settled done on approval");
+        let summary = ctrl.output_summary.as_deref().unwrap_or("");
+        assert!(summary.starts_with("LOOP: DONE"), "machine marker leads: {summary}");
+        assert!(summary.contains("reason=approved"), "early verdict-gated stop: {summary}");
+        assert!(summary.contains("iterations=3"), "stopped at 3 iterations: {summary}");
+        assert!(summary.contains("draft v3"), "final approved body output carried: {summary}");
+        // Downstream ran after the loop approved.
+        assert_eq!(by_title("Publish").status, "done", "downstream runs after the loop approves");
+    }
+
+    #[tokio::test]
+    async fn loop_approved_never_passes_stops_at_max_iter_hard_cap() {
+        // BREAK-NEVER-SPIN BACKSTOP: a body that NEVER approves itself (always emits
+        // FAIL) must STOP at the max_iter=3 HARD cap — the verdict-gated stop can
+        // never run unbounded. Body runs EXACTLY 3 times, then the cap forces STOP.
+        let (svc, engine, worker, run_id) = loop_harness(
+            r#"{"max_iter":3,"stop":{"kind":"approved"}}"#,
+            vec![
+                r#"v1 {"pass":false}"#,
+                r#"v2 {"pass":false}"#,
+                r#"v3 {"pass":false}"#,
+                "round4-should-not-happen",
+            ],
+            None,
+        )
+        .await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "the cap guarantees termination");
+
+        let by_title = |t: &str| detail.tasks.iter().find(|x| x.title == t).cloned().unwrap();
+        // Body ran EXACTLY 3 times (the cap), never a 4th despite never approving.
+        assert_eq!(body_run_count(&worker, &detail), 3, "never-approving body stops at the cap");
+        let body = by_title("Refine");
+        assert_eq!(body.attempt, 2, "body attempt is 2 (3rd round, 0-based) at the cap");
+        let ctrl = by_title("Loop");
+        assert_eq!(ctrl.status, "done", "loop controller settled done at the cap");
+        let summary = ctrl.output_summary.as_deref().unwrap_or("");
+        assert!(summary.contains("reason=max_iter"), "hard cap is the stop reason: {summary}");
+        assert!(summary.contains("iterations=3"), "exactly 3 iterations at the cap: {summary}");
+        assert_eq!(by_title("Publish").status, "done", "downstream still runs after the capped loop");
+
+        // The loop controller NEVER reached a worker (no spin / no dispatch).
+        let specs = worker.seen_specs.lock().unwrap().clone();
+        assert!(
+            !specs.iter().any(|s| s == "iterate"),
+            "the loop controller spec must never reach a worker: {specs:?}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

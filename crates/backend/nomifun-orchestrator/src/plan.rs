@@ -315,8 +315,12 @@ Rules:\n\
     3) ONE \"kind\":\"judge\" task that \"depends_on\" ALL N judges. Its \"pattern_config\" carries the aggregation policy as a JSON string: \"{\\\"aggregate\\\":\\\"mean\\\"}\" (default — average each candidate's scores across judges; winner = highest mean) or \"{\\\"aggregate\\\":\\\"borda\\\"}\" (each judge RANKS the candidates by its scores, award M-1…0 Borda points, sum across judges; winner = highest total). Optionally add \"{\\\"candidates\\\":M}\" to pin the candidate count. The judge task runs NO agent — the engine aggregates the ballots itself — so give it an empty/short spec. It REPORTS the winning candidate index in its output (downstream can build on the winner).\n\
   - \"loop\": a NO-AGENT controller that RE-RUNS one BODY task in place, iterating until a stop condition is met OR a HARD iteration cap is hit. Use it for iterative refinement — keep improving/retrying ONE task until it is good enough (e.g. 「反复打磨这段文案直到没有可改之处」, 「重试直到测试通过」). To set up a loop emit EXACTLY two tasks:\n\
     1) a BODY \"kind\":\"agent\" task that does one round of the work. Its \"spec\" should produce output that can be re-run/refined each round; it sees its own previous round's output as upstream context.\n\
-    2) ONE \"kind\":\"loop\" task that \"depends_on\":[BODY] (the body is its ONLY dependency). Its \"pattern_config\" is a JSON string carrying a REQUIRED hard cap and a stop criterion: \"{\\\"max_iter\\\":N,\\\"stop\\\":{...}}\". \"max_iter\" (a small N like 3–5) is the HARD upper bound — the loop ALWAYS stops at the cap even if the criterion never fires (this guarantees termination). \"stop\" is one of: \"{\\\"kind\\\":\\\"max_iter\\\"}\" (stop only at the cap), \"{\\\"kind\\\":\\\"predicate\\\",\\\"done_marker\\\":\\\"DONE\\\"}\" (stop early once the body output contains the marker text, or strict JSON {\\\"done\\\":true}; instruct the body to emit the marker when it judges itself finished), or \"{\\\"kind\\\":\\\"dry\\\",\\\"quiet_rounds\\\":K}\" (stop early once K consecutive rounds produce the SAME body output — no further change). The loop task runs NO agent — the engine re-dispatches the body and evaluates the stop condition itself — so give it an empty/short spec. Downstream work \"depends_on\" the LOOP task (NOT the body), so it waits for the whole iteration to finish.\n\
+    2) ONE \"kind\":\"loop\" task that \"depends_on\":[BODY] (the body is its ONLY dependency). Its \"pattern_config\" is a JSON string carrying a REQUIRED hard cap and a stop criterion: \"{\\\"max_iter\\\":N,\\\"stop\\\":{...}}\". \"max_iter\" (a small N like 3–5) is the HARD upper bound — the loop ALWAYS stops at the cap even if the criterion never fires (this guarantees termination). \"stop\" is one of: \"{\\\"kind\\\":\\\"max_iter\\\"}\" (stop only at the cap), \"{\\\"kind\\\":\\\"predicate\\\",\\\"done_marker\\\":\\\"DONE\\\"}\" (stop early once the body output contains the marker text, or strict JSON {\\\"done\\\":true}; instruct the body to emit the marker when it judges itself finished), \"{\\\"kind\\\":\\\"dry\\\",\\\"quiet_rounds\\\":K}\" (stop early once K consecutive rounds produce the SAME body output — no further change), or \"{\\\"kind\\\":\\\"approved\\\"}\" (a VERDICT-GATED loop — stop early once the body's output PASSES a self-check: instruct the body to SELF-ASSESS its round and emit a strict-JSON verdict {\\\"pass\\\":true|false} (or end with a PASS/FAIL marker); the loop keeps iterating until the body's own verdict PASSES, capped by max_iter). The loop task runs NO agent — the engine re-dispatches the body and evaluates the stop condition itself — so give it an empty/short spec. Downstream work \"depends_on\" the LOOP task (NOT the body), so it waits for the whole iteration to finish.\n\
 - FAN-OUT (parallel variants / shards) is expressed by PLANNING, NOT a special kind: when a step benefits from doing the same work in parallel (e.g. N independent drafts, N shards of a corpus, N candidate approaches), emit MULTIPLE sibling tasks that all have \"kind\":\"agent\" and SHARE the same \"pattern_config\" group tag — a JSON string like \"{\\\"group\\\":\\\"<label>\\\"}\" (e.g. \"{\\\"group\\\":\\\"drafts\\\"}\"). Then add ONE downstream task (usually \"kind\":\"synthesis\") that \"depends_on\" ALL of those siblings to combine them. The engine runs the siblings in parallel automatically.\n\
+- COMPOSING PATTERNS: the kinds above are building blocks — COMBINE them when the goal calls for it. Each pattern is just a task plus its \"depends_on\" edges, so you compose by CHAINING one pattern's aggregator/result into the next pattern's inputs. Reach for a composition only when the goal genuinely needs it (do not nest patterns gratuitously). The most useful compositions:\n\
+  - FAN-OUT → JUDGE → SYNTHESIS (explore alternatives, pick the best, then build on it): emit M candidate \"kind\":\"agent\" siblings sharing a \"{\\\"group\\\":\\\"candidates\\\"}\" tag; N judge \"kind\":\"agent\" tasks each \"depends_on\" ALL M candidates emitting a \"{\\\"scores\\\":[..]}\" ballot; ONE \"kind\":\"judge\" task \"depends_on\" ALL N judges (it REPORTS the winning candidate index); then a closing \"kind\":\"synthesis\" (or plain \"kind\":\"agent\") task \"depends_on\" the judge that takes the winner and produces the final deliverable.\n\
+  - VERIFY-GATE → DOWNSTREAM (validate a result before anything builds on it): emit the task T to validate, then N skeptic \"kind\":\"agent\" tasks each \"depends_on\":[T] emitting a \"{\\\"pass\\\":bool}\" verdict, then ONE \"kind\":\"verify\" task \"depends_on\" ALL N skeptics with a \"{\\\"vote\\\":...}\" policy, then the downstream work (a \"kind\":\"synthesis\" merge or a plain \"kind\":\"agent\" build step) \"depends_on\" the VERIFY task — on a FAIL verdict the engine SKIPS that downstream automatically so unvalidated work never runs.\n\
+  - LOOP WITH AN INTERNAL CHECK (iterate until the result is good enough): emit a BODY \"kind\":\"agent\" task that BOTH produces a round of work AND self-assesses it, ending its output with a strict-JSON verdict {\\\"pass\\\":true|false} (or a PASS/FAIL marker); then ONE \"kind\":\"loop\" task \"depends_on\":[BODY] with \"pattern_config\":\"{\\\"max_iter\\\":N,\\\"stop\\\":{\\\"kind\\\":\\\"approved\\\"}}\" — the loop re-runs the body until ITS OWN verdict PASSES, bounded by the max_iter hard cap (the body sees its prior round's output, so it refines until it approves itself or the cap stops it). Downstream \"depends_on\" the LOOP.\n\
 - \"pattern_config\" is a raw JSON STRING (or omit it). It carries the fan-out \"group\" tag, a verify task's \"vote\" policy, a judge task's \"aggregate\" policy, OR a loop task's \"max_iter\"+\"stop\" criterion (see above); leave it out for ordinary tasks.\n\
 - \"task_profile\", \"member_index\" and \"rationale\" are optional.\n\
 - \"title\" is a short imperative label; \"spec\" is the full instruction the worker agent will execute.\n\
@@ -613,7 +617,7 @@ YOU JUDGE, per task, based on the intent AND the current delivery state:\n\
 - ADD new tasks the intent introduces, wiring their \"depends_on\" to the kept upstream work and/or to earlier new tasks.\n\
 - A task you neither keep nor replace is DROPPED — only keep what genuinely still helps.\n\
 You are NOT constrained to a fixed policy: decide freely how much to preserve vs. rebuild so the resulting DAG delivers the user's intent with the least wasted work.\n\
-\"role\" is a SHORT Chinese role name (例如 规划/前端/后端/测试/设计/文档/研究) for a NEW task. \"kind\" is the NEW task's execution mode; omit it (or use \"agent\") for a normal single-agent task (the default and the vast majority). The other kinds (\"synthesis\"/\"verify\"/\"judge\"/\"loop\") and their \"pattern_config\" follow the same conventions as the planner: synthesis merges its dependencies' outputs; a fan-out group is sibling agent tasks sharing \"pattern_config\":\"{\\\"group\\\":\\\"<label>\\\"}\". Reach for them only when the intent genuinely benefits.\n\
+\"role\" is a SHORT Chinese role name (例如 规划/前端/后端/测试/设计/文档/研究) for a NEW task. \"kind\" is the NEW task's execution mode; omit it (or use \"agent\") for a normal single-agent task (the default and the vast majority). The other kinds (\"synthesis\"/\"verify\"/\"judge\"/\"loop\") and their \"pattern_config\" follow the same conventions as the planner: synthesis merges its dependencies' outputs; a fan-out group is sibling agent tasks sharing \"pattern_config\":\"{\\\"group\\\":\\\"<label>\\\"}\"; a verify gate is N skeptic agent tasks → a \"kind\":\"verify\" task (\"{\\\"vote\\\":...}\") that SKIPS its dependents on a FAIL; a judge contest is M candidate siblings → N judge agents → a \"kind\":\"judge\" task (\"{\\\"aggregate\\\":...}\") reporting the winner; a loop is a BODY agent task → a \"kind\":\"loop\" task \"depends_on\":[body] (\"{\\\"max_iter\\\":N,\\\"stop\\\":{...}}\", where stop can be \"{\\\"kind\\\":\\\"approved\\\"}\" — iterate until the body self-verifies PASS, capped by max_iter). You may also COMPOSE them (fan-out→judge→synthesis, verify-gate→downstream, loop-with-a-self-checking-body) by chaining one pattern's result into the next via \"depends_on\". Reach for any of them only when the intent genuinely benefits.\n\
 \"title\" is a short imperative label; \"spec\" is the full instruction the worker will execute.\n\
 The graph MUST be acyclic: a NEW task's integer \"depends_on\" indices must point EARLIER in the \"tasks\" array.\n\
 Output the JSON object and nothing else.";
@@ -948,6 +952,73 @@ mod tests {
         for kw in ["predicate", "dry", "quiet_rounds", "done_marker"] {
             assert!(PLAN_SYSTEM.contains(kw), "rules must teach loop stop kw '{kw}': {PLAN_SYSTEM}");
         }
+    }
+
+    // B4: the system prompt must TEACH the verdict-gated loop stop — the
+    // `{"kind":"approved"}` stop + that the body should self-assess and emit a
+    // pass/fail verdict — so the lead can plan an "iterate until approved" loop.
+    #[test]
+    fn plan_system_teaches_verdict_gated_loop_stop() {
+        assert!(
+            PLAN_SYSTEM.contains("approved"),
+            "rules must teach the approved (verdict-gated) loop stop: {PLAN_SYSTEM}"
+        );
+        // The body must be told to emit a pass/fail verdict the loop reads.
+        assert!(
+            PLAN_SYSTEM.contains("\\\"pass\\\""),
+            "rules must teach the body emits a pass verdict: {PLAN_SYSTEM}"
+        );
+        assert!(
+            PLAN_SYSTEM.contains("SELF-ASSESS") || PLAN_SYSTEM.contains("self-assess"),
+            "rules must tell the body to self-assess: {PLAN_SYSTEM}"
+        );
+        // max_iter must stay the named hard backstop even in the verdict-gated case.
+        assert!(PLAN_SYSTEM.contains("max_iter"), "max_iter hard cap still taught: {PLAN_SYSTEM}");
+    }
+
+    // B4: the system prompt must TEACH deep pattern COMPOSITION — the three named
+    // compositions (fan-out→judge→synthesis, verify-gate→downstream, loop with an
+    // internal self-check) — so the lead reliably emits composed structures rather
+    // than only single patterns.
+    #[test]
+    fn plan_system_teaches_pattern_composition() {
+        assert!(
+            PLAN_SYSTEM.contains("COMPOSING PATTERNS") || PLAN_SYSTEM.contains("COMPOSITION"),
+            "rules must have a composition section: {PLAN_SYSTEM}"
+        );
+        // fan-out → judge → synthesis.
+        assert!(
+            PLAN_SYSTEM.contains("FAN-OUT → JUDGE → SYNTHESIS"),
+            "rules must teach fan-out→judge→synthesis: {PLAN_SYSTEM}"
+        );
+        // verify-gate → downstream.
+        assert!(
+            PLAN_SYSTEM.contains("VERIFY-GATE → DOWNSTREAM"),
+            "rules must teach verify-gate→downstream: {PLAN_SYSTEM}"
+        );
+        // loop with an internal check.
+        assert!(
+            PLAN_SYSTEM.contains("LOOP WITH AN INTERNAL CHECK"),
+            "rules must teach loop-with-internal-check: {PLAN_SYSTEM}"
+        );
+    }
+
+    // B4: the ADJUST prompt must ALSO teach composition + the verdict-gated loop
+    // stop, so a conversational re-adjust can emit composed structures.
+    #[test]
+    fn adjust_system_teaches_composition_and_verdict_loop() {
+        assert!(
+            ADJUST_SYSTEM.contains("COMPOSE") || ADJUST_SYSTEM.contains("compose"),
+            "adjust must teach composing patterns: {ADJUST_SYSTEM}"
+        );
+        assert!(
+            ADJUST_SYSTEM.contains("fan-out→judge→synthesis"),
+            "adjust must name the fan-out→judge→synthesis composition: {ADJUST_SYSTEM}"
+        );
+        assert!(
+            ADJUST_SYSTEM.contains("approved"),
+            "adjust must teach the verdict-gated (approved) loop stop: {ADJUST_SYSTEM}"
+        );
     }
 
     // UC-1d: a loop plan — a BODY agent task + a `loop` controller depending only
