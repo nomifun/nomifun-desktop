@@ -67,6 +67,10 @@
       "researcher": "Researcher",
       "tester": "Tester"
     },
+    "kind": {
+      "synthesis": "Synthesis",
+      "fanout": "Fan-out · {{label}}"
+    },
     "title": "Run History",
     "subtitle": "Browse every orchestration run you started — click any one to replay its task graph",
     "openConversation": "Open conversation",

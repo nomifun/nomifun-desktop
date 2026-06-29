@@ -67,6 +67,10 @@
       "researcher": "调研",
       "tester": "测试"
     },
+    "kind": {
+      "synthesis": "汇总",
+      "fanout": "扇出 · {{label}}"
+    },
     "title": "Run 历史",
     "subtitle": "查看你发起过的全部编排 Run，点击任意一条复盘其任务图",
     "openConversation": "打开会话",

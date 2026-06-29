@@ -2044,6 +2044,8 @@ export type I18nKey =
   | 'orchestrator.run.detail.untitledTask'
   | 'orchestrator.run.emptyDesc'
   | 'orchestrator.run.emptyTitle'
+  | 'orchestrator.run.kind.fanout'
+  | 'orchestrator.run.kind.synthesis'
   | 'orchestrator.run.loadError'
   | 'orchestrator.run.manage.delete'
   | 'orchestrator.run.manage.deleteConfirm'
