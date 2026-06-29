@@ -155,13 +155,17 @@ Rules:\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
 - Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
 - \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable assistants. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
-- \"kind\" is the task's EXECUTION MODE; omit it (or use \"agent\") for a normal single-agent task — this is the DEFAULT and should be the vast majority of tasks. The only other value is:\n\
+- \"kind\" is the task's EXECUTION MODE; omit it (or use \"agent\") for a normal single-agent task — this is the DEFAULT and should be the vast majority of tasks. The other values are:\n\
   - \"synthesis\": a task that MERGES/synthesizes its dependency tasks' outputs into one coherent final result. Use it for a closing step like 「综合/合并上述产出，写出最终的 X」: set \"kind\":\"synthesis\" and make \"depends_on\" list every task whose output it should merge. A synthesis task needs no tools of its own — it reasons over the upstream results you give it.\n\
+  - \"verify\": a NO-AGENT aggregator that VALIDATES an earlier task's result by majority/quorum vote of independent skeptics, then GATES the work that depends on it. Use it when a result must be checked before downstream work proceeds (correctness-critical output, a plan/spec others will build on). To set up a verify gate emit, for the task T you want to validate:\n\
+    1) N independent SKEPTIC tasks (N usually 3) — each is a normal \"kind\":\"agent\" task that \"depends_on\":[T] and whose \"spec\" instructs it to CRITICALLY and INDEPENDENTLY evaluate T's result and OUTPUT ONLY a strict-JSON verdict: {\\\"pass\\\": true|false, \\\"critique\\\": \\\"<one-line reason>\\\"}. Phrase each skeptic's spec a little differently so they don't all make the same mistake.\n\
+    2) ONE \"kind\":\"verify\" task that \"depends_on\" ALL N skeptics. Its \"pattern_config\" carries the vote policy as a JSON string: \"{\\\"vote\\\":\\\"majority\\\"}\" (default — pass iff > half pass), \"{\\\"vote\\\":\\\"unanimous\\\"}\" (pass iff every skeptic passes), or \"{\\\"vote\\\":{\\\"threshold\\\":K}}\" (pass iff at least K pass). The verify task runs NO agent — the engine tallies the skeptics' verdicts itself — so give it an empty/short spec.\n\
+    3) The downstream work that must only run on a PASS \"depends_on\" the verify task. On a FAIL verdict the engine SKIPS that downstream automatically (it never runs unvalidated).\n\
 - FAN-OUT (parallel variants / shards) is expressed by PLANNING, NOT a special kind: when a step benefits from doing the same work in parallel (e.g. N independent drafts, N shards of a corpus, N candidate approaches), emit MULTIPLE sibling tasks that all have \"kind\":\"agent\" and SHARE the same \"pattern_config\" group tag — a JSON string like \"{\\\"group\\\":\\\"<label>\\\"}\" (e.g. \"{\\\"group\\\":\\\"drafts\\\"}\"). Then add ONE downstream task (usually \"kind\":\"synthesis\") that \"depends_on\" ALL of those siblings to combine them. The engine runs the siblings in parallel automatically.\n\
-- \"pattern_config\" is a raw JSON STRING (or omit it). Today it is only used for the fan-out \"group\" tag above; leave it out for ordinary tasks.\n\
+- \"pattern_config\" is a raw JSON STRING (or omit it). It carries the fan-out \"group\" tag OR a verify task's \"vote\" policy (see above); leave it out for ordinary tasks.\n\
 - \"task_profile\", \"member_index\" and \"rationale\" are optional.\n\
 - \"title\" is a short imperative label; \"spec\" is the full instruction the worker agent will execute.\n\
-- Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged. Do NOT over-use synthesis/fan-out — reach for them only when the goal genuinely benefits from merging multiple outputs or parallel variants.\n\
+- Keep the plan minimal but complete: one task if the goal is atomic, several with dependencies if it must be staged. Do NOT over-use synthesis/fan-out/verify — reach for them only when the goal genuinely benefits from merging multiple outputs, parallel variants, or validating a result before building on it.\n\
 Output the JSON object and nothing else.";
 
 /// Build the `(provider_id, model) → description` map for the prompt.
@@ -467,6 +471,49 @@ mod tests {
         assert!(dag.tasks[2].pattern_config.is_none());
     }
 
+    // UC-1b: a verify plan — a task to validate, N skeptic agent tasks each
+    // depending on it, and a `verify` aggregator depending on all skeptics with a
+    // vote policy in pattern_config — parses, and the verify kind + vote policy
+    // round-trip. parse_plan stays fail-soft for the kind (it is kept as-is; the
+    // engine recognizes "verify").
+    #[test]
+    fn parse_plan_accepts_verify_skeptics_and_aggregator() {
+        let raw = r#"{"tasks":[
+            {"title":"Build","spec":"build the feature","depends_on":[],"kind":"agent"},
+            {"title":"Skeptic 1","spec":"evaluate; output {\"pass\":bool}","depends_on":[0],"kind":"agent"},
+            {"title":"Skeptic 2","spec":"evaluate; output {\"pass\":bool}","depends_on":[0],"kind":"agent"},
+            {"title":"Skeptic 3","spec":"evaluate; output {\"pass\":bool}","depends_on":[0],"kind":"agent"},
+            {"title":"Gate","spec":"tally","depends_on":[1,2,3],"kind":"verify","pattern_config":"{\"vote\":\"majority\"}"},
+            {"title":"Deploy","spec":"ship it","depends_on":[4],"kind":"agent"}
+        ]}"#;
+        let dag = parse_plan(raw, "build, verify, deploy");
+        assert_eq!(dag.tasks.len(), 6);
+        // The three skeptics are plain agent tasks depending on Build.
+        for i in 1..=3 {
+            assert_eq!(dag.tasks[i].kind, "agent", "skeptic {i} is an agent task");
+            assert_eq!(dag.tasks[i].depends_on, vec![0]);
+        }
+        // The aggregator is `verify`, depends on all three skeptics, carries the
+        // vote policy in pattern_config.
+        let gate = &dag.tasks[4];
+        assert_eq!(gate.kind, "verify");
+        assert_eq!(gate.depends_on, vec![1, 2, 3]);
+        assert_eq!(gate.pattern_config.as_deref(), Some("{\"vote\":\"majority\"}"));
+        // Downstream gates on the verify task.
+        assert_eq!(dag.tasks[5].depends_on, vec![4]);
+    }
+
+    // An unknown kind stays as-is here (parse_plan does not normalize kinds); the
+    // engine is what treats anything other than the known kinds as agent. This
+    // pins the fail-soft contract (parse keeps the string, no error).
+    #[test]
+    fn parse_plan_keeps_unknown_kind_verbatim_fail_soft() {
+        let raw = r#"{"tasks":[{"title":"X","spec":"do X","depends_on":[],"kind":"totally-unknown"}]}"#;
+        let dag = parse_plan(raw, "goal");
+        assert_eq!(dag.tasks.len(), 1);
+        assert_eq!(dag.tasks[0].kind, "totally-unknown", "parse keeps the kind verbatim (fail-soft)");
+    }
+
     // ZERO-REGRESSION: a legacy plan WITHOUT any `kind` field parses with every
     // task defaulting to "agent" — the current single-agent behavior is unchanged
     // for any pre-023 plan.
@@ -510,6 +557,23 @@ mod tests {
             "rules must teach fan-out: {PLAN_SYSTEM}"
         );
         assert!(PLAN_SYSTEM.contains("group"), "rules must teach the group tag: {PLAN_SYSTEM}");
+    }
+
+    // UC-1b: the system prompt must TEACH the verify pattern — the `verify` kind,
+    // the skeptic JSON verdict shape, and the vote policies — otherwise the lead
+    // model never emits a verify gate.
+    #[test]
+    fn plan_system_teaches_verify_pattern() {
+        assert!(PLAN_SYSTEM.contains("verify"), "rules must teach the verify kind: {PLAN_SYSTEM}");
+        assert!(
+            PLAN_SYSTEM.contains("SKEPTIC") || PLAN_SYSTEM.contains("skeptic"),
+            "rules must mention skeptic tasks: {PLAN_SYSTEM}"
+        );
+        assert!(PLAN_SYSTEM.contains("\\\"pass\\\""), "rules must teach the pass verdict shape: {PLAN_SYSTEM}");
+        assert!(PLAN_SYSTEM.contains("vote"), "rules must teach the vote policy: {PLAN_SYSTEM}");
+        for kw in ["majority", "unanimous", "threshold"] {
+            assert!(PLAN_SYSTEM.contains(kw), "rules must teach vote policy '{kw}': {PLAN_SYSTEM}");
+        }
     }
 
     #[test]
