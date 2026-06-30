@@ -183,31 +183,31 @@
   color: var(--text-tertiary);
 }
 
-/* ── Steer popover ───────────────────────────────────────────────────────────
- * Small input + send shown inside an Arco Popover triggered by the 「转向…」
- * banner action. */
-.steerPop {
+/* ── 局部调整 composer (docked at the BOTTOM of the projected worker view) ──────
+ * A labeled input + submit so the user can type a local adjustment for this node
+ * and submit it (runs.steer) without leaving the content area. */
+.steerBar {
+  flex-shrink: 0;
   display: flex;
-  flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
-  width: 280px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-base);
+  background: color-mix(in srgb, rgb(var(--primary-6)) 4%, var(--bg-1));
 }
 
-.steerPopTitle {
+.steerLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding-bottom: 7px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-secondary);
 }
 
-.steerPopHint {
-  font-size: 11px;
-  line-height: 15px;
-  color: var(--text-tertiary);
-}
-
-.steerPopRow {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
+.steerInput {
+  flex: 1;
+  min-width: 0;
 }

@@ -228,13 +228,11 @@
       "noConversation": "暂无对话记录，待有 worker 接手该任务后将在此处实时显示。"
     },
     "steer": {
-      "title": "插话引导",
-      "hint": "向正在执行该任务的 worker 实时插入一条引导消息。",
-      "placeholder": "输入要插入的引导内容…",
-      "send": "发送",
-      "open": "转向…",
-      "sent": "已发送引导消息",
-      "error": "发送引导消息失败：{{error}}"
+      "label": "局部调整",
+      "placeholder": "输入对当前节点的局部调整方向…",
+      "submit": "提交",
+      "sent": "已提交局部调整",
+      "error": "局部调整失败：{{error}}"
     },
     "project": {
       "viewing": "查看",

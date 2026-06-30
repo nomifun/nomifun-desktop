@@ -6,7 +6,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Input, Popover, Spin } from '@arco-design/web-react';
+import { Input, Spin } from '@arco-design/web-react';
 import { Comment, Left, Redo, Send } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
@@ -23,20 +23,24 @@ type ProjectedWorkerViewProps = {
 
 /**
  * ProjectedWorkerView — the read-only projection of one DAG worker node into the
- * conversation content area (「会话原生编排 v2」F7). Rendered by
- * {@link ConversationContentSwitcher} ON TOP of the (display:none) main NomiChat
- * whenever a node is projected, so the user can inspect a worker's live record
- * and steer / rerun it in place, then return to the main agent.
+ * conversation content area (「会话原生编排」F7; left chat column of the 左右分屏).
+ * Rendered by {@link ConversationContentSwitcher} ON TOP of the (display:none)
+ * main NomiChat whenever a node is projected, so the user can inspect a worker's
+ * live record and adjust / rerun it in place, then return to the main agent.
  *
- * Layout: a thin banner (left「查看:<title>」, right [重跑] / [转向…] / [← 返回 main])
- * over a transcript body. The body replicates {@link WorkerTranscriptPanel}'s
- * resolution exactly: `task.conversation_id → ipcBridge.conversation.get →
- * <ReadOnlyConversationView hideSendBox agent_name={task.title} />`, with a
- * 「尚未开始」empty state when `conversation_id` is undefined and a loader while
- * the conversation is being fetched.
+ * Layout:
+ *  - a thin banner (left「查看:<title>」; right [重跑] / [← 返回 main]);
+ *  - the worker transcript body (replicates {@link WorkerTranscriptPanel}'s
+ *    resolution: `task.conversation_id → conversation.get → ReadOnlyConversationView`,
+ *    with「尚未开始」/ loader states);
+ *  - a docked「局部调整」composer at the BOTTOM (only once the worker has started)
+ *    — a labeled input + 提交 that injects a steering message into the worker's
+ *    live conversation (`runs.steer`). This used to be a 「转向…」popover in the
+ *    banner; moved to the bottom so the user types the adjustment where the eye
+ *    already is (用户反馈).
  *
  * `TRunTask.conversation_id` is already the backend INTEGER id — passed straight
- * through with no conversion (unlike the string TeamAgent.conversation_id).
+ * through with no conversion.
  */
 const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) => {
   const { t } = useTranslation();
@@ -49,17 +53,15 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Steer (mid-turn inject) draft + in-flight state, behind the 「转向…」popover.
-  const [steerOpen, setSteerOpen] = useState(false);
-  const [steerText, setSteerText] = useState('');
-  const [steering, setSteering] = useState(false);
+  // 局部调整 (mid-turn steer) draft + in-flight state (now a docked bottom bar).
+  const [adjustText, setAdjustText] = useState('');
+  const [adjusting, setAdjusting] = useState(false);
   // Guards the rerun trigger against a double-click while the request is in flight.
   const [rerunning, setRerunning] = useState(false);
 
-  // Reset the steer draft whenever the projected task changes.
+  // Reset the adjust draft whenever the projected task changes.
   useEffect(() => {
-    setSteerText('');
-    setSteerOpen(false);
+    setAdjustText('');
   }, [task.id]);
 
   // Resolve the worker conversation off `task.conversation_id` (mirrors
@@ -98,40 +100,35 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
       message.success(t('orchestrator.run.rerun.ok', { defaultValue: '已重跑该节点' }));
       await payload.refetch();
     } catch (e) {
-      message.error(
-        t('orchestrator.run.rerun.error', { defaultValue: '重跑失败:{{error}}', error: String(e) })
-      );
+      message.error(t('orchestrator.run.rerun.error', { defaultValue: '重跑失败:{{error}}', error: String(e) }));
     } finally {
       setRerunning(false);
     }
   };
 
-  // Inject a steering message into the worker's live conversation. On success we
-  // clear the draft + close the popover; no refetch needed (the transcript stream
-  // surfaces the injected turn on its own).
-  const sendSteer = async () => {
-    const text = steerText.trim();
-    if (!text || steering) return;
-    setSteering(true);
+  // Submit a 局部调整: inject a steering message into the worker's live
+  // conversation. On success clear the draft; no refetch needed (the transcript
+  // stream surfaces the injected turn on its own).
+  const submitAdjust = async () => {
+    const text = adjustText.trim();
+    if (!text || adjusting) return;
+    setAdjusting(true);
     try {
       await ipcBridge.orchestrator.runs.steer.invoke({
         run_id: runId,
         task_id: task.id,
         updates: { text },
       });
-      message.success(t('orchestrator.run.steer.sent', { defaultValue: '已发送转向消息' }));
-      setSteerText('');
-      setSteerOpen(false);
+      message.success(t('orchestrator.run.steer.sent', { defaultValue: '已提交局部调整' }));
+      setAdjustText('');
     } catch (e) {
-      message.error(
-        t('orchestrator.run.steer.error', { defaultValue: '转向失败:{{error}}', error: String(e) })
-      );
+      message.error(t('orchestrator.run.steer.error', { defaultValue: '局部调整失败:{{error}}', error: String(e) }));
     } finally {
-      setSteering(false);
+      setAdjusting(false);
     }
   };
 
-  const steerDisabled = steering || steerText.trim().length === 0;
+  const adjustDisabled = adjusting || adjustText.trim().length === 0;
 
   return (
     <div className={styles.root}>
@@ -168,59 +165,6 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
             <Redo theme='outline' size='13' strokeWidth={3} />
             <span>{t('orchestrator.run.rerun.button', { defaultValue: '重跑' })}</span>
           </div>
-
-          {/* 转向… (mid-turn inject), behind a small Arco Popover */}
-          <Popover
-            trigger='click'
-            position='br'
-            popupVisible={steerOpen}
-            onVisibleChange={setSteerOpen}
-            content={
-              <div className={styles.steerPop}>
-                <div className={styles.steerPopTitle}>{t('orchestrator.run.steer.title', { defaultValue: '转向' })}</div>
-                <div className={styles.steerPopHint}>
-                  {t('orchestrator.run.steer.hint', { defaultValue: '向正在运行的 agent 中途注入一条消息' })}
-                </div>
-                <Input.TextArea
-                  autoFocus
-                  value={steerText}
-                  disabled={steering}
-                  placeholder={t('orchestrator.run.steer.placeholder', { defaultValue: '输入要注入的消息…' })}
-                  autoSize={{ minRows: 2, maxRows: 6 }}
-                  onChange={(v: string) => setSteerText(v)}
-                />
-                <div className={styles.steerPopRow}>
-                  <div
-                    role='button'
-                    tabIndex={0}
-                    aria-label={t('orchestrator.run.steer.send', { defaultValue: '发送' })}
-                    aria-disabled={steerDisabled}
-                    className={`${styles.action} ${styles.actionPrimary}`}
-                    onClick={steerDisabled ? undefined : () => void sendSteer()}
-                    onKeyDown={(e) => {
-                      if ((e.key === 'Enter' || e.key === ' ') && !steerDisabled) {
-                        e.preventDefault();
-                        void sendSteer();
-                      }
-                    }}
-                  >
-                    <Send theme='outline' size='13' strokeWidth={3} />
-                    <span>{t('orchestrator.run.steer.send', { defaultValue: '发送' })}</span>
-                  </div>
-                </div>
-              </div>
-            }
-          >
-            <div
-              role='button'
-              tabIndex={0}
-              aria-label={t('orchestrator.run.steer.open', { defaultValue: '转向…' })}
-              className={styles.action}
-            >
-              <Send theme='outline' size='13' strokeWidth={3} />
-              <span>{t('orchestrator.run.steer.open', { defaultValue: '转向…' })}</span>
-            </div>
-          </Popover>
 
           {/* ← 返回 main */}
           <div
@@ -264,6 +208,49 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
           <ReadOnlyConversationView conversation={conversation} hideSendBox agent_name={task.title} />
         ) : null}
       </div>
+
+      {/* ── 局部调整 composer (docked bottom) — only once the worker has started.
+          The user types an adjustment for this node and submits it (runs.steer)
+          right where they are reading the transcript. Enter submits;
+          Shift+Enter / IME composition inserts a newline. ───────────────────── */}
+      {conversationId !== undefined && (
+        <div className={styles.steerBar}>
+          <span className={styles.steerLabel}>
+            <Send theme='outline' size='13' strokeWidth={3} />
+            {t('orchestrator.run.steer.label', { defaultValue: '局部调整' })}
+          </span>
+          <Input.TextArea
+            value={adjustText}
+            disabled={adjusting}
+            placeholder={t('orchestrator.run.steer.placeholder', { defaultValue: '输入对当前节点的局部调整方向…' })}
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            className={styles.steerInput}
+            onChange={(v: string) => setAdjustText(v)}
+            onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                if (!adjustDisabled) void submitAdjust();
+              }
+            }}
+          />
+          <div
+            role='button'
+            tabIndex={0}
+            aria-label={t('orchestrator.run.steer.submit', { defaultValue: '提交' })}
+            aria-disabled={adjustDisabled}
+            className={`${styles.action} ${styles.actionPrimary}`}
+            onClick={adjustDisabled ? undefined : () => void submitAdjust()}
+            onKeyDown={(e) => {
+              if ((e.key === 'Enter' || e.key === ' ') && !adjustDisabled) {
+                e.preventDefault();
+                void submitAdjust();
+              }
+            }}
+          >
+            <span>{t('orchestrator.run.steer.submit', { defaultValue: '提交' })}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
