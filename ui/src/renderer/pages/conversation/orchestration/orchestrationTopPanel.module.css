@@ -1,0 +1,44 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * OrchestrationTopPanel — the orchestration canvas as a collapsible panel pinned
+ * to the top of the conversation content area. Glass/card surface; all colors go
+ * through CSS variables to protect the themes.
+ */
+
+/* Outer shell — a tinted card separating the canvas from the chat below. Never
+ * grows past its content: the header is auto height, the body is bounded. */
+.panel {
+  position: relative;
+  border-bottom: 1px solid var(--bg-3);
+  background: var(--bg-1);
+}
+
+/* Header strip — always visible while a run exists (even when collapsed). */
+.header {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  background: color-mix(in srgb, var(--bg-2) 60%, transparent);
+}
+
+/* Collapse toggle hit area. */
+.toggle {
+  color: var(--color-text-2);
+  border-radius: 8px;
+  padding: 2px 4px;
+  transition: color 0.15s ease;
+}
+
+.toggle:hover {
+  color: rgb(var(--primary-6));
+}
+
+/* Bounded canvas box — finite height so react-flow can lay out, while the chat
+ * region below stays `flex-1`. Capped at the smaller of 45vh / 360px. */
+.body {
+  height: min(45vh, 360px);
+  overflow: hidden;
+  border-top: 1px solid var(--bg-3);
+}

@@ -13,7 +13,7 @@ import { usePresetAssistantInfo, resolveAssistantConfigId } from '@/renderer/hoo
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
 import { History } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
@@ -30,6 +30,7 @@ import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import { OrchestrationProvider } from '../orchestration/OrchestrationContext';
+import OrchestrationTopPanel from '../orchestration/OrchestrationTopPanel';
 import ConversationContentSwitcher from '../orchestration/ConversationContentSwitcher';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 // import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
@@ -163,38 +164,16 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
   const { info: presetAssistantInfo } = usePresetAssistantInfo(conversation);
   const nomiAssistantId = resolveAssistantConfigId(conversation) ?? undefined;
 
-  // Orchestration landing (no floating window): the homepage「智能编排」entry
-  // stashes a one-shot `nomi_open_rail_<id>` sessionStorage flag. We read it ONCE
-  // here (the single owner) to decide whether THIS mount should open the right
-  // rail straight onto the 编排 tab, then clear it in an effect so it never
-  // re-applies. Driving both `initialWorkspaceExpanded` (ChatLayout → rail open)
-  // and `defaultRailTab` (ChatSlider → 编排 active) from this one read keeps the
-  // behavior scoped strictly to the landing — no shared rail code reads the flag.
-  const [openRailOnLanding] = useState<boolean>(() => {
-    try {
-      return sessionStorage.getItem(`nomi_open_rail_${conversation.id}`) != null;
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    if (!openRailOnLanding) return;
-    try {
-      sessionStorage.removeItem(`nomi_open_rail_${conversation.id}`);
-    } catch {
-      /* sessionStorage may be unavailable — non-fatal */
-    }
-  }, [openRailOnLanding, conversation.id]);
-
   const chatLayoutProps = {
     title: conversation.name,
     siderTitle: sliderTitle,
-    sider: <ChatSlider conversation={conversation} defaultRailTab={openRailOnLanding ? 'orchestration' : undefined} />,
+    sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
-        {/* 会话原生编排 v2: the orchestration canvas + run controls live in the
-            right-rail「编排」tab (no floating overlay). The header keeps just the
-            existing capability controls (CronJobManager). */}
+        {/* 编排画布 (Option B): the orchestration canvas + run controls live in a
+            collapsible panel pinned to the TOP of the content area (no floating
+            overlay, no right-rail tab). The header keeps just the existing
+            capability controls (CronJobManager). */}
         <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.extra?.cron_job_id as string | undefined}
@@ -206,7 +185,6 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     workspacePath: conversation.extra?.workspace,
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
-    initialWorkspaceExpanded: openRailOnLanding,
     backend: 'nomi' as const,
     presetAssistant: presetAssistantInfo ? { ...presetAssistantInfo, id: nomiAssistantId } : undefined,
   };
@@ -214,27 +192,33 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
   return (
     <OrchestrationProvider conversation={conversation}>
       <ChatLayout {...chatLayoutProps} conversation_id={conversation.id}>
-        {/* Content-area projection (会话原生编排 v2, F7): keeps NomiChat ALWAYS
-            mounted and just toggles its visibility, overlaying a clicked DAG
-            worker node's read-only transcript when a node is projected. Outside
-            an OrchestrationProvider it would passthrough — here it is always
-            inside one, so projection works while the main conversation's scroll
-            + input draft survive the round-trip. */}
-        <ConversationContentSwitcher>
-          <NomiChat
-            conversation_id={conversation.id}
-            workspace={conversation.extra.workspace}
-            modelSelection={modelSelection}
-            session_mode={conversation.extra?.session_mode}
-            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
-            loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-            loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
-            loadedMcpStatuses={
-              (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-            }
-            agent_name={presetAssistantInfo?.name}
-          />
-        </ConversationContentSwitcher>
+        {/* 编排画布 (Option B): the collapsible orchestration canvas panel sits at
+            the TOP of the content area; the main agent chat coexists BELOW it.
+            The panel renders null when no run is linked, so a plain nomi
+            conversation looks exactly as before. */}
+        <OrchestrationTopPanel />
+        <div className='flex-1 min-h-0 flex flex-col'>
+          {/* Content-area projection (会话原生编排, F7): keeps NomiChat ALWAYS
+              mounted and just toggles its visibility, overlaying a clicked DAG
+              worker node's read-only transcript when a node is projected. The
+              projection region is BELOW the top panel — node clicks in the panel
+              project the worker transcript into this chat region; default main. */}
+          <ConversationContentSwitcher>
+            <NomiChat
+              conversation_id={conversation.id}
+              workspace={conversation.extra.workspace}
+              modelSelection={modelSelection}
+              session_mode={conversation.extra?.session_mode}
+              cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+              loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
+              loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
+              loadedMcpStatuses={
+                (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
+              }
+              agent_name={presetAssistantInfo?.name}
+            />
+          </ConversationContentSwitcher>
+        </div>
       </ChatLayout>
     </OrchestrationProvider>
   );

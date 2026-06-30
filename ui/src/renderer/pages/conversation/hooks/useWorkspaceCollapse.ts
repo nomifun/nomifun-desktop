@@ -27,17 +27,6 @@ type UseWorkspaceCollapseParams = {
    * that "send 你好 without picking a folder" leaves the panel collapsed.
    */
   isTemporaryWorkspace?: boolean;
-  /**
-   * Opt-in: start this mount EXPANDED instead of the default collapsed. The ONLY
-   * way a rail begins open. Scoped to a deliberate landing flow (today: the
-   * homepage「智能编排」entry → conversation right-rail 编排 tab, driven by
-   * NomiConversationPanel reading its one-shot sessionStorage flag). Defaults to
-   * `false` so every normal conversation / terminal rail behaves exactly as
-   * before — always collapsed at mount, with `WORKSPACE_TOGGLE_EVENT` / the
-   * hasFiles handler as the only expand triggers. Ignored on mobile (an expanded
-   * rail would cover the chat).
-   */
-  initialExpanded?: boolean;
 };
 
 type UseWorkspaceCollapseReturn = {
@@ -69,16 +58,10 @@ export function useWorkspaceCollapse({
   conversation_id,
   preferenceKey,
   isTemporaryWorkspace,
-  initialExpanded = false,
 }: UseWorkspaceCollapseParams): UseWorkspaceCollapseReturn {
   // Workspace panel always starts collapsed; preference and hasFiles events
-  // drive expand. See WORKSPACE_HAS_FILES_EVENT handler below. The lone
-  // exception is an explicit, opt-in `initialExpanded` (a deliberate landing
-  // flow) — we do NOT read `workspace-preference-*` at mount, so a previously
-  // manually-opened rail does not auto-reopen (that persisted key stays a manual
-  // override consulted only by the hasFiles handler). Mobile is never seeded
-  // expanded (it would cover the chat).
-  const [rightSiderCollapsed, setRightSiderCollapsed] = useState(!(initialExpanded && !isMobile));
+  // drive expand. See WORKSPACE_HAS_FILES_EVENT handler below.
+  const [rightSiderCollapsed, setRightSiderCollapsed] = useState(true);
 
   // Mirror ref for collapse state
   const rightCollapsedRef = useRef(rightSiderCollapsed);

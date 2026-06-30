@@ -76,13 +76,6 @@ interface ChatLayoutProps {
    * `conversation_id` for single chats.
    */
   workspacePreferenceKey?: string;
-  /**
-   * Opt-in: start the workspace rail EXPANDED on this mount (the only way it
-   * begins open). Scoped to a deliberate landing flow — today only the homepage
-   * 「智能编排」entry landing, which opens the rail onto the 编排 tab. Defaults to
-   * collapsed for every other surface. See {@link useWorkspaceCollapse}.
-   */
-  initialWorkspaceExpanded?: boolean;
   /** Custom rename handler; when provided, replaces the default conversation.update rename flow */
   onRenameTitle?: (new_name: string) => Promise<boolean>;
   /** Optional override for the leading icon shown before the title (e.g. team Peoples icon) */
@@ -121,7 +114,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
     conversation_id,
     preferenceKey: workspacePreferenceKey ?? (conversation_id != null ? String(conversation_id) : undefined),
     isTemporaryWorkspace,
-    initialExpanded: props.initialWorkspaceExpanded,
   });
 
   // --- Hook B: container width ---

@@ -76,14 +76,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   // EAGER on mount (snapshot baseline captured at init time), which is required:
   // for non-git/snapshot-mode workspaces, deferring init would fold agent edits
   // made before the tab is opened into the baseline so they'd never show.
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>(() => {
-    // Seed from the source's requested initial tab when it resolves to a real
-    // tab (files / changes / one of the extra tabs); otherwise default to files.
-    const requested = source.defaultActiveTab;
-    if (requested === 'files' || requested === 'changes') return requested;
-    if (requested && source.extraTabs?.some((tab) => tab.key === requested)) return requested;
-    return 'files';
-  });
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('files');
   const [changesTabEverOpened, setChangesTabEverOpened] = useState(false);
 
   const fileChangesEnabled = source.lazyChanges ? changesTabEverOpened : true;
