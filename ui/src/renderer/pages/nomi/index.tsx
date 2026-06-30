@@ -4,17 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
-import { Empty, Radio, Spin, Tabs } from '@arco-design/web-react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Button, Empty, Message, Radio, Spin, Tabs } from '@arco-design/web-react';
+import { ipcBridge } from '@/common';
 import OverviewTab from './tabs/OverviewTab';
 import MemoriesTab from './tabs/MemoriesTab';
 import CollectTab from './tabs/CollectTab';
 import LearnTab from './tabs/LearnTab';
 import SuggestionsTab from './tabs/SuggestionsTab';
 import MigrateTab from './tabs/MigrateTab';
-import ChatTab from './tabs/ChatTab';
 import KnowledgeTab from './tabs/KnowledgeTab';
 import RemoteTab from './tabs/RemoteTab';
 import SettingsTab from './tabs/SettingsTab';
@@ -27,8 +27,10 @@ import { useCompanion, useCompanions, useCompanionShared } from './useNomi';
 /** Companion-domain tabs follow the selected companion; shared-domain tabs are cross-companion.
  *  Sub-tab render order under the workbench puts 总览 (overview) first — see the right-pane strip.
  *  `memories` lives in the companion domain (shared + that companion's private, scope-aware) so it
- *  is one click from the selected companion rather than buried under a "shared" domain switch. */
-const COMPANION_TABS = ['overview', 'memories', 'chat', 'knowledge', 'skills', 'remote', 'secrets', 'settings'] as const;
+ *  is one click from the selected companion rather than buried under a "shared" domain switch.
+ *  聊天已迁出管理中心 → 统一从「会话」侧边栏的桌面伙伴分组进入标准 /conversation/:id；
+ *  本页只保留管理（形象/记忆/技能/知识/设置）。 */
+const COMPANION_TABS = ['overview', 'memories', 'knowledge', 'skills', 'remote', 'secrets', 'settings'] as const;
 const SHARED_TABS = ['collect', 'learn', 'suggestions', 'migrate'] as const;
 const ALL_TABS: readonly string[] = [...COMPANION_TABS, ...SHARED_TABS];
 /** Standalone figure-library domain (not companion-scoped, no tab set of its own). */
@@ -39,15 +41,17 @@ type Domain = 'companion' | 'shared' | 'figures';
 /** nomi 配置中心：伙伴条 + 双域（伙伴/共享）Tab。深链 /nomi?companion=<id>&tab=<key>。 */
 const NomiConfigPage: React.FC = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const companionsApi = useCompanions();
   const shared = useCompanionShared();
   const { companions } = companionsApi;
 
-  // ?tab= deep link (legacy values keep working: overview/chat/settings/memories →
+  // ?tab= deep link (legacy values keep working: overview/settings/memories →
   // companion domain, collect/learn/suggestions → shared domain, figures →
   // the standalone figure library). Back-compat: the old `modelKnowledge` tab
-  // split into `knowledge` (model config moved to the chat tab), so map it.
+  // split into `knowledge`, so map it. `chat` is no longer a tab — 聊天已迁进会话；
+  // 旧的 ?tab=chat 深链由下方 effect 重定向到伙伴会话 /conversation/:id。
   const rawTabParam = searchParams.get('tab');
   const tabParam = rawTabParam === 'modelKnowledge' ? 'knowledge' : rawTabParam;
   const isFigures = tabParam === FIGURES_TAB;
@@ -63,6 +67,26 @@ const NomiConfigPage: React.FC = () => {
   }, [companionParam, companions]);
 
   const companion = useCompanion(selectedCompanionId);
+
+  // 打开伙伴聊天：解析（幂等 ensure）其唯一会话并跳转标准 /conversation/:id。未配置模型时
+  // ensure 返回 400 → 留在管理中心引导配置（不跳走）。供「打开聊天」按钮与旧 ?tab=chat 深链复用。
+  const openChat = useCallback(
+    async (companionId: string | null) => {
+      if (!companionId) return;
+      try {
+        const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: companionId });
+        void navigate(`/conversation/${thread.conversation_id}`);
+      } catch {
+        Message.info(t('nomi.chat.modelMissing'));
+      }
+    },
+    [navigate, t]
+  );
+
+  // 旧的 ?tab=chat 深链（如历史书签、旧桌宠菜单）：迁移后聊天在会话里，重定向到伙伴会话。
+  useEffect(() => {
+    if (rawTabParam === 'chat' && selectedCompanionId) void openChat(selectedCompanionId);
+  }, [rawTabParam, selectedCompanionId, openChat]);
 
   // The companion session rail reads the roster (useCompanions), which only
   // refreshes on the WS round-trip — so a figure/character change made through
@@ -119,13 +143,14 @@ const NomiConfigPage: React.FC = () => {
     (profile: { id: string }) => {
       void companionsApi.refresh();
       void shared.refresh();
-      // One atomic update: two sequential functional setSearchParams calls
-      // would both read the pre-navigation params and the second would drop
-      // the first's `companion=` change.
+      // 新建后落到 总览(overview)：新伙伴尚未配置模型，先在管理中心引导配置，配置后再从
+      // 「打开聊天」或会话侧边栏的桌面伙伴分组进入对话。One atomic update: two sequential
+      // functional setSearchParams calls would both read the pre-navigation params and the
+      // second would drop the first's `companion=` change.
       setSearchParams(
         (prev) => {
           prev.set('companion', profile.id);
-          prev.set('tab', 'chat');
+          prev.set('tab', 'overview');
           return prev;
         },
         { replace: true }
@@ -191,45 +216,40 @@ const NomiConfigPage: React.FC = () => {
                 />
                 {selectedCompanionId ? (
                   <div className='flex-1 min-w-0 flex flex-col'>
-                    <div className='shrink-0 mb-8px'>
+                    <div className='shrink-0 mb-8px flex items-center justify-between gap-8px'>
                       <Radio.Group type='button' size='small' value={activeTab} onChange={setTab}>
                         <Radio value='overview'>{t('nomi.tabs.overview')}</Radio>
                         <Radio value='memories'>{t('nomi.tabs.memories')}</Radio>
-                        <Radio value='chat'>{t('nomi.tabs.chat')}</Radio>
                         <Radio value='knowledge'>{t('nomi.tabs.knowledge')}</Radio>
                         <Radio value='skills'>{t('nomi.tabs.skills', { defaultValue: '技能' })}</Radio>
                         <Radio value='remote'>{t('nomi.tabs.remote')}</Radio>
                         <Radio value='secrets'>{t('nomi.tabs.secrets')}</Radio>
                         <Radio value='settings'>{t('nomi.tabs.settings')}</Radio>
                       </Radio.Group>
+                      <Button
+                        type='primary'
+                        size='small'
+                        className='shrink-0'
+                        onClick={() => void openChat(selectedCompanionId)}
+                      >
+                        {t('nomi.openChat')}
+                      </Button>
                     </div>
-                    {activeTab === 'chat' ? (
-                      <div className='flex-1 min-h-0 bg-fill-1 rd-12px box-border overflow-hidden flex flex-col'>
-                        <ChatTab
-                          key={selectedCompanionId}
-                          companionId={selectedCompanionId}
-                          companionName={companion.profile?.name ?? ''}
-                          status={companion.status}
-                          companion={companion}
-                        />
-                      </div>
-                    ) : (
-                      <div className='flex-1 min-h-0 overflow-y-auto pr-2px'>
-                        {activeTab === 'overview' && (
-                          <OverviewTab key={selectedCompanionId} companion={companion} onGoTab={setTab} />
-                        )}
-                        {activeTab === 'memories' && (
-                          <MemoriesTab key={selectedCompanionId} companionId={selectedCompanionId} companions={companions} />
-                        )}
-                        {activeTab === 'knowledge' && <KnowledgeTab key={selectedCompanionId} companion={companion} />}
-                        {activeTab === 'skills' && <SkillsTab key={selectedCompanionId} companion={companion} />}
-                        {activeTab === 'remote' && <RemoteTab key={selectedCompanionId} companion={companion} />}
-                        {activeTab === 'secrets' && <SecretsTab key={selectedCompanionId} companion={companion} />}
-                        {activeTab === 'settings' && (
-                          <SettingsTab key={selectedCompanionId} companion={companion} onDeleted={handleDeleted} />
-                        )}
-                      </div>
-                    )}
+                    <div className='flex-1 min-h-0 overflow-y-auto pr-2px'>
+                      {activeTab === 'overview' && (
+                        <OverviewTab key={selectedCompanionId} companion={companion} onGoTab={setTab} />
+                      )}
+                      {activeTab === 'memories' && (
+                        <MemoriesTab key={selectedCompanionId} companionId={selectedCompanionId} companions={companions} />
+                      )}
+                      {activeTab === 'knowledge' && <KnowledgeTab key={selectedCompanionId} companion={companion} />}
+                      {activeTab === 'skills' && <SkillsTab key={selectedCompanionId} companion={companion} />}
+                      {activeTab === 'remote' && <RemoteTab key={selectedCompanionId} companion={companion} />}
+                      {activeTab === 'secrets' && <SecretsTab key={selectedCompanionId} companion={companion} />}
+                      {activeTab === 'settings' && (
+                        <SettingsTab key={selectedCompanionId} companion={companion} onDeleted={handleDeleted} />
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className='flex-1 flex items-center justify-center bg-fill-1 rd-12px box-border'>
