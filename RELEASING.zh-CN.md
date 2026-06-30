@@ -45,7 +45,7 @@ tag 统一使用 `vX.Y.Z`，例如 `v0.1.11`。
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
-bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:mac --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -55,7 +55,7 @@ bun run make:latest
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
-bun run build:mac --signed --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -72,13 +72,19 @@ git checkout main
 
 如果是在已经发布 macOS 后补 Windows，确认 `Cargo.toml` 版本号与现有 GitHub Release 一致。
 
+> updater 私钥 `apps/desktop/signing/nomifun-updater.key` 已被 gitignore、只存在于密钥库。
+> 这台 Windows 构建前需先从密钥库把它拷过来，且必须与 `tauri.conf.json` 内嵌的 `pubkey`
+> 匹配（keyID `F3AA272E60AA7952`），否则已安装的客户端会拒绝更新。叠加 `createUpdaterArtifacts`
+> 用的是仓库内的 `apps/desktop/tauri.updater.conf.json`，以 `--config <文件路径>` 传入——
+> **不要内联 JSON**，PowerShell 5.1 会把内联 `--config '{...}'` 的双引号剥掉变成非法 JSON。
+
 ### 当前无 Authenticode 签名的做法
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 
-bun run build:win -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -90,14 +96,15 @@ bun run make:latest
 
 ### 以后补 Authenticode 签名
 
-拿到 Windows 代码签名证书后，先把证书导入当前用户证书库，再设置证书指纹：
+拿到 Windows 代码签名证书后，先把证书导入当前用户证书库，再设置证书指纹（`--signed`
+注入指纹仍走内联 JSON，需在 pwsh 7+ 下运行）：
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 $env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
 
-bun run build:win --signed -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -111,7 +118,7 @@ bun run make:latest
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
-bun run build:linux -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:linux --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 

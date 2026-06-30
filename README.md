@@ -309,9 +309,10 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 - **arch** — zero or more architectures. Omit to use the per-OS default below.
 - **`--signed`** — sign (and, on macOS, notarize). Requires local signing config; see each OS.
 - **`-- …`** — everything after `--` is forwarded verbatim to `tauri build`
-  (e.g. `-- --bundles nsis`, `-- --config '{"bundle":{"createUpdaterArtifacts":true}}'`).
-  `build:mac` also forwards unknown `--xxx` options directly, so updater builds can use
-  `bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'`.
+  (e.g. `-- --bundles nsis`). `build:mac` and `build:win` also forward unknown `--xxx`
+  options directly. For updater builds, layer on the committed overlay as a **file path**:
+  `bun run build:<os> --config apps/desktop/tauri.updater.conf.json` — pass the file, not
+  inline JSON, because Windows PowerShell 5.1 strips the quotes from `--config '{...}'`.
 
 **macOS — `build:mac`** (produces `.dmg`; default arch: `universal`)
 
@@ -327,7 +328,7 @@ bun run build:<os> [arch ...] [--signed] [-- <args passed straight to `tauri bui
 Arch aliases: `arm`/`aarch64`/`silicon`, `intel`/`x64`/`x86_64`, `universal`/`all-arch`.
 Signing reads `apps/desktop/signing/.env.signing` (gitignored); missing → it errors with setup hints.
 
-**Windows — `build:win`** (produces `.msi` + `.exe`/NSIS; default arch: the host's, usually `x64`)
+**Windows — `build:win`** (produces a single NSIS `.exe`; default arch: the host's, usually `x64`)
 
 | Goal | Command |
 | --- | --- |
