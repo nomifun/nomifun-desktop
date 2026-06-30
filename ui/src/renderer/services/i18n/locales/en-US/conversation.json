@@ -22,7 +22,10 @@
   "orchestration": {
     "panelTitle": "Orchestration",
     "startTitle": "Start orchestration",
-    "planning": "Planning…"
+    "planning": "Planning…",
+    "collapseCanvas": "Collapse orchestration canvas",
+    "expandCanvas": "Expand orchestration canvas",
+    "resizeCanvas": "Resize canvas"
   },
   "history": {
     "noHistory": "No chat history",

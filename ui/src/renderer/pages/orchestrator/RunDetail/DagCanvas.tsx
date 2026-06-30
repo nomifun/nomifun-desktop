@@ -663,6 +663,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
             <MiniMap
               pannable
               zoomable
+              position='top-right'
               maskColor={flowColors.minimapMask}
               style={{ background: flowColors.minimapBg, border: `1px solid ${flowColors.minimapStroke}` }}
               nodeColor={(n) => miniMapNodeColor(String((n.data as { status?: string }).status ?? ''), theme)}
