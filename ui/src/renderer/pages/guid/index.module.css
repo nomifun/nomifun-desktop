@@ -722,6 +722,9 @@ button.guidResourceCard:focus-visible {
 .entryButtonText {
   min-width: 0;
   overflow: hidden;
+  /* Enough vertical room so overflow:hidden (for the ellipsis) doesn't clip
+     the top/bottom of CJK glyphs, whose rendered box exceeds the em box. */
+  line-height: 1.5;
   text-overflow: ellipsis;
 }
 
