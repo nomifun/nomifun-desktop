@@ -1314,7 +1314,19 @@ const CompanionPage: React.FC = () => {
   const runMenuAction = useCallback(
     (action: CompanionMenuAction) => {
       if (action === 'open-chat') {
-        void openMainAt(companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=chat` : '/nomi?tab=chat');
+        // 聊天已迁进「会话」：解析（幂等 ensure）该伙伴的唯一会话并在主窗口打开标准
+        // /conversation/:id（旧的 /nomi?tab=chat 已废除）。未配置对话模型时 ensureThread
+        // 返回 400 → 回退到管理中心总览引导配置。
+        void (async () => {
+          try {
+            const cid = await ensureThread();
+            await openMainAt(`/conversation/${cid}`);
+          } catch {
+            await openMainAt(
+              companionId ? `/nomi?companion=${encodeURIComponent(companionId)}&tab=overview` : '/nomi'
+            );
+          }
+        })();
         return;
       }
       if (action === 'open-memories') {
@@ -1335,7 +1347,7 @@ const CompanionPage: React.FC = () => {
       }
       void hideCompanion();
     },
-    [clearUnreadSuggestions, companionId, hideCompanion, openMainAt]
+    [clearUnreadSuggestions, companionId, ensureThread, hideCompanion, openMainAt]
   );
 
   const openNativeContextMenu = useCallback(async () => {

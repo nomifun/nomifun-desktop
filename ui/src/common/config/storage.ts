@@ -473,6 +473,18 @@ export type TChatConversation =
          * multi-agent run (which then writes `orchestrator_run_id` back here). Absent
          * for normal nomi conversations. */
         orchestrator_role?: string;
+        /** Marks this nomi conversation as a desktop-companion's single per-companion
+         * session (单会话契约). Written by the backend at companion-session creation.
+         * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
+         * (CompanionChatPanel), and the work-conversation list filter. */
+        companionSession?: boolean;
+        /** The companion (桌面伙伴) this session belongs to, when `companionSession` is
+         * set. Resolves the companion profile for the constrained chat panel + the
+         * session-list group's active-row highlight. */
+        companionId?: string;
+        /** IM-channel platform when a companion turn originated from an external
+         * channel (telegram/lark/…). Present on channel-sourced companion turns. */
+        channelPlatform?: string;
       }
     >;
 
