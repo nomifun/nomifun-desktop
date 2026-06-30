@@ -16,7 +16,14 @@ import { useOrchestrationSafe } from '../orchestration/OrchestrationContext';
 
 const ChatSlider: React.FC<{
   conversation?: TChatConversation;
-}> = ({ conversation }) => {
+  /**
+   * One-shot initial active tab for the nomi rail (today only `'orchestration'`,
+   * set by the orchestration landing flow). The flag is read + cleared ONCE in
+   * the owner ({@link NomiConversationPanel}); ChatSlider just forwards it. Other
+   * surfaces leave it unset → the rail defaults to the Files tab.
+   */
+  defaultRailTab?: 'orchestration';
+}> = ({ conversation, defaultRailTab }) => {
   const [messageApi, messageContext] = useArcoMessage({ maxCount: 1 });
   const { t } = useTranslation();
   // F5 carry-forward fix: the 「编排」tab is only meaningful when an
@@ -25,26 +32,9 @@ const ChatSlider: React.FC<{
   // the tab is omitted there. Hook is called unconditionally (Rules of Hooks).
   const orch = useOrchestrationSafe();
 
-  // Landing display: when this conversation was launched from the homepage
-  // 「智能编排」entry (useGuidSend stashed `nomi_open_rail_<id>`) AND it actually
-  // has a linked run, open the right rail straight onto the 编排 tab — NO
-  // floating window. The rail is opened via the persisted workspace preference
-  // (written alongside the flag); here we only decide the initial active tab and
-  // consume the flag once so it never re-selects after the user switches tabs.
-  // `useMemo` over the run-presence so the one-shot read is stable across the
-  // re-renders that follow `runId` lighting up.
-  const orchHasRun = orch?.runId != null;
-  const defaultOrchestrationTab = React.useMemo(() => {
-    if (!orchHasRun || conversation == null) return false;
-    const key = `nomi_open_rail_${conversation.id}`;
-    try {
-      if (sessionStorage.getItem(key) == null) return false;
-      sessionStorage.removeItem(key);
-      return true;
-    } catch {
-      return false;
-    }
-  }, [orchHasRun, conversation]);
+  // Only select the 编排 tab on landing when the orchestration provider is in
+  // scope (a real run surface). The owner already read + cleared the flag once.
+  const defaultOrchestrationTab = defaultRailTab === 'orchestration' && orch != null;
 
   let workspaceNode: React.ReactNode = null;
   if (conversation?.type === 'acp' && conversation.extra?.workspace) {

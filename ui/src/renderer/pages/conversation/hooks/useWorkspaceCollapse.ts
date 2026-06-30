@@ -27,6 +27,17 @@ type UseWorkspaceCollapseParams = {
    * that "send 你好 without picking a folder" leaves the panel collapsed.
    */
   isTemporaryWorkspace?: boolean;
+  /**
+   * Opt-in: start this mount EXPANDED instead of the default collapsed. The ONLY
+   * way a rail begins open. Scoped to a deliberate landing flow (today: the
+   * homepage「智能编排」entry → conversation right-rail 编排 tab, driven by
+   * NomiConversationPanel reading its one-shot sessionStorage flag). Defaults to
+   * `false` so every normal conversation / terminal rail behaves exactly as
+   * before — always collapsed at mount, with `WORKSPACE_TOGGLE_EVENT` / the
+   * hasFiles handler as the only expand triggers. Ignored on mobile (an expanded
+   * rail would cover the chat).
+   */
+  initialExpanded?: boolean;
 };
 
 type UseWorkspaceCollapseReturn = {
@@ -58,23 +69,16 @@ export function useWorkspaceCollapse({
   conversation_id,
   preferenceKey,
   isTemporaryWorkspace,
+  initialExpanded = false,
 }: UseWorkspaceCollapseParams): UseWorkspaceCollapseReturn {
-  // Workspace panel starts collapsed by default, UNLESS the user has a persisted
-  // "expanded" preference for this surface (manual toggles are saved under
-  // `workspace-preference-${preferenceKey}`). Honoring that persisted choice at
-  // mount lets a landing flow request an open panel by writing the preference
-  // before navigating here (e.g. the homepage「智能编排」entry → right-rail 编排
-  // tab), and keeps the panel state consistent with the user's last manual
-  // choice. Mobile never auto-expands (it would cover the chat), so it ignores
-  // the preference seed. Other expand triggers come from the hasFiles handler.
-  const [rightSiderCollapsed, setRightSiderCollapsed] = useState(() => {
-    if (isMobile || !workspaceEnabled || !preferenceKey) return true;
-    try {
-      return localStorage.getItem(`workspace-preference-${preferenceKey}`) !== 'expanded';
-    } catch {
-      return true;
-    }
-  });
+  // Workspace panel always starts collapsed; preference and hasFiles events
+  // drive expand. See WORKSPACE_HAS_FILES_EVENT handler below. The lone
+  // exception is an explicit, opt-in `initialExpanded` (a deliberate landing
+  // flow) — we do NOT read `workspace-preference-*` at mount, so a previously
+  // manually-opened rail does not auto-reopen (that persisted key stays a manual
+  // override consulted only by the hasFiles handler). Mobile is never seeded
+  // expanded (it would cover the chat).
+  const [rightSiderCollapsed, setRightSiderCollapsed] = useState(!(initialExpanded && !isMobile));
 
   // Mirror ref for collapse state
   const rightCollapsedRef = useRef(rightSiderCollapsed);

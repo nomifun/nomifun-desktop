@@ -13,7 +13,7 @@ import { usePresetAssistantInfo, resolveAssistantConfigId } from '@/renderer/hoo
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
 import { History } from '@icon-park/react';
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
@@ -162,10 +162,34 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetAssistantInfo } = usePresetAssistantInfo(conversation);
   const nomiAssistantId = resolveAssistantConfigId(conversation) ?? undefined;
+
+  // Orchestration landing (no floating window): the homepage「智能编排」entry
+  // stashes a one-shot `nomi_open_rail_<id>` sessionStorage flag. We read it ONCE
+  // here (the single owner) to decide whether THIS mount should open the right
+  // rail straight onto the 编排 tab, then clear it in an effect so it never
+  // re-applies. Driving both `initialWorkspaceExpanded` (ChatLayout → rail open)
+  // and `defaultRailTab` (ChatSlider → 编排 active) from this one read keeps the
+  // behavior scoped strictly to the landing — no shared rail code reads the flag.
+  const [openRailOnLanding] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem(`nomi_open_rail_${conversation.id}`) != null;
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    if (!openRailOnLanding) return;
+    try {
+      sessionStorage.removeItem(`nomi_open_rail_${conversation.id}`);
+    } catch {
+      /* sessionStorage may be unavailable — non-fatal */
+    }
+  }, [openRailOnLanding, conversation.id]);
+
   const chatLayoutProps = {
     title: conversation.name,
     siderTitle: sliderTitle,
-    sider: <ChatSlider conversation={conversation} />,
+    sider: <ChatSlider conversation={conversation} defaultRailTab={openRailOnLanding ? 'orchestration' : undefined} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
         {/* 会话原生编排 v2: the orchestration canvas + run controls live in the
@@ -182,6 +206,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     workspacePath: conversation.extra?.workspace,
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
+    initialWorkspaceExpanded: openRailOnLanding,
     backend: 'nomi' as const,
     presetAssistant: presetAssistantInfo ? { ...presetAssistantInfo, id: nomiAssistantId } : undefined,
   };
