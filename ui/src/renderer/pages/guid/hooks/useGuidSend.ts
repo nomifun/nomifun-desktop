@@ -18,6 +18,8 @@ import type { NavigateFunction } from 'react-router-dom';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { planGuidEntry } from './autoWorkEntry';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
+import type { ModelRangeSource } from '@/renderer/pages/orchestrator/useModelRange';
+import type { TModelRange } from '@/common/types/orchestrator/orchestratorTypes';
 import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
 
 export type GuidSendDeps = {
@@ -72,6 +74,17 @@ export type GuidSendDeps = {
    * "conversation N is already running". */
   autoWork: AutoWorkDraftValue;
 
+  /** When true the entry creates a new nomi conversation, starts a
+   * conversation-hosted orchestration run linked to it (Path B), and navigates
+   * there with the floating canvas auto-opening on landing. Mutually exclusive
+   * with AutoWork / preset-agent flows (the homepage strip enforces this). */
+  orchestrationMode: boolean;
+  /** Materializes the orchestrator model range (auto → explicit range; REST
+   * rejects bare `auto`). See `pages/orchestrator/useModelRange`. */
+  buildModelRange: (source: ModelRangeSource) => TModelRange | null;
+  /** True when at least one usable model is configured (orchestration guard). */
+  hasModels: boolean;
+
   // Mention state reset
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
@@ -123,6 +136,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     isGoogleAuth,
     applyAdvancedConfig,
     autoWork,
+    orchestrationMode,
+    buildModelRange,
+    hasModels,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -135,6 +151,57 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const handleSend = useCallback(async () => {
     const isCustomWorkspace = !!dir;
     const finalWorkspace = dir || '';
+
+    // Orchestration entry (homepage 智能编排 strip) — create a new nomi
+    // conversation, start a conversation-hosted orchestration run linked to it
+    // (Path B, `lead_conv_id`), and navigate there. The backend writes
+    // `extra.orchestrator_run_id` + broadcasts `conversation.listChanged`; the
+    // conversation page's `useConversationRun` lights up `runId` on its own —
+    // we never fake run state here. We also DON'T stash an initial chat message:
+    // the run drives the conversation, so a normal first turn would race it.
+    if (orchestrationMode) {
+      const goal = input.trim();
+      if (!goal) return;
+      if (!hasModels) {
+        Message.warning(t('orchestrator.composer.noModels', { defaultValue: '请先在模型中心配置可用模型' }));
+        return;
+      }
+      const model_range = buildModelRange({ mode: 'auto' });
+      if (!model_range) {
+        Message.warning(t('orchestrator.composer.modelRequired'));
+        return;
+      }
+      if (!current_model) {
+        Message.error(t('guid.modelRequired', { defaultValue: '请先选择模型' }));
+        return;
+      }
+      const conversation = await ipcBridge.conversation.create.invoke({
+        type: 'nomi',
+        name: goal.slice(0, 60),
+        model: current_model,
+        extra: { workspace: finalWorkspace, custom_workspace: isCustomWorkspace },
+      });
+      if (!conversation?.id) {
+        Message.error(t('conversation.createFailed', { defaultValue: '创建会话失败' }));
+        return;
+      }
+      await applyAdvancedConfig?.(conversation.id);
+      await ipcBridge.orchestrator.runs.createAdhoc.invoke({
+        goal,
+        model_range,
+        lead_conv_id: conversation.id,
+      });
+      // Auto-open the floating canvas on landing (show the plan, not an empty
+      // chat page). OrchestrationContext consumes this flag once `runId` lights up.
+      try {
+        sessionStorage.setItem(`nomi_open_canvas_${conversation.id}`, '1');
+      } catch {
+        /* sessionStorage may be unavailable — non-fatal */
+      }
+      emitter.emit('chat.history.refresh');
+      await navigate(`/conversation/${conversation.id}`);
+      return;
+    }
 
     // AutoWork entry (switch on + tag) creates the session and lets the backend
     // requirement loop drive it — it must NOT also send a first message, which
@@ -447,6 +514,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedMcpServerIds,
     applyAdvancedConfig,
     autoWork,
+    orchestrationMode,
+    buildModelRange,
+    hasModels,
     navigate,
     t,
   ]);
