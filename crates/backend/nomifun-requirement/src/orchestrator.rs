@@ -9,7 +9,7 @@ use nomifun_ai_agent::TurnStopReason;
 use nomifun_ai_agent::registry::AgentRegistry;
 use nomifun_ai_agent::task_manager::IWorkerTaskManager;
 use nomifun_ai_agent::types::BuildTaskOptions;
-use nomifun_api_types::{AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
+use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
 use nomifun_common::AppError;
 use nomifun_conversation::ConversationService;
 use nomifun_db::{IConversationRepository, IUserRepository};
@@ -413,6 +413,34 @@ enum TurnEnd {
     Cancelled,
 }
 
+/// Broadcast this loop target's live AutoWork run-state so EVERY surface stays in
+/// sync across idle↔active transitions. The per-session control GETs fresh state
+/// on open, but the session-list capability icon updates ONLY from this event (no
+/// per-row GET); without an emit on claim/finish it kept the run-state from its
+/// initial bulk load and showed a stale colour — active/green in the header but
+/// idle/orange in the sidebar for the same session. `enabled=false` is emitted
+/// when the max-requirements cap just disabled the binding so the icon drops off.
+fn emit_autowork_progress(
+    deps: &OrchestratorDeps,
+    kind: AutoWorkTargetKind,
+    target_id: &str,
+    tag: &str,
+    progress: &LiveProgress,
+    enabled: bool,
+) {
+    let current_requirement_id = progress.current().map(|id| id.to_string());
+    deps.service.emit_autowork_state(&AutoWorkState {
+        kind,
+        target_id: target_id.to_string(),
+        enabled,
+        tag: Some(tag.to_string()),
+        running: enabled,
+        run_state: AutoWorkState::run_state(enabled, current_requirement_id.as_deref()),
+        current_requirement_id,
+        completed_count: progress.completed(),
+    });
+}
+
 async fn run_loop(
     deps: Arc<OrchestratorDeps>,
     target_id: &str,
@@ -495,6 +523,9 @@ async fn run_loop(
         let req_id = claimed.id;
         progress.set_current(Some(req_id));
         info!(target_id, tag, requirement_id = req_id, "AutoWork claimed requirement");
+        // active: a requirement is now in flight → broadcast so the session-list
+        // icon turns active-coloured in step with the per-session control.
+        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
 
         // 2. Inject + wait for the turn to finish (per target kind).
         let result = match kind {
@@ -633,9 +664,16 @@ async fn run_loop(
                 {
                     warn!(target_id, tag, error = %e, "Failed to persist autowork disable on max");
                 }
+                // off: the cap disabled the binding → drop the session-list icon.
+                emit_autowork_progress(&deps, kind, target_id, tag, &progress, false);
                 break;
             }
         }
+
+        // idle: the turn finished and no requirement is in flight → broadcast so
+        // the session-list icon returns to the idle colour in step with the
+        // per-session control (which only looks fresh because it re-GETs on open).
+        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
 
         // 4. Failure backoff: a failed or busy turn inserts a bounded, escalating
         // delay before the next claim so a deterministic failure cannot spin the
