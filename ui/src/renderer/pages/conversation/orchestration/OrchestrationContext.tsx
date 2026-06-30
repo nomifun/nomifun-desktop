@@ -95,6 +95,24 @@ export const OrchestrationProvider: React.FC<{ conversation: TChatConversation; 
     setProjectedPayload(null);
   }, [runId]);
 
+  // Auto-open the floating canvas on landing when this conversation was just
+  // launched from the homepage「智能编排」entry (which stashes a per-conversation
+  // sessionStorage flag). Wait until `runId` lights up so the overlay shows the
+  // live canvas rather than briefly flashing the「发起」initiation state, then
+  // consume the flag once so it never re-opens after the user collapses it.
+  useEffect(() => {
+    if (runId == null) return;
+    const key = `nomi_open_canvas_${conversationId}`;
+    let flagged = false;
+    try {
+      flagged = sessionStorage.getItem(key) != null;
+      if (flagged) sessionStorage.removeItem(key);
+    } catch {
+      /* sessionStorage may be unavailable — non-fatal */
+    }
+    if (flagged) setCanvasOpen(true);
+  }, [runId, conversationId]);
+
   const value = useMemo<OrchestrationContextValue>(
     () => ({
       conversationId,
