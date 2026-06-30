@@ -170,6 +170,7 @@ const MigrateTab: React.FC<Props> = ({ companions }) => {
           writeback: false,
           writeback_mode: 'staged',
           writeback_eagerness: 'conservative',
+          channel_write_enabled: false,
           kb_ids: matchedIds,
         });
         Message.success(t('nomi.migrate.bindingRebuilt', { count: matchedIds.length }));
