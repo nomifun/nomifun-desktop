@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Spin } from '@arco-design/web-react';
 import { Comment, Left, Redo, CheckOne } from '@icon-park/react';
@@ -48,10 +48,21 @@ type ProjectedWorkerViewProps = {
  */
 const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) => {
   const { t } = useTranslation();
-  const { returnToMain } = useOrchestration();
+  const { returnToMain, detail } = useOrchestration();
   const [message, msgCtx] = useArcoMessage();
 
-  const { task, runId } = payload;
+  const { task: snapshotTask, runId } = payload;
+  // Re-resolve the node from the LIVE run detail by its stable id, rather than
+  // reading the click-time snapshot in `payload.task`. The context's `detail` is
+  // WS-driven (useRunLive refetches on every run-engine event), so a 重跑 / 采用 —
+  // which resets this node and has the engine spawn a NEW worker conversation —
+  // flows through here in real time: the node's `conversation_id` (and title /
+  // status) update without the user having to switch nodes and back. Falls back to
+  // the snapshot until `detail` first loads / for a node not (yet) in `detail`.
+  const task = useMemo(
+    () => detail?.tasks.find((tt) => tt.id === snapshotTask.id) ?? snapshotTask,
+    [detail?.tasks, snapshotTask]
+  );
   const conversationId = task.conversation_id;
 
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
