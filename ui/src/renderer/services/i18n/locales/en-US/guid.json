@@ -10,6 +10,17 @@
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "Switched to {{agent}}",
   "modelRequired": "Select a model first",
+  "orchestration": {
+    "collaborators": {
+      "title": "Collaborator models",
+      "label": "Collaborators",
+      "count": "Collaborators · {{count}}",
+      "mainTag": "main",
+      "placeholder": "Pick collaborator models for orchestration…",
+      "emptyHint": "The main model is always in the pool; add collaborators to let it offload simpler tasks to cheaper models by difficulty.",
+      "selectedHint": "Pool = main model + {{count}} collaborator(s); the main model assigns each node by difficulty, balancing cost and quality."
+    }
+  },
   "workspace": {
     "workInProject": "Work in a project",
     "optional": "Optional",

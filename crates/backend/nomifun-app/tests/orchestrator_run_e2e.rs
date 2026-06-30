@@ -830,6 +830,7 @@ async fn adhoc_run_from_model_range_completes_through_engine() {
                 autonomy: Some("autonomous".to_string()),
                 max_parallel: None,
                 lead_conv_id: Some(909),
+                lead_model: None,
             },
         )
         .await

@@ -40,6 +40,9 @@ export type ConfigKeyMap = {
   'css.activeThemeId': string;
   'nomi.config': { preferredMode?: string } | undefined;
   'nomi.defaultModel': { id: string; use_model: string } | undefined;
+  // 智能编排「协作模型」默认偏好：主模型(=nomi.defaultModel)之外、供主模型按任务难度
+  // 为各节点挑选的额外 worker 模型池。仅编排发起时使用；空 = 全程用主模型。
+  'nomi.orchestrationCollaborators': { provider_id: string; model: string }[] | undefined;
   // Default provider+model for the knowledge-base AI description/overview
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.

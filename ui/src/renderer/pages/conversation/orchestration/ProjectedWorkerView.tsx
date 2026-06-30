@@ -6,11 +6,12 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Spin } from '@arco-design/web-react';
-import { Comment, Left, Redo, CheckOne } from '@icon-park/react';
+import { Dropdown, Menu, Spin } from '@arco-design/web-react';
+import { Brain, Comment, Down, Left, Redo, CheckOne } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { OpenTaskPayload } from '@/renderer/pages/orchestrator/RunDetail/DagCanvas';
+import { memberShortLabel } from '@/renderer/pages/orchestrator/RunDetail/memberLabel';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useOrchestration } from './OrchestrationContext';
 import ReadOnlyConversationView from '@/renderer/pages/orchestrator/RunDetail/ReadOnlyConversationView';
@@ -79,6 +80,76 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
   const [rerunning, setRerunning] = useState(false);
   // Guards the「采用为该节点产出」trigger against a double-click while in flight.
   const [adopting, setAdopting] = useState(false);
+  // Guards the「改用模型」(reassign) trigger against a double-click while in flight.
+  const [reassigning, setReassigning] = useState(false);
+
+  // The run's frozen fleet snapshot = the model pool this node may use, and the
+  // node's LIVE assignment (resolved off `detail`, not the click-time snapshot, so
+  // a reassign reflects immediately). Falls back to the payload for the first paint.
+  const fleetMembers = detail?.fleet_members ?? payload.fleetMembers;
+  const liveAssignment = useMemo(
+    () => detail?.assignments.find((a) => a.task_id === task.id) ?? payload.assignment,
+    [detail?.assignments, task.id, payload.assignment]
+  );
+  const currentMember = liveAssignment
+    ? fleetMembers.find((m) => m.id === liveAssignment.member_id)
+    : undefined;
+  const currentModelLabel =
+    memberShortLabel(currentMember) ?? t('orchestrator.run.assign.changeModel', { defaultValue: '改用模型' });
+
+  // A node that has already run (or is running) needs an explicit 重跑 for the new
+  // model to take effect; a not-yet-started node simply picks it up at dispatch.
+  const taskSettled = ['running', 'done', 'completed', 'failed', 'error'].includes(task.status);
+
+  // Reassign this node to a different fleet member (= a different model). The
+  // backend only updates the assignment row — for a PENDING node the engine reads
+  // it fresh at dispatch (no rerun needed); for a settled/running node the user
+  // must 重跑 (right here in the same banner) for the new model to actually run.
+  const doReassign = async (memberId: string) => {
+    if (reassigning || memberId === liveAssignment?.member_id) return;
+    setReassigning(true);
+    try {
+      await ipcBridge.orchestrator.runs.reassign.invoke({
+        run_id: runId,
+        task_id: task.id,
+        updates: { member_id: memberId },
+      });
+      message.success({
+        content: taskSettled
+          ? t('orchestrator.run.assign.reassignThenRerun', {
+              defaultValue: '已改用模型；该节点已运行过，点「重跑」用新模型重跑',
+            })
+          : t('orchestrator.run.assign.reassignSuccess', { defaultValue: '已更新分派' }),
+        duration: taskSettled ? TOAST_ERR_MS : TOAST_OK_MS,
+        className: TOAST_CLASS,
+      });
+      await payload.refetch();
+    } catch (e) {
+      message.error({
+        content: t('orchestrator.run.assign.reassignError', {
+          defaultValue: '更新分派失败：{{error}}',
+          error: String(e),
+        }),
+        duration: TOAST_ERR_MS,
+        className: TOAST_CLASS,
+      });
+    } finally {
+      setReassigning(false);
+    }
+  };
+
+  const modelMenu = (
+    <Menu
+      selectedKeys={liveAssignment ? [liveAssignment.member_id] : []}
+      onClickMenuItem={(key) => {
+        void doReassign(key);
+      }}
+    >
+      {fleetMembers.map((m) => (
+        <Menu.Item key={m.id}>{memberShortLabel(m) ?? m.model ?? m.agent_id ?? m.id}</Menu.Item>
+      ))}
+    </Menu>
+  );
 
   // Resolve the worker conversation off `task.conversation_id` (mirrors
   // WorkerTranscriptPanel). Undefined → no conversation yet (「尚未开始」state).
@@ -175,6 +246,26 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
         </div>
 
         <div className={styles.bannerActions}>
+          {/* 改用模型 — reassign this node to another model from the run's pool. Only
+              shown when there's an actual choice (>1 member). A pending node picks
+              the new model up at dispatch; a settled/running node needs 重跑 (right
+              here) for it to take effect — the success toast says which. */}
+          {fleetMembers.length > 1 && (
+            <Dropdown trigger='click' position='br' droplist={modelMenu}>
+              <div
+                role='button'
+                tabIndex={0}
+                aria-label={t('orchestrator.run.assign.reassign', { defaultValue: '改用模型给其他成员' })}
+                aria-disabled={reassigning}
+                className={styles.action}
+              >
+                <Brain theme='outline' size='13' strokeWidth={3} />
+                <span className='max-w-[140px] truncate'>{currentModelLabel}</span>
+                <Down theme='outline' size='12' strokeWidth={3} />
+              </div>
+            </Dropdown>
+          )}
+
           {/* 采用为该节点产出 — only when a worker conversation exists to read from. */}
           {conversationId !== undefined ? (
             <div

@@ -185,7 +185,9 @@
       "noRationale": "暂无分派说明。",
       "score": "匹配度 {{score}}",
       "reassign": "改派给其他成员",
+      "changeModel": "改用模型",
       "reassignSuccess": "已更新分派",
+      "reassignThenRerun": "已改用模型；该节点已运行过，点「重跑」用新模型重跑",
       "reassignError": "更新分派失败：{{error}}",
       "locked": "锁定分派",
       "lockedHint": "锁定后，编排器不会在后续重新规划时自动改派该任务。"

@@ -83,6 +83,10 @@ pub struct UpdateTaskParams {
     /// re-run to carry the prior round's output forward (see the orchestrator
     /// engine's `settle_loop_task`).
     pub pattern_config: Option<Option<String>>,
+    /// Backoff gate (epoch-ms) for transient-error auto-retry (迁移 024, skip/NULL/set).
+    /// Set to `Some(Some(now + backoff))` to defer a re-`pending` task's re-dispatch;
+    /// `Some(None)` clears it; `None` leaves the column unchanged.
+    pub next_retry_at: Option<Option<i64>>,
 }
 
 /// Parameters for creating an assignment (member → task). `id` is minted

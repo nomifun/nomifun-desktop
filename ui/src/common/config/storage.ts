@@ -71,6 +71,9 @@ export interface IConfigStorageRefer {
     preferredMode?: string;
   };
   'nomi.defaultModel'?: { id: string; use_model: string };
+  // 智能编排「协作模型」默认偏好（多选）。主模型见 nomi.defaultModel；这里是供主模型
+  // 按任务难度挑选的额外 worker 模型池。空 = 全程用主模型。
+  'nomi.orchestrationCollaborators'?: { provider_id: string; model: string }[];
   'tools.imageGenerationModel': TProviderWithModel & {
     /** @deprecated Image generation is now controlled via built-in MCP server toggle */
     switch?: boolean;
@@ -473,6 +476,16 @@ export type TChatConversation =
          * multi-agent run (which then writes `orchestrator_run_id` back here). Absent
          * for normal nomi conversations. */
         orchestrator_role?: string;
+        /** Curated model range for the orchestration run this lead conversation
+         * spawns (homepage「主模型 + 协作模型」picker). `models[0]` is the 主模型
+         * (also the lead/planner); the rest are 协作模型 the planner may assign
+         * per node by difficulty. Written by the homepage entry into `extra`; the
+         * `nomi_run_create` gateway handler reads it back to build the run's fleet
+         * (deterministic — not relayed through the LLM). Absent ⇒ Auto (all enabled). */
+        orchestrator_model_range?:
+          | { mode: 'single'; model: { provider_id: string; model: string } }
+          | { mode: 'auto' }
+          | { mode: 'range'; models: { provider_id: string; model: string }[] };
       }
     >;
 

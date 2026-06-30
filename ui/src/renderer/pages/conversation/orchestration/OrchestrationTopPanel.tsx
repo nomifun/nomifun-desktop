@@ -296,6 +296,7 @@ const OrchestrationTopPanel: React.FC = () => {
             onOpenTask={projectTask}
             onOpenMain={returnToMain}
             mainActive={projectedTaskId === null}
+            activeTaskId={projectedTaskId}
           />
         </Suspense>
       </div>
