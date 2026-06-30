@@ -15,7 +15,10 @@
  *
  * Render gates (header stays clean unless there's something to show):
  *  • outside a provider (`ctx == null`, e.g. companion chat) → `null`;
- *  • no linked run (`runId == null`) → `null`;
+ *  • no linked run (`runId == null`) → a permanent「智能编排」start entry (Workbench
+ *    icon + label, no status dot) so EVERY nomi conversation has a discoverable way
+ *    to open the floating canvas and start a run (the canvas shows the initiation
+ *    composer when there's no run yet);
  *  • otherwise → a compact status pill mirroring the sibling header capability
  *    controls (自动工作 / 智能决策 / 知识库): icon + 画布 label + status dot, status
  *    text/color from {@link STATUS_META}; `leadThinking.active` swaps the dot for a
@@ -50,11 +53,52 @@ const CanvasEntryPill: React.FC = () => {
     [openCanvas]
   );
 
-  // Header stays clean when there is no run to surface: outside a provider OR
-  // not linked to a run → render nothing at all.
-  if (ctx == null || ctx.runId == null) return null;
+  // Header stays clean only outside a provider (e.g. companion chat). Inside a
+  // provider we always surface an entry — a permanent「智能编排」start entry when
+  // there's no run yet, or the live status pill once a run is linked.
+  if (ctx == null) return null;
 
   const { detail, leadThinking, canvasOpen } = ctx;
+
+  // ── No run — permanent「智能编排」start entry ───────────────────────────────
+  // Same visual language as the sibling capability controls, minus the status
+  // dot (there's nothing to report yet); clicking opens the floating canvas,
+  // which shows the initiation composer when runId is still null.
+  if (ctx.runId == null) {
+    const startLabel = t('orchestrator.canvas.startEntry', { defaultValue: '智能编排' });
+    return (
+      <div
+        role='button'
+        tabIndex={0}
+        aria-label={startLabel}
+        title={startLabel}
+        onClick={handleOpen}
+        onKeyDown={handleKeyDown}
+        className='inline-flex h-26px shrink-0 cursor-pointer select-none items-center gap-6px rd-full border border-solid px-10px leading-none outline-none transition-all duration-150'
+        style={{
+          borderColor: canvasOpen
+            ? 'color-mix(in srgb, rgb(var(--primary-6)) 45%, var(--color-border-2))'
+            : 'var(--color-border-2)',
+          background: canvasOpen
+            ? 'color-mix(in srgb, rgb(var(--primary-6)) 12%, transparent)'
+            : 'var(--color-bg-1)',
+          color: canvasOpen ? 'rgb(var(--primary-6))' : 'var(--color-text-1)',
+        }}
+      >
+        <Workbench
+          theme='outline'
+          size='14'
+          fill='currentColor'
+          strokeWidth={3}
+          className='block'
+          style={{ lineHeight: 0 }}
+        />
+        <span className='text-12px font-500'>{startLabel}</span>
+      </div>
+    );
+  }
+
+  // ── Has run — live status pill ────────────────────────────────────────────
   const status = detail?.run.status ?? '';
   const statusMeta = STATUS_META[status];
   // Fall back to the muted text token for an unknown/absent status (mirrors the

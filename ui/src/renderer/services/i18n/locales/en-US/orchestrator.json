@@ -66,6 +66,7 @@
   },
   "canvas": {
     "entryLabel": "Canvas",
+    "startEntry": "Orchestrate",
     "title": "Agent canvas",
     "openCanvas": "Expand agent canvas",
     "collapse": "Collapse"
