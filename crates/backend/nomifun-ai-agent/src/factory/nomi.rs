@@ -108,6 +108,11 @@ pub(super) async fn build(
                 .knowledge_writeback_mode
                 .clone()
                 .unwrap_or_else(|| "staged".to_owned()),
+            // Threaded from the binding via MountOutcome → build-extra so the
+            // external-IM-channel opt-in actually reaches resolve_write_policy;
+            // a `..Default::default()` here would pin it to `false` and keep
+            // channel write-back permanently disabled on the nomi engine.
+            channel_write_enabled: overrides.knowledge_channel_write_enabled,
             ..Default::default()
         },
         &ctx.conversation_id,
@@ -1790,5 +1795,51 @@ mod tests {
         // Legacy extra (no summary/live_sources) must keep deserializing and
         // still get the upgraded retrieval contract.
         assert!(prompt.contains("When to consult"));
+    }
+
+    #[test]
+    fn channel_write_opt_in_threads_from_extra_into_write_policy() {
+        // Regression: the `channel_write_enabled` opt-in must survive the
+        // build-extra round-trip so the nomi factory can resolve the
+        // external-IM-channel write policy. Before the fix this field was never
+        // threaded, so the reconstructed binding defaulted it to false and
+        // channel write-back was permanently Disabled on the nomi engine.
+        use nomifun_knowledge::{resolve_write_policy, KnowledgeBinding, WriteMode, WriteSurface};
+
+        // Absent in JSON → serde default false (the previous, broken behavior).
+        let off: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "knowledge_writeback": true,
+        }))
+        .unwrap();
+        assert!(!off.knowledge_channel_write_enabled);
+
+        // Present and true → carried through.
+        let on: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "knowledge_writeback": true,
+            "knowledge_channel_write_enabled": true,
+        }))
+        .unwrap();
+        assert!(on.knowledge_channel_write_enabled);
+
+        // Reconstruct the binding exactly as build_nomi does and confirm the
+        // policy flips from Disabled to Staged for an external channel.
+        let reconstruct = |extra: &NomiBuildExtra| KnowledgeBinding {
+            enabled: true,
+            writeback: extra.knowledge_writeback,
+            writeback_mode: extra
+                .knowledge_writeback_mode
+                .clone()
+                .unwrap_or_else(|| "staged".to_owned()),
+            channel_write_enabled: extra.knowledge_channel_write_enabled,
+            ..Default::default()
+        };
+
+        let disabled =
+            resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&off), "conv-c");
+        assert!(matches!(disabled.mode, WriteMode::Disabled));
+
+        let staged =
+            resolve_write_policy(WriteSurface::ExternalChannel, &reconstruct(&on), "conv-c");
+        assert!(matches!(staged.mode, WriteMode::Staged { .. }));
     }
 }

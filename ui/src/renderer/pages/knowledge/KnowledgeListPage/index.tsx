@@ -12,7 +12,7 @@
  * The old Form-based create Modal has been removed; only the edit path (openEdit)
  * retains a simple modal.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -79,6 +79,24 @@ function sortBases(bases: IKnowledgeBase[], sort: KnowledgeSort): IKnowledgeBase
       return arr.sort((a, b) => b.total_size - a.total_size);
   }
 }
+
+/** Self-managing checkbox for the imperative delete Modal.confirm. The modal
+ * content never re-renders from page state, so this holds its own `checked`
+ * state (so it toggles visually) and reports every change via `onChange`. */
+const PurgeFilesCheckbox: React.FC<{ label: string; onChange: (v: boolean) => void }> = ({ label, onChange }) => {
+  const [checked, setChecked] = useState(false);
+  return (
+    <Checkbox
+      checked={checked}
+      onChange={(v) => {
+        setChecked(v);
+        onChange(v);
+      }}
+    >
+      {label}
+    </Checkbox>
+  );
+};
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
@@ -191,13 +209,18 @@ const KnowledgeListPage: React.FC = () => {
 
   // ─── Delete ─────────────────────────────────────────────────────────────────
 
-  const [purgeOnDelete, setPurgeOnDelete] = useState(false);
+  // The delete confirm uses the imperative Modal.confirm, whose `content` is
+  // rendered ONCE and never re-renders from page state — a page-level
+  // `useState` checkbox could neither toggle visually nor be read by the
+  // already-captured `onOk` closure. A ref carries the choice instead, and the
+  // checkbox below manages its own checked state.
+  const purgeRef = useRef(false);
 
   const handleDelete = async (base: IKnowledgeBase) => {
     try {
-      await ipcBridge.knowledge.deleteBase.invoke({ id: base.id, purge: base.managed && purgeOnDelete });
+      await ipcBridge.knowledge.deleteBase.invoke({ id: base.id, purge: base.managed && purgeRef.current });
       Message.success(t('knowledge.actions.deleteOk'));
-      setPurgeOnDelete(false);
+      purgeRef.current = false;
       void refresh();
     } catch (e) {
       Message.error(String(e));
@@ -205,15 +228,21 @@ const KnowledgeListPage: React.FC = () => {
   };
 
   const handleCardMore = (base: IKnowledgeBase, _e: React.MouseEvent) => {
+    purgeRef.current = false;
     Modal.confirm({
       title: t('knowledge.actions.deleteConfirm', { defaultValue: '确认删除？' }),
       content: base.managed ? (
-        <Checkbox checked={purgeOnDelete} onChange={setPurgeOnDelete}>
-          {t('knowledge.actions.deleteWithFiles', { defaultValue: '同时删除文件' })}
-        </Checkbox>
+        <PurgeFilesCheckbox
+          label={t('knowledge.actions.deleteWithFiles', { defaultValue: '同时删除文件' })}
+          onChange={(v) => {
+            purgeRef.current = v;
+          }}
+        />
       ) : undefined,
       onOk: () => handleDelete(base),
-      onCancel: () => setPurgeOnDelete(false),
+      onCancel: () => {
+        purgeRef.current = false;
+      },
     });
   };
 

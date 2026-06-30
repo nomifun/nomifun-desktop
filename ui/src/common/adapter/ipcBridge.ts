@@ -3493,6 +3493,14 @@ export interface IKnowledgeBinding {
   writeback_mode: KnowledgeWritebackMode;
   /** Write-back disposition ("回写意识"), orthogonal to writeback_mode: 'conservative' (restrained, default) only writes clearly-useful knowledge; 'aggressive' captures anything plausibly relevant. */
   writeback_eagerness: KnowledgeWritebackEagerness;
+  /**
+   * Opt-in switch letting an unattended IM-channel (bot) session write back to
+   * the base. Off by default; channel writes are ALWAYS staged into the review
+   * inbox even when on. Set by the gateway/MCP path (the bot), not the in-app
+   * control — but it MUST round-trip through `setBinding` so an in-app edit
+   * (toggling bases / write-back) never silently clears it.
+   */
+  channel_write_enabled: boolean;
   kb_ids: string[];
 }
 
@@ -3616,7 +3624,15 @@ export const knowledge = {
   ),
   setBinding: httpPost<IKnowledgeBinding, { kind: KnowledgeBindingKind; target_id: string } & IKnowledgeBinding>(
     (p) => `/api/knowledge/binding/${p.kind}/${encodeURIComponent(p.target_id)}`,
-    (p) => ({ enabled: p.enabled, writeback: p.writeback, writeback_mode: p.writeback_mode, writeback_eagerness: p.writeback_eagerness, kb_ids: p.kb_ids })
+    // Forward EVERY binding field by destructuring off the routing params only.
+    // A hand-maintained whitelist here silently dropped writeback_mode,
+    // writeback_eagerness and channel_write_enabled in turn (the backend POST
+    // is a full replace), so any new IKnowledgeBinding field stays in the body
+    // automatically.
+    (p) => {
+      const { kind: _kind, target_id: _target_id, ...body } = p;
+      return body;
+    }
   ),
   // ── Import / export (spec 2026-06-11 §4.8: zip with manifest.kind="knowledge-base") ──
   exportBase: httpPost<{ dest_path: string }, { id: string; dest_path: string }>(
@@ -3671,6 +3687,8 @@ export const knowledge = {
   onBindingChanged: wsEmitter<{ target_kind: string; target_id: string } & IKnowledgeBinding>(
     'knowledge.binding-changed'
   ),
+  /** A tag was created/renamed/recolored/reordered/deleted — re-list tags. */
+  onTagChanged: wsEmitter<Record<string, never>>('knowledge.tag-changed'),
   // ── Tags (categorization / filtering) ──
   listTags: httpGet<IKnowledgeTag[], void>('/api/knowledge/tags'),
   createTag: httpPost<IKnowledgeTag, { label: string; color?: string }>(

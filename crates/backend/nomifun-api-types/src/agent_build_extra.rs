@@ -302,6 +302,16 @@ pub struct NomiBuildExtra {
     /// `AcpBuildExtra::knowledge_writeback_eagerness`.
     #[serde(default)]
     pub knowledge_writeback_eagerness: Option<String>,
+    /// Opt-in for unattended IM-channel (bot) sessions to write back. Off by
+    /// default; channel writes are always staged. The nomi factory reconstructs
+    /// the knowledge binding from this build-extra to resolve the per-surface
+    /// write policy, so this MUST be threaded through — otherwise the
+    /// reconstructed binding defaults it to `false` and `WriteSurface::ExternalChannel`
+    /// is permanently `Disabled` on the nomi engine. (The ACP path doesn't need
+    /// a mirror: it resolves channel writes at write time from the live binding
+    /// via the scoped knowledge MCP bridge.)
+    #[serde(default)]
+    pub knowledge_channel_write_enabled: bool,
     /// Orchestration role marker. When `"lead"`, the conversation was created
     /// from the 会话 entry with "auto/range" models selected: the nomi factory
     /// injects a server-authored 编排主管 (orchestration lead) system prompt so

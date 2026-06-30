@@ -1419,6 +1419,7 @@ export type I18nKey =
   | 'knowledge.studio.webRealtime'
   | 'knowledge.studio.webSnapshot'
   | 'knowledge.studio.webTitleOptional'
+  | 'knowledge.studio.webUrlInvalid'
   | 'knowledge.studio.webUrlList'
   | 'knowledge.studio.webUrlMax'
   | 'knowledge.studio.webUrlRequired'
