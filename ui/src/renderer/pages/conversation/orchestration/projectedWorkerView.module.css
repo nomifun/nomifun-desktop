@@ -182,32 +182,3 @@
   line-height: 18px;
   color: var(--text-tertiary);
 }
-
-/* ── 局部调整 composer (docked at the BOTTOM of the projected worker view) ──────
- * A labeled input + submit so the user can type a local adjustment for this node
- * and submit it (runs.steer) without leaving the content area. Neutral surface —
- * the input keeps Arco's clean default; the bar adds no tint of its own. */
-.steerBar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px 12px;
-  border-top: 1px solid var(--border-base);
-  background: var(--bg-1);
-}
-
-.steerLabel {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-}
-
-.steerInput {
-  flex: 1;
-  min-width: 0;
-}
