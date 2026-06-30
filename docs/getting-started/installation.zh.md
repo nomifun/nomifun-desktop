@@ -89,8 +89,8 @@ bun run build    # tauri build → 安装包 + 独立二进制
 
 - 位于 `target/release/nomifun-desktop`（Windows 上为 `.exe`）的独立可
   执行文件。
-- 位于 `target/release/bundle/` 下的平台安装包——`.msi`/`.exe`
-  （Windows）、`.dmg`/`.app`（macOS）、`.deb`/`.AppImage`（Linux）。
+- 位于 `target/release/bundle/` 下的平台安装包——`.exe`（NSIS，
+  Windows）、`.dmg`/`.app`（macOS）、`.deb`/`.AppImage`（Linux）。
 
 `bun run build` 产物适合本地测试。要分发 macOS 构建，请配置
 `apps/desktop/signing/.env.signing` 并使用 `bun run build:signed`。Windows

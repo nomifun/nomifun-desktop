@@ -39,7 +39,7 @@ This runs `tauri dev --config apps/desktop/tauri.conf.json`. It starts the Vite 
 bun run build
 ```
 
-Output bundles land under `target/release/bundle/` per platform (NSIS installer + MSI on Windows, `.app` + `.dmg` on macOS, `.deb` + `.AppImage` on Linux). To produce signed updater artifacts (extra `.sig` files), use `bun run build:updater` after configuring signing keys (see [Updater status](#updater-status) below).
+Output bundles land under `target/release/bundle/` per platform (an NSIS installer (`.exe`) on Windows, `.app` + `.dmg` on macOS, `.deb` + `.AppImage` on Linux). To produce signed updater artifacts (extra `.sig` files), use `bun run build:updater` after configuring signing keys (see [Updater status](#updater-status) below).
 
 A successful build prints the bundle locations, for example on macOS:
 

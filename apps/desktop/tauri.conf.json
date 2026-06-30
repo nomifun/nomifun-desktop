@@ -18,7 +18,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "resources": ["../../ui/dist"],
     "icon": [
       "icons/32x32.png",

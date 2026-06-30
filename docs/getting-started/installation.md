@@ -96,8 +96,8 @@ bun run build    # tauri build → installers + standalone binary
 
 - A standalone executable under
   `target/release/nomifun-desktop` (`.exe` on Windows).
-- Platform installers under `target/release/bundle/` — `.msi`/`.exe`
-  (Windows), `.dmg`/`.app` (macOS), `.deb`/`.AppImage` (Linux).
+- Platform installers under `target/release/bundle/` — `.exe` (NSIS,
+  Windows), `.dmg`/`.app` (macOS), `.deb`/`.AppImage` (Linux).
 
 `bun run build` artifacts are suitable for local testing. For distributable
 macOS builds, configure `apps/desktop/signing/.env.signing` and use
