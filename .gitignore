@@ -28,6 +28,9 @@ apps/desktop/target/
 # Tauri updater signing keys — NEVER commit private keys
 apps/desktop/.tauri/
 *.key
+# The matching public key lives in tauri.conf.json (plugins.updater.pubkey);
+# keep the local .pub copy out of git to avoid a stray untracked file.
+*.key.pub
 
 # macOS code signing / notarization secrets — NEVER commit
 apps/desktop/signing/.env.signing

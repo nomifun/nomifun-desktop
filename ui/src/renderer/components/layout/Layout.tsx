@@ -406,6 +406,29 @@ const Layout: React.FC<{
     };
   }, [navigate]);
 
+  // 启动后静默检查一次更新（仅桌面壳）：发现新版本才弹出更新弹窗；无更新 / 离线 / 出错都完全静默。
+  // Startup silent update check (desktop shell only): surface the modal ONLY when a
+  // newer version is available; stay silent when up to date or offline. The modal
+  // (always mounted below) then runs its own full check to render the details.
+  useEffect(() => {
+    if (!isDesktopShell()) return;
+    let cancelled = false;
+    const includePrerelease = localStorage.getItem('update.includePrerelease') === 'true';
+    void (async () => {
+      try {
+        const res = await ipcBridge.autoUpdate.check.invoke({ includePrerelease });
+        if (!cancelled && res?.success && res.data?.updateInfo) {
+          window.dispatchEvent(new CustomEvent('nomifun-open-update-modal', { detail: { source: 'startup' } }));
+        }
+      } catch {
+        /* offline / endpoint unreachable — silent; the About page button still works */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const siderWidth = isMobile
     ? Math.max(
         MOBILE_SIDER_MIN_WIDTH,

@@ -1,23 +1,19 @@
 {
-  "version": "0.1.1",
-  "notes": "示例发布说明 — 替换为真实更新内容。",
-  "pub_date": "2026-06-08T00:00:00Z",
+  "version": "0.0.0",
+  "notes": "占位模板 — 真实清单由 `bun run make:latest` 在各平台构建机上扫描更新产物自动生成/合并。带 << >> 占位签名或 REPLACE-WITH 占位 URL 的条目会被脚本视为空并替换。",
+  "pub_date": "1970-01-01T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "<<粘贴 .exe.sig 内容>>",
-      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_x64-setup.exe"
-    },
-    "darwin-x86_64": {
-      "signature": "<<粘贴 .app.tar.gz.sig 内容>>",
-      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_x64.app.tar.gz"
+      "signature": "<<NomiFun_<ver>_x64-setup.exe.sig 的内容>>",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v<ver>/NomiFun_<ver>_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "<<粘贴 .app.tar.gz.sig 内容>>",
-      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_aarch64.app.tar.gz"
+      "signature": "<<NomiFun_<ver>_aarch64.app.tar.gz.sig 的内容>>",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v<ver>/NomiFun_<ver>_aarch64.app.tar.gz"
     },
-    "linux-x86_64": {
-      "signature": "<<粘贴 .AppImage.sig 内容>>",
-      "url": "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/NomiFun_0.1.1_amd64.AppImage"
+    "darwin-x86_64": {
+      "signature": "<<NomiFun_<ver>_x64.app.tar.gz.sig 的内容>>",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v<ver>/NomiFun_<ver>_x64.app.tar.gz"
     }
   }
 }

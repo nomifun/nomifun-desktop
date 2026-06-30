@@ -43,6 +43,13 @@ import {
   tauriWindowUnmaximize,
   type ShellOpenDialogOptions,
 } from './tauriShell';
+import {
+  autoUpdateStatusEmitter,
+  tauriUpdateCheck,
+  tauriUpdateCurrentVersion,
+  tauriUpdateDownload,
+  tauriUpdateInstallAndRelaunch,
+} from './tauriUpdater';
 import type {
   ICssTheme,
   IMcpServer,
@@ -98,6 +105,7 @@ import type {
   UpdateDownloadProgressEvent,
   UpdateDownloadRequest,
   UpdateDownloadResult,
+  UpdateReleaseInfo,
 } from '../update/updateTypes';
 import type { ProtocolDetectionRequest, ProtocolDetectionResponse } from '../utils/protocolDetector';
 import { fromApiConversation, fromApiPaginatedConversations, toApiModelOptional } from './apiModelMapper';
@@ -563,31 +571,70 @@ export const application = {
 // Update — stays IPC (Electron-native auto-updater)
 // ---------------------------------------------------------------------------
 
-// DEGRADE_STUB: manual + auto update flows. The Tauri updater plugin is wired
-// (apps/desktop check_for_updates command); the in-app update modal is opened via
-// the 'nomifun-open-update-modal' window event. These bridge channels are not
-// invoked under Tauri/web (the update UI is shell-gated), so they degrade safely.
+// Tauri-native auto-update, backed by @tauri-apps/plugin-updater (see
+// ./tauriUpdater). The in-app UpdateModal drives this flow: it calls
+// `autoUpdate.check` then `update.check`, and — because the Tauri updater plugin
+// downloads + installs internally (no per-asset manual download, so
+// `recommendedAsset` is intentionally absent) — routes the download through
+// `autoUpdate.download`. The modal is shell-gated (About entry + startup check
+// only render under `isDesktopShell()`), and `shellProvider` additionally guards
+// each call with `isTauri()`, so the WebUI browser degrades to the safe fallback.
+
+/** Releases page shown in the modal's "go to release" affordance. */
+const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
+
 export const update = {
   open: noopEmitter<{ source?: 'menu' | 'about' }>(),
-  check: stubShellProvider<IBridgeResponse<UpdateCheckResult>, UpdateCheckRequest>({
-    success: false,
-    msg: 'Use the Tauri updater (check_for_updates)',
-  }),
+  check: shellProvider<IBridgeResponse<UpdateCheckResult>, UpdateCheckRequest>(async () => {
+    // Reuses the check started by autoUpdate.check (the modal calls that first),
+    // so this is the SAME round-trip, not a second network call.
+    const currentVersion = await tauriUpdateCurrentVersion();
+    const info = await tauriUpdateCheck(false);
+    if (!info) {
+      return { success: true, data: { currentVersion, updateAvailable: false } };
+    }
+    const latest: UpdateReleaseInfo = {
+      tagName: `v${info.version}`,
+      version: info.version,
+      body: info.releaseNotes,
+      htmlUrl: GITHUB_RELEASES_PAGE,
+      prerelease: false,
+      draft: false,
+      assets: [],
+      // recommendedAsset intentionally omitted: the plugin handles download +
+      // install, so the modal routes through the autoUpdate.* channels below.
+    };
+    return { success: true, data: { currentVersion, updateAvailable: true, latest } };
+  }, { success: false, msg: 'Updater is unavailable outside the desktop shell' }),
+  // Unused under Tauri (no recommendedAsset → the modal never takes the manual
+  // download path); kept for API compatibility with the modal's manual branch.
   download: stubShellProvider<IBridgeResponse<UpdateDownloadResult>, UpdateDownloadRequest>({
     success: false,
-    msg: 'Use the Tauri updater',
+    msg: 'Use the Tauri updater (auto path)',
   }),
   downloadProgress: noopEmitter<UpdateDownloadProgressEvent>(),
 };
 
 export const autoUpdate = {
-  check: stubShellProvider<
+  check: shellProvider<
     IBridgeResponse<{ updateInfo?: { version: string; releaseDate?: string; releaseNotes?: string } }>,
     { includePrerelease?: boolean }
-  >({ success: false }),
-  download: stubShellProvider<IBridgeResponse, void>({ success: false }),
-  quitAndInstall: shellProvider<void, void>(() => tauriRelaunch(), undefined),
-  status: noopEmitter<AutoUpdateStatus>(),
+  >(async () => {
+    // `force` so each modal open / retry performs a fresh check; update.check
+    // (called right after) then reuses this same in-flight result.
+    const info = await tauriUpdateCheck(true);
+    if (!info) return { success: true, data: {} };
+    return {
+      success: true,
+      data: { updateInfo: { version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes } },
+    };
+  }, { success: false }),
+  download: shellProvider<IBridgeResponse, void>(async () => {
+    await tauriUpdateDownload((s) => autoUpdateStatusEmitter.emit(s));
+    return { success: true };
+  }, { success: false }),
+  quitAndInstall: shellProvider<void, void>(() => tauriUpdateInstallAndRelaunch(), undefined),
+  status: autoUpdateStatusEmitter,
 };
 
 // ---------------------------------------------------------------------------

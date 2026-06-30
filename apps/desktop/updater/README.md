@@ -1,122 +1,109 @@
 # NomiFun Desktop Updater
 
-This directory documents the Tauri updater wiring for `nomifun-desktop`.
+In-app auto-update for `nomifun-desktop`, built on **Tauri's native updater**
+(`tauri-plugin-updater` + minisign signatures + a `latest.json` manifest hosted
+on GitHub Releases). The app checks → downloads → verifies → installs → relaunches.
 
-The updater is a scaffold, not a ready production release channel. The plugin
-is installed and the desktop command exists, but public releases still require
-release-owner credentials, a real HTTPS endpoint, and a signing key pair that
-is controlled outside the repository.
+## How it works
 
-## Current State
+```
+App (running version, from workspace Cargo.toml)
+  └─ check() ──► plugins.updater.endpoints  (GitHub Releases latest.json)
+        └─ newer version? ──► download the platform artifact + its .sig
+              └─ verify signature against plugins.updater.pubkey
+                    └─ install (swap .app / run NSIS) ──► relaunch
+```
 
-- Rust plugin: `apps/desktop/Cargo.toml` includes `tauri-plugin-updater`.
-- Frontend package: `ui/package.json` includes `@tauri-apps/plugin-updater`.
-- Tauri config: `apps/desktop/tauri.conf.json` contains
-  `plugins.updater.endpoints` and `plugins.updater.pubkey`.
-- Desktop command: `check_for_updates` is exposed through Tauri invoke and
-  returns a version string or `null`.
-- Build script: `bun run build:updater` produces updater signatures (`.sig`)
-  next to release installers when the signing environment variables are set.
+- **Frontend wiring (done):** `ui/src/common/adapter/tauriUpdater.ts` wraps
+  `@tauri-apps/plugin-updater` (+ `plugin-process` for relaunch) and backs the
+  `ipcBridge.update` / `ipcBridge.autoUpdate` channels. The in-app `UpdateModal`
+  drives check → download (progress) → install. Entry points:
+  - **About page** "检查更新" button (shell-gated on `isDesktopShell()`).
+  - **Startup silent check** (`Layout.tsx`): on launch, if a newer version is
+    available the modal opens automatically; otherwise it stays silent.
+- **Config:** `apps/desktop/tauri.conf.json` →
+  - `plugins.updater.endpoints` = `https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json`
+  - `plugins.updater.pubkey` = the project updater public key (committed; safe).
+- **Permissions:** `apps/desktop/capabilities/default.json` grants
+  `updater:default` + `updater:allow-check` + `updater:allow-download-and-install`,
+  and `process:default` (relaunch).
 
-The configured endpoint is a placeholder. The configured pubkey must be treated
-as a development value unless the release owner has explicitly replaced it and
-stored the matching private key in release infrastructure.
+## Signing keys
 
-## Required Before Public Release
+A single minisign keypair signs **every** platform/chip; the matching public key
+is embedded in the app for verification.
 
-1. Generate an updater signing key pair owned by the release owner:
+- **Public key** → `plugins.updater.pubkey` in `tauri.conf.json` (committed).
+- **Private key** → `apps/desktop/signing/nomifun-updater.key` — **gitignored**
+  (`*.key`), never committed, never printed. **Back it up** to your release
+  secret store: lose it and already-installed users stop receiving auto-updates
+  (they must reinstall once); the app itself keeps working.
+- Generated with no password (set one and pass it via
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if you prefer). Regenerate with:
 
-   ```bash
-   bun x tauri signer generate -w <private-key-output-path>
-   ```
+  ```bash
+  bun x tauri signer generate -w apps/desktop/signing/nomifun-updater.key --password "" --ci -f
+  # then paste the printed public key into tauri.conf.json → plugins.updater.pubkey
+  ```
 
-2. Put the printed public key in `plugins.updater.pubkey` in
-   `apps/desktop/tauri.conf.json`.
-3. Store the private key and password in CI or another release-secret store.
-   Never commit them.
-4. Replace `plugins.updater.endpoints` with a real HTTPS URL that serves
-   `latest.json`.
-5. Build release artifacts with updater signing enabled.
-6. Upload installers and signatures to your release hosting.
-7. Publish `latest.json` with the correct URLs and signatures.
+Updater signing is **separate** from OS code signing (Apple Developer ID /
+Windows Authenticode). See `apps/desktop/signing/README.md`. macOS note: an
+auto-updated `.app.tar.gz` should be signed + notarized, or Gatekeeper may block
+the swapped bundle on other machines — that's the code-signing concern, not the
+updater signature.
 
-Updater signing is separate from OS code signing. macOS Developer ID signing and
-notarization are documented in `apps/desktop/signing/README.md`. Windows
-SmartScreen reputation still requires an external code-signing certificate and
-publisher reputation.
+## Building signed update artifacts
 
-## Build A Signed Update Artifact
-
-Set the private key content, not a path:
+`createUpdaterArtifacts` makes Tauri emit a `.sig` next to each updatable bundle.
+Set the private key **content** (not the path) in the environment first:
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat <private-key-output-path>)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<private-key-password-or-empty>"
+export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""   # empty for the default key
+
+# Windows (NSIS .exe + .sig):
 bun run build:updater
+
+# macOS (Universal .app.tar.gz + .sig — one artifact serves both darwin chips):
+bun run build:mac -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+# Linux (AppImage + .sig):
+bun run build:updater   # on a Linux machine
 ```
 
-Artifacts land under `target/release/bundle/`. Each installer that supports
-updates gets a sibling `.sig` file, for example:
+You **cannot cross-compile**: build Windows on Windows, macOS on macOS, Linux on
+Linux. Each platform's artifacts land under `target/**/release/bundle/`.
 
-```text
-target/release/bundle/nsis/NomiFun_0.1.1_x64-setup.exe
-target/release/bundle/nsis/NomiFun_0.1.1_x64-setup.exe.sig
+## Generating `latest.json`
+
+`bun run make:latest` scans `target/` for this machine's updater artifacts + their
+`.sig` files, derives the `<os>-<arch>` platform keys, and **merges** them into
+`apps/desktop/updater/latest.json` (preserving entries built on other machines):
+
+```bash
+bun run make:latest                     # version from Cargo.toml, notes from CHANGELOG
+bun run make:latest --collect           # also copy artifacts + .sig + latest.json → dist/desktop/
+bun run make:latest --version 0.1.11 --notes "..."   # overrides
 ```
 
-Copy the full `.sig` file content into the matching platform entry in
-`latest.json`.
+Run it once per build machine; carry `latest.json` between them (or commit it) so
+the merged manifest ends up complete. The report prints which platform keys are
+filled and which are still missing — **a missing `<os>-<arch>` entry means those
+users silently get no update**, so make sure every platform you ship has one.
 
-## `latest.json`
+## Releasing
 
-The Tauri updater expects a manifest similar to:
+1. Build signed updater artifacts on each platform (above).
+2. `bun run make:latest` on each, merging into one `latest.json`.
+3. Create a GitHub Release tagged `v<version>`.
+4. Upload **all** installers + their `.sig` files + `latest.json` as release assets.
+5. The endpoint `releases/latest/download/latest.json` resolves to the newest
+   release automatically — clients pick up the update on their next check.
 
-```json
-{
-  "version": "0.1.1",
-  "notes": "Release notes for users.",
-  "pub_date": "2026-06-24T00:00:00Z",
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "<contents-of-.sig>",
-      "url": "https://example.com/downloads/NomiFun_0.1.1_x64-setup.exe"
-    },
-    "darwin-aarch64": {
-      "signature": "<contents-of-.sig>",
-      "url": "https://example.com/downloads/NomiFun_0.1.1_aarch64.dmg"
-    },
-    "linux-x86_64": {
-      "signature": "<contents-of-.sig>",
-      "url": "https://example.com/downloads/nomifun_0.1.1_amd64.AppImage"
-    }
-  }
-}
-```
+## Safety checklist
 
-Common platform keys are:
-
-- `windows-x86_64`
-- `darwin-x86_64`
-- `darwin-aarch64`
-- `linux-x86_64`
-
-## Client Behavior
-
-The current command only checks for an available update:
-
-```ts
-import { invoke } from "@tauri-apps/api/core";
-
-const newVersion = await invoke<string | null>("check_for_updates");
-```
-
-Download/install UX can be implemented either in the frontend with
-`@tauri-apps/plugin-updater` (`check`, `downloadAndInstall`) or in the Rust
-command by calling `download_and_install` after a user confirms the action.
-
-## Safety Checklist
-
-- Private updater key is stored only in release secrets.
-- `plugins.updater.pubkey` matches the private key used by CI.
-- `plugins.updater.endpoints` points to HTTPS.
-- `latest.json` contains real installer URLs and exact signature contents.
-- OS code signing and notarization are handled separately for each platform.
+- Private updater key stored only in your release secret store; never committed.
+- `plugins.updater.pubkey` matches the private key used to sign.
+- `plugins.updater.endpoints` is HTTPS (GitHub Releases).
+- Every shipped `<os>-<arch>` has a `latest.json` entry with the exact `.sig` content.
+- OS code signing / notarization handled separately per platform.

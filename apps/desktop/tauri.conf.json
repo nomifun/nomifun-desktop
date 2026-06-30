@@ -17,7 +17,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "app", "dmg", "appimage", "deb", "rpm"],
     "resources": ["../../ui/dist"],
     "icon": [
       "icons/32x32.png",
@@ -41,9 +41,9 @@
     },
     "updater": {
       "endpoints": [
-        "https://REPLACE-WITH-YOUR-HOST/nomifun/updates/latest.json"
+        "https://github.com/nomifun/nomifun-tauri/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhGOTlCMjEwMzg2MDFFRDgKUldUWUhtQTRFTEtaajNCVlBFS3ZvVzFheVo5RkttMnJnNnk4b3gycS95MFZNdnlvRjhMRG5nUDcK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzQUEyNzJFNjBBQTc5NTIKUldSU2VhcGdMaWVxODRRbUdXczZodEJZOE1Ja2Zta011eWUxUko2SG5XclVaSUdtaWNobXJNemEK"
     }
   }
 }
