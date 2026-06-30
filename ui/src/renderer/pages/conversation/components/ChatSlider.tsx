@@ -25,6 +25,27 @@ const ChatSlider: React.FC<{
   // the tab is omitted there. Hook is called unconditionally (Rules of Hooks).
   const orch = useOrchestrationSafe();
 
+  // Landing display: when this conversation was launched from the homepage
+  // 「智能编排」entry (useGuidSend stashed `nomi_open_rail_<id>`) AND it actually
+  // has a linked run, open the right rail straight onto the 编排 tab — NO
+  // floating window. The rail is opened via the persisted workspace preference
+  // (written alongside the flag); here we only decide the initial active tab and
+  // consume the flag once so it never re-selects after the user switches tabs.
+  // `useMemo` over the run-presence so the one-shot read is stable across the
+  // re-renders that follow `runId` lighting up.
+  const orchHasRun = orch?.runId != null;
+  const defaultOrchestrationTab = React.useMemo(() => {
+    if (!orchHasRun || conversation == null) return false;
+    const key = `nomi_open_rail_${conversation.id}`;
+    try {
+      if (sessionStorage.getItem(key) == null) return false;
+      sessionStorage.removeItem(key);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [orchHasRun, conversation]);
+
   let workspaceNode: React.ReactNode = null;
   if (conversation?.type === 'acp' && conversation.extra?.workspace) {
     workspaceNode = (
@@ -60,6 +81,7 @@ const ChatSlider: React.FC<{
         }
         eventPrefix='nomi'
         messageApi={messageApi}
+        defaultActiveTab={defaultOrchestrationTab ? 'orchestration' : undefined}
         extraTabs={[
           ...(orch != null
             ? [

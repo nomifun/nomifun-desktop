@@ -76,8 +76,9 @@ export type GuidSendDeps = {
 
   /** When true the entry creates a new nomi conversation, starts a
    * conversation-hosted orchestration run linked to it (Path B), and navigates
-   * there with the floating canvas auto-opening on landing. Mutually exclusive
-   * with AutoWork / preset-agent flows (the homepage strip enforces this). */
+   * there with the right-rail「编排」tab auto-opening (canvas, no floating window)
+   * on landing. Mutually exclusive with AutoWork / preset-agent flows (the
+   * homepage strip enforces this). */
   orchestrationMode: boolean;
   /** Materializes the orchestrator model range (auto → explicit range; REST
    * rejects bare `auto`). See `pages/orchestrator/useModelRange`. */
@@ -191,12 +192,16 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model_range,
         lead_conv_id: conversation.id,
       });
-      // Auto-open the floating canvas on landing (show the plan, not an empty
-      // chat page). OrchestrationContext consumes this flag once `runId` lights up.
+      // Open the right rail + select the「编排」tab on landing (show the plan,
+      // not an empty chat page) — NO floating window. We persist an "expanded"
+      // workspace preference so the freshly-mounted rail starts open
+      // (useWorkspaceCollapse seeds its initial state from this key), and stash a
+      // per-conversation flag the rail reads to make 编排 the active tab.
       try {
-        sessionStorage.setItem(`nomi_open_canvas_${conversation.id}`, '1');
+        sessionStorage.setItem(`nomi_open_rail_${conversation.id}`, '1');
+        localStorage.setItem(`workspace-preference-${conversation.id}`, 'expanded');
       } catch {
-        /* sessionStorage may be unavailable — non-fatal */
+        /* sessionStorage / localStorage may be unavailable — non-fatal */
       }
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${conversation.id}`);
