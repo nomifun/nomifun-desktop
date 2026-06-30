@@ -222,3 +222,106 @@ async fn autowork_and_idmm_enable_auto_resumes_paused_tag_and_runs_requirement()
         "the tag must remain resumed after the turn (the clean turn must not re-pause it)"
     );
 }
+
+#[tokio::test]
+async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
+    // REGRESSION (用户截图: 顶部「自动工作」图标=绿/active,但侧边栏同一会话=橙/idle):
+    // the orchestrator updated its in-memory `live_progress` on claim/finish but
+    // emitted NO autowork state event, so the session-list capability icon — which
+    // updates ONLY from `autowork.statusChanged` (no per-row GET) — kept its stale
+    // bulk-loaded run-state while the per-session control (which re-GETs on open)
+    // showed the live one. The loop must now BROADCAST run_state=active on claim
+    // and run_state=idle on finish so both surfaces land on the same colour.
+    let (mut app, services) = build_app_completing().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let tag = "rs-sync";
+
+    let conv = {
+        let body = json!({ "type": "nomi", "name": "rs", "extra": { "workspace": "/project" } });
+        let resp = app
+            .clone()
+            .oneshot(json_with_token("POST", "/api/conversations", body, &token, &csrf))
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "create conversation failed: {}", resp.status());
+        body_json(resp).await["data"]["id"].as_i64().unwrap().to_string()
+    };
+    let req_id = {
+        let body = json!({ "title": "需求", "content": "做点事", "tag": tag, "order_key": "1" });
+        let resp = app
+            .clone()
+            .oneshot(json_with_token("POST", "/api/requirements", body, &token, &csrf))
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "create requirement failed: {}", resp.status());
+        body_json(resp).await["data"]["id"].as_i64().unwrap()
+    };
+
+    // Capture broadcast events BEFORE enabling, so the loop's emits are observed.
+    let mut events = services.event_bus.subscribe();
+
+    let resp = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/requirements/autowork",
+            json!({ "kind": "conversation", "target_id": conv, "enabled": true, "tag": tag }),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "enabling 自动工作 should succeed: {}", resp.status());
+
+    // Collect this conversation's autowork run-state transitions while the loop
+    // claims → the mock completes the turn → finalize.
+    let mut run_states: Vec<String> = Vec::new();
+    let mut processed = false;
+    for _ in 0..240 {
+        loop {
+            match events.try_recv() {
+                Ok(msg) => {
+                    if msg.name == "autowork.statusChanged"
+                        && msg.data.get("target_id").and_then(|v| v.as_str()) == Some(conv.as_str())
+                        && let Some(rs) = msg.data.get("run_state").and_then(|v| v.as_str())
+                    {
+                        run_states.push(rs.to_string());
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+        let resp = app
+            .clone()
+            .oneshot(get_with_token(&format!("/api/requirements/{req_id}"), &token))
+            .await
+            .unwrap();
+        let status = body_json(resp).await["data"]["status"].as_str().unwrap_or("").to_string();
+        if matches!(status.as_str(), "needs_review" | "done") {
+            processed = true;
+        }
+        // The finish `idle` emit fires just AFTER the status settles, so keep
+        // draining until we have seen active and landed back on idle.
+        if processed
+            && run_states.iter().any(|s| s == "active")
+            && run_states.last().map(|s| s == "idle").unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    assert!(processed, "the requirement must be claimed and run; run_states seen = {run_states:?}");
+    assert!(
+        run_states.iter().any(|s| s == "active"),
+        "AutoWork must broadcast run_state=active on claim (the session-list sync fix); states = {run_states:?}"
+    );
+    // After the turn finishes the loop returns to idle and broadcasts it, so the
+    // last transition both surfaces observe is idle (header AND sidebar align).
+    assert_eq!(
+        run_states.last().map(String::as_str),
+        Some("idle"),
+        "AutoWork must broadcast run_state=idle after the turn finishes; states = {run_states:?}"
+    );
+}
