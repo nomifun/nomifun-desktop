@@ -32,6 +32,16 @@ pub struct ServerEnvironment {
 /// All subcommands that need logging and config should call this first.
 pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironment> {
     let log_dir = cli.log_dir.clone().unwrap_or_else(|| cli.data_dir.join("logs"));
+    // Export the *actual* log dir so `nomifun_system::sysinfo::resolve_log_dir`
+    // (which the settings UI reads via GET /api/system/info) reports where logs
+    // truly land instead of its own independent default — otherwise the UI shows
+    // a Roaming path while logs write under the Local data dir. Mirrors the
+    // NOMIFUN_WORK_DIR export below.
+    // SAFETY: called at the very start of boot, before any service initialization
+    // or env reads; the only reader of NOMIFUN_LOG_DIR is sysinfo, much later.
+    unsafe {
+        std::env::set_var("NOMIFUN_LOG_DIR", &log_dir);
+    }
     let log_guard = init_tracing(&log_dir, cli.log_level.as_deref());
 
     // Notes recorded before tracing existed (e.g. the desktop shell's data-dir
