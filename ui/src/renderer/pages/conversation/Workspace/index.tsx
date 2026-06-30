@@ -48,6 +48,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
   eventPrefix = 'acp',
   messageApi,
   extraTabs,
+  defaultActiveTab,
 }) => {
   // Bind workspace uploads to the conversation lifecycle: switching the
   // workspace conversation or unmounting the panel cancels in-flight uploads.
@@ -221,6 +222,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
       subscribeFileTreeReplace,
       upload: { trackingKey: String(conversation_id) },
       extraTabs,
+      defaultActiveTab,
     }),
     [
       workspace,
@@ -233,6 +235,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
       subscribeFileTreeReplace,
       conversation_id,
       extraTabs,
+      defaultActiveTab,
     ]
   );
 

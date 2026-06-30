@@ -64,13 +64,6 @@
     "roleUnknown": "Unassigned",
     "modelUnknown": "No model set"
   },
-  "canvas": {
-    "entryLabel": "Canvas",
-    "startEntry": "Orchestrate",
-    "title": "Agent canvas",
-    "openCanvas": "Expand agent canvas",
-    "collapse": "Collapse"
-  },
   "run": {
     "role": {
       "planner": "Planner",

@@ -64,13 +64,6 @@
     "roleUnknown": "待分派",
     "modelUnknown": "未指定模型"
   },
-  "canvas": {
-    "entryLabel": "画布",
-    "startEntry": "智能编排",
-    "title": "Agent 画布",
-    "openCanvas": "展开 agent 画布",
-    "collapse": "收起"
-  },
   "run": {
     "role": {
       "planner": "规划",

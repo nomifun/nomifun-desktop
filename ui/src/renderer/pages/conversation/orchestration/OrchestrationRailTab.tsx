@@ -6,17 +6,18 @@
 
 import React, { Suspense, useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FullScreen, Branch, Workbench } from '@icon-park/react';
-import { Spin } from '@arco-design/web-react';
+import { Branch, Loading, Workbench } from '@icon-park/react';
+import { Modal, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { TCreateAdhocRun } from '@/common/types/orchestrator/orchestratorTypes';
+import type { TCreateAdhocRun, TReplanRequest } from '@/common/types/orchestrator/orchestratorTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import OrchestratorComposer, {
   type AutonomyLevel,
   type ComposerModelRange,
 } from '@/renderer/pages/orchestrator/OrchestratorComposer';
 import { useModelRange } from '@/renderer/pages/orchestrator/useModelRange';
+import { RunControls } from '@/renderer/pages/orchestrator/RunDetail/RunControls';
 import { STATUS_META } from '@/renderer/pages/orchestrator/RunDetail/runStatusMeta';
 import { useOrchestrationSafe } from './OrchestrationContext';
 
@@ -34,11 +35,19 @@ const STATUS_FALLBACK_COLOR = 'var(--color-text-3)';
 /**
  * OrchestrationRailTab — the conversation right-rail「编排」tab (会话原生编排 v2).
  *
+ * This IS the orchestration surface now — there is no floating overlay. The
+ * canvas + run controls live here in the rail; the conversation content area
+ * keeps the native NomiChat + the node→content-area projection (F7) untouched.
+ *
  * Two states, both reading {@link useOrchestrationSafe}:
- *  - **has run** (`runId != null`): a status pill (colored from {@link STATUS_META}
- *    via a CSS var), a live「规划中…」hint while the lead agent is still planning,
- *    a height-constrained live {@link DagCanvas} preview (lazy + Suspense), and an
- *    「展开」control that floats the full canvas (F6) via `openCanvas()`.
+ *  - **has run** (`runId != null`): a top control row (status pill colored from
+ *    {@link STATUS_META}, a「规划中…」hint while the lead agent is still planning,
+ *    and the compact {@link RunControls} — approve / pause / resume / cancel /
+ *    replan; the row is allowed to wrap in the narrow rail), a replan Arco Modal
+ *    (a standard dialog, not a floating window) hosting the {@link OrchestratorComposer}
+ *    prefilled with the run's goal, and the lazy {@link DagCanvas} FILLING the rail
+ *    height (click a node → `projectTask`, the main node → `returnToMain`,
+ *    `mainActive = projectedTaskId === null`).
  *  - **no run** (`runId == null`): an initiation card whose {@link OrchestratorComposer}
  *    (in `fluid` mode so it fills the narrow rail) launches a Path-B ad-hoc run
  *    bound to the current conversation. We DON'T set `runId` after create — the
@@ -55,12 +64,28 @@ const OrchestrationRailTab: React.FC = () => {
   const orchestration = useOrchestrationSafe();
   const { hasModels, buildModelRange } = useModelRange();
 
-  // Path-B composer state — intent text + model range (defaults to「auto」=
-  // every enabled model) + autonomy (defaults to interactive: review the plan).
+  // Path-B composer state (no-run initiation) — intent text + model range
+  // (defaults to「auto」= every enabled model) + autonomy (defaults to
+  // interactive: review the plan).
   const [intent, setIntent] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [modelRange, setModelRange] = useState<ComposerModelRange>({ mode: 'auto', single: '', range: [] });
   const [autonomy, setAutonomy] = useState<AutonomyLevel>('interactive');
+
+  // ── Replan modal state ──────────────────────────────────────────────────────
+  // Moved over from the deleted floating overlay. v1 simplification: the replan
+  // composer prefills the run's goal + autonomy, but the model_range defaults to
+  // `auto` (every enabled pair) rather than being reverse-rebuilt from the run's
+  // fleet_members snapshot. The user can narrow it in the modal.
+  const [replanOpen, setReplanOpen] = useState(false);
+  const [replanGoal, setReplanGoal] = useState('');
+  const [replanModelRange, setReplanModelRange] = useState<ComposerModelRange>({
+    mode: 'auto',
+    single: '',
+    range: [],
+  });
+  const [replanAutonomy, setReplanAutonomy] = useState<AutonomyLevel>('interactive');
+  const [replanSubmitting, setReplanSubmitting] = useState(false);
 
   const conversationId = orchestration?.conversationId;
 
@@ -103,6 +128,53 @@ const OrchestrationRailTab: React.FC = () => {
     [submitting, conversationId, hasModels, buildModelRange, modelRange, autonomy, message, t]
   );
 
+  const openReplan = useCallback(() => {
+    const goal = orchestration?.detail?.run.goal ?? '';
+    setReplanGoal(goal);
+    setReplanModelRange({ mode: 'auto', single: '', range: [] });
+    setReplanAutonomy(orchestration?.detail?.run.autonomy === 'supervised' ? 'supervised' : 'interactive');
+    setReplanOpen(true);
+  }, [orchestration?.detail?.run.goal, orchestration?.detail?.run.autonomy]);
+
+  const submitReplan = useCallback(
+    async (goal: string) => {
+      const runId = orchestration?.runId;
+      if (!runId) return;
+      const trimmed = goal.trim();
+      if (!trimmed) {
+        message.warning(t('orchestrator.composer.goalRequired'));
+        return;
+      }
+      const wireRange = buildModelRange({
+        mode: replanModelRange.mode,
+        single: replanModelRange.single,
+        range: replanModelRange.range,
+      });
+      if (!wireRange) {
+        message.warning(t('orchestrator.composer.modelRequired'));
+        return;
+      }
+      setReplanSubmitting(true);
+      try {
+        const body: { id: string } & TReplanRequest = {
+          id: runId,
+          goal: trimmed,
+          model_range: wireRange,
+          autonomy: replanAutonomy,
+        };
+        await ipcBridge.orchestrator.runs.replan.invoke(body);
+        message.success(t('orchestrator.run.detail.replanOk', { defaultValue: '已重新规划' }));
+        await orchestration?.refetch();
+        setReplanOpen(false);
+      } catch (e) {
+        message.error(t('orchestrator.composer.replanError', { error: String(e) }));
+      } finally {
+        setReplanSubmitting(false);
+      }
+    },
+    [orchestration, buildModelRange, replanModelRange, replanAutonomy, message, t]
+  );
+
   // Outside an OrchestrationProvider (e.g. the companion「聊天」tab) — degrade to a
   // neutral empty state instead of throwing.
   if (!orchestration) {
@@ -118,7 +190,7 @@ const OrchestrationRailTab: React.FC = () => {
     );
   }
 
-  const { runId, detail, leadThinking, projectTask, returnToMain, openCanvas, projectedTaskId } = orchestration;
+  const { runId, detail, leadThinking, refetch, projectTask, returnToMain, projectedTaskId } = orchestration;
 
   // ── No run — Path-B initiation card ─────────────────────────────────────────
   if (runId == null) {
@@ -161,7 +233,7 @@ const OrchestrationRailTab: React.FC = () => {
     );
   }
 
-  // ── Has run — live preview + expand ─────────────────────────────────────────
+  // ── Has run — full orchestration surface (status + controls + canvas) ────────
   const status = detail?.run.status ?? '';
   const statusMeta = STATUS_META[status];
   const statusColor = statusMeta?.color ?? STATUS_FALLBACK_COLOR;
@@ -173,8 +245,10 @@ const OrchestrationRailTab: React.FC = () => {
     <div className='size-full flex flex-col gap-10px p-12px'>
       {msgCtx}
 
-      {/* Header row — status pill + live planning hint. */}
-      <div className='flex items-center justify-between gap-8px shrink-0'>
+      {/* Control row — status pill + planning hint + run controls. Allowed to
+          wrap (`flex-wrap`) because the rail is narrow and RunControls' button
+          group can overflow a single line. */}
+      <div className='flex flex-wrap items-center gap-x-8px gap-y-6px shrink-0'>
         <span
           className='inline-flex items-center gap-6px rd-full px-9px py-3px text-11px font-600 leading-none'
           style={{
@@ -187,16 +261,20 @@ const OrchestrationRailTab: React.FC = () => {
         </span>
         {leadThinking.active && (
           <span className='inline-flex items-center gap-5px text-11px text-primary-6 leading-none'>
-            <Spin size={12} />
+            <Loading theme='outline' size='12' strokeWidth={3} className='animate-spin line-height-0' />
             <span>{t('conversation.orchestration.planning', { defaultValue: '规划中…' })}</span>
           </span>
         )}
+        {/* Compact run controls (approve/pause/resume/cancel/replan). Pushed to
+            its own wrap line on a narrow rail via the flex-wrap container. */}
+        <div className='ml-auto'>
+          <RunControls runId={runId} status={status} refetch={refetch} onReplan={openReplan} />
+        </div>
       </div>
 
-      {/* Live canvas preview — height-constrained because the extra-tab content
-          renders inside a scrolling FlexFullContainer with no fixed height; the
-          react-flow canvas needs a bounded box to lay out. */}
-      <div className='shrink-0 h-[clamp(220px,42vh,360px)] min-h-0 rd-12px overflow-hidden border border-solid border-[var(--color-border-2)] bg-fill-1'>
+      {/* Live canvas — FILLS the remaining rail height (flex-1). The react-flow
+          canvas needs a bounded box to lay out; the flex column gives it one. */}
+      <div className='flex-1 min-h-0 rd-12px overflow-hidden border border-solid border-[var(--color-border-2)] bg-fill-1'>
         <Suspense
           fallback={
             <div className='size-full flex items-center justify-center'>
@@ -213,23 +291,6 @@ const OrchestrationRailTab: React.FC = () => {
         </Suspense>
       </div>
 
-      {/* Expand — floats the full canvas (overlay rendered in F6). */}
-      <div
-        role='button'
-        tabIndex={0}
-        onClick={openCanvas}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            openCanvas();
-          }
-        }}
-        className='shrink-0 inline-flex cursor-pointer select-none items-center justify-center gap-6px rd-8px px-10px py-7px text-12px font-600 text-t-secondary transition-colors hover:bg-fill-2 hover:text-t-primary border border-solid border-[var(--color-border-2)]'
-      >
-        <FullScreen theme='outline' size='14' strokeWidth={3} />
-        <span>{t('conversation.orchestration.expand', { defaultValue: '展开画布' })}</span>
-      </div>
-
       {/* When the run is freshly created but the plan hasn't arrived yet (no tasks),
           a quiet hint sits below the canvas' own planning state. */}
       {detail && detail.tasks.length === 0 && (
@@ -238,6 +299,40 @@ const OrchestrationRailTab: React.FC = () => {
           <span>{t('conversation.orchestration.awaitingPlan', { defaultValue: '正在生成任务编排…' })}</span>
         </div>
       )}
+
+      {/* Replan modal — a STANDARD Arco dialog (not a floating window): the
+          OrchestratorComposer (fluid) prefilled with the run's goal; model-range
+          defaults to auto (v1 simplification — not rebuilt from the fleet snapshot)
+          + the autonomy pill from the run. On submit → runs.replan → toast +
+          refetch + close. */}
+      <Modal
+        title={t('orchestrator.run.detail.replan')}
+        visible={replanOpen}
+        footer={null}
+        onCancel={() => {
+          if (!replanSubmitting) setReplanOpen(false);
+        }}
+        maskClosable={!replanSubmitting}
+        autoFocus={false}
+        unmountOnExit
+        style={{ width: 'min(640px, calc(100vw - 32px))' }}
+      >
+        <OrchestratorComposer
+          fluid
+          value={replanGoal}
+          onChange={setReplanGoal}
+          onSubmit={submitReplan}
+          submitting={replanSubmitting}
+          placeholder={t('orchestrator.composer.goalPlaceholder', { defaultValue: '描述要重新规划的目标…' })}
+          label={t('orchestrator.run.detail.replan')}
+          showModelRange
+          modelRange={replanModelRange}
+          onModelRangeChange={setReplanModelRange}
+          showAutonomy
+          autonomy={replanAutonomy}
+          onAutonomyChange={setReplanAutonomy}
+        />
+      </Modal>
     </div>
   );
 };
