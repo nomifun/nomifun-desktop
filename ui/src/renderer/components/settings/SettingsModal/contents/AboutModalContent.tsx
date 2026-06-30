@@ -5,16 +5,21 @@
  * Based on AionUi (https://github.com/iOfficeAI/AionUi)
  */
 
-import { Divider, Typography, Button, Switch } from '@arco-design/web-react';
+import { Divider, Typography, Button } from '@arco-design/web-react';
 import { Github, Right } from '@icon-park/react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { useSettingsViewMode } from '../settingsViewContext';
-import { isElectronDesktop, openExternalUrl } from '@/renderer/utils/platform';
+import { isDesktopShell, openExternalUrl } from '@/renderer/utils/platform';
+import { httpGet } from '@/common/adapter/httpBridge';
 import { NOMIFUN_PUBLIC_LINKS } from './FeedbackReportModal';
 
-const ABOUT_SYSTEM_VERSION = '1.0.0';
+// Real app version from the backend `/health` endpoint (public, no auth). The
+// version there is `CARGO_PKG_VERSION`, which follows the single-source
+// workspace version — so it stays correct in both the desktop shell and the
+// WebUI browser without a Tauri-only `getVersion()` call.
+const healthGet = httpGet<{ version?: string }>('/health');
 
 type LinkItem =
   | { title: string; detail: string; url: string; icon: React.ReactNode; onClick?: never }
@@ -24,19 +29,24 @@ const AboutModalContent: React.FC = () => {
   const { t } = useTranslation();
   const viewMode = useSettingsViewMode();
   const isPageMode = viewMode === 'page';
-  const isElectron = isElectronDesktop();
+  // The in-app updater only runs in the bundled desktop shell (Tauri); the WebUI
+  // browser has no updater, so the check-update entry is shell-gated.
+  const isDesktop = isDesktopShell();
 
-  const [includePrerelease, setIncludePrerelease] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
 
   useEffect(() => {
-    const saved = localStorage.getItem('update.includePrerelease');
-    setIncludePrerelease(saved === 'true');
+    let alive = true;
+    healthGet
+      .invoke()
+      .then((health) => {
+        if (alive && health?.version) setAppVersion(health.version);
+      })
+      .catch((error) => console.error('Failed to read app version:', error));
+    return () => {
+      alive = false;
+    };
   }, []);
-
-  const handlePrereleaseChange = (val: boolean) => {
-    setIncludePrerelease(val);
-    localStorage.setItem('update.includePrerelease', String(val));
-  };
 
   const openLink = async (url: string) => {
     try {
@@ -111,7 +121,7 @@ const AboutModalContent: React.FC = () => {
             </Typography.Text>
             <div className='flex items-center justify-center gap-8px mb-16px'>
               <span className='px-10px py-4px rd-6px text-13px bg-fill-2 text-t-primary font-500'>
-                v{ABOUT_SYSTEM_VERSION}
+                v{appVersion || '—'}
               </span>
               <div
                 className='text-t-primary cursor-pointer hover:text-t-secondary transition-colors p-4px'
@@ -124,17 +134,11 @@ const AboutModalContent: React.FC = () => {
             </div>
 
             {/* Check Update Section */}
-            {isElectron && (
+            {isDesktop && (
               <div className='flex flex-col items-center gap-12px w-full max-w-300px bg-fill-2 p-16px rounded-lg'>
                 <Button type='primary' long onClick={checkUpdate}>
                   {t('settings.checkForUpdates')}
                 </Button>
-                <div className='flex items-center justify-between w-full'>
-                  <Typography.Text className='text-12px text-t-secondary'>
-                    {t('settings.includePrereleaseUpdates')}
-                  </Typography.Text>
-                  <Switch size='small' checked={includePrerelease} onChange={handlePrereleaseChange} />
-                </div>
               </div>
             )}
           </div>

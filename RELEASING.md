@@ -32,18 +32,37 @@ versions are kept in sync by the script but are not read by any build.
 
 ## Desktop Release
 
-1. Build unsigned bundles with `bun run build`.
+Installers are unsigned-OS by default; in-app auto-update uses the Tauri updater
+key (separate from OS code signing). You **cannot cross-compile** — build each
+platform on its own machine.
+
+1. Build unsigned bundles with `bun run build` (or `build:mac` / `build:win` /
+   `build:linux`).
 2. For macOS public distribution, use `bun run build:signed` with the
    release-owner Developer ID credentials.
-3. For updater artifacts, configure the release-owner Tauri updater key and run
-   `bun run build:updater`.
-4. Publish installers and signatures to the release host.
-5. Publish a signed `latest.json` only after artifacts are uploaded.
+3. **Updater artifacts (per platform):** export the updater private key, then
+   build with updater signing on. The signed `.sig` lands next to each bundle.
+
+   ```bash
+   export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
+   export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+   bun run build:updater                                              # Windows / Linux
+   bun run build:mac -- --config '{"bundle":{"createUpdaterArtifacts":true}}'   # macOS (Universal)
+   ```
+
+4. **Build the manifest:** `bun run make:latest` on each build machine scans its
+   updater artifacts and **merges** the `<os>-<arch>` entries into
+   `apps/desktop/updater/latest.json`. Carry that file between machines so the
+   merged manifest covers every shipped platform/chip (the report flags missing
+   ones — a missing entry = those users silently get no update).
+5. **Publish to GitHub Releases:** create a release tagged `v<version>` and upload
+   every installer + its `.sig` + the merged `latest.json`. The configured
+   endpoint (`releases/latest/download/latest.json`) then serves the newest release.
 
 Updater signing and OS code signing are separate. See:
 
-- `apps/desktop/updater/README.md`
-- `apps/desktop/signing/README.md`
+- `apps/desktop/updater/README.md`  (full updater flow + signing keys)
+- `apps/desktop/signing/README.md`  (macOS Developer ID / notarization)
 
 ## Server Release
 
