@@ -228,13 +228,11 @@
       "noConversation": "There’s no transcript to show — it will appear here once a worker picks up this task."
     },
     "steer": {
-      "title": "Steer",
-      "hint": "Inject a steering message into the worker currently running this task.",
-      "placeholder": "Type a steering message to inject…",
-      "send": "Send",
-      "open": "Steer…",
-      "sent": "Steering message sent",
-      "error": "Failed to send steering message: {{error}}"
+      "label": "Local adjustment",
+      "placeholder": "Describe a local adjustment for this node…",
+      "submit": "Submit",
+      "sent": "Adjustment submitted",
+      "error": "Local adjustment failed: {{error}}"
     },
     "project": {
       "viewing": "Viewing",
