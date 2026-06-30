@@ -1710,6 +1710,10 @@ export interface ICreateConversationParams {
     context?: string;
     context_file_name?: string;
     preset_rules?: string;
+    /** Orchestration lead role. When `'lead'`, the backend composes the
+     *  LEAD_ORCHESTRATOR_PROMPT so the agent decomposes complex goals via
+     *  `nomi_run_create` (homepage 智能编排 entry). Prompt-only; never grants tools. */
+    orchestrator_role?: string;
     /** Transient: preset opt-in skills. Consumed by backend create handler
      *  and stripped before persistence. */
     preset_enabled_skills?: string[];

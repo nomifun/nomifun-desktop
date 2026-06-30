@@ -467,6 +467,12 @@ export type TChatConversation =
          * created as a worker for an orchestration run task (vs. the run's lead
          * conversation). Absent for the lead conversation and non-orchestration ones. */
         orchestrator_task_id?: string;
+        /** Marks this nomi conversation as an orchestration LEAD (homepage 智能编排
+         * on-ramp). When set to 'lead' the backend injects the LEAD_ORCHESTRATOR_PROMPT
+         * so the agent natively thinks → calls `nomi_run_create(goal)` to fan out a
+         * multi-agent run (which then writes `orchestrator_run_id` back here). Absent
+         * for normal nomi conversations. */
+        orchestrator_role?: string;
       }
     >;
 

@@ -18,8 +18,6 @@ import type { NavigateFunction } from 'react-router-dom';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import { planGuidEntry } from './autoWorkEntry';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
-import type { ModelRangeSource } from '@/renderer/pages/orchestrator/useModelRange';
-import type { TModelRange } from '@/common/types/orchestrator/orchestratorTypes';
 import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
 
 export type GuidSendDeps = {
@@ -74,18 +72,16 @@ export type GuidSendDeps = {
    * "conversation N is already running". */
   autoWork: AutoWorkDraftValue;
 
-  /** When true the entry creates a new nomi conversation, starts a
-   * conversation-hosted orchestration run linked to it (Path B), and navigates
-   * there. On landing the OrchestrationTopPanel (pinned to the top of the
-   * content area, default expanded) shows the canvas — no floating window.
+  /** When true the homepage 智能编排 strip creates an orchestration LEAD nomi
+   * conversation (`extra.orchestrator_role: 'lead'` → backend
+   * LEAD_ORCHESTRATOR_PROMPT), stashes the goal as the first message, and
+   * navigates immediately. On landing the lead agent natively thinks and calls
+   * `nomi_run_create`, which links a multi-agent run back to this conversation
+   * (writing `extra.orchestrator_run_id` + broadcasting) so `useConversationRun`
+   * lights up the top-panel DAG. No FE adhoc-run creation, no blank wait.
    * Mutually exclusive with AutoWork / preset-agent flows (the homepage strip
    * enforces this). */
   orchestrationMode: boolean;
-  /** Materializes the orchestrator model range (auto → explicit range; REST
-   * rejects bare `auto`). See `pages/orchestrator/useModelRange`. */
-  buildModelRange: (source: ModelRangeSource) => TModelRange | null;
-  /** True when at least one usable model is configured (orchestration guard). */
-  hasModels: boolean;
 
   // Mention state reset
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -139,8 +135,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     orchestrationMode,
-    buildModelRange,
-    hasModels,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -154,25 +148,19 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     const isCustomWorkspace = !!dir;
     const finalWorkspace = dir || '';
 
-    // Orchestration entry (homepage 智能编排 strip) — create a new nomi
-    // conversation, start a conversation-hosted orchestration run linked to it
-    // (Path B, `lead_conv_id`), and navigate there. The backend writes
-    // `extra.orchestrator_run_id` + broadcasts `conversation.listChanged`; the
-    // conversation page's `useConversationRun` lights up `runId` on its own —
-    // we never fake run state here. We also DON'T stash an initial chat message:
-    // the run drives the conversation, so a normal first turn would race it.
+    // 智能编排(首页模式条)Direction B — create a nomi conversation set up as an
+    // ORCHESTRATION LEAD (`extra.orchestrator_role: 'lead'` → server-authored
+    // LEAD_ORCHESTRATOR_PROMPT), stash the user's goal as the first message, and
+    // navigate IMMEDIATELY. On landing the lead agent thinks natively (thinking
+    // bubbles), calls `nomi_run_create` (visible「查看步骤」tool card) to decompose
+    // the goal into a multi-agent run, and narrates — the whole startup/
+    // orchestration process is live in the native chat (no silent await, no blank
+    // wait). That tool call links the run to THIS conversation (lead_conv_id +
+    // extra.orchestrator_run_id + broadcast), so `useConversationRun` lights up the
+    // top-panel DAG on its own. No FE adhoc-run creation here.
     if (orchestrationMode) {
       const goal = input.trim();
       if (!goal) return;
-      if (!hasModels) {
-        Message.warning(t('orchestrator.composer.noModels', { defaultValue: '请先在模型中心配置可用模型' }));
-        return;
-      }
-      const model_range = buildModelRange({ mode: 'auto' });
-      if (!model_range) {
-        Message.warning(t('orchestrator.composer.modelRequired'));
-        return;
-      }
       if (!current_model) {
         Message.error(t('guid.modelRequired', { defaultValue: '请先选择模型' }));
         return;
@@ -181,23 +169,20 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         type: 'nomi',
         name: goal.slice(0, 60),
         model: current_model,
-        extra: { workspace: finalWorkspace, custom_workspace: isCustomWorkspace },
+        extra: { workspace: finalWorkspace, custom_workspace: isCustomWorkspace, orchestrator_role: 'lead' },
       });
       if (!conversation?.id) {
         Message.error(t('conversation.createFailed', { defaultValue: '创建会话失败' }));
         return;
       }
       await applyAdvancedConfig?.(conversation.id);
-      await ipcBridge.orchestrator.runs.createAdhoc.invoke({
-        goal,
-        model_range,
-        lead_conv_id: conversation.id,
-      });
-      // The backend writes `extra.orchestrator_run_id` + broadcasts
-      // `conversation.listChanged`; on landing the conversation page's
-      // `useConversationRun` lights up `runId`, so the OrchestrationTopPanel
-      // (pinned to the top of the content area, default expanded) is visible
-      // straight away — no rail flag to stash, no floating window.
+      // Send the goal as the first turn — NomiSendBox consumes this on mount and
+      // starts a native turn. The lead agent then thinks + orchestrates natively;
+      // the live turn IS the visible startup process.
+      sessionStorage.setItem(
+        `nomi_initial_message_${conversation.id}`,
+        JSON.stringify({ input: goal, files: files.length > 0 ? files : undefined }),
+      );
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${conversation.id}`);
       return;
@@ -515,8 +500,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     orchestrationMode,
-    buildModelRange,
-    hasModels,
     navigate,
     t,
   ]);
