@@ -193,15 +193,15 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         lead_conv_id: conversation.id,
       });
       // Open the right rail + select the「编排」tab on landing (show the plan,
-      // not an empty chat page) — NO floating window. We persist an "expanded"
-      // workspace preference so the freshly-mounted rail starts open
-      // (useWorkspaceCollapse seeds its initial state from this key), and stash a
-      // per-conversation flag the rail reads to make 编排 the active tab.
+      // not an empty chat page) — NO floating window. We stash a one-shot
+      // per-conversation flag; NomiConversationPanel reads it ONCE on landing to
+      // open the rail (initialExpanded) onto the 编排 tab, then clears it. We do
+      // NOT persist a workspace preference here — that would leak into every
+      // future mount of this (and, via shared rail code, other) conversations.
       try {
         sessionStorage.setItem(`nomi_open_rail_${conversation.id}`, '1');
-        localStorage.setItem(`workspace-preference-${conversation.id}`, 'expanded');
       } catch {
-        /* sessionStorage / localStorage may be unavailable — non-fatal */
+        /* sessionStorage may be unavailable — non-fatal */
       }
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${conversation.id}`);
