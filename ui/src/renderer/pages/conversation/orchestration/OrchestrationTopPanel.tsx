@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, useCallback, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Down, Loading, Up } from '@icon-park/react';
+import { Left, Loading, Right } from '@icon-park/react';
 import { Modal, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { TReplanRequest } from '@/common/types/orchestrator/orchestratorTypes';
@@ -20,33 +20,58 @@ import styles from './orchestrationTopPanel.module.css';
 
 /**
  * Lazy-load the react-flow DAG canvas so its heavy graph deps (`@xyflow/react`)
- * aren't pulled into the conversation page bundle until a run actually exists to
- * preview in the top panel.
+ * aren't pulled into the conversation page bundle until a run actually exists.
  */
 const DagCanvas = React.lazy(() => import('@/renderer/pages/orchestrator/RunDetail/DagCanvas'));
 
 /** Fallback color for an unknown run status — neutral tertiary text var. */
 const STATUS_FALLBACK_COLOR = 'var(--color-text-3)';
 
+/** Resizable width of the canvas pane (px), persisted across sessions. */
+const CANVAS_WIDTH_KEY = 'nomifun:orchestration-canvas-width';
+const MIN_W = 320;
+const MAX_W = 860;
+const DEFAULT_W = 480;
+/** Collapsed (hidden) preference, persisted so the pane stays where the user left it. */
+const CANVAS_COLLAPSED_KEY = 'nomifun:orchestration-canvas-collapsed';
+
+function readInitialWidth(): number {
+  try {
+    const n = Number(localStorage.getItem(CANVAS_WIDTH_KEY));
+    if (Number.isFinite(n) && n >= MIN_W && n <= MAX_W) return n;
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_W;
+}
+
+function readInitialCollapsed(): boolean {
+  try {
+    return localStorage.getItem(CANVAS_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 /**
- * OrchestrationTopPanel — the orchestration canvas as a COLLAPSIBLE panel pinned
- * to the TOP of the conversation content area (用户定案 Option B). The main agent
- * chat coexists BELOW it (rendered by the content-area switcher). This is the
- * orchestration surface now — there is no floating overlay and no right-rail tab.
+ * OrchestrationTopPanel — the orchestration canvas as a 左右分屏 RIGHT pane (用户
+ * 设计稿:左侧边栏 | 内容区(聊天) | 画布展开区 | 右侧边栏). The main agent chat is the
+ * `flex-1` left column (rendered by the content switcher); this pane is the right
+ * "画布展开区": a draggable-width, collapsible column hosting the DAG (with its
+ * minimap). It sits between the chat and the 项目 right rail. No floating overlay,
+ * no top split.
  *
- * Reads {@link useOrchestration} (always inside an `OrchestrationProvider` on the
- * nomi conversation surface):
- *  - `runId == null` → renders nothing (the panel only exists while a run is
- *    linked to this conversation; initiation lives on the homepage 模式条 + the
- *    main agent's own autonomy, NOT here).
- *  - has run → a header (always visible while a run exists) with a ▼/▲ collapse
- *    toggle, the「编排画布」title, the status pill ({@link STATUS_META}), a
- *    「规划中…」hint while the lead agent is still planning, and the compact
- *    {@link RunControls} (approve / pause / resume / cancel / replan). When
- *    `expanded` (default true), a height-bounded body hosts the lazy
- *    {@link DagCanvas} (node → `projectTask`, main → `returnToMain`,
- *    `mainActive = projectedTaskId === null`); the completion-state
- *    RolePrecipitationPanel is rendered by the canvas itself.
+ * Reads {@link useOrchestration} (always inside an `OrchestrationProvider`):
+ *  - `runId == null` → renders nothing (no run linked → pane absent; the chat takes
+ *    the full width, so a plain nomi conversation looks exactly as before).
+ *  - collapsed → a thin vertical strip on the right edge (status dot + a 「‹」expand
+ *    affordance) so the canvas can be hidden and the chat reclaim the width.
+ *  - expanded → a width-resizable column: a left-edge drag handle to widen/narrow;
+ *    a header (collapse 「›」 + 「编排画布」title + status pill {@link STATUS_META} +
+ *    「规划中…」hint + compact {@link RunControls}); and a full-height body hosting
+ *    the lazy {@link DagCanvas} (node → `projectTask`, main → `returnToMain`,
+ *    `mainActive = projectedTaskId === null`; the completion RolePrecipitationPanel
+ *    and the minimap come from the canvas itself).
  *  - replan: RunControls' `onReplan` opens a standard Arco Modal (not a floating
  *    window) hosting the {@link OrchestratorComposer} (fluid) prefilled with the
  *    run's goal → `runs.replan` → toast + refetch + close.
@@ -57,14 +82,55 @@ const OrchestrationTopPanel: React.FC = () => {
   const orchestration = useOrchestration();
   const { buildModelRange } = useModelRange();
 
-  // Default EXPANDED for discoverability; collapsing leaves just the header strip.
-  const [expanded, setExpanded] = useState(true);
+  // Collapsed (hidden) ⟷ expanded. Default expanded for discoverability.
+  const [collapsed, setCollapsed] = useState<boolean>(readInitialCollapsed);
+  // Resizable pane width (px). Persisted; drag the left edge to change it.
+  const [width, setWidth] = useState<number>(readInitialWidth);
+  const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CANVAS_WIDTH_KEY, String(width));
+    } catch {
+      /* ignore */
+    }
+  }, [width]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CANVAS_COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+
+  // ── Resize (drag the LEFT edge; pane is on the right, so dragging left widens) ──
+  const onResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      dragState.current = { startX: e.clientX, startWidth: width };
+      (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    },
+    [width]
+  );
+  const onResizePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const ds = dragState.current;
+    if (!ds) return;
+    const next = ds.startWidth + (ds.startX - e.clientX);
+    setWidth(Math.min(MAX_W, Math.max(MIN_W, next)));
+  }, []);
+  const onResizeEnd = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragState.current) return;
+    dragState.current = null;
+    const el = e.currentTarget as HTMLDivElement;
+    if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+  }, []);
 
   // ── Replan modal state ──────────────────────────────────────────────────────
   // v1 simplification: the replan composer prefills the run's goal + autonomy,
-  // but the model_range defaults to `auto` (every enabled pair) rather than
-  // being reverse-rebuilt from the run's fleet_members snapshot. The user can
-  // narrow it in the modal.
+  // but the model_range defaults to `auto` (every enabled pair) rather than being
+  // reverse-rebuilt from the run's fleet_members snapshot. The user can narrow it.
   const [replanOpen, setReplanOpen] = useState(false);
   const [replanGoal, setReplanGoal] = useState('');
   const [replanModelRange, setReplanModelRange] = useState<ComposerModelRange>({ mode: 'auto', single: '', range: [] });
@@ -119,7 +185,7 @@ const OrchestrationTopPanel: React.FC = () => {
     [runId, buildModelRange, replanModelRange, replanAutonomy, refetch, message, t]
   );
 
-  // No run linked to this conversation → the panel does not exist.
+  // No run linked to this conversation → the pane does not exist.
   if (runId == null) return null;
 
   const status = detail?.run.status ?? '';
@@ -128,37 +194,68 @@ const OrchestrationTopPanel: React.FC = () => {
   const statusLabel = statusMeta
     ? t(`orchestrator.run.status.${statusMeta.key}`, { defaultValue: status })
     : t('orchestrator.run.status.unknown', { defaultValue: status });
+  const panelTitle = t('conversation.orchestration.panelTitle', { defaultValue: '编排画布' });
 
+  // ── Collapsed: thin vertical strip on the right edge ──────────────────────────
+  if (collapsed) {
+    return (
+      <div
+        role='button'
+        tabIndex={0}
+        aria-label={t('conversation.orchestration.expandCanvas', { defaultValue: '展开编排画布' })}
+        title={panelTitle}
+        onClick={() => setCollapsed(false)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setCollapsed(false);
+          }
+        }}
+        className={styles.collapsedStrip}
+      >
+        {msgCtx}
+        <Left theme='outline' size='14' strokeWidth={3} />
+        <span className={styles.collapsedDot} style={{ background: statusColor }} />
+        <span className={styles.collapsedLabel}>{panelTitle}</span>
+      </div>
+    );
+  }
+
+  // ── Expanded: width-resizable right column ────────────────────────────────────
   return (
-    <div className={`${styles.panel} shrink-0 flex flex-col`}>
+    <div className={`${styles.panel} shrink-0 flex flex-col`} style={{ width }}>
       {msgCtx}
 
-      {/* Header — always shown while a run exists. Collapse toggle + title +
-          status pill + planning hint on the left; compact RunControls on the
-          right (allowed to wrap on a narrow content area). */}
+      {/* Left-edge drag handle — widen/narrow the pane. */}
+      <div
+        className={styles.resizeHandle}
+        role='separator'
+        aria-orientation='vertical'
+        aria-label={t('conversation.orchestration.resizeCanvas', { defaultValue: '调整画布宽度' })}
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizeEnd}
+        onPointerCancel={onResizeEnd}
+      />
+
+      {/* Header — collapse toggle + title + status pill + planning hint + compact
+          RunControls (allowed to wrap in the narrow column). */}
       <div className={`${styles.header} flex flex-wrap items-center gap-x-10px gap-y-6px`}>
         <div
           role='button'
           tabIndex={0}
-          aria-label={t('conversation.orchestration.panelTitle', { defaultValue: '编排画布' })}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
+          aria-label={t('conversation.orchestration.collapseCanvas', { defaultValue: '收起编排画布' })}
+          onClick={() => setCollapsed(true)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
-              setExpanded((v) => !v);
+              setCollapsed(true);
             }
           }}
           className={`${styles.toggle} inline-flex items-center gap-6px cursor-pointer select-none`}
         >
-          {expanded ? (
-            <Down theme='outline' size='14' strokeWidth={3} />
-          ) : (
-            <Up theme='outline' size='14' strokeWidth={3} />
-          )}
-          <span className='text-13px font-600 text-t-primary'>
-            {t('conversation.orchestration.panelTitle', { defaultValue: '编排画布' })}
-          </span>
+          <Right theme='outline' size='14' strokeWidth={3} />
+          <span className='text-13px font-600 text-t-primary'>{panelTitle}</span>
         </div>
 
         <span
@@ -184,32 +281,26 @@ const OrchestrationTopPanel: React.FC = () => {
         </div>
       </div>
 
-      {/* Body — only mounted when expanded. Height-bounded box so the react-flow
-          canvas has a finite layout area while the chat below keeps `flex-1`. */}
-      {expanded && (
-        <div className={`${styles.body} min-h-0`}>
-          <Suspense
-            fallback={
-              <div className='size-full flex items-center justify-center'>
-                <Spin />
-              </div>
-            }
-          >
-            <DagCanvas
-              runId={runId}
-              onOpenTask={projectTask}
-              onOpenMain={returnToMain}
-              mainActive={projectedTaskId === null}
-            />
-          </Suspense>
-        </div>
-      )}
+      {/* Body — fills the remaining column height; react-flow lays out + draws its
+          own minimap. */}
+      <div className={`${styles.body} flex-1 min-h-0`}>
+        <Suspense
+          fallback={
+            <div className='size-full flex items-center justify-center'>
+              <Spin />
+            </div>
+          }
+        >
+          <DagCanvas
+            runId={runId}
+            onOpenTask={projectTask}
+            onOpenMain={returnToMain}
+            mainActive={projectedTaskId === null}
+          />
+        </Suspense>
+      </div>
 
-      {/* Replan modal — a STANDARD Arco dialog (not a floating window): the
-          OrchestratorComposer (fluid) prefilled with the run's goal; model-range
-          defaults to auto (v1 simplification — not rebuilt from the fleet
-          snapshot) + the autonomy pill from the run. On submit → runs.replan →
-          toast + refetch + close. */}
+      {/* Replan modal — a STANDARD Arco dialog (not a floating window). */}
       <Modal
         title={t('orchestrator.run.detail.replan')}
         visible={replanOpen}
