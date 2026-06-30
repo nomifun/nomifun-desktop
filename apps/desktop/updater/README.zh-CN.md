@@ -45,13 +45,22 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
 ## 构建自动更新产物
 
+仓库内置了一个叠加配置 `apps/desktop/tauri.updater.conf.json`（内容是
+`{"bundle":{"createUpdaterArtifacts":true}}`），用 `--config` 叠加它即可产出 `.sig`。
+**务必传文件路径，不要内联 JSON**：Windows PowerShell 5.1 会剥掉内联 `--config '{...}'`
+里的双引号、变成非法 JSON；文件路径没有引号，各平台都稳。
+
+> 新构建机（如这台 Windows）构建前，需先把已被 gitignore 的私钥
+> `apps/desktop/signing/nomifun-updater.key` 从密钥库拷过来，且它必须与 `tauri.conf.json`
+> 内嵌的 `pubkey` 匹配（keyID `F3AA272E60AA7952`），否则已安装的客户端会拒绝更新。
+
 macOS：
 
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
-bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:mac --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -61,18 +70,18 @@ Windows 无 Authenticode 签名：
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 
-bun run build:win -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
-Windows 有 Authenticode 签名：
+Windows 有 Authenticode 签名（`--signed` 注入证书指纹仍走内联 JSON，需在 pwsh 7+ 下运行）：
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 $env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
 
-bun run build:win --signed -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 
@@ -82,7 +91,7 @@ Linux：
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
-bun run build:linux -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:linux --config apps/desktop/tauri.updater.conf.json
 bun run make:latest
 ```
 

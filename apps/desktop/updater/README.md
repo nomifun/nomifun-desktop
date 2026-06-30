@@ -57,6 +57,12 @@ updater signature.
 ## Building signed update artifacts
 
 `createUpdaterArtifacts` makes Tauri emit a `.sig` next to each updatable bundle.
+The repo ships a tiny overlay config `apps/desktop/tauri.updater.conf.json`
+(`{"bundle":{"createUpdaterArtifacts":true}}`) that you layer on with `--config`.
+Pass it as a **file path**, not inline JSON: Windows PowerShell 5.1 strips the
+double quotes from inline `--config '{...}'`, producing invalid JSON — a file path
+has no quotes and works on every shell.
+
 Set the private key **content** (not the path) in the environment first:
 
 ```bash
@@ -64,29 +70,34 @@ export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""   # empty for the default key
 
 # Windows (NSIS .exe + .sig):
-bun run build:win -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --config apps/desktop/tauri.updater.conf.json
 
 # macOS (Universal .app.tar.gz + .sig — one artifact serves both darwin chips):
-bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:mac --config apps/desktop/tauri.updater.conf.json
 
 # Linux (AppImage + .sig):
-bun run build:linux -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:linux --config apps/desktop/tauri.updater.conf.json
 ```
 
 You **cannot cross-compile**: build Windows on Windows, macOS on macOS, Linux on
-Linux. Each platform's artifacts land under `target/**/release/bundle/`.
+Linux. Each platform's artifacts land under `target/**/release/bundle/`. The
+updater private key is gitignored, so on a fresh build machine (e.g. your Windows
+box) copy it to `apps/desktop/signing/nomifun-updater.key` from your key store
+first — it must match the `pubkey` embedded in `tauri.conf.json` (keyID
+`F3AA272E60AA7952`), or installed clients silently reject the update.
 
 Windows note: the command above signs the updater package with the Tauri updater
 key, but it does **not** Authenticode-sign the Windows installer. That is enough
 for updater verification, but manual downloads can still show SmartScreen /
 unknown-publisher warnings. When a Windows certificate is available, set
-`WINDOWS_CERTIFICATE_THUMBPRINT` and run:
+`WINDOWS_CERTIFICATE_THUMBPRINT` and run (the `--signed` cert injection still uses
+inline JSON, so run it under PowerShell 7+):
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 $env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
-bun run build:win --signed -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
 ```
 
 ## Generating `latest.json`

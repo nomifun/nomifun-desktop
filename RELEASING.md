@@ -47,6 +47,15 @@ that an update package is ours; OS code signing controls Gatekeeper / SmartScree
 trust for people launching a manually downloaded app. You **cannot cross-compile**
 reliable desktop installers — build each platform on its own machine.
 
+The updater private key (`apps/desktop/signing/nomifun-updater.key`) is gitignored
+and lives only in your key store. On a fresh build machine (e.g. a Windows box that
+never generated it) copy it there before building; it must match the `pubkey`
+embedded in `tauri.conf.json` (keyID `F3AA272E60AA7952`), or installed clients
+silently reject the update. The `createUpdaterArtifacts` flag is supplied as a
+committed overlay file `apps/desktop/tauri.updater.conf.json` passed with
+`--config <path>` (not inline JSON — Windows PowerShell 5.1 mangles inline
+`--config '{...}'`).
+
 ### Standard Release Runbook
 
 Use this order for every desktop release.
@@ -64,7 +73,7 @@ Use this order for every desktop release.
    ```bash
    export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-   bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:mac --config apps/desktop/tauri.updater.conf.json
    bun run make:latest
    ```
 
@@ -73,7 +82,7 @@ Use this order for every desktop release.
    notarized:
 
    ```bash
-   bun run build:mac --signed --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:mac --signed --config apps/desktop/tauri.updater.conf.json
    ```
 
 3. **Build Windows on a Windows machine.** Use the same updater private key.
@@ -84,7 +93,7 @@ Use this order for every desktop release.
    ```powershell
    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-   bun run build:win -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:win --config apps/desktop/tauri.updater.conf.json
    bun run make:latest
    ```
 
@@ -93,7 +102,7 @@ Use this order for every desktop release.
 
    ```powershell
    $env:WINDOWS_CERTIFICATE_THUMBPRINT = "A1B2C3..."
-   bun run build:win --signed -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:win --signed --config apps/desktop/tauri.updater.conf.json
    ```
 
 4. **Build Linux on Linux** if that platform is part of the release.
@@ -101,7 +110,7 @@ Use this order for every desktop release.
    ```bash
    export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-   bun run build:linux -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:linux --config apps/desktop/tauri.updater.conf.json
    bun run make:latest
    ```
 
@@ -172,12 +181,15 @@ Windows build machine.
    If you stay on `main`, confirm `Cargo.toml` still has the same version as the
    existing Release.
 
-2. Build Windows updater artifacts with the same updater private key.
+2. Build Windows updater artifacts with the same updater private key. The key is
+   gitignored, so first copy `apps/desktop/signing/nomifun-updater.key` onto this
+   Windows machine from your key store (it must match the `pubkey` in
+   `tauri.conf.json`).
 
    ```powershell
    $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content apps/desktop/signing/nomifun-updater.key -Raw
    $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-   bun run build:win -- --config '{"bundle":{"createUpdaterArtifacts":true}}'
+   bun run build:win --config apps/desktop/tauri.updater.conf.json
    bun run make:latest
    ```
 
@@ -205,7 +217,9 @@ Windows without Authenticode signing is acceptable for internal updater testing:
 the Tauri updater `.sig` still protects the automatic update package. It is not
 equivalent to a trusted public Windows installer. For public distribution, obtain
 a Windows code-signing certificate, set `WINDOWS_CERTIFICATE_THUMBPRINT`, and
-rerun `build:win --signed -- --config ...` before publishing the Windows assets.
+rerun `build:win --signed --config apps/desktop/tauri.updater.conf.json` (under
+PowerShell 7+, since the cert injection uses inline JSON) before publishing the
+Windows assets.
 
 See:
 
