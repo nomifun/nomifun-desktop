@@ -36,7 +36,6 @@ import { autoWorkStartDisabled, isAutoWorkEntry } from './hooks/autoWorkEntry';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
-import { useModelRange } from '@/renderer/pages/orchestrator/useModelRange';
 import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import { ensureBackendMcpCatalog } from '@/renderer/hooks/mcp/catalog';
@@ -135,10 +134,6 @@ const GuidPage: React.FC = () => {
   // regular ACP backend with its own model selector).
   const modelSelection = useGuidModelSelection('nomi');
 
-  // Orchestrator model range helpers — materializes「auto」into an explicit
-  // range (REST rejects bare auto) and guards on having usable models.
-  const { buildModelRange, hasModels } = useModelRange();
-
   const navState = location.state as { resetAssistant?: boolean; selectedAgentKey?: string } | null;
   const resetAssistantRequested = navState?.resetAssistant === true;
   const preselectAgentKey = navState?.selectedAgentKey;
@@ -206,8 +201,6 @@ const GuidPage: React.FC = () => {
 
     // Orchestration entry
     orchestrationMode,
-    buildModelRange,
-    hasModels,
 
     // Mention state reset
     setMentionOpen: mention.setMentionOpen,
