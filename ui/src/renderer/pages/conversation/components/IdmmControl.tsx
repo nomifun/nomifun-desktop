@@ -27,6 +27,7 @@ import type {
 } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { CAPABILITY_COLORS } from '@/renderer/components/capability/CapabilityIcon';
+import { IDMM_STATUS_COLOR } from '@/renderer/components/capability/capabilityStatusColors';
 import { renderIdmmCapabilityIcon } from '@/renderer/components/capability/idmmCapabilityIcon';
 import { applyIdmmStateToSessionCapabilities } from '@/renderer/pages/conversation/SessionList/hooks/useSessionCapabilities';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
@@ -62,12 +63,6 @@ type IdmmControlProps = {
   applyNote?: string;
 };
 
-/** Tri-state status dot colour — shared capability palette (CAPABILITY_COLORS). */
-const DOT_COLOR: Record<IdmmRunState, string> = {
-  off: CAPABILITY_COLORS.off,
-  armed: CAPABILITY_COLORS.armed,
-  intervening: CAPABILITY_COLORS.active,
-};
 
 /** Shared watch-base defaults (mirrors `WatchBase::default()` on the backend). */
 const defaultWatchBase = (): IIdmmWatchBase => ({
@@ -290,7 +285,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
   const faultBackupErrorKey = watchBackupErrorKey(cfg.fault_watch);
   const decisionBackupErrorKey = watchBackupErrorKey(cfg.decision_watch);
 
-  const dotColor = draft ? (enabled ? CAPABILITY_COLORS.primary : CAPABILITY_COLORS.off) : DOT_COLOR[runState];
+  const dotColor = draft ? (enabled ? CAPABILITY_COLORS.primary : CAPABILITY_COLORS.off) : IDMM_STATUS_COLOR[runState];
   const statusText = draft
     ? enabled
       ? t('guid.advanced.draftOn')
@@ -1030,14 +1025,17 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
     <Button
       size='mini'
       shape='round'
-      type={enabled ? 'primary' : 'secondary'}
+      type='secondary'
       disabled={!!disabledReason}
       className='shrink-0'
     >
       <span className='inline-flex items-center gap-6px leading-none'>
-        {renderIdmmCapabilityIcon({ size: 14, spinning: runState === 'intervening' })}
+        {/* Icon tinted by run-state (same hue as the session-list IDMM icon); the
+            status used to live on a separate dot beside a primary-blue button. */}
+        <span className='inline-flex' style={{ color: dotColor, lineHeight: 0 }}>
+          {renderIdmmCapabilityIcon({ size: 14, spinning: runState === 'intervening' })}
+        </span>
         <span className='text-12px'>{t('idmm.label')}</span>
-        <span className='inline-block w-6px h-6px rounded-full' style={{ backgroundColor: dotColor }} />
       </span>
     </Button>
   );
