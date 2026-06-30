@@ -21,6 +21,14 @@ type ProjectedWorkerViewProps = {
   payload: OpenTaskPayload;
 };
 
+// These confirmation toasts float over the node banner. Keep them brief and
+// click-through (`nomifun-message-passthrough` flips the Arco message box back to
+// `pointer-events:none`) so they never block the banner's 重跑 / 采用 / 返回 main
+// buttons while on screen. Errors linger a touch longer to stay readable.
+const TOAST_CLASS = 'nomifun-message-passthrough';
+const TOAST_OK_MS = 1500;
+const TOAST_ERR_MS = 2500;
+
 /**
  * ProjectedWorkerView — projects one DAG worker node into the conversation content
  * area (「会话原生编排」F7; left chat column of the 左右分屏). Rendered by
@@ -105,10 +113,18 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
     setRerunning(true);
     try {
       await ipcBridge.orchestrator.runs.rerunTask.invoke({ run_id: runId, task_id: task.id });
-      message.success(t('orchestrator.run.rerun.ok', { defaultValue: '已重跑该节点' }));
+      message.success({
+        content: t('orchestrator.run.rerun.ok', { defaultValue: '已重跑该节点' }),
+        duration: TOAST_OK_MS,
+        className: TOAST_CLASS,
+      });
       await payload.refetch();
     } catch (e) {
-      message.error(t('orchestrator.run.rerun.error', { defaultValue: '重跑失败:{{error}}', error: String(e) }));
+      message.error({
+        content: t('orchestrator.run.rerun.error', { defaultValue: '重跑失败:{{error}}', error: String(e) }),
+        duration: TOAST_ERR_MS,
+        className: TOAST_CLASS,
+      });
     } finally {
       setRerunning(false);
     }
@@ -125,10 +141,18 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
     setAdopting(true);
     try {
       await ipcBridge.orchestrator.runs.adoptTaskResult.invoke({ run_id: runId, task_id: task.id });
-      message.success(t('orchestrator.run.adopt.ok', { defaultValue: '已采用为该节点产出' }));
+      message.success({
+        content: t('orchestrator.run.adopt.ok', { defaultValue: '已采用为该节点产出' }),
+        duration: TOAST_OK_MS,
+        className: TOAST_CLASS,
+      });
       await payload.refetch();
     } catch (e) {
-      message.error(t('orchestrator.run.adopt.error', { defaultValue: '采用失败:{{error}}', error: String(e) }));
+      message.error({
+        content: t('orchestrator.run.adopt.error', { defaultValue: '采用失败:{{error}}', error: String(e) }),
+        duration: TOAST_ERR_MS,
+        className: TOAST_CLASS,
+      });
     } finally {
       setAdopting(false);
     }
