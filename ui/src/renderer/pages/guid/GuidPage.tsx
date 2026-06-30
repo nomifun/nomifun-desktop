@@ -604,10 +604,14 @@ const GuidPage: React.FC = () => {
       onToggleMcpServer={handleToggleMcpServer}
       hidePresetTag
       loading={guidInput.loading}
-      autoWorkMode={isAutoWorkMode}
+      autoWorkMode={isAutoWorkMode && !orchestrationMode}
       orchestrationMode={orchestrationMode}
       isButtonDisabled={
-        isAutoWorkMode ? autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork) : send.isButtonDisabled
+        // 智能编排 takes precedence over AutoWork: orchestration needs a typed goal,
+        // so it always uses the normal send-disabled (typed-input) predicate.
+        isAutoWorkMode && !orchestrationMode
+          ? autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork)
+          : send.isButtonDisabled
       }
       onSend={send.sendMessageHandler}
     />
