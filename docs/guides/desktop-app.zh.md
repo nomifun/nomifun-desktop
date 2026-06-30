@@ -37,7 +37,7 @@ bun run dev
 bun run build
 ```
 
-输出包按平台落到 `target/release/bundle/` 下 (Windows 上是 NSIS 安装器 + MSI，macOS 上是 `.app` + `.dmg`，Linux 上是 `.deb` + `.AppImage`)。要生成签名的更新器构件 (额外的 `.sig` 文件)，请在配置好签名密钥后使用 `bun run build:updater` (参见下方[更新器状态](#更新器状态))。
+输出包按平台落到 `target/release/bundle/` 下 (Windows 上是 NSIS 安装器 `.exe`，macOS 上是 `.app` + `.dmg`，Linux 上是 `.deb` + `.AppImage`)。要生成签名的更新器构件 (额外的 `.sig` 文件)，请在配置好签名密钥后使用 `bun run build:updater` (参见下方[更新器状态](#更新器状态))。
 
 构建成功后会打印包的位置，例如在 macOS 上：
 
