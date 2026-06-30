@@ -6,8 +6,8 @@
 
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Input, Spin } from '@arco-design/web-react';
-import { Comment, Left, Redo, Send } from '@icon-park/react';
+import { Spin } from '@arco-design/web-react';
+import { Comment, Left, Redo } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { OpenTaskPayload } from '@/renderer/pages/orchestrator/RunDetail/DagCanvas';
@@ -22,22 +22,21 @@ type ProjectedWorkerViewProps = {
 };
 
 /**
- * ProjectedWorkerView — the read-only projection of one DAG worker node into the
- * conversation content area (「会话原生编排」F7; left chat column of the 左右分屏).
- * Rendered by {@link ConversationContentSwitcher} ON TOP of the (display:none)
- * main NomiChat whenever a node is projected, so the user can inspect a worker's
- * live record and adjust / rerun it in place, then return to the main agent.
+ * ProjectedWorkerView — projects one DAG worker node into the conversation content
+ * area (「会话原生编排」F7; left chat column of the 左右分屏). Rendered by
+ * {@link ConversationContentSwitcher} ON TOP of the (display:none) main NomiChat
+ * whenever a node is projected, so the user can inspect a worker's record, talk to
+ * it, and rerun it — then return to the main agent.
  *
  * Layout:
  *  - a thin banner (left「查看:<title>」; right [重跑] / [← 返回 main]);
- *  - the worker transcript body (replicates {@link WorkerTranscriptPanel}'s
- *    resolution: `task.conversation_id → conversation.get → ReadOnlyConversationView`,
- *    with「尚未开始」/ loader states);
- *  - a docked「局部调整」composer at the BOTTOM (only once the worker has started)
- *    — a labeled input + 提交 that injects a steering message into the worker's
- *    live conversation (`runs.steer`). This used to be a 「转向…」popover in the
- *    banner; moved to the bottom so the user types the adjustment where the eye
- *    already is (用户反馈).
+ *  - the worker conversation, rendered via {@link ReadOnlyConversationView}
+ *    WITHOUT `hideSendBox` — so the worker's OWN full composer (NomiChat →
+ *    NomiSendBox) is reused: current-model pill, `+` attachments, @-file mentions,
+ *    slash commands, autonomy pill, multi-line auto-grow, circular send. The user
+ *    types a 局部调整 by talking to the worker directly (a normal turn in the
+ *    worker's conversation) — the fullest, most familiar input surface, instead of
+ *    a bespoke steer box. 「尚未开始」/ loader states cover the not-started case.
  *
  * `TRunTask.conversation_id` is already the backend INTEGER id — passed straight
  * through with no conversion.
@@ -52,17 +51,8 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
 
   const [conversation, setConversation] = useState<TChatConversation | null>(null);
   const [loading, setLoading] = useState(false);
-
-  // 局部调整 (mid-turn steer) draft + in-flight state (now a docked bottom bar).
-  const [adjustText, setAdjustText] = useState('');
-  const [adjusting, setAdjusting] = useState(false);
   // Guards the rerun trigger against a double-click while the request is in flight.
   const [rerunning, setRerunning] = useState(false);
-
-  // Reset the adjust draft whenever the projected task changes.
-  useEffect(() => {
-    setAdjustText('');
-  }, [task.id]);
 
   // Resolve the worker conversation off `task.conversation_id` (mirrors
   // WorkerTranscriptPanel). Undefined → no conversation yet (「尚未开始」state).
@@ -105,30 +95,6 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
       setRerunning(false);
     }
   };
-
-  // Submit a 局部调整: inject a steering message into the worker's live
-  // conversation. On success clear the draft; no refetch needed (the transcript
-  // stream surfaces the injected turn on its own).
-  const submitAdjust = async () => {
-    const text = adjustText.trim();
-    if (!text || adjusting) return;
-    setAdjusting(true);
-    try {
-      await ipcBridge.orchestrator.runs.steer.invoke({
-        run_id: runId,
-        task_id: task.id,
-        updates: { text },
-      });
-      message.success(t('orchestrator.run.steer.sent', { defaultValue: '已提交局部调整' }));
-      setAdjustText('');
-    } catch (e) {
-      message.error(t('orchestrator.run.steer.error', { defaultValue: '局部调整失败:{{error}}', error: String(e) }));
-    } finally {
-      setAdjusting(false);
-    }
-  };
-
-  const adjustDisabled = adjusting || adjustText.trim().length === 0;
 
   return (
     <div className={styles.root}>
@@ -186,7 +152,9 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
         </div>
       </div>
 
-      {/* ── Body: worker transcript / not-started / loading ───────────────── */}
+      {/* ── Body: the worker conversation, EDITABLE (full NomiSendBox reused) ──
+          Not-started / loading covered; otherwise the worker's own conversation
+          with its full composer (model pill, attachments, @, slash, send). */}
       <div className={styles.body}>
         {conversationId === undefined ? (
           <div className={styles.center}>
@@ -205,45 +173,9 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
         ) : loading ? (
           <Spin loading className='flex flex-1 items-center justify-center' />
         ) : conversation ? (
-          <ReadOnlyConversationView conversation={conversation} hideSendBox agent_name={task.title} />
+          <ReadOnlyConversationView conversation={conversation} agent_name={task.title} />
         ) : null}
       </div>
-
-      {/* ── 局部调整 composer (docked bottom) — only once the worker has started.
-          The user types an adjustment for this node and submits it (runs.steer)
-          right where they are reading the transcript. Enter submits;
-          Shift+Enter / IME composition inserts a newline. ───────────────────── */}
-      {conversationId !== undefined && (
-        <div className={styles.steerBar}>
-          <span className={styles.steerLabel}>
-            <Send theme='outline' size='13' strokeWidth={3} />
-            {t('orchestrator.run.steer.label', { defaultValue: '局部调整' })}
-          </span>
-          <Input.TextArea
-            value={adjustText}
-            disabled={adjusting}
-            placeholder={t('orchestrator.run.steer.placeholder', { defaultValue: '输入对当前节点的局部调整方向…' })}
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            className={styles.steerInput}
-            onChange={(v: string) => setAdjustText(v)}
-            onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                if (!adjustDisabled) void submitAdjust();
-              }
-            }}
-          />
-          <Button
-            type='primary'
-            size='small'
-            loading={adjusting}
-            disabled={adjustText.trim().length === 0}
-            onClick={() => void submitAdjust()}
-          >
-            {t('orchestrator.run.steer.submit', { defaultValue: '提交' })}
-          </Button>
-        </div>
-      )}
     </div>
   );
 };
