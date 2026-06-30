@@ -76,9 +76,10 @@ export type GuidSendDeps = {
 
   /** When true the entry creates a new nomi conversation, starts a
    * conversation-hosted orchestration run linked to it (Path B), and navigates
-   * there with the right-rail「编排」tab auto-opening (canvas, no floating window)
-   * on landing. Mutually exclusive with AutoWork / preset-agent flows (the
-   * homepage strip enforces this). */
+   * there. On landing the OrchestrationTopPanel (pinned to the top of the
+   * content area, default expanded) shows the canvas — no floating window.
+   * Mutually exclusive with AutoWork / preset-agent flows (the homepage strip
+   * enforces this). */
   orchestrationMode: boolean;
   /** Materializes the orchestrator model range (auto → explicit range; REST
    * rejects bare `auto`). See `pages/orchestrator/useModelRange`. */
@@ -192,17 +193,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model_range,
         lead_conv_id: conversation.id,
       });
-      // Open the right rail + select the「编排」tab on landing (show the plan,
-      // not an empty chat page) — NO floating window. We stash a one-shot
-      // per-conversation flag; NomiConversationPanel reads it ONCE on landing to
-      // open the rail (initialExpanded) onto the 编排 tab, then clears it. We do
-      // NOT persist a workspace preference here — that would leak into every
-      // future mount of this (and, via shared rail code, other) conversations.
-      try {
-        sessionStorage.setItem(`nomi_open_rail_${conversation.id}`, '1');
-      } catch {
-        /* sessionStorage may be unavailable — non-fatal */
-      }
+      // The backend writes `extra.orchestrator_run_id` + broadcasts
+      // `conversation.listChanged`; on landing the conversation page's
+      // `useConversationRun` lights up `runId`, so the OrchestrationTopPanel
+      // (pinned to the top of the content area, default expanded) is visible
+      // straight away — no rail flag to stash, no floating window.
       emitter.emit('chat.history.refresh');
       await navigate(`/conversation/${conversation.id}`);
       return;

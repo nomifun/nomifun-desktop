@@ -28,13 +28,6 @@ export interface WorkspaceProps {
   eventPrefix?: 'acp' | 'codex' | 'nomi' | 'openclaw-gateway' | 'nanobot' | 'remote';
   messageApi?: MessageApi;
   extraTabs?: WorkspaceExtraTab[];
-  /**
-   * Optional initial active tab key (e.g. an extra-tab key such as
-   * `'orchestration'`). Applied ONCE when the body first mounts; the user can
-   * switch freely afterward. Lets a landing flow open the rail straight onto a
-   * specific tab without any controlled-tab plumbing.
-   */
-  defaultActiveTab?: WorkspaceTab;
 }
 
 /**
@@ -198,13 +191,6 @@ export interface WorkspaceSource {
   upload?: WorkspaceUploadConfig;
   /** Optional source-specific tabs rendered after Files / Changes. */
   extraTabs?: WorkspaceExtraTab[];
-  /**
-   * Optional initial active tab key, applied ONCE on first mount of the body
-   * (the user can switch tabs freely afterward). Used by a landing flow to open
-   * the rail directly onto a specific tab (e.g. the conversation 编排 tab when a
-   * run exists). Falls back to `'files'` when absent or unknown.
-   */
-  defaultActiveTab?: WorkspaceTab;
 }
 
 /**
