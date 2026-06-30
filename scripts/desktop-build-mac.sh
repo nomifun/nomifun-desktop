@@ -193,7 +193,12 @@ COLLECTED=()
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
-  CI=true bun x tauri build --config "$CONF" --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+  # bundle.targets 在 tauri.conf.json 里被钉成 ["nsis"](仅给 Windows 用),
+  # macOS 上那是无效目标 —— 不覆盖的话 tauri 只编出二进制、不产 .app/.dmg。
+  # 用第二个 --config 覆盖成 macOS 的 app+dmg(与 build:updater 同款叠加写法)。
+  CI=true bun x tauri build --config "$CONF" \
+    --config '{"bundle":{"targets":["app","dmg"]}}' \
+    --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 
   # tauri 把 DMG 放在 target/<triple>/release/bundle/dmg/*.dmg
   dmg_dir="$ROOT/target/$t/release/bundle/dmg"
@@ -206,6 +211,17 @@ for t in "${TRIPLES[@]}"; do
     COLLECTED+=("$DIST/$(basename "$dmg")")
   done < <(find "$dmg_dir" -maxdepth 1 -type f -name '*.dmg' -print0 2>/dev/null)
 done
+
+# COLLECTED 为空 = 这一轮没产出任何 DMG(多半 bundle.targets 不含 dmg)。
+# bash 3.2 下 `set -u` 还会让空数组展开直接报 unbound variable,所以这里既兜底
+# 又把真正的失败原因说清楚,而不是假装「✅ 全部完成」。
+if [[ "${#COLLECTED[@]}" -eq 0 ]]; then
+  echo "" >&2
+  echo "❌ 没有收集到任何 DMG —— tauri build 没在 macOS 上产出安装包。" >&2
+  echo "   回看上面 tauri build 的输出:应出现 Bundling …dmg / Finished N bundles。" >&2
+  echo "   若没有,多半是 bundle.targets 不含 dmg(本脚本本应已用 --config 覆盖)。" >&2
+  exit 1
+fi
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
