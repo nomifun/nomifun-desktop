@@ -528,6 +528,7 @@ Rules:\n\
 - \"depends_on\" lists the 0-based indices of EARLIER tasks (smaller index) this task depends on; the graph MUST be acyclic.\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
 - Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
+- MATCH THE MODEL TO TASK DIFFICULTY (性价比 / cost-effectiveness): you are the 主模型 designing which model runs each task from the user's range. Assign cheaper/faster models to simple, mechanical, well-specified, or bulk tasks, and reserve the stronger/pricier models for hard, ambiguous, or reasoning-heavy tasks — do NOT route every task to the strongest model. Judge each member's relative cost/capability from its \"desc\" and \"strengths\"; the FIRST member is the 主模型 (a capable default when unsure). The goal is the best overall result per unit cost, not maximum power on every node.\n\
 - \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable assistants. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
 - \"kind\" is the task's EXECUTION MODE; omit it (or use \"agent\") for a normal single-agent task — this is the DEFAULT and should be the vast majority of tasks. The other values are:\n\
   - \"synthesis\": a task that MERGES/synthesizes its dependency tasks' outputs into one coherent final result. Use it for a closing step like 「综合/合并上述产出，写出最终的 X」: set \"kind\":\"synthesis\" and make \"depends_on\" list every task whose output it should merge. A synthesis task needs no tools of its own — it reasons over the upstream results you give it.\n\
@@ -1640,6 +1641,21 @@ mod tests {
                 "PLAN_SYSTEM should mention example role '{kw}': {PLAN_SYSTEM}"
             );
         }
+    }
+
+    // 主模型 选模性价比: the planner must be told to weigh task DIFFICULTY against
+    // model cost/capability (assign cheap models to easy tasks, strong models to
+    // hard ones) rather than defaulting every node to the strongest model.
+    #[test]
+    fn plan_system_teaches_cost_difficulty_tradeoff() {
+        assert!(
+            PLAN_SYSTEM.contains("DIFFICULTY") || PLAN_SYSTEM.contains("difficulty"),
+            "PLAN_SYSTEM must teach matching model to task difficulty: {PLAN_SYSTEM}"
+        );
+        assert!(
+            PLAN_SYSTEM.contains("性价比"),
+            "PLAN_SYSTEM must frame the cost-effectiveness (性价比) goal: {PLAN_SYSTEM}"
+        );
     }
 
     // (a) build_plan_user_prompt surfaces a member's model description in the

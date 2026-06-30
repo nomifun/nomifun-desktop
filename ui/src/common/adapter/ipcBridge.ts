@@ -84,6 +84,7 @@ import type {
   TAdjustRunRequest,
   TCreateAdhocRun,
   TReassign,
+  TModelRange,
   TReplanRequest,
   TRun,
   TRunDetail,
@@ -1772,6 +1773,12 @@ export interface ICreateConversationParams {
      *  LEAD_ORCHESTRATOR_PROMPT so the agent decomposes complex goals via
      *  `nomi_run_create` (homepage 智能编排 entry). Prompt-only; never grants tools. */
     orchestrator_role?: string;
+    /** Curated model range for the orchestration run this lead conversation
+     *  spawns (homepage「主模型 + 协作模型」picker). `models[0]` = 主模型 (also the
+     *  lead/planner); the rest = 协作模型. Read back by the `nomi_run_create`
+     *  gateway handler from the conversation's extra (deterministic, not via the
+     *  LLM). Absent ⇒ Auto (every enabled model). */
+    orchestrator_model_range?: TModelRange;
     /** Transient: preset opt-in skills. Consumed by backend create handler
      *  and stripped before persistence. */
     preset_enabled_skills?: string[];

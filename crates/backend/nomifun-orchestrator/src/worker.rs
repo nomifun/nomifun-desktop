@@ -99,6 +99,20 @@ pub trait WorkerRunner: Send + Sync {
     async fn read_final_output(&self, _conversation_id: &str) -> Option<String> {
         None
     }
+
+    /// Whether the worker conversation's MOST RECENT terminal turn ended on a
+    /// RETRYABLE provider error (rate limit / timeout / transient gateway error —
+    /// the persisted error message's `error.retryable` flag). The engine consults
+    /// this when a worker turn produced NO final text, to decide whether to
+    /// auto-retry the node (a transient blip self-heals) or fail it permanently.
+    ///
+    /// Default `false` so test/mock runners (no live conversation store) and any
+    /// unknown error never loop — only an error EXPLICITLY marked retryable opts a
+    /// node into the bounded auto-retry. The production [`ConversationWorkerRunner`]
+    /// overrides it to read the conversation's latest error marker.
+    async fn last_error_retryable(&self, _conversation_id: &str) -> bool {
+        false
+    }
 }
 
 /// Production [`WorkerRunner`]: runs the task on a real nomi conversation via
@@ -127,6 +141,13 @@ impl WorkerRunner for ConversationWorkerRunner {
     /// real latest assistant text.
     async fn read_final_output(&self, conversation_id: &str) -> Option<String> {
         self.read_final_text(conversation_id).await
+    }
+
+    /// Production override of [`WorkerRunner::last_error_retryable`]: scan the
+    /// worker conversation's most recent messages for the newest provider-error
+    /// marker and return its `error.retryable` flag (false when none / absent).
+    async fn last_error_retryable(&self, conversation_id: &str) -> bool {
+        self.read_latest_error_retryable(conversation_id).await
     }
 
     async fn run(
@@ -285,6 +306,34 @@ impl ConversationWorkerRunner {
         let v = serde_json::to_value(&messages).ok()?;
         latest_assistant_text(&v)
     }
+
+    /// Read the worker conversation's latest provider-error `retryable` flag.
+    /// Lists the same recent (desc) window as [`read_final_text`](Self::read_final_text)
+    /// and scans for the newest `content.type == "error"` marker's
+    /// `error.retryable`; `false` on any list error / no error message / absent flag.
+    async fn read_latest_error_retryable(&self, conv_id: &str) -> bool {
+        let Ok(messages) = self
+            .conv
+            .list_messages(
+                &self.user_id,
+                conv_id,
+                ListMessagesQuery {
+                    page: Some(1),
+                    page_size: Some(10),
+                    order: Some("desc".to_owned()),
+                    content_mode: None,
+                    cursor: None,
+                },
+            )
+            .await
+        else {
+            return false;
+        };
+        match serde_json::to_value(&messages) {
+            Ok(v) => latest_error_retryable(&v),
+            Err(_) => false,
+        }
+    }
 }
 
 /// Assemble the worker conversation `extra`: yolo + desktopGateway + orchestrator
@@ -362,6 +411,40 @@ fn latest_assistant_text(v: &Value) -> Option<String> {
     }
 }
 
+/// Scan a serialized message list (desc-ordered) for the newest PROVIDER-error
+/// message and return its `error.retryable` flag. A provider error is a message
+/// whose parsed `content.type == "error"` (carrying the persisted agent
+/// [`ErrorInfo`](nomi_protocol-style) `{code, message, retryable}` under
+/// `content.error`); the rate-limit case is `retryable: true`. A tool-call error
+/// (which has `status:"error"` but no `content.type == "error"` marker) and any
+/// non-error message are skipped — so this returns the classification of the turn-
+/// ending provider error, not an intermediate tool failure. `false` when no
+/// provider error is present or the flag is absent, so an unknown error never loops.
+fn latest_error_retryable(v: &Value) -> bool {
+    match v {
+        Value::Array(arr) => arr.iter().find_map(error_retryable_flag).unwrap_or(false),
+        _ => error_retryable_flag(v).unwrap_or(false),
+    }
+}
+
+/// For a single serialized message, `Some(retryable)` iff its `content` marks a
+/// provider error (`content.type == "error"`), else `None` — so a desc-ordered
+/// `find_map` skips non-error messages and yields the NEWEST provider error's flag.
+/// The flag is `content.error.retryable` (absent → `false`).
+fn error_retryable_flag(v: &Value) -> Option<bool> {
+    let content = v.as_object()?.get("content")?;
+    if content.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    Some(
+        content
+            .get("error")
+            .and_then(|e| e.get("retryable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+}
+
 /// Fixed-outcome [`WorkerRunner`] for tests — returns the configured
 /// [`WorkerOutcome`] regardless of inputs. Reused by the Run engine (Task 6) to
 /// drive the scheduler without a live agent. Public (not `#[cfg(test)]`) so other
@@ -426,6 +509,47 @@ impl WorkerRunner for MockWorkerRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 迁移 024: the retryable-error scanner the engine reads to decide auto-retry.
+    #[test]
+    fn latest_error_retryable_reads_provider_error_flag() {
+        // Desc-ordered list (newest first); the rate-limit marker carries
+        // content.type=="error" + error.retryable==true → retryable.
+        let rate_limited = json!([
+            {"position":"left","type":"tips","content":{
+                "content":"rate limited","type":"error",
+                "error":{"code":"USER_LLM_PROVIDER_RATE_LIMITED","retryable":true}}},
+            {"position":"right","type":"text","content":{"content":"the task"}}
+        ]);
+        assert!(latest_error_retryable(&rate_limited), "rate-limit error is retryable");
+
+        // A non-retryable provider error (auth) → false.
+        let auth = json!([{"position":"left","type":"tips","content":{
+            "content":"auth","type":"error",
+            "error":{"code":"USER_LLM_PROVIDER_AUTH_FAILED","retryable":false}}}]);
+        assert!(!latest_error_retryable(&auth), "auth error is NOT retryable");
+
+        // No error message at all → false.
+        let clean = json!([{"position":"left","type":"text","content":{"content":"hi"}}]);
+        assert!(!latest_error_retryable(&clean), "no error → not retryable");
+
+        // A tool-call error (status error but NO content.type=="error") is skipped;
+        // the provider error below it (newest-first) decides.
+        let tool_then_provider = json!([
+            {"position":"left","type":"tool_call","content":{"name":"Bash","status":"error"}},
+            {"position":"left","type":"tips","content":{
+                "content":"rate","type":"error","error":{"retryable":true}}}
+        ]);
+        assert!(
+            latest_error_retryable(&tool_then_provider),
+            "tool error skipped; provider error's retryable flag is read"
+        );
+
+        // A provider error with no `retryable` field defaults to NOT retrying.
+        let no_flag = json!([{"position":"left","type":"tips","content":{
+            "content":"x","type":"error","error":{"code":"X"}}}]);
+        assert!(!latest_error_retryable(&no_flag), "missing flag defaults to not-retryable");
+    }
 
     #[tokio::test]
     async fn mock_worker_runner_returns_fixed_outcome() {

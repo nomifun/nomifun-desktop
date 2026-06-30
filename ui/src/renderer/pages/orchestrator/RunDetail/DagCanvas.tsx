@@ -307,6 +307,16 @@ interface DagCanvasProps {
   /** When the main node is rendered, highlight it (the lead conversation is the
    * currently-projected view). Ignored when `onOpenMain` is absent. */
   mainActive?: boolean;
+  /** The currently-projected task id (the conversation's content-area projection
+   * state). The matching task node renders in its `selected` state so the canvas
+   * mirrors EXACTLY what the content area is showing — clicking a node feels
+   * responsive instead of "nothing happened". `null`/absent → no task selected
+   * (the main conversation is projected; the synthetic main node carries its own
+   * `mainActive` ring instead). Selection is driven SOLELY by this prop —
+   * react-flow's own interaction-selection is turned off (`elementsSelectable=
+   * false`) so the canvas never fights the projection state with a discarded,
+   * flickering internal selection. */
+  activeTaskId?: string | null;
 }
 
 /**
@@ -329,7 +339,7 @@ interface DagCanvasProps {
  * `data-theme` attribute into `colorMode` + resolved colors via a MutationObserver
  * (template: MermaidBlock).
  */
-const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, mainActive }) => {
+const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, mainActive, activeTaskId }) => {
   const { t } = useTranslation();
   const { detail, loading, refetch } = useRunLive(runId);
 
@@ -437,6 +447,31 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
       const group = parseGroupLabel(task.pattern_config);
       if (group && !hueByGroup.has(group)) hueByGroup.set(group, hueForGroup(group));
     }
+    // Carry react-flow's LAST MEASURED size back onto each rebuilt node object.
+    //
+    // WHY (root cause of "画布线条经常丢失"): this canvas drives `nodes` as a
+    // controlled prop and rebuilds every node object on each render (live refetch /
+    // selection). On re-adoption `@xyflow/system`'s `parseHandles` does:
+    //   `if (!userNode.handles) return !userNode.measured ? undefined : prev.handleBounds`
+    // — so a rebuilt node WITHOUT `measured` has its `handleBounds` RESET to
+    // `undefined` every render. An edge whose source/target handleBounds are missing
+    // resolves to a null position and `EdgeWrapper` returns `null` → the connecting
+    // line VANISHES. It only reappears if the node's ResizeObserver re-fires, which
+    // it does NOT when the card's size is unchanged (e.g. a node flips to 「已完成」
+    // at the same height) — so the lines stay gone. Feeding `measured` back makes
+    // `parseHandles` PRESERVE the prior handleBounds → lines never drop, no flicker.
+    //
+    // Plain ref read (safe in render); `undefined` before first measure, where
+    // `initialWidth/Height` + the card's CSS auto-size take over. `measured` is NOT
+    // applied as an inline DOM dimension (`getNodeInlineStyleDimensions` reads
+    // `width`/`initialWidth`, never `measured`), so the card keeps `w-220px` + auto
+    // height — only the minimap/bounds read the real measured size.
+    const measuredOf = (nodeId: string): { width: number; height: number } | undefined => {
+      const m = rfRef.current?.getInternalNode(nodeId)?.measured;
+      return typeof m?.width === 'number' && typeof m?.height === 'number'
+        ? { width: m.width, height: m.height }
+        : undefined;
+    };
     // BACKWARD COMPAT: when no `onOpenMain` is given we shift NOTHING — `offsetY`
     // is 0 so the position object is computed exactly as before (and the array
     // below holds only task nodes, with no injected main / edges).
@@ -465,7 +500,16 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
       return {
         id: task.id,
         type: 'task',
+        // Selection mirrors the conversation's projection state (driven solely by
+        // `activeTaskId`; see the prop doc + `elementsSelectable={false}` below).
+        // react-flow forwards this to `NodeProps.selected`, lighting up TaskNode's
+        // selected ring the instant the content area switches to this task.
+        selected: activeTaskId != null && task.id === activeTaskId,
         position: pos,
+        // Preserve handleBounds across the controlled re-adoption (keeps the DAG's
+        // connecting lines from vanishing) — see `measuredOf`. Undefined before the
+        // node's first measure, where the size hints below take over.
+        measured: measuredOf(task.id),
         // Size hints so the MiniMap can render this node's rect (see
         // MINIMAP_NODE_W/H). `initialWidth/Height` give react-flow a non-zero
         // size for the minimap WITHOUT pinning the rendered card's DOM size, so
@@ -545,7 +589,14 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
     const mainNode: MainFlowNode = {
       id: MAIN_NODE_ID,
       type: 'main',
+      // The main node's "you are here" highlight comes from `data.active`
+      // (`mainActive`), not the blue selection ring — keep it unselected so the
+      // two affordances stay visually distinct (task = blue ring, main = brand ring).
+      selected: false,
       position: { x: mainX, y: 0 },
+      // Preserve handleBounds across re-adoption (keeps the main→root lines from
+      // vanishing) — see `measuredOf`.
+      measured: measuredOf(MAIN_NODE_ID),
       initialWidth: MINIMAP_NODE_W,
       initialHeight: MINIMAP_NODE_H,
       data: {
@@ -555,7 +606,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
       },
     };
     return [mainNode, ...taskNodes];
-  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t, onOpenMain, mainActive]);
+  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t, onOpenMain, mainActive, activeTaskId]);
 
   const edges = useMemo<Edge[]>(() => {
     const tasks = detail?.tasks ?? [];
@@ -656,7 +707,15 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
             proOptions={{ hideAttribution: true }}
             nodesConnectable={false}
             nodesDraggable
-            elementsSelectable
+            // Selection is driven entirely by `activeTaskId` (the projection
+            // state), NOT by react-flow's interaction layer. Turning this off
+            // stops react-flow from running its own select-on-click write that
+            // we never persist (no `onNodesChange`) and would only get wiped on
+            // the next controlled re-render — the source of the old "clicked but
+            // nothing lights up / feels janky" behavior. Nodes stay clickable
+            // (our inner `<div onClick>`) and draggable (pointer-events stay on
+            // via `nodesDraggable`).
+            elementsSelectable={false}
           >
             <Background variant={BackgroundVariant.Dots} gap={20} size={1.4} color={flowColors.dots} />
             <Controls showInteractive={false} />

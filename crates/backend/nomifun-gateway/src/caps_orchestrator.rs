@@ -132,6 +132,29 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
         Err(e) => return e,
     };
 
+    // 1b. When the lead OMITS model_range (⇒ Auto), prefer the curated「主模型 +
+    //     协作模型」range the homepage stashed on the calling conversation's
+    //     `extra.orchestrator_model_range` (deterministic — never relayed through
+    //     the LLM). An explicit tool arg (MCP caller) still wins; a missing /
+    //     malformed extra value falls through to Auto.
+    let model_range = if matches!(model_range, ModelRange::Auto) {
+        read_conversation_model_range(&deps, &user, &ctx.conversation_id)
+            .await
+            .unwrap_or(model_range)
+    } else {
+        model_range
+    };
+
+    // The 主模型 = the FIRST model of the curated/explicit range; it becomes the
+    // run's lead/planner (RunService floats its fleet member to the front so
+    // `pick_lead` selects it). Captured BEFORE Auto-expansion so an uncurated Auto
+    // run keeps `None` (engine's positional default — zero behavior change).
+    let lead_model: Option<ModelRef> = match &model_range {
+        ModelRange::Single { model } => Some(model.clone()),
+        ModelRange::Range { models } => models.first().cloned(),
+        ModelRange::Auto => None,
+    };
+
     // 2. Load provider summaries once: needed to (a) expand `Auto` to a concrete
     //    `Range`, (b) map an assistant's preferred model NAME → a (provider_id,
     //    model) within the run's range, and (c) fill `description` on both the
@@ -173,7 +196,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // arg, autonomy passed through so an omitted value falls to `create_adhoc`'s own
     // `supervised` default, lead_conv_id = the parsed calling-conversation id.
     let req =
-        build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members, lead_conv_id);
+        build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members, lead_conv_id, lead_model);
 
     // 4. Create: synthesize the fleet from the model range + park in `planning`.
     let run = match deps.orchestrator_run_service.create_adhoc(&user, req).await {
@@ -276,6 +299,39 @@ fn resolve_model_range(model_range: Option<Value>) -> Result<ModelRange, Value> 
     }
 }
 
+/// Read the curated「主模型 + 协作模型」range the homepage stashed on the lead
+/// conversation's `extra.orchestrator_model_range`. This is the deterministic
+/// channel from the FE picker into the run (the lead agent never has to pass a
+/// `model_range`). Returns `None` — falling back to `Auto` — for every soft
+/// failure: no calling conversation, an unreadable conversation, an absent key,
+/// or a value that does not parse as a [`ModelRange`].
+async fn read_conversation_model_range(
+    deps: &Arc<GatewayDeps>,
+    user_id: &str,
+    conversation_id: &str,
+) -> Option<ModelRange> {
+    if conversation_id.is_empty() {
+        return None;
+    }
+    let conv = deps
+        .conversation_service
+        .get(user_id, conversation_id)
+        .await
+        .ok()?;
+    let raw = conv.extra.get("orchestrator_model_range")?;
+    match serde_json::from_value::<ModelRange>(raw.clone()) {
+        Ok(range) => Some(range),
+        Err(e) => {
+            tracing::warn!(
+                conversation_id,
+                error = %e,
+                "orchestrator_model_range on conversation extra is malformed; falling back to Auto"
+            );
+            None
+        }
+    }
+}
+
 /// Build the [`CreateAdhocRunRequest`] from the EXPLICIT params plus an optional
 /// lead conversation (Path A). `work_dir` comes straight from the arg; `autonomy`
 /// is passed through untouched so an omitted value falls to `create_adhoc`'s own
@@ -289,6 +345,7 @@ fn build_adhoc_request(
     autonomy: Option<String>,
     role_members: Vec<FleetMember>,
     lead_conv_id: Option<i64>,
+    lead_model: Option<ModelRef>,
 ) -> CreateAdhocRunRequest {
     CreateAdhocRunRequest {
         goal,
@@ -306,6 +363,9 @@ fn build_adhoc_request(
         // chat) when there is one, so the FE lights up that conversation's
         // orchestration canvas entry. `None` for MCP / no-session callers.
         lead_conv_id,
+        // The 主模型 (planner/lead) when the range is curated/explicit; `None` for
+        // an uncurated Auto run (engine keeps its positional default).
+        lead_model,
     }
 }
 
@@ -717,12 +777,18 @@ mod tests {
             Some("supervised".into()),
             vec![],
             Some(909),
+            Some(ModelRef { provider_id: "p1".into(), model: "m1".into() }),
         );
         assert_eq!(req.goal, "ship it");
         assert_eq!(req.work_dir.as_deref(), Some("/tmp/proj"));
         assert!(matches!(req.model_range, ModelRange::Range { .. }), "explicit range preserved");
         assert_eq!(req.autonomy.as_deref(), Some("supervised"), "autonomy passed through");
         assert_eq!(req.lead_conv_id, Some(909), "lead_conv_id threaded through");
+        assert_eq!(
+            req.lead_model.as_ref().map(|m| m.model.as_str()),
+            Some("m1"),
+            "lead_model (主模型) threaded through"
+        );
         assert!(req.pinned_roles.is_empty());
         assert!(req.max_parallel.is_none());
     }
@@ -737,6 +803,7 @@ mod tests {
             ModelRange::Range { models: vec![] },
             Some("supervised".into()),
             vec![],
+            None,
             None,
         );
         assert!(req.lead_conv_id.is_none(), "lead_conv_id must be None (no lead conversation)");
@@ -753,10 +820,40 @@ mod tests {
             None,
             vec![],
             None,
+            None,
         );
         assert!(req.autonomy.is_none(), "omitted autonomy → None (service default applies)");
         assert!(req.work_dir.is_none(), "omitted work_dir → None (temp dir)");
         assert!(req.lead_conv_id.is_none());
+    }
+
+    // The deterministic homepage channel: the exact `extra.orchestrator_model_range`
+    // Value shape the FE stashes (a tagged range with 主模型 first) must parse to a
+    // `ModelRange` — this is what `read_conversation_model_range` does — and its
+    // first model is the 主模型 the handler lifts into `lead_model`.
+    #[test]
+    fn extra_orchestrator_model_range_value_parses_main_first() {
+        let raw = json!({
+            "mode": "range",
+            "models": [
+                { "provider_id": "p_main", "model": "opus" },
+                { "provider_id": "p_collab", "model": "haiku" }
+            ]
+        });
+        let range: ModelRange =
+            serde_json::from_value(raw).expect("the stashed extra range must parse");
+        let first = match &range {
+            ModelRange::Range { models } => {
+                assert_eq!(models.len(), 2, "主模型 + 1 协作模型");
+                models.first().cloned()
+            }
+            _ => panic!("expected a range"),
+        };
+        assert_eq!(
+            first.map(|m| m.model),
+            Some("opus".to_string()),
+            "models[0] is the 主模型 → becomes lead_model"
+        );
     }
 
     // ── parse_lead_conv_id: ctx.conversation_id (String) → Option<i64> ────────

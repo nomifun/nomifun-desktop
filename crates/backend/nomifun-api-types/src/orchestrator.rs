@@ -481,6 +481,14 @@ pub struct CreateAdhocRunRequest {
     /// Originating conversation — local `conversations.id` INTEGER.
     #[serde(default)]
     pub lead_conv_id: Option<i64>,
+    /// The user-designated 主模型 (homepage「主模型+协作模型」picker): the model that
+    /// should be the run's lead/planner. When set, `create_adhoc` floats the
+    /// matching fleet member to the front of the snapshot so `pick_lead` selects
+    /// it (the prefer-the-bare-model rule keeps it a pure model, not an assistant
+    /// that happens to share the model). `None` ⇒ the engine keeps its positional
+    /// default (first member) — zero behavior change for callers that omit it.
+    #[serde(default)]
+    pub lead_model: Option<ModelRef>,
 }
 
 /// One planned task in a [`PlannedDag`]. Produced by the PlanProducer (主管规划)
@@ -770,6 +778,7 @@ mod tests {
             autonomy: Some("supervised".to_string()),
             max_parallel: Some(3),
             lead_conv_id: Some(77),
+            lead_model: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let back: CreateAdhocRunRequest = serde_json::from_str(&json).expect("deserialize");
@@ -1064,6 +1073,7 @@ mod tests {
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let back: CreateAdhocRunRequest = serde_json::from_str(&json).expect("deserialize");

@@ -48,7 +48,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use nomifun_api_types::FleetMember;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, now_ms};
 use nomifun_db::models::{OrchRunRow, OrchRunTaskRow};
 use nomifun_db::{IOrchWorkspaceRepository, IRunRepository};
 use nomifun_db::{UpdateRunParams, UpdateTaskParams};
@@ -145,6 +145,22 @@ pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Fallback concurrency cap when neither the run nor the fleet snapshot pins one.
 pub const DEFAULT_MAX_PARALLEL: usize = 4;
 
+/// Max AUTO-retries for a worker task that fails on a RETRYABLE provider error
+/// (rate limit / transient gateway / timeout — see [`WorkerRunner::last_error_retryable`]).
+/// The first dispatch is attempt 0; each retryable failure bumps `attempt` and
+/// re-`pending`s the node with a backoff gate, up to this many retries — so a
+/// transient blip (e.g. a per-minute rate limit) self-heals without the node ever
+/// permanently failing the run. After the cap the node fails as before. A
+/// non-retryable error (auth / billing / bad request) never retries. Overridable
+/// per [`RunEngineDeps`] (tests set it small).
+pub const DEFAULT_MAX_WORKER_RETRIES: usize = 3;
+
+/// Base backoff before the FIRST auto-retry; doubles each subsequent retry
+/// (`base · 2^attempt`). 5s comfortably clears a per-minute RPM cap within the
+/// retry budget while staying snappy for a one-off blip. Overridable per
+/// [`RunEngineDeps`] (tests set [`Duration::ZERO`] for instant retries).
+pub const DEFAULT_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(5);
+
 /// Per-run async lock registry serializing the run-loop's **terminal-check +
 /// finish** against the rerun path's **reset + re-activation** (UC-2a 评审
 /// Critical). Both critical sections take the SAME run's lock, so the race window
@@ -200,6 +216,14 @@ impl RunLocks {
 /// observed within ~one interval.
 const PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How long the run loop idles when its ONLY outstanding work is a task whose
+/// transient-error retry backoff has not yet elapsed (no ready work, no in-flight
+/// worker, run not terminal). A bounded sleep — NOT a busy-spin: the gated task is
+/// excluded from `list_ready_tasks` until its `next_retry_at`, so without this idle
+/// the loop would otherwise mis-read the graph as "stuck" and exit. Re-loops within
+/// ~one interval of the backoff elapsing, then `list_ready_tasks` returns the task.
+const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Shared dependencies for all run loops. The `fleet_snapshot` is read off the
 /// run row via `run_repo` (no separate fleet handle is needed at runtime — the
 /// snapshot is the single source of truth once a run is created).
@@ -238,6 +262,13 @@ pub struct RunEngineDeps {
     /// the same `LlmPlanProducer` it gives `RunService` (a real one-shot summary).
     /// FAIL-SOFT: any error here NEVER fails the run — it only loses the synthesis.
     pub summarizer: Arc<dyn PlanProducer>,
+    /// Max AUTO-retries for a worker task that fails on a RETRYABLE provider error
+    /// (see [`DEFAULT_MAX_WORKER_RETRIES`]). 0 disables auto-retry (every failure is
+    /// terminal — the pre-retry behaviour).
+    pub max_worker_retries: usize,
+    /// Base backoff before the first auto-retry, doubled per retry
+    /// (see [`DEFAULT_RETRY_BACKOFF_BASE`]). [`Duration::ZERO`] retries instantly.
+    pub retry_backoff_base: Duration,
 }
 
 impl RunEngineDeps {
@@ -263,6 +294,8 @@ impl RunEngineDeps {
             steer_conversation: Arc::new(NoopConversationSteerer),
             run_locks: Arc::new(RunLocks::new()),
             summarizer: Arc::new(NoopSummaryProducer),
+            max_worker_retries: DEFAULT_MAX_WORKER_RETRIES,
+            retry_backoff_base: DEFAULT_RETRY_BACKOFF_BASE,
         }
     }
 }
@@ -912,6 +945,10 @@ async fn run_loop(
                 Completed { tasks: Vec<OrchRunTaskRow>, total_tokens: Option<i64> },
                 /// A task failed → finished `failed` under this guard already.
                 FinishedFailed,
+                /// No ready/in-flight work, but a task is `pending` waiting out its
+                /// transient-error retry backoff (`next_retry_at` in the future) →
+                /// idle-wait (NOT terminal, NOT stuck) and re-loop.
+                IdleRetry,
                 /// Stuck / list_tasks error → already logged; just break.
                 Break,
             }
@@ -955,14 +992,32 @@ async fn run_loop(
                                 handles.remove_if(run_id, |_, h| h.generation == generation);
                                 TerminalDecision::FinishedFailed
                             } else {
-                                // Stuck (no ready, no in-flight, not terminal) —
-                                // break, never spin.
-                                warn!(
-                                    run_id,
-                                    task_count = tasks.len(),
-                                    "Run loop: no ready tasks and run not terminal — exiting to avoid spin"
-                                );
-                                TerminalDecision::Break
+                                // Not terminal and nothing ready. Distinguish a
+                                // transient-error retry-in-backoff (a `pending` task
+                                // gated by a future `next_retry_at` — `list_ready_tasks`
+                                // holds it out until due) from a genuine stuck graph.
+                                // The former must NOT finish/break: idle-wait and
+                                // re-loop so the node re-dispatches once its backoff
+                                // elapses. Bounded — `attempt` is capped by
+                                // `max_worker_retries`, after which the task fails (no
+                                // spin). The latter exits to avoid a busy-spin.
+                                let now = now_ms();
+                                let awaiting_retry = tasks.iter().any(|t| {
+                                    t.status == "pending"
+                                        && t.next_retry_at.is_some_and(|at| at > now)
+                                });
+                                if awaiting_retry {
+                                    TerminalDecision::IdleRetry
+                                } else {
+                                    // Stuck (no ready, no in-flight, not terminal) —
+                                    // break, never spin.
+                                    warn!(
+                                        run_id,
+                                        task_count = tasks.len(),
+                                        "Run loop: no ready tasks and run not terminal — exiting to avoid spin"
+                                    );
+                                    TerminalDecision::Break
+                                }
                             }
                         }
                         Err(e) => {
@@ -977,6 +1032,14 @@ async fn run_loop(
 
             match decision {
                 TerminalDecision::ReLoop => continue,
+                TerminalDecision::IdleRetry => {
+                    // A task is waiting out its transient-error backoff. Idle-wait
+                    // (the guard was dropped at the end of the decision scope) then
+                    // re-loop — `list_ready_tasks` returns the node once `next_retry_at`
+                    // elapses, and the fill pass re-dispatches it.
+                    tokio::time::sleep(RETRY_POLL_INTERVAL).await;
+                    continue;
+                }
                 TerminalDecision::FinishedFailed | TerminalDecision::Break => break,
                 TerminalDecision::Completed { tasks, total_tokens } => {
                     // B2: synthesize a coherent run summary with a one-shot lead
@@ -1166,6 +1229,7 @@ async fn dispatch_task(
                             graph_x: None,
                             graph_y: None,
                             pattern_config: None,
+                            next_retry_at: None,
                         },
                     )
                     .await;
@@ -1196,7 +1260,9 @@ async fn dispatch_task(
 
 /// Settle a finished worker's outcome: `ok` → mark the task `done` with its
 /// conversation id + output summary + emit; otherwise (timeout / no reply /
-/// error) → mark `failed` + emit. Completion is what unblocks downstream tasks.
+/// error) → AUTO-RETRY if the failure was a transient/retryable provider error and
+/// the retry budget remains (see [`settle_failed_or_retry`]), else mark `failed` +
+/// emit. Completion is what unblocks downstream tasks.
 async fn settle_task_outcome(
     deps: &Arc<RunEngineDeps>,
     run_id: &str,
@@ -1228,20 +1294,100 @@ async fn settle_task_outcome(
                         graph_x: None,
                         graph_y: None,
                         pattern_config: None,
+                        // A successful settle clears any leftover retry gate (a prior
+                        // attempt may have set one) so the `done` row is clean.
+                        next_retry_at: Some(None),
                     },
                 )
                 .await;
             deps.emitter.emit_task_status(run_id, task_id, "done");
         }
         Ok(o) => {
-            // Worker returned but did not produce a final text (timeout / empty).
-            // Still record any token usage that accumulated before giving up.
-            mark_task_failed(deps, run_id, task_id, Some(o.conversation_id), o.tokens).await;
+            // Worker returned but produced no final text (rate-limit / transient
+            // error / timeout / empty). Auto-retry transient errors; else fail.
+            settle_failed_or_retry(deps, run_id, task_id, Some(o.conversation_id), o.tokens).await;
         }
         Err(e) => {
-            warn!(run_id, task_id, error = %e, "Run loop: worker errored — failing task");
-            mark_task_failed(deps, run_id, task_id, None, None).await;
+            warn!(run_id, task_id, error = %e, "Run loop: worker errored — failing or retrying task");
+            settle_failed_or_retry(deps, run_id, task_id, None, None).await;
         }
+    }
+}
+
+/// Backoff (ms) before the `attempt`-th auto-retry: `base · 2^attempt`, saturating
+/// and exponent-clamped so a huge attempt count can never overflow. `attempt` is
+/// the PRE-bump retry count (0 = first retry → one `base`).
+fn retry_backoff_ms(base: Duration, attempt: i64) -> i64 {
+    let base_ms = base.as_millis() as i64;
+    let factor = 1i64.checked_shl(attempt.clamp(0, 16) as u32).unwrap_or(i64::MAX);
+    base_ms.saturating_mul(factor)
+}
+
+/// Decide a failed worker turn's fate: AUTO-RETRY a transient/retryable provider
+/// error while the retry budget remains, else mark the task permanently `failed`.
+///
+/// Retryable is classified by [`WorkerRunner::last_error_retryable`] reading the
+/// worker conversation's latest error marker (`error.retryable` — the same flag the
+/// UI shows as 「可重试」). On a retry we keep the run `running` and put the node back
+/// to `pending` with `attempt+1` and a `next_retry_at = now + backoff` gate;
+/// `list_ready_tasks` holds the node out until the backoff elapses, then the loop
+/// re-dispatches it (a fresh worker turn). After `max_worker_retries` retries — or
+/// for a non-retryable error (auth / billing / bad request → `retryable:false`) — we
+/// fall back to [`mark_task_failed`] exactly as before.
+async fn settle_failed_or_retry(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    task_id: &str,
+    conv_from_outcome: Option<i64>,
+    tokens: Option<i64>,
+) {
+    // Read the task once for its current attempt count + its conversation id (the
+    // worker conv to classify the error against — prefer the outcome's, else the
+    // stamped one, since an `Err` outcome carries none).
+    let task = deps.run_repo.get_task(task_id).await.ok().flatten();
+    let attempt = task.as_ref().map(|t| t.attempt).unwrap_or(0);
+    let conv = conv_from_outcome.or_else(|| task.as_ref().and_then(|t| t.conversation_id));
+
+    let retryable = match conv {
+        Some(c) => deps.worker.last_error_retryable(&c.to_string()).await,
+        None => false,
+    };
+
+    if retryable && (attempt as usize) < deps.max_worker_retries {
+        let next = now_ms() + retry_backoff_ms(deps.retry_backoff_base, attempt);
+        // Back to `pending`, attempt+1, gated by `next_retry_at`. The run stays
+        // `running` (we never write a terminal status here), so it self-heals — and
+        // survives a restart (boot-resume re-arms the still-`running` run, the loop
+        // respects the persisted gate). Keep the conversation_id (the failed turn
+        // stays inspectable); a re-dispatch creates a fresh worker conversation and
+        // re-stamps it. Record any tokens accrued by the failed attempt.
+        let _ = deps
+            .run_repo
+            .update_task(
+                task_id,
+                UpdateTaskParams {
+                    status: Some("pending".to_string()),
+                    attempt: Some(attempt + 1),
+                    next_retry_at: Some(Some(next)),
+                    tokens: tokens.map(Some),
+                    ..Default::default()
+                },
+            )
+            .await;
+        // Emit `pending` so the canvas reflects the node leaving its failed/running
+        // state back to a queued-retry state (the ×N attempt badge shows the count).
+        deps.emitter.emit_task_status(run_id, task_id, "pending");
+        info!(
+            run_id,
+            task_id,
+            attempt = attempt + 1,
+            backoff_ms = retry_backoff_ms(deps.retry_backoff_base, attempt),
+            "Run loop: worker hit a retryable error — scheduling bounded auto-retry"
+        );
+    } else {
+        // Non-retryable, or retry budget exhausted → permanent failure (the run
+        // loop's terminal check then fails the run, exactly as before).
+        mark_task_failed(deps, run_id, task_id, conv_from_outcome, tokens).await;
     }
 }
 
@@ -1845,6 +1991,7 @@ async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &Orch
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await;
@@ -2270,6 +2417,7 @@ async fn settle_judge_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchR
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await;
@@ -2761,6 +2909,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                         graph_x: None,
                         graph_y: None,
                         pattern_config: None,
+                        next_retry_at: None,
                     },
                 )
                 .await;
@@ -2799,6 +2948,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                         // Carry the prior round's output forward (or clear a stale
                         // carry when there is nothing to forward).
                         pattern_config: Some(body_carry),
+                        next_retry_at: Some(None),
                     },
                 )
                 .await;
@@ -2841,6 +2991,7 @@ async fn finish_loop_controller(
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await;
@@ -2902,6 +3053,7 @@ async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &s
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await;
@@ -2932,6 +3084,7 @@ async fn mark_task_failed(
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await;
@@ -3487,6 +3640,7 @@ mod tests {
                     autonomy: Some("interactive".to_string()),
                     max_parallel: None,
                     lead_conv_id: Some(909),
+                    lead_model: None,
                 },
             )
             .await
@@ -3588,6 +3742,7 @@ mod tests {
             role: None,
             kind: "agent".to_string(),
             pattern_config: None,
+            next_retry_at: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -3619,6 +3774,7 @@ mod tests {
             role: None,
             kind: kind.to_string(),
             pattern_config: None,
+            next_retry_at: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -3702,6 +3858,7 @@ mod tests {
             role: None,
             kind: "agent".to_string(),
             pattern_config: None,
+            next_retry_at: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -4320,6 +4477,195 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("run did not reach a terminal status within the bounded poll");
+    }
+
+    // -------------------------------------------------------------------------
+    // 迁移 024: transient-error AUTO-RETRY. A single-task plan + a worker mock
+    // that fails a configurable number of dispatches (classified retryable or
+    // not) before succeeding. Proves a retryable failure (rate limit / timeout)
+    // auto-retries to completion (self-heals) without ever permanently failing
+    // the run, that the retry budget is bounded, and that a non-retryable error
+    // still fails fast — the pre-retry behaviour.
+    // -------------------------------------------------------------------------
+
+    /// One-task plan (no deps), pre-assigned to member 0 — the minimal graph for
+    /// the per-node retry decision without dependency noise.
+    struct SingleTaskPlanProducer;
+    #[async_trait]
+    impl PlanProducer for SingleTaskPlanProducer {
+        async fn produce(
+            &self,
+            _goal: &str,
+            _members: &[FleetMember],
+            _sink: Option<&crate::plan::LeadThinkingSink>,
+        ) -> Result<PlannedDag, AppError> {
+            Ok(PlannedDag {
+                tasks: vec![PlannedTask {
+                    title: "solo".to_string(),
+                    spec: "do it".to_string(),
+                    task_profile: None,
+                    depends_on: vec![],
+                    member_index: Some(0),
+                    rationale: None,
+                    role: None,
+                    kind: "agent".to_string(),
+                    pattern_config: None,
+                }],
+            })
+        }
+    }
+
+    /// Worker mock that FAILS its first `fail_times` dispatches — returning
+    /// `ok:false` with no final text, the same shape a turn that ended on a
+    /// provider error produces — then SUCCEEDS. `retryable` is what
+    /// `last_error_retryable` reports for those failures (the signal the engine
+    /// reads to decide auto-retry). `dispatches` counts total `run` calls.
+    struct RetryMockWorkerRunner {
+        fail_times: usize,
+        retryable: bool,
+        dispatches: AtomicUsize,
+    }
+    #[async_trait]
+    impl WorkerRunner for RetryMockWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            let n = self.dispatches.fetch_add(1, Ordering::SeqCst); // 0-based dispatch index
+            on_started(900); // arbitrary fixed conv id (stamps task.conversation_id)
+            if n < self.fail_times {
+                // Finished turn with NO final text → ok:false (the rate-limit shape).
+                Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false, tokens: None })
+            } else {
+                Ok(WorkerOutcome {
+                    conversation_id: 900,
+                    text: Some(format!("output of {task_id}")),
+                    ok: true,
+                    tokens: None,
+                })
+            }
+        }
+        async fn last_error_retryable(&self, _conversation_id: &str) -> bool {
+            self.retryable
+        }
+    }
+
+    /// Single-task harness with the retry mock + ZERO backoff (instant retries in
+    /// tests) + the given retry budget. Returns (RunService, RunEngine, mock, run id).
+    async fn retry_harness(
+        fail_times: usize,
+        retryable: bool,
+        max_retries: usize,
+    ) -> (RunService, RunEngine, Arc<RetryMockWorkerRunner>, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster);
+        let planner: Arc<dyn PlanProducer> = Arc::new(SingleTaskPlanProducer);
+        let run_service =
+            RunService::new(run_repo.clone(), fleet_repo.clone(), ws_repo.clone(), planner, emitter.clone());
+
+        let worker = Arc::new(RetryMockWorkerRunner {
+            fail_times,
+            retryable,
+            dispatches: AtomicUsize::new(0),
+        });
+        let worker_dyn: Arc<dyn WorkerRunner> = worker.clone();
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.max_worker_retries = max_retries;
+        engine_deps.retry_backoff_base = Duration::ZERO; // instant retries — no wall-clock wait in tests
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "retry fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "retry ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "retry test".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run create");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, worker, run.id)
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_auto_retries_then_succeeds() {
+        // Fails once (retryable), succeeds on the retry → the run self-heals with
+        // no manual intervention (the core fix: a transient rate-limit no longer
+        // permanently fails the run).
+        let (svc, engine, worker, run_id) = retry_harness(1, true, 3).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "a retryable failure must auto-retry to completion");
+        assert_eq!(detail.tasks.len(), 1);
+        assert_eq!(detail.tasks[0].status, "done", "node done after the retry");
+        assert_eq!(detail.tasks[0].attempt, 1, "one retry bumps attempt 0 → 1");
+        assert_eq!(worker.dispatches.load(Ordering::SeqCst), 2, "dispatched twice: initial + 1 retry");
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_exhausts_bounded_retries_then_fails() {
+        // Always fails (retryable); budget = 2 retries → fails after 1 initial + 2
+        // retries (bounded — no infinite retry loop).
+        let (svc, engine, worker, run_id) = retry_harness(99, true, 2).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "failed", "exhausting the retry budget fails the run");
+        assert_eq!(detail.tasks[0].status, "failed");
+        assert_eq!(detail.tasks[0].attempt, 2, "attempt reaches the retry cap (2)");
+        assert_eq!(worker.dispatches.load(Ordering::SeqCst), 3, "1 initial + 2 retries");
+    }
+
+    #[tokio::test]
+    async fn non_retryable_failure_fails_immediately_without_retry() {
+        // Fails, NOT retryable (auth / billing / bad request) → no retry, immediate
+        // failure (the pre-retry behaviour is preserved for permanent errors).
+        let (svc, engine, worker, run_id) = retry_harness(99, false, 3).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "failed", "a non-retryable failure fails the run at once");
+        assert_eq!(detail.tasks[0].status, "failed");
+        assert_eq!(detail.tasks[0].attempt, 0, "no retry → attempt stays 0");
+        assert_eq!(worker.dispatches.load(Ordering::SeqCst), 1, "dispatched exactly once");
     }
 
     #[tokio::test]
@@ -8551,6 +8897,7 @@ mod tests {
             role: Some("研究".to_string()),
             kind: "agent".to_string(),
             pattern_config: None,
+            next_retry_at: None,
             created_at: 0,
             updated_at: 0,
         }

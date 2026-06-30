@@ -93,6 +93,13 @@ pub struct OrchRunTaskRow {
     /// Optional per-kind config JSON (迁移 023, nullable), e.g. fan-out 兄弟任务
     /// 共享的分组标签 `{"group":"<label>"}`。未用时 `None`。
     pub pattern_config: Option<String>, // JSON
+    /// Epoch-ms before which a `pending` task must NOT be dispatched — the backoff
+    /// gate for the engine's transient-error auto-retry (迁移 024). `None` = no
+    /// backoff (a normal pending task dispatches at once); set to `now + backoff`
+    /// when a retryable worker error (rate limit / timeout) sends the node back to
+    /// `pending` for another attempt. `list_ready_tasks` excludes a task whose
+    /// `next_retry_at` is still in the future; a `NULL` is always ready.
+    pub next_retry_at: Option<i64>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

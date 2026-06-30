@@ -25,9 +25,9 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    Assignment, CreateAdhocRunRequest, CreateRunRequest, FleetMember, ModelRange, PlannedDag,
-    PlannedTask, ReassignRequest, ReplanRequest, Run, RunDetail, RunTask, RunTaskDep, TaskProfile,
-    WorkspaceEntry,
+    Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateRunRequest, FleetMember, ModelRange,
+    ModelRef, PlannedDag, PlannedTask, ReassignRequest, ReplanRequest, Run, RunDetail, RunTask,
+    RunTaskDep, TaskProfile, WorkspaceEntry,
 };
 use nomifun_common::AppError;
 use nomifun_common::generate_prefixed_id;
@@ -156,6 +156,11 @@ impl RunService {
         // routing target — the enriched (assistant-backed) member wins, since it
         // carries the persona/skills/description the planner + worker need.
         let members = merge_members(build_members_from_range(&req.model_range)?, req.role_members);
+        // 主模型 as planner: when the request names a `lead_model` (the homepage
+        // 主模型), float its fleet member to the front so `pick_lead` (first member
+        // with provider+model) selects it. No-op when `lead_model` is None or
+        // matches nothing — zero behavior change for uncurated/Auto runs.
+        let members = float_lead_member(members, req.lead_model.as_ref());
         let fleet_snapshot =
             serde_json::to_string(&members).unwrap_or_else(|_| "[]".to_string());
 
@@ -867,7 +872,7 @@ impl RunService {
         // output.
         let Some(output) = worker.read_final_output(&conv_id.to_string()).await else {
             return Err(OrchestratorError::BadRequest(
-                "worker 会话暂无最终产出，请等其回复完成后再采用".into(),
+                "该节点 worker 暂无最终回复(可能仍在自动重试,或本次仅产生了报错)。请等其回复完成,或在该节点对话里继续/重跑后再采用产出".into(),
             )
             .into());
         };
@@ -1028,6 +1033,9 @@ impl RunService {
                     output_files: Some(None),
                     attempt: Some(prior_attempt + 1),
                     pattern_config,
+                    // Clear any transient-error retry gate so a manual rerun is not
+                    // held back by a stale backoff timestamp (迁移 024).
+                    next_retry_at: Some(None),
                     ..Default::default()
                 },
             )
@@ -1736,6 +1744,45 @@ fn resolve_member(members: &[FleetMember], member_index: Option<usize>) -> Optio
     }
 }
 
+/// Best-effort cost / reasoning / speed tier for a bare model, inferred from
+/// common naming conventions, so the capability [`router`](crate::router) can do
+/// real cost-vs-effect routing for range members (which otherwise carry no
+/// profile). DELIBERATELY conservative and **fail-soft**: only a clear "strong"
+/// or clear "light" signal sets tiers; anything unknown or ambiguous returns
+/// `None`, which the Router treats as its neutral baseline — i.e. exactly the
+/// pre-existing behavior (zero regression). Strengths/modalities/tools are left
+/// at the baseline (empty / false), so this only nudges the reasoning + cost-tier
+/// scoring arms, never the hard filters (a bare member stays tool-neutral exactly
+/// as before).
+fn infer_model_capability(model: &str) -> Option<CapabilityProfile> {
+    let m = model.to_lowercase();
+    // Strong / premium signals (high reasoning, premium cost).
+    const STRONG: &[&str] = &[
+        "opus", "ultra", "-pro", "gpt-4", "gpt4", "o1", "o3", "-large", "reasoner", "deepseek-r", "-r1",
+    ];
+    // Light / economy signals (low reasoning, economy cost, fast).
+    const LIGHT: &[&str] = &["haiku", "mini", "flash", "lite", "nano", "-small", "-8b", "phi-"];
+    let strong = STRONG.iter().any(|k| m.contains(k));
+    let light = LIGHT.iter().any(|k| m.contains(k));
+    // Only commit when the signal is unambiguous; a name hitting both (or neither)
+    // stays None → baseline.
+    let (reasoning, cost_tier, speed_tier) = if strong && !light {
+        ("high", "premium", "medium")
+    } else if light && !strong {
+        ("low", "economy", "fast")
+    } else {
+        return None;
+    };
+    Some(CapabilityProfile {
+        strengths: Vec::new(),
+        modalities: Vec::new(),
+        tools: false,
+        reasoning: reasoning.to_string(),
+        cost_tier: cost_tier.to_string(),
+        speed_tier: speed_tier.to_string(),
+    })
+}
+
 /// Synthesize the ad-hoc fleet members for a [`ModelRange`]. Each `provider+model`
 /// pair becomes one [`FleetMember`] with both `provider_id` and `model` set to
 /// `Some` (the worker hard-requires both — `worker.rs:116-120`), a freshly minted
@@ -1783,7 +1830,15 @@ fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppE
             provider_id: Some(provider_id.to_string()),
             model: Some(model.to_string()),
             role_hint: None,
-            capability_profile: None,
+            // Best-effort cost/reasoning tier inferred from the model NAME so the
+            // capability Router can weigh cost-vs-effect (router.rs's reasoning /
+            // cost-tier arms). Unknown / ambiguous names → None → the Router's
+            // neutral baseline = current behavior (zero regression). When the
+            // caps layer prepends a description-decorated copy of this same
+            // (provider, model), that copy wins dedup and the planner reads the
+            // richer user description instead — so this only fires where there is
+            // no description, exactly where the Router needs a signal.
+            capability_profile: infer_model_capability(model),
             constraints: None,
             sort_order: i as i64,
             // Bare model members carry no persona/skills. `description` is left
@@ -1840,9 +1895,41 @@ fn merge_members(range_members: Vec<FleetMember>, role_members: Vec<FleetMember>
     out
 }
 
+/// Float the fleet member matching `lead_model` to the front of `members` so the
+/// planner's [`pick_lead`](crate::plan) (first member with provider+model) selects
+/// it as the run's lead/planner, then re-densify `sort_order` to the new index.
+///
+/// Prefers the BARE model member (empty `agent_id`) over an assistant-backed
+/// member that merely shares the same `(provider, model)`, so the planner runs as
+/// the pure 主模型 the user picked rather than an assistant. A `None` `lead_model`
+/// or no match is a no-op — the snapshot (and thus the engine's positional default)
+/// is returned unchanged, so uncurated / Auto runs keep their current behavior.
+fn float_lead_member(mut members: Vec<FleetMember>, lead_model: Option<&ModelRef>) -> Vec<FleetMember> {
+    let Some(lead) = lead_model else {
+        return members;
+    };
+    let is_match = |m: &FleetMember| {
+        m.provider_id.as_deref() == Some(lead.provider_id.as_str())
+            && m.model.as_deref() == Some(lead.model.as_str())
+    };
+    let pos = members
+        .iter()
+        .position(|m| is_match(m) && m.agent_id.is_empty())
+        .or_else(|| members.iter().position(is_match));
+    if let Some(pos) = pos {
+        if pos != 0 {
+            let lead_member = members.remove(pos);
+            members.insert(0, lead_member);
+        }
+        for (i, m) in members.iter_mut().enumerate() {
+            m.sort_order = i as i64;
+        }
+    }
+    members
+}
+
 /// The member + score/rationale chosen for a task during planning.
-struct AssignmentPick {
-    member_id: String,
+struct AssignmentPick {    member_id: String,
     score: Option<f64>,
     rationale: Option<String>,
 }
@@ -3083,6 +3170,7 @@ mod tests {
             autonomy: None,
             max_parallel: Some(2),
             lead_conv_id: Some(909),
+            lead_model: None,
         };
 
         let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
@@ -3127,6 +3215,7 @@ mod tests {
             autonomy: Some("autonomous".to_string()),
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
 
         let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
@@ -3152,6 +3241,7 @@ mod tests {
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let err = svc.create_adhoc("u1", req).await.expect_err("empty goal must reject");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
@@ -3170,6 +3260,7 @@ mod tests {
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let err = svc.create_adhoc("u1", req).await.expect_err("empty range must reject");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
@@ -3190,6 +3281,7 @@ mod tests {
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let err = svc.create_adhoc("u1", req).await.expect_err("auto must reject at service");
         assert!(matches!(err, AppError::BadRequest(_)), "got: {err:?}");
@@ -3309,6 +3401,77 @@ mod tests {
         );
     }
 
+    // 主模型 as planner: float_lead_member moves the member matching `lead_model`
+    // to the front (so `pick_lead` selects it), preferring the BARE model member
+    // over an assistant that merely shares the same (provider, model).
+    #[test]
+    fn float_lead_member_floats_bare_main_to_front() {
+        // Range: collaborator first, 主模型 (p1/m1) second. Plus an assistant pinned
+        // to the SAME (p1, m1) — merge_members puts the assistant (role) first, so
+        // without floating, pick_lead would pick the collaborator (index 0).
+        let range = build_members_from_range(&ModelRange::Range {
+            models: vec![model_ref("p0", "collab"), model_ref("p1", "m1")],
+        })
+        .expect("range");
+        let roles = vec![enriched_member("asst_x", "p1", "m1", "助手X")];
+        let merged = merge_members(range, roles);
+
+        let floated = float_lead_member(merged, Some(&model_ref("p1", "m1")));
+        assert_eq!(floated[0].provider_id.as_deref(), Some("p1"));
+        assert_eq!(floated[0].model.as_deref(), Some("m1"));
+        assert!(
+            floated[0].agent_id.is_empty(),
+            "the floated lead must be the pure 主模型 (empty agent_id), not the assistant"
+        );
+        // sort_order re-densified to the new positions.
+        for (i, m) in floated.iter().enumerate() {
+            assert_eq!(m.sort_order, i as i64, "sort_order re-densified after float");
+        }
+    }
+
+    // float_lead_member is a no-op when `lead_model` is None or matches no member —
+    // the snapshot (and thus the engine's positional default) is unchanged.
+    #[test]
+    fn float_lead_member_none_or_unmatched_is_noop() {
+        let members = build_members_from_range(&ModelRange::Range {
+            models: vec![model_ref("p0", "a"), model_ref("p1", "b")],
+        })
+        .expect("range");
+        let first = members[0].provider_id.clone();
+
+        let unchanged = float_lead_member(members.clone(), None);
+        assert_eq!(unchanged[0].provider_id, first, "None lead_model is a no-op");
+
+        let unchanged2 = float_lead_member(members, Some(&model_ref("nope", "nope")));
+        assert_eq!(unchanged2[0].provider_id, first, "unmatched lead_model is a no-op");
+    }
+
+    // 裸模型能力档启发式: clear strong/light names get tiered; unknown / ambiguous
+    // names stay None (= Router baseline, zero regression).
+    #[test]
+    fn infer_model_capability_tiers_by_name() {
+        let opus = infer_model_capability("claude-opus-4-8").expect("opus → strong");
+        assert_eq!(opus.reasoning, "high");
+        assert_eq!(opus.cost_tier, "premium");
+        // Bare members never claim tools/strengths — hard filters unchanged.
+        assert!(opus.strengths.is_empty() && !opus.tools);
+
+        let haiku = infer_model_capability("claude-haiku-4-5").expect("haiku → light");
+        assert_eq!(haiku.reasoning, "low");
+        assert_eq!(haiku.cost_tier, "economy");
+        assert_eq!(haiku.speed_tier, "fast");
+
+        let flash = infer_model_capability("gemini-2.5-flash").expect("flash → light");
+        assert_eq!(flash.cost_tier, "economy");
+
+        // Unknown → None (baseline). Ambiguous (matches BOTH strong+light) → None.
+        assert!(infer_model_capability("some-unknown-model").is_none());
+        assert!(
+            infer_model_capability("gpt-4o-mini").is_none(),
+            "a name hitting both strong (gpt-4) and light (mini) stays neutral"
+        );
+    }
+
     // (KEYSTONE) create_adhoc with role_members merges the assistant-backed
     // member INTO the snapshot alongside the bare range member, preserving the
     // assistant's agent_id / role_hint / system_prompt / enabled_skills /
@@ -3326,6 +3489,7 @@ mod tests {
             autonomy: None,
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
 
@@ -3866,6 +4030,7 @@ mod tests {
             autonomy: Some("supervised".to_string()),
             max_parallel: None,
             lead_conv_id: None,
+            lead_model: None,
         };
         let run = svc.create_adhoc("u1", req).await.expect("create_adhoc");
         (svc, run)

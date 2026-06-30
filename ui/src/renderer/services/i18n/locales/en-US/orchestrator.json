@@ -185,7 +185,9 @@
       "noRationale": "No assignment rationale yet.",
       "score": "Match {{score}}",
       "reassign": "Reassign to another member",
+      "changeModel": "Change model",
       "reassignSuccess": "Assignment updated",
+      "reassignThenRerun": "Model changed; this node already ran — hit 重跑 (Rerun) to re-run it on the new model",
       "reassignError": "Failed to update assignment: {{error}}",
       "locked": "Lock assignment",
       "lockedHint": "When locked, the orchestrator won't auto-reassign this task on the next planning pass."

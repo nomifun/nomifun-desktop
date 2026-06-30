@@ -29,6 +29,9 @@ type GuidActionRowProps = {
 
   // Model selector node (rendered by parent)
   modelSelectorNode: React.ReactNode;
+  /** 智能编排「协作模型」selector — rendered next to the model selector, only in
+   * orchestration mode (the parent passes null otherwise). */
+  collaboratorSelectorNode?: React.ReactNode;
 
   // Agent mode
   selectedAgent: string | 'custom';
@@ -75,6 +78,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   files,
   onFilesUploaded,
   modelSelectorNode,
+  collaboratorSelectorNode,
   selectedAgent,
   effectiveModeAgent,
   selectedMode,
@@ -104,7 +108,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
   const modeBackend = effectiveModeAgent || selectedAgent;
   const showModeSwitch = supportsModeSwitch(modeBackend);
-  const configOptionCount = (modelSelectorNode ? 1 : 0) + (showModeSwitch ? 1 : 0);
+  const configOptionCount = (modelSelectorNode ? 1 : 0) + (collaboratorSelectorNode ? 1 : 0) + (showModeSwitch ? 1 : 0);
 
   // Browser file picker ref (WebUI only)
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -265,6 +269,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
         {configOptionCount > 0 && (
           <div className={styles.actionConfigGroup} data-mobile={isMobile ? 'true' : undefined}>
             {modelSelectorNode}
+            {collaboratorSelectorNode}
 
             {showModeSwitch && (
               <AgentModeSelector

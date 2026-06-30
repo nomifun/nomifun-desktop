@@ -19,6 +19,7 @@ import ComposerEntryStrip, { type GuidActiveSkill } from './components/ComposerE
 import GuidAssistantEditorHost from './components/GuidAssistantEditorHost';
 import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
+import GuidCollaboratorSelector from './components/GuidCollaboratorSelector';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
@@ -32,6 +33,7 @@ import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
+import { useGuidCollaborators } from './hooks/useGuidCollaborators';
 import { autoWorkStartDisabled, isAutoWorkEntry } from './hooks/autoWorkEntry';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
@@ -154,6 +156,9 @@ const GuidPage: React.FC = () => {
   // collected up front and applied right after the conversation is created.
   const advancedConfig = useGuidAdvancedConfig();
 
+  // 智能编排「协作模型」偏好（多选，持久化）。主模型 = modelSelection.current_model。
+  const collaborators = useGuidCollaborators();
+
   const mention = useGuidMention({
     availableAgents: agentSelection.availableAgents,
     customAgentAvatarMap: agentSelection.customAgentAvatarMap,
@@ -201,6 +206,7 @@ const GuidPage: React.FC = () => {
 
     // Orchestration entry
     orchestrationMode,
+    collaborators: collaborators.collaborators,
 
     // Mention state reset
     setMentionOpen: mention.setMentionOpen,
@@ -543,6 +549,22 @@ const GuidPage: React.FC = () => {
     />
   );
 
+  // 智能编排「协作模型」选择器 — 仅编排模式显示，挂在主模型选择器旁。主模型
+  // (current_model) 作为 lead/规划器始终在池中，故从协作列表中排除。
+  const mainModelRef = modelSelection.current_model
+    ? { provider_id: modelSelection.current_model.id, model: modelSelection.current_model.use_model }
+    : null;
+  const collaboratorSelectorNode =
+    orchestrationMode && isGeminiMode ? (
+      <GuidCollaboratorSelector
+        value={collaborators.collaborators}
+        onChange={(next) => {
+          void collaborators.setCollaborators(next);
+        }}
+        mainModel={mainModelRef}
+      />
+    ) : null;
+
   // Advanced drafts — the same controls as the conversation header, in draft
   // mode (collected locally, applied right after the conversation is created).
   // Keyed by location.key so same-route navigations (which reset the drafts in
@@ -578,6 +600,7 @@ const GuidPage: React.FC = () => {
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
       modelSelectorNode={modelSelectorNode}
+      collaboratorSelectorNode={collaboratorSelectorNode}
       selectedAgent={agentSelection.selectedAgent}
       effectiveModeAgent={agentSelection.currentEffectiveAgentInfo.agent_type}
       selectedMode={agentSelection.selectedMode}

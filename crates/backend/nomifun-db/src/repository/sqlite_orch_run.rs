@@ -220,6 +220,7 @@ impl IRunRepository for SqliteRunRepository {
             role: p.role,
             kind: p.kind,
             pattern_config: p.pattern_config,
+            next_retry_at: None,
             created_at: now,
             updated_at: now,
         })
@@ -277,6 +278,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.pattern_config.is_some() {
             sets.push("pattern_config = ?");
         }
+        if p.next_retry_at.is_some() {
+            sets.push("next_retry_at = ?");
+        }
         if sets.is_empty() {
             return Ok(());
         }
@@ -313,6 +317,9 @@ impl IRunRepository for SqliteRunRepository {
         }
         if let Some(pattern_config) = &p.pattern_config {
             q = q.bind(pattern_config);
+        }
+        if let Some(next_retry_at) = &p.next_retry_at {
+            q = q.bind(next_retry_at);
         }
         q = q.bind(now_ms());
         q = q.bind(id);
@@ -504,19 +511,26 @@ impl IRunRepository for SqliteRunRepository {
     }
 
     async fn list_ready_tasks(&self, run_id: &str) -> Result<Vec<OrchRunTaskRow>, sqlx::Error> {
-        // Ready = pending AND no incomplete blocker. A task with zero dep rows
-        // trivially satisfies the NOT EXISTS (the subquery is empty); a task
-        // with multiple blockers is ready only when EVERY blocker is 'done'
-        // (any single non-'done' blocker makes the subquery non-empty).
+        // Ready = pending AND no incomplete blocker AND not currently backing off.
+        // A task with zero dep rows trivially satisfies the NOT EXISTS (the subquery
+        // is empty); a task with multiple blockers is ready only when EVERY blocker
+        // is 'done' (any single non-'done' blocker makes the subquery non-empty).
+        // The `next_retry_at` gate (迁移 024) excludes a task still in transient-error
+        // backoff: `NULL` (the common case — never failed retryably) is always ready;
+        // a future timestamp is held out until it elapses. This keeps the read model
+        // the single authority on readiness, so the engine loop never busy-spins on a
+        // task that is "pending" but not yet due.
         let rows = sqlx::query_as::<_, OrchRunTaskRow>(
             "SELECT t.* FROM orch_run_tasks t \
-             WHERE t.run_id = ? AND t.status = 'pending' AND NOT EXISTS (\
+             WHERE t.run_id = ? AND t.status = 'pending' \
+             AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?) AND NOT EXISTS (\
                  SELECT 1 FROM orch_run_task_deps d \
                  JOIN orch_run_tasks bt ON bt.id = d.blocker_task_id \
                  WHERE d.blocked_task_id = t.id AND bt.status != 'done'\
              ) ORDER BY t.created_at ASC",
         )
         .bind(run_id)
+        .bind(now_ms())
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -668,10 +682,79 @@ mod tests {
                 graph_x: None,
                 graph_y: None,
                 pattern_config: None,
+                next_retry_at: None,
             },
         )
         .await
         .unwrap();
+    }
+
+    // 迁移 024: a `pending` task gated by a future `next_retry_at` (transient-error
+    // backoff) is held OUT of the ready set until the timestamp elapses; a NULL gate
+    // (the common case) is always ready, and a past gate is ready again.
+    #[tokio::test]
+    async fn list_ready_tasks_respects_retry_backoff_gate() {
+        let db = init_database_memory().await.unwrap();
+        let pool = db.pool().clone();
+        let ws_id = make_workspace(&pool).await;
+        let repo = SqliteRunRepository::new(pool);
+        let run = repo
+            .create_run(CreateRunParams {
+                workspace_id: Some(ws_id),
+                user_id: "u1".into(),
+                goal: "retry gate".into(),
+                fleet_snapshot: "{}".into(),
+                autonomy: "auto".into(),
+                max_parallel: Some(1),
+                lead_conv_id: None,
+                work_dir: None,
+            })
+            .await
+            .unwrap();
+        let t = repo
+            .create_task(CreateTaskParams {
+                run_id: run.id.clone(),
+                title: "solo".into(),
+                spec: "s".into(),
+                task_profile: None,
+                status: "pending".into(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".into(),
+                pattern_config: None,
+            })
+            .await
+            .unwrap();
+
+        // NULL gate → ready (no regression for normal pending tasks).
+        let ready = repo.list_ready_tasks(&run.id).await.unwrap();
+        assert_eq!(ready.iter().map(|t| t.id.clone()).collect::<Vec<_>>(), vec![t.id.clone()], "NULL gate is ready");
+
+        let set_gate = |at: Option<i64>| UpdateTaskParams {
+            next_retry_at: Some(at),
+            ..Default::default()
+        };
+
+        // Future gate → held out of the ready set.
+        repo.update_task(&t.id, set_gate(Some(now_ms() + 60_000))).await.unwrap();
+        assert!(repo.list_ready_tasks(&run.id).await.unwrap().is_empty(), "future gate holds the task out");
+
+        // Past gate → ready again.
+        repo.update_task(&t.id, set_gate(Some(now_ms() - 1))).await.unwrap();
+        assert_eq!(
+            repo.list_ready_tasks(&run.id).await.unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t.id.clone()],
+            "past gate is ready"
+        );
+
+        // Cleared gate → ready.
+        repo.update_task(&t.id, set_gate(None)).await.unwrap();
+        assert_eq!(
+            repo.list_ready_tasks(&run.id).await.unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![t.id],
+            "cleared gate is ready"
+        );
     }
 
     #[tokio::test]
