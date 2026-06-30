@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Modal } from '@arco-design/web-react';
 import { Loading, Minus } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { TReplanRequest } from '@/common/types/orchestrator/orchestratorTypes';
+import type { TCreateAdhocRun, TReplanRequest } from '@/common/types/orchestrator/orchestratorTypes';
 import AppLoader from '@/renderer/components/layout/AppLoader';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 // Reuse the conversation page's glass-header visual language (bg-1 92% + backdrop
@@ -84,8 +84,13 @@ function initialPosition(): Point {
  * Reads the conversation's {@link useOrchestration} state and renders one of
  * three forms:
  *
- *  • `runId == null` → nothing (the conversation isn't linked to a run);
- *  • `canvasOpen` → a draggable, glass-headed floating panel that REPLICATES the
+ *  • `runId == null && !canvasOpen` → nothing (the header「智能编排」pill opens it);
+ *  • `runId == null && canvasOpen` → a Path-B initiation panel (same draggable
+ *    glass chrome) hosting the {@link OrchestratorComposer}; on submit it
+ *    createAdhoc-s a run bound to this conversation, then the backend broadcast
+ *    relights `runId` and this overlay auto-switches to the canvas;
+ *  • `canvasOpen` (run linked) → a draggable, glass-headed floating panel that
+ *    REPLICATES the
  *    standalone {@link RunView} composition — a glass header (inline-editable
  *    goal + status pill + 规划中 indicator on the left; {@link RunControls} +
  *    {@link ViewToggle} + a 收起 button on the right), a body that swaps between
@@ -101,6 +106,7 @@ function initialPosition(): Point {
 const OrchestrationCanvasOverlay: React.FC = () => {
   const { t } = useTranslation();
   const {
+    conversationId,
     runId,
     detail,
     refetch,
@@ -210,7 +216,61 @@ const OrchestrationCanvasOverlay: React.FC = () => {
     [runId, buildModelRange, replanModelRange, replanAutonomy, refetch, message, t]
   );
 
-  // ── Drag ──────────────────────────────────────────────────────────────────
+  // ── Start composer (no-run initiation) ───────────────────────────────────────
+  // When the conversation has no linked run yet, the open canvas hosts a Path-B
+  // initiation composer. State mirrors the replan composer (goal + model-range +
+  // autonomy + submitting). On submit we createAdhoc bound to this conversation —
+  // and DELIBERATELY do NOT set runId: the backend writes `extra.orchestrator_run_id`
+  // + broadcasts, the conversation refetches, `useConversationRun` lights up runId,
+  // and this overlay auto-switches from the initiation panel to the canvas.
+  const [startGoal, setStartGoal] = useState('');
+  const [startModelRange, setStartModelRange] = useState<ComposerModelRange>({
+    mode: 'auto',
+    single: '',
+    range: [],
+  });
+  const [startAutonomy, setStartAutonomy] = useState<AutonomyLevel>('interactive');
+  const [startSubmitting, setStartSubmitting] = useState(false);
+
+  const handleStart = useCallback(
+    async (goal: string) => {
+      const trimmed = goal.trim();
+      if (!trimmed) {
+        message.warning(t('orchestrator.composer.goalRequired'));
+        return;
+      }
+      const modelRange = buildModelRange({
+        mode: startModelRange.mode,
+        single: startModelRange.single,
+        range: startModelRange.range,
+      });
+      if (!modelRange) {
+        message.warning(t('orchestrator.composer.modelRequired'));
+        return;
+      }
+      setStartSubmitting(true);
+      try {
+        const body: TCreateAdhocRun = {
+          goal: trimmed,
+          model_range: modelRange,
+          autonomy: startAutonomy,
+          lead_conv_id: conversationId,
+        };
+        await ipcBridge.orchestrator.runs.createAdhoc.invoke(body);
+        setStartGoal('');
+        // Do NOT set runId here — backend broadcasts → conversation refetch →
+        // runId lights up → this overlay auto-switches to the canvas.
+        message.success(t('conversation.orchestration.startSuccess', { defaultValue: '已发起编排，正在规划…' }));
+      } catch (e) {
+        message.error(
+          t('conversation.orchestration.startError', { defaultValue: '发起编排失败', error: String(e) })
+        );
+      } finally {
+        setStartSubmitting(false);
+      }
+    },
+    [conversationId, buildModelRange, startModelRange, startAutonomy, message, t]
+  );
   // Minimal pointer-event drag (no library: the repo has no position-drag hook,
   // only drag-upload / resize-split). The glass header is the handle; we capture
   // the pointer on it, track the offset from the panel's top-left, and clamp the
@@ -262,8 +322,78 @@ const OrchestrationCanvasOverlay: React.FC = () => {
   }, []);
 
   // ── Render gates ────────────────────────────────────────────────────────────
-  // No linked run → render nothing (don't even mount the chip).
-  if (runId == null) return null;
+  // No linked run yet:
+  //  • canvas collapsed → render nothing (the header「智能编排」pill is the opener);
+  //  • canvas open → the Path-B initiation panel below (same chrome as the run panel).
+  if (runId == null && !canvasOpen) return null;
+
+  if (runId == null) {
+    return (
+      <>
+        {msgCtx}
+        <div
+          className={`${styles.panel} ${dragging ? styles.dragging : ''}`}
+          style={{ left: position.x, top: position.y, zIndex: OVERLAY_Z }}
+          role='dialog'
+          aria-label={t('conversation.orchestration.startTitle', { defaultValue: '发起智能编排' })}
+        >
+          {/* Glass header = drag handle (reuses the run-panel chrome): title + 收起. */}
+          <div
+            className={`${styles.header} ${styles.dragHandle} chat-layout-header chat-layout-header--glass`}
+            onPointerDown={onHandlePointerDown}
+            onPointerMove={onHandlePointerMove}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+          >
+            <div className='flex min-w-0 flex-1 items-center gap-10px'>
+              <span className='truncate text-14px font-600 text-t-primary'>
+                {t('conversation.orchestration.startTitle', { defaultValue: '发起智能编排' })}
+              </span>
+            </div>
+            <div className='flex shrink-0 items-center gap-10px' onPointerDown={(e) => e.stopPropagation()}>
+              <div
+                role='button'
+                tabIndex={0}
+                aria-label={t('orchestrator.canvas.collapse', { defaultValue: '收起' })}
+                title={t('orchestrator.canvas.collapse', { defaultValue: '收起' })}
+                onClick={collapseCanvas}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    collapseCanvas();
+                  }
+                }}
+                className='flex size-28px shrink-0 cursor-pointer select-none items-center justify-center rd-8px border border-b-base text-t-secondary outline-none transition-all duration-150 hover:border-primary-6 hover:text-primary-6'
+              >
+                <Minus theme='outline' size='15' strokeWidth={3} />
+              </div>
+            </div>
+          </div>
+
+          {/* Body — Path-B initiation composer (fluid, fills the panel). */}
+          <div className={`${styles.body} min-h-[260px] p-16px`}>
+            <OrchestratorComposer
+              fluid
+              value={startGoal}
+              onChange={setStartGoal}
+              onSubmit={handleStart}
+              submitting={startSubmitting}
+              placeholder={t('conversation.orchestration.startPlaceholder', {
+                defaultValue: '描述你想让 agent 团队完成的目标…',
+              })}
+              label={t('conversation.orchestration.startLabel', { defaultValue: '发起编排' })}
+              showModelRange
+              modelRange={startModelRange}
+              onModelRangeChange={setStartModelRange}
+              showAutonomy
+              autonomy={startAutonomy}
+              onAutonomyChange={setStartAutonomy}
+            />
+          </div>
+        </div>
+      </>
+    );
+  }
 
   const status = detail?.run.status ?? '';
   const statusMeta = STATUS_META[status];

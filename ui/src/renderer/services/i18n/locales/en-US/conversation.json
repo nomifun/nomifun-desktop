@@ -26,6 +26,7 @@
     "startPlaceholder": "Describe the goal you want the agent team to accomplish…",
     "startLabel": "Start orchestration",
     "startSuccess": "Orchestration started — planning…",
+    "startError": "Failed to start orchestration",
     "unavailable": "This conversation doesn't support orchestration",
     "planning": "Planning…",
     "expand": "Expand canvas",

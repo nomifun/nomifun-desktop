@@ -26,6 +26,7 @@
     "startPlaceholder": "描述你想让 agent 团队完成的目标…",
     "startLabel": "发起编排",
     "startSuccess": "已发起编排，正在规划…",
+    "startError": "发起编排失败",
     "unavailable": "此会话不支持智能编排",
     "planning": "规划中…",
     "expand": "展开画布",

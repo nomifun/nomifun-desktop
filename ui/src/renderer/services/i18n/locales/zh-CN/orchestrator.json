@@ -66,6 +66,7 @@
   },
   "canvas": {
     "entryLabel": "画布",
+    "startEntry": "智能编排",
     "title": "Agent 画布",
     "openCanvas": "展开 agent 画布",
     "collapse": "收起"
