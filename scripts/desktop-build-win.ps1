@@ -1,4 +1,4 @@
-# ============================================================================
+﻿# ============================================================================
 # 打 Windows 桌面端安装包(.msi + .exe/NSIS),汇总到 dist/desktop/。
 # 仅能在 Windows 上运行。
 #
@@ -25,7 +25,15 @@
 # ============================================================================
 $ErrorActionPreference = 'Stop'
 
-if (-not $IsWindows) {
+# Render the Chinese progress output correctly under Windows PowerShell 5.1
+# (whose console defaults to the OEM code page); harmless under pwsh 7+.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+
+# `$IsWindows` is an automatic variable only in PowerShell 7+ (it is $null under
+# Windows PowerShell 5.1). Fall back to the OS env var so this guard works under
+# both: 5.1 only ever runs on Windows, where `$env:OS` is `Windows_NT`.
+if ($null -ne $IsWindows) { $onWindows = [bool]$IsWindows } else { $onWindows = ($env:OS -eq 'Windows_NT') }
+if (-not $onWindows) {
   Write-Error "build:win 只能在 Windows 上运行。macOS 包用 build:mac,Linux 包用 build:linux,且都需在对应系统上构建。"
   exit 1
 }
