@@ -165,10 +165,16 @@ Use this order for every desktop release.
    has a `platforms[...]` entry, and all URLs point to the same `v$VERSION`
    Release.
 
-### Adding Windows After macOS Was Already Published
+### Releasing Windows (append to an existing release, or Windows-first)
 
-Use this when a macOS Release already exists and you later continue from a
-Windows build machine.
+The one-click script auto-detects two scenarios:
+
+- **APPEND** — a Release for this version already exists (macOS usually went
+  first): just add the Windows assets and merge the `windows-x86_64` entry into
+  `latest.json`.
+- **CREATE** — no Release exists yet (Windows goes first): create the tag and the
+  Release (with release notes) and upload the Windows assets; `-Version` can bump
+  the version number as part of the same command.
 
 **One-click (recommended).** After a one-time setup, repeat with a single command:
 
@@ -180,16 +186,37 @@ Windows build machine.
 
    ```powershell
    git pull
-   bun run release:win            # pull -> verify Release -> clean -> build -> merge latest.json -> upload --clobber -> commit & push -> verify
-   bun run release:win -DryRun    # read-only preflight (gh/token/Release/key/version), no build or upload
-   bun run release:win -NoPush    # build + upload, but leave the latest.json change local
+
+   # APPEND (macOS already released; add Windows):
+   bun run release:win
+
+   # CREATE (Windows first): -Version bumps; -NotesFile/-Notes are required for a first release
+   bun run release:win -Version 0.1.14 -NotesFile notes.md
+   bun run release:win -Version 0.1.14 -Notes "- Fixes"
+
+   # Switches:
+   bun run release:win -DryRun     # read-only preflight + plan (incl. detected mode); no bump/build/upload/push
+   bun run release:win -NoPush     # APPEND: still uploads but no git push; CREATE: local bump/build only, no Release
+   bun run release:win -SkipPull   # skip git pull
    ```
 
-The script loads `GH_TOKEN` from `.env.release`, loads the signing key, verifies
-the `v<version>` Release exists, removes stale NSIS artifacts, builds updater
-artifacts, merges the `windows-x86_64` entry via `make:latest`, uploads with
-`--clobber`, commits `latest.json` back to `main` as author `nomifun`, and
-verifies the updater endpoint. It aborts with a clear error on any failure.
+**Version** is the single source `Cargo.toml [workspace.package].version`. APPEND
+uses the current version. For CREATE, `-Version X.Y.Z` (when different) first runs
+`bun run bump`, then commits as `nomifun`, tags, and creates the Release.
+
+**Release notes are LLM-friendly**: passed on the command line (no CHANGELOG
+coupling), and the **same text is used for both the GitHub Release body and the
+`latest.json` `notes`**. Prefer `-NotesFile <md>` for multi-line notes (the script
+routes them through a file to avoid PowerShell multi-line arg issues). A first
+release with no `-NotesFile`/`-Notes` aborts rather than creating an empty-notes
+Release; in APPEND mode notes are optional.
+
+The script loads `GH_TOKEN` from `.env.release`, loads the signing key, detects the
+mode, removes stale NSIS artifacts, builds updater artifacts, merges the
+`windows-x86_64` entry via `make:latest`, uploads (`--clobber` for APPEND, or
+`gh release create` for CREATE), commits `latest.json` (plus the bump for CREATE)
+as author `nomifun`, and verifies the updater endpoint. It aborts with a clear
+error on any failure.
 
 **Manual steps** (equivalent to what the script runs internally):
 
