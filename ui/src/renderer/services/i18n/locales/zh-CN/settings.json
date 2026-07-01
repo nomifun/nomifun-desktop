@@ -2,6 +2,13 @@
   "title": "设置",
   "contextLimit": "上下文窗口 (tokens)",
   "contextLimitPlaceholder": "留空 = 默认 200k",
+  "contextLimitSelectPlaceholder": "选择上下文窗口",
+  "contextLimitDefaultOption": "默认 200k",
+  "contextLimitCustomOption": "{{value}}（自定义）",
+  "modelContextLimit": "模型上下文窗口",
+  "modelContextLimitDefault": "默认",
+  "modelContextLimitInherited": "当前继承旧供应商设置 {{value}}；选择并保存后会写入该模型自己的配置。",
+  "editModelContextLimit": "编辑模型上下文窗口",
   "skillsHub": {
     "title": "技能中心",
     "description": "集中管理 AI 智能体技能。一次安装，全助手通用。",

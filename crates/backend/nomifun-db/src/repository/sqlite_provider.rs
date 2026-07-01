@@ -46,9 +46,9 @@ impl IProviderRepository for SqliteProviderRepository {
         sqlx::query(
             "INSERT INTO providers \
                 (id, platform, name, base_url, api_key_encrypted, models, enabled, \
-                 capabilities, context_limit, model_protocols, model_descriptions, \
+                 capabilities, context_limit, model_context_limits, model_protocols, model_descriptions, \
                  model_enabled, model_health, bedrock_config, is_full_url, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(params.platform)
@@ -59,6 +59,7 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(params.enabled)
         .bind(params.capabilities)
         .bind(params.context_limit)
+        .bind(params.model_context_limits.unwrap_or("{}"))
         .bind(params.model_protocols)
         // model_descriptions is NOT NULL DEFAULT '{}'; coalesce None → '{}'.
         .bind(params.model_descriptions.unwrap_or("{}"))
@@ -87,6 +88,7 @@ impl IProviderRepository for SqliteProviderRepository {
             enabled: params.enabled,
             capabilities: params.capabilities.to_string(),
             context_limit: params.context_limit,
+            model_context_limits: params.model_context_limits.map(String::from),
             model_protocols: params.model_protocols.map(String::from),
             model_descriptions: params.model_descriptions.map(String::from),
             model_enabled: params.model_enabled.map(String::from),
@@ -110,7 +112,7 @@ impl IProviderRepository for SqliteProviderRepository {
             "UPDATE providers SET \
                 platform = ?, name = ?, base_url = ?, api_key_encrypted = ?, \
                 models = ?, enabled = ?, capabilities = ?, context_limit = ?, \
-                model_protocols = ?, model_descriptions = ?, model_enabled = ?, \
+                model_context_limits = ?, model_protocols = ?, model_descriptions = ?, model_enabled = ?, \
                 model_health = ?, bedrock_config = ?, is_full_url = ?, updated_at = ? \
              WHERE id = ?",
         )
@@ -122,6 +124,7 @@ impl IProviderRepository for SqliteProviderRepository {
         .bind(merged.enabled)
         .bind(&merged.capabilities)
         .bind(merged.context_limit)
+        .bind(merged.model_context_limits.as_deref().unwrap_or("{}"))
         .bind(&merged.model_protocols)
         // model_descriptions is NOT NULL DEFAULT '{}'; coalesce None → '{}'.
         .bind(merged.model_descriptions.as_deref().unwrap_or("{}"))
@@ -172,6 +175,9 @@ fn merge_update(existing: Provider, params: UpdateProviderParams<'_>) -> Provide
         enabled: params.enabled.unwrap_or(existing.enabled),
         capabilities: params.capabilities.unwrap_or(&existing.capabilities).to_string(),
         context_limit: params.context_limit.unwrap_or(existing.context_limit),
+        model_context_limits: params
+            .model_context_limits
+            .map_or(existing.model_context_limits, |v| v.map(String::from)),
         model_protocols: params
             .model_protocols
             .map_or(existing.model_protocols, |v| v.map(String::from)),
@@ -215,6 +221,7 @@ mod tests {
             enabled: true,
             capabilities: r#"[{"type":"text"}]"#,
             context_limit: Some(200000),
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,
@@ -243,6 +250,7 @@ mod tests {
         assert_eq!(p.api_key_encrypted, "encrypted_key_data");
         assert!(p.enabled);
         assert_eq!(p.context_limit, Some(200000));
+        assert!(p.model_context_limits.is_none());
         assert!(p.model_protocols.is_none());
         assert!(p.bedrock_config.is_none());
         assert!(p.created_at > 0);

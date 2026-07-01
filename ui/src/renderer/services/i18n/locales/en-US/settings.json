@@ -2,6 +2,13 @@
   "title": "Settings",
   "contextLimit": "Context window (tokens)",
   "contextLimitPlaceholder": "Leave blank = default 200k",
+  "contextLimitSelectPlaceholder": "Select context window",
+  "contextLimitDefaultOption": "Default 200k",
+  "contextLimitCustomOption": "{{value}} (custom)",
+  "modelContextLimit": "Model context window",
+  "modelContextLimitDefault": "Default",
+  "modelContextLimitInherited": "Currently inherited from the old provider setting {{value}}. Pick an option and save to write a model-specific value.",
+  "editModelContextLimit": "Edit model context window",
   "skillsHub": {
     "title": "Skills Hub",
     "description": "Centrally manage AI agent skills. Install once, use across all assistants.",

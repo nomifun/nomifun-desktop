@@ -37,6 +37,7 @@ impl ProviderService {
         let models_json = serialize_json(&req.models, "models")?;
         let capabilities_json = serialize_json(&req.capabilities, "capabilities")?;
         let model_protocols_json = serialize_opt(&req.model_protocols, "model_protocols")?;
+        let model_context_limits_json = serialize_opt(&req.model_context_limits, "model_context_limits")?;
         let model_descriptions_json = serialize_opt(&req.model_descriptions, "model_descriptions")?;
         let model_enabled_json = serialize_opt(&req.model_enabled, "model_enabled")?;
         let model_health_json = serialize_opt(&req.model_health, "model_health")?;
@@ -53,6 +54,7 @@ impl ProviderService {
             enabled: req.enabled,
             capabilities: &capabilities_json,
             context_limit: req.context_limit,
+            model_context_limits: model_context_limits_json.as_deref(),
             model_protocols: model_protocols_json.as_deref(),
             model_descriptions: model_descriptions_json.as_deref(),
             model_enabled: model_enabled_json.as_deref(),
@@ -77,6 +79,7 @@ impl ProviderService {
         let models_json = serialize_opt(&req.models, "models")?;
         let capabilities_json = serialize_opt(&req.capabilities, "capabilities")?;
         let model_protocols_json = serialize_opt(&req.model_protocols, "model_protocols")?;
+        let model_context_limits_json = serialize_opt(&req.model_context_limits, "model_context_limits")?;
         let model_descriptions_json = serialize_opt(&req.model_descriptions, "model_descriptions")?;
         let model_enabled_json = serialize_opt(&req.model_enabled, "model_enabled")?;
         let model_health_json = serialize_opt(&req.model_health, "model_health")?;
@@ -91,6 +94,7 @@ impl ProviderService {
             enabled: req.enabled,
             capabilities: capabilities_json.as_deref(),
             context_limit: req.context_limit.map(Some),
+            model_context_limits: model_context_limits_json.as_ref().map(|s| Some(s.as_str())),
             model_protocols: model_protocols_json.as_ref().map(|s| Some(s.as_str())),
             model_descriptions: model_descriptions_json.as_ref().map(|s| Some(s.as_str())),
             model_enabled: model_enabled_json.as_ref().map(|s| Some(s.as_str())),
@@ -128,6 +132,10 @@ impl ProviderService {
             .map_err(|e| AppError::Internal(format!("Failed to parse capabilities JSON: {e}")))?;
         let model_protocols: Option<HashMap<String, String>> =
             deserialize_opt(&row.model_protocols, "model_protocols")?;
+        let model_context_limits: Option<HashMap<String, i64>> =
+            deserialize_opt(&row.model_context_limits, "model_context_limits")?;
+        let model_context_limits =
+            merge_legacy_model_context_limits(&models, row.context_limit, model_context_limits);
         let model_descriptions: Option<HashMap<String, String>> =
             deserialize_opt(&row.model_descriptions, "model_descriptions")?;
         let model_enabled: Option<HashMap<String, bool>> = deserialize_opt(&row.model_enabled, "model_enabled")?;
@@ -144,6 +152,7 @@ impl ProviderService {
             enabled: row.enabled,
             capabilities,
             context_limit: row.context_limit,
+            model_context_limits,
             model_protocols,
             model_descriptions,
             model_enabled,
@@ -171,6 +180,22 @@ fn serialize_opt<T: serde::Serialize>(val: &Option<T>, field: &str) -> Result<Op
 /// Serialize a value to JSON string.
 fn serialize_json<T: serde::Serialize>(val: &T, field: &str) -> Result<String, AppError> {
     serde_json::to_string(val).map_err(|e| AppError::Internal(format!("Failed to serialize {field}: {e}")))
+}
+
+fn merge_legacy_model_context_limits(
+    models: &[String],
+    legacy_context_limit: Option<i64>,
+    model_context_limits: Option<HashMap<String, i64>>,
+) -> Option<HashMap<String, i64>> {
+    let mut limits = model_context_limits.unwrap_or_default();
+    if limits.is_empty()
+        && let Some(limit) = legacy_context_limit.filter(|value| *value > 0)
+    {
+        for model in models {
+            limits.insert(model.clone(), limit);
+        }
+    }
+    if limits.is_empty() { None } else { Some(limits) }
 }
 
 /// Deserialize an optional JSON string into a typed value.
@@ -296,6 +321,7 @@ mod tests {
             enabled: true,
             capabilities: vec![],
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,
@@ -605,6 +631,57 @@ mod tests {
             updated.model_descriptions.as_ref().and_then(|m| m.get("m1")),
             Some(&"擅长后端".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn create_and_update_round_trips_model_context_limits() {
+        use std::collections::HashMap;
+        let svc = setup().await;
+
+        let req = CreateProviderRequest {
+            models: vec!["m1".into(), "m2".into()],
+            model_context_limits: Some(HashMap::from([("m1".into(), 32_000), ("m2".into(), 128_000)])),
+            ..sample_create_request()
+        };
+        let created = svc.create(req).await.unwrap();
+        assert_eq!(
+            created.model_context_limits.as_ref().and_then(|m| m.get("m2")),
+            Some(&128_000)
+        );
+
+        let all = svc.list().await.unwrap();
+        assert_eq!(
+            all[0].model_context_limits.as_ref().and_then(|m| m.get("m1")),
+            Some(&32_000)
+        );
+
+        let updated = svc
+            .update(
+                &created.id,
+                UpdateProviderRequest {
+                    model_context_limits: Some(HashMap::from([("m2".into(), 200_000)])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.model_context_limits.as_ref().and_then(|m| m.get("m2")),
+            Some(&200_000)
+        );
+        assert!(updated.model_context_limits.as_ref().and_then(|m| m.get("m1")).is_none());
+
+        let cleared = svc
+            .update(
+                &created.id,
+                UpdateProviderRequest {
+                    model_context_limits: Some(HashMap::new()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(cleared.model_context_limits.is_none());
     }
 
     #[tokio::test]

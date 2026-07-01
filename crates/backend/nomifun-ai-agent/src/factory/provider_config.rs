@@ -83,8 +83,20 @@ pub(crate) async fn resolve_provider_fields(
         base_url,
         compat_overrides,
         bedrock_config,
-        context_limit: row.context_limit,
+        context_limit: resolve_model_context_limit(row.context_limit, row.model_context_limits.as_deref(), model),
     })
+}
+
+fn resolve_model_context_limit(
+    provider_context_limit: Option<i64>,
+    model_context_limits: Option<&str>,
+    model: &str,
+) -> Option<i64> {
+    let per_model = model_context_limits
+        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw).ok())
+        .and_then(|map| map.get(model).and_then(serde_json::Value::as_i64));
+
+    per_model.filter(|value| *value > 0).or(provider_context_limit)
 }
 
 /// Resolve a provider DB row into a base `Config` suitable for LLM calls.
@@ -401,6 +413,24 @@ mod tests {
     fn provider_error_maps_to_bad_gateway() {
         let err = provider_error_to_app_error(ProviderError::Connection("timeout".into()));
         assert!(matches!(err, AppError::BadGateway(_)));
+    }
+
+    #[test]
+    fn resolve_model_context_limit_prefers_selected_model_map() {
+        let per_model = r#"{"model-a":32000,"model-b":128000}"#;
+
+        assert_eq!(
+            resolve_model_context_limit(Some(200_000), Some(per_model), "model-b"),
+            Some(128_000)
+        );
+        assert_eq!(
+            resolve_model_context_limit(Some(200_000), Some(per_model), "missing"),
+            Some(200_000)
+        );
+        assert_eq!(
+            resolve_model_context_limit(None, Some(per_model), "model-a"),
+            Some(32_000)
+        );
     }
 
     // The kinded drain forwards TextDelta as DeltaKind::Text and ThinkingDelta as

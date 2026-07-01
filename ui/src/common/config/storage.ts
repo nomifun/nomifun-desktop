@@ -538,8 +538,14 @@ export interface IProvider {
   capabilities?: ModelCapability[];
   /**
    * 上下文token限制，可选字段，只在明确知道时填写
+   * @deprecated Use model_context_limits for model-specific context windows.
    */
   context_limit?: number;
+  /**
+   * 每个模型的上下文窗口限制。映射模型名称到 token 数。
+   * Per-model context window limits. Maps model name to token count.
+   */
+  model_context_limits?: Record<string, number>;
   /**
    * 每个模型的协议覆盖配置。映射模型名称到协议字符串。
    * 仅在 platform 为 'new-api' 时使用。

@@ -126,6 +126,7 @@ mod tests {
             enabled,
             capabilities: "[]".into(),
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: model_enabled.map(str::to_owned),

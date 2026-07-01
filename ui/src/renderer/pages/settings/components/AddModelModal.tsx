@@ -2,7 +2,7 @@ import type { IProvider } from '@/common/config/storage';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { Button, Select, Tag } from '@arco-design/web-react';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useModeModeList from '@renderer/hooks/agent/useModeModeList';
 import {
@@ -10,12 +10,14 @@ import {
   NEW_API_PROTOCOL_OPTIONS,
   detectNewApiProtocol,
 } from '@/renderer/utils/model/modelPlatforms';
+import { ContextLimitSelect } from './ContextLimitSelect';
 
 const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (model: IProvider) => void }>(
   ({ modalProps, data, onSubmit, modalCtrl }) => {
     const { t } = useTranslation();
     const [model, setModel] = useState('');
     const [modelProtocol, setModelProtocol] = useState<string>('openai');
+    const [contextLimit, setContextLimit] = useState<number | undefined>();
     const isNewApi = isNewApiPlatform(data?.platform ?? '');
     const { data: modelList, isLoading } = useModeModeList(data?.platform ?? '', data?.base_url, data?.api_key);
     const existingModels = data?.models || [];
@@ -31,9 +33,28 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (model: IProvider) 
     const remainingCount =
       existingModels.length > previewModels.length ? existingModels.length - previewModels.length : 0;
 
+    useEffect(() => {
+      if (modalProps.visible) {
+        setModel('');
+        setModelProtocol('openai');
+        setContextLimit(undefined);
+      }
+    }, [modalProps.visible]);
+
     const handleConfirm = useCallback(() => {
       if (!model || !data) return;
-      const updatedData: IProvider = { ...data, models: [...existingModels, model] };
+      const nextContextLimits = { ...data.model_context_limits };
+      if (contextLimit && contextLimit > 0) {
+        nextContextLimits[model] = contextLimit;
+      } else {
+        delete nextContextLimits[model];
+      }
+
+      const updatedData: IProvider = {
+        ...data,
+        models: [...existingModels, model],
+        model_context_limits: Object.keys(nextContextLimits).length > 0 ? nextContextLimits : undefined,
+      };
 
       // new-api 平台：添加模型协议配置 / new-api platform: add model protocol config
       if (isNewApi) {
@@ -42,7 +63,7 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (model: IProvider) 
 
       onSubmit(updatedData);
       modalCtrl.close();
-    }, [data, existingModels, model, modelProtocol, isNewApi, onSubmit, modalCtrl]);
+    }, [contextLimit, data, existingModels, model, modelProtocol, isNewApi, onSubmit, modalCtrl]);
 
     return (
       <NomiModal
@@ -76,6 +97,13 @@ const AddModelModal = ModalHOC<{ data?: IProvider; onSubmit: (model: IProvider) 
               allowCreate
               placeholder={t('settings.addModelPlaceholder')}
             ></Select>
+          </div>
+
+          <div className='space-y-8px'>
+            <div className='text-13px font-500 text-t-secondary'>
+              {t('settings.contextLimit', { defaultValue: '上下文窗口 (tokens)' })}
+            </div>
+            <ContextLimitSelect value={contextLimit} onChange={setContextLimit} />
           </div>
 
           {/* New API 协议选择 / New API Protocol Selection */}

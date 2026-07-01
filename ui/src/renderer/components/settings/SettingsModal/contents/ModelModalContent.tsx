@@ -21,6 +21,7 @@ import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { useSettingsViewMode } from '../settingsViewContext';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
+import { ContextLimitSelect, formatContextLimit } from '@/renderer/pages/settings/components/ContextLimitSelect';
 import '../model-provider.css';
 
 /**
@@ -168,6 +169,77 @@ const ModelDescriptionEditor: React.FC<{
   );
 };
 
+/**
+ * 每模型上下文窗口编辑浮层 / Per-model context window editor popover.
+ */
+const ModelContextLimitEditor: React.FC<{
+  value?: number;
+  inheritedValue?: number;
+  onSave: (value?: number) => void;
+}> = ({ value, inheritedValue, onSave }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<number | undefined>(value);
+  const effectiveValue = value ?? inheritedValue;
+
+  const handleVisibleChange = (visible: boolean) => {
+    if (visible) setDraft(value);
+    setOpen(visible);
+  };
+
+  const handleSave = () => {
+    onSave(draft);
+    setOpen(false);
+  };
+
+  const label = effectiveValue
+    ? formatContextLimit(effectiveValue)
+    : t('settings.modelContextLimitDefault', { defaultValue: '默认' });
+  const inherited = value == null && inheritedValue != null;
+
+  return (
+    <Popover
+      trigger='click'
+      position='bl'
+      popupVisible={open}
+      onVisibleChange={handleVisibleChange}
+      content={
+        <div className='flex flex-col gap-8px w-240px' onClick={(e) => e.stopPropagation()}>
+          <div className='text-12px text-t-secondary'>
+            {t('settings.modelContextLimit', { defaultValue: '模型上下文窗口' })}
+          </div>
+          <ContextLimitSelect value={draft} onChange={setDraft} />
+          {inherited && (
+            <div className='text-11px text-t-tertiary leading-4'>
+              {t('settings.modelContextLimitInherited', {
+                value: formatContextLimit(inheritedValue),
+                defaultValue: '当前继承旧供应商设置 {{value}}；选择并保存后会写入该模型自己的配置。',
+              })}
+            </div>
+          )}
+          <div className='flex items-center justify-end gap-8px'>
+            <Button size='mini' onClick={() => setOpen(false)}>
+              {t('common.cancel', { defaultValue: '取消' })}
+            </Button>
+            <Button size='mini' type='primary' onClick={handleSave}>
+              {t('common.save', { defaultValue: '保存' })}
+            </Button>
+          </div>
+        </div>
+      }
+    >
+      <Tooltip content={t('settings.editModelContextLimit', { defaultValue: '编辑模型上下文窗口' })}>
+        <Button
+          size='mini'
+          className={`model-provider-action-btn !h-24px !min-w-44px shrink-0 px-6px text-11px ${value ? 'text-[rgb(var(--primary-6))] hover:text-[rgb(var(--primary-5))]' : 'text-t-secondary hover:text-t-primary'}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {inherited ? `${label}*` : label}
+        </Button>
+      </Tooltip>
+    </Popover>
+  );
+};
 
 const ModelModalContent: React.FC = () => {
   const { t } = useTranslation();
@@ -569,6 +641,8 @@ const ModelModalContent: React.FC = () => {
                       const model_health = platform.model_health?.[model];
                       const healthStatus = model_health?.status || 'unknown';
                       const modelDescription = platform.model_descriptions?.[model] ?? '';
+                      const modelContextLimit = platform.model_context_limits?.[model];
+                      const inheritedContextLimit = modelContextLimit == null ? platform.context_limit : undefined;
 
                       return (
                         <div key={model}>
@@ -628,6 +702,27 @@ const ModelModalContent: React.FC = () => {
                                     {getProtocolLabel(modelProtocol)}
                                   </Tag>
                                 )}
+
+                                {/* 每模型上下文窗口 / Per-model context window */}
+                                <ModelContextLimitEditor
+                                  value={modelContextLimit}
+                                  inheritedValue={inheritedContextLimit}
+                                  onSave={(value) => {
+                                    const next = { ...platform.model_context_limits };
+                                    if (value && value > 0) {
+                                      next[model] = value;
+                                    } else {
+                                      delete next[model];
+                                    }
+                                    updatePlatform(
+                                      {
+                                        ...platform,
+                                        model_context_limits: next,
+                                      },
+                                      () => {}
+                                    );
+                                  }}
+                                />
 
                                 {/* 模型启用开关 / Model enable switch */}
                                 <Switch
@@ -691,10 +786,12 @@ const ModelModalContent: React.FC = () => {
                                   const newModelEnabled = { ...platform.model_enabled };
                                   const newModelHealth = { ...platform.model_health };
                                   const newModelDescriptions = { ...platform.model_descriptions };
+                                  const newModelContextLimits = { ...platform.model_context_limits };
                                   delete newProtocols[model];
                                   delete newModelEnabled[model];
                                   delete newModelHealth[model];
                                   delete newModelDescriptions[model];
+                                  delete newModelContextLimits[model];
 
                                   updatePlatform(
                                     {
@@ -706,6 +803,7 @@ const ModelModalContent: React.FC = () => {
                                       model_health: Object.keys(newModelHealth).length > 0 ? newModelHealth : undefined,
                                       model_descriptions:
                                         Object.keys(newModelDescriptions).length > 0 ? newModelDescriptions : undefined,
+                                      model_context_limits: newModelContextLimits,
                                     },
                                     () => {}
                                   );
