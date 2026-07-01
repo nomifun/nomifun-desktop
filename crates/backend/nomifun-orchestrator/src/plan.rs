@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::{
-    one_shot_completion, resolve_provider_config, streaming_completion_kinded, user_message,
+    resolve_provider_config, streaming_completion_text_or_reasoning, user_message,
     DeltaKind,
 };
 use nomifun_api_types::{FleetMember, PlannedDag, PlannedTask, RunTask, RunTaskDep};
@@ -26,8 +26,13 @@ use nomifun_common::{AppError, ProviderWithModel};
 use nomifun_db::IProviderRepository;
 use nomifun_db::models::Provider;
 
-/// How many tokens the planner may use for its one-shot DAG completion.
-const PLAN_MAX_TOKENS: u32 = 4096;
+/// How many tokens the planner may use for its DAG completion. Sized generously
+/// because reasoning models (e.g. StepFun `step-*`) spend a large share of the
+/// budget "thinking" BEFORE emitting the JSON — at 4096 the reasoning phase could
+/// exhaust the budget (`finish_reason=length`) and truncate the plan (会话10). The
+/// conversation entry plans in the background, so the extra latency is not on the
+/// critical path.
+const PLAN_MAX_TOKENS: u32 = 8192;
 
 /// Non-silent notice pushed to the lead-thinking stream when planning FALLS BACK to
 /// the single-task DAG (the lead did not emit a parseable plan). Lets the user see
@@ -482,12 +487,15 @@ impl PlanProducer for LlmPlanProducer {
     }
 }
 
-/// Run one lead-model one-shot completion, honoring an optional lead-thinking
-/// `sink`. With a sink, [`streaming_completion_kinded`] forwards each `Text` /
-/// `Reasoning` delta to it (mapped to [`LeadDeltaKind`]) while still returning the
-/// `TextDelta`-only concat; with `None`, [`one_shot_completion`] is used — the
-/// SAME bytes, but without the streaming machinery. The two paths return identical
-/// text for a given stream, so `parse_plan`/`parse_adjusted_plan` are unaffected.
+/// Run one lead-model completion for the planner, honoring an optional lead-
+/// thinking `sink`. Uses [`streaming_completion_text_or_reasoning`]: it forwards
+/// BOTH `Text` and `Reasoning` deltas to the sink (so the canvas shows the planning
+/// process) and — crucially — RETURNS the reasoning text when the model left
+/// `content` empty. Reasoning models like StepFun `step-*` emit their answer (incl.
+/// the requested plan JSON) only in the reasoning channel; the old text-only drain
+/// returned `""` for them → the planner fell back to a single-task DAG (会话10).
+/// `parse_plan`/`parse_adjusted_plan` then extract the JSON from whichever buffer
+/// carried it.
 async fn run_lead_completion(
     cfg: &nomifun_ai_agent::nomi_config::config::Config,
     system: &str,
@@ -495,19 +503,18 @@ async fn run_lead_completion(
     max_tokens: u32,
     sink: Option<&LeadThinkingSink>,
 ) -> Result<String, AppError> {
-    match sink {
-        Some(sink) => {
-            streaming_completion_kinded(
-                cfg,
-                system,
-                vec![user_message(user)],
-                max_tokens,
-                |kind, delta| (sink)(kind.into(), delta),
-            )
-            .await
-        }
-        None => one_shot_completion(cfg, system, vec![user_message(user)], max_tokens).await,
-    }
+    streaming_completion_text_or_reasoning(
+        cfg,
+        system,
+        vec![user_message(user)],
+        max_tokens,
+        |kind, delta| {
+            if let Some(sink) = sink {
+                (sink)(kind.into(), delta);
+            }
+        },
+    )
+    .await
 }
 
 /// How many tokens the lead may use for its one-shot run-summary completion.
