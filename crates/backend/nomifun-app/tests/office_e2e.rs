@@ -96,7 +96,7 @@ fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::p
     let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
 
     let snapshot = Arc::new(SnapshotService::new(data_dir));
-    let detector = Arc::new(StarOfficeDetector::new(reqwest::Client::new()));
+    let detector = Arc::new(StarOfficeDetector::local());
     let conversion = Arc::new(ConversionService::new(None));
     let proxy = Arc::new(ProxyService::new(wm.clone()));
 

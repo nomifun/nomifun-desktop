@@ -96,9 +96,13 @@ impl FeishuConnector {
 
     /// Create a connector with a custom base URL (for testing with wiremock).
     pub fn with_base_url(base_url: String) -> Self {
+        Self::with_client(base_url, Client::new())
+    }
+
+    fn with_client(base_url: String, client: Client) -> Self {
         Self {
             base_url,
-            client: Client::new(),
+            client,
             token_cache: Arc::new(Mutex::new(None)),
             last_request: Arc::new(Mutex::new(None)),
         }
@@ -498,6 +502,13 @@ mod tests {
         ConnectorScope(json!({"space_id": "space_xyz"}))
     }
 
+    fn test_connector(server: &MockServer) -> FeishuConnector {
+        FeishuConnector::with_client(
+            server.uri(),
+            Client::builder().no_proxy().build().expect("test http client"),
+        )
+    }
+
     fn token_response() -> Value {
         json!({
             "code": 0,
@@ -593,7 +604,7 @@ mod tests {
         let server = MockServer::start().await;
         setup_token_mock(&server).await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
 
         let identity = connector.validate_credentials(&cred).await.unwrap();
@@ -615,7 +626,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
 
         let err = connector.validate_credentials(&cred).await.unwrap_err();
@@ -636,7 +647,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let scope = test_scope();
         let cursor = SyncCursor::default();
@@ -672,7 +683,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let scope = test_scope();
 
@@ -708,7 +719,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
 
         let doc = connector
@@ -746,7 +757,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let scope = test_scope();
         let cursor = SyncCursor::default();
@@ -781,7 +792,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let scope = test_scope();
         let cursor = SyncCursor::default();
@@ -829,7 +840,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let scope = test_scope();
         let cursor = SyncCursor::default();
@@ -868,7 +879,7 @@ mod tests {
         let server = MockServer::start().await;
         setup_token_mock(&server).await;
 
-        let connector = FeishuConnector::with_base_url(server.uri());
+        let connector = test_connector(&server);
         let cred = test_credential();
         let bad_scope = ConnectorScope(json!({}));
         let cursor = SyncCursor::default();

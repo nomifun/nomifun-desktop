@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nomifun_common::AppError;
-use url::Url;
+use url::{Host, Url};
 
 /// Base-root-relative directory holding URL snapshots.
 pub const SNAPSHOT_REL_DIR: &str = "snapshots";
@@ -251,6 +251,15 @@ async fn resolve_validated(url: &Url, allow_private: bool) -> Result<Vec<SocketA
         .ok_or_else(|| AppError::BadRequest("URL has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(443);
 
+    if !allow_private
+        && let Some(literal) = url.host().and_then(host_ip)
+        && forbidden_ip(&literal)
+    {
+        return Err(AppError::BadRequest(format!(
+            "URL host {host} is a private or local address; fetching it is blocked"
+        )));
+    }
+
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| AppError::BadGateway(format!("DNS resolution failed for {host}: {e}")))?
@@ -265,6 +274,14 @@ async fn resolve_validated(url: &Url, allow_private: bool) -> Result<Vec<SocketA
         )));
     }
     Ok(addrs)
+}
+
+fn host_ip(host: Host<&str>) -> Option<IpAddr> {
+    match host {
+        Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+        Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+        Host::Domain(_) => None,
+    }
 }
 
 /// SSRF address policy: anything not unambiguously public is forbidden.

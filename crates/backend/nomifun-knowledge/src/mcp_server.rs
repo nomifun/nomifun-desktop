@@ -479,7 +479,10 @@ mod tests {
 
     /// POST /tool with a JSON body, return the response JSON.
     async fn post_tool(port: u16, token: &str, body: Value) -> Value {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test http client");
         let resp = client
             .post(format!("http://127.0.0.1:{port}/tool"))
             .header("Authorization", format!("Bearer {token}"))

@@ -10,7 +10,11 @@ fn dummy_audio() -> Vec<u8> {
 }
 
 fn stt_service() -> SttService {
-    SttService::new(reqwest::Client::new())
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test HTTP client should build");
+    SttService::new(client)
 }
 
 // ---------------------------------------------------------------------------

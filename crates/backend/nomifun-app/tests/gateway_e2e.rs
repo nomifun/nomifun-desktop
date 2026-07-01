@@ -17,6 +17,10 @@ struct Gateway {
     client: reqwest::Client,
 }
 
+fn local_http_client() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
 impl Gateway {
     fn from_services(services: &nomifun_app::AppServices) -> Self {
         let cfg = services
@@ -26,7 +30,7 @@ impl Gateway {
         Self {
             port: cfg.port,
             token: cfg.token.clone(),
-            client: reqwest::Client::new(),
+            client: local_http_client(),
         }
     }
 
@@ -119,7 +123,7 @@ fn error_of(body: &Value) -> &str {
 async fn gw_unauthenticated_tool_call_is_rejected() {
     let (_app, services) = build_app().await;
     let cfg = services.gateway_mcp_config.as_ref().unwrap();
-    let resp = reqwest::Client::new()
+    let resp = local_http_client()
         .post(format!("http://127.0.0.1:{}/tool", cfg.port))
         .json(&json!({"tool": "nomi_list_conversations", "args": {}}))
         .send()

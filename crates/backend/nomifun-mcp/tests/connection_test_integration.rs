@@ -14,11 +14,18 @@ use nomifun_mcp::McpConnectionTestService;
 use nomifun_mcp::McpServerTransport;
 
 fn make_service() -> McpConnectionTestService {
-    McpConnectionTestService::new(reqwest::Client::new())
+    McpConnectionTestService::new(test_http_client())
 }
 
 fn make_service_with_timeout(timeout: Duration) -> McpConnectionTestService {
-    McpConnectionTestService::new(reqwest::Client::new()).with_timeout(timeout)
+    McpConnectionTestService::new(test_http_client()).with_timeout(timeout)
+}
+
+fn test_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("test http client")
 }
 
 // ---------------------------------------------------------------------------
