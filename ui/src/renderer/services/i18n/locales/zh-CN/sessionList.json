@@ -1,5 +1,7 @@
 {
   "title": "会话",
+  "companionGroup": "桌面伙伴",
+  "companionManage": "管理桌面伙伴",
   "workpathSection": "项目/工作路径",
   "defaultWorkpath": "默认工作路径",
   "interactiveGroup": "交互会话",

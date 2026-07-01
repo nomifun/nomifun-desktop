@@ -29,6 +29,7 @@ import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conve
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
+import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
 import { OrchestrationProvider } from '../orchestration/OrchestrationContext';
 import OrchestrationTopPanel from '../orchestration/OrchestrationTopPanel';
 import ConversationContentSwitcher from '../orchestration/ConversationContentSwitcher';
@@ -354,6 +355,11 @@ const ChatConversation: React.FC<{
   }, [t]);
 
   if (conversation && conversation.type === 'nomi') {
+    // 桌面伙伴的专属会话（单会话契约）走受限面板：保留锁定模型/隐藏高级控制/强制 yolo/
+    // 固定工作区（详见 CompanionChatPanel → CompanionConversation），而非全功能编排面板。
+    if (conversation.extra?.companionSession) {
+      return <CompanionChatPanel key={conversation.id} conversation={conversation} />;
+    }
     return <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} />;
   }
 
