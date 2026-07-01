@@ -234,97 +234,70 @@ impl FeishuConnector {
         *last = Some(Instant::now());
     }
 
-    /// Make an authenticated GET request with token refresh on 401 and rate-limit
-    /// retry on 429.
+    /// Make an authenticated GET request with bounded retries: token refresh on
+    /// 401 and rate-limit back-off on 429, up to `MAX_ATTEMPTS` total. A second
+    /// transient failure no longer aborts the whole sync (the previous code
+    /// retried each condition exactly once, then surfaced any further 429/401
+    /// as a hard error).
     async fn authed_get(
         &self,
         credential: &ConnectorCredential,
         url: &str,
     ) -> Result<String, AppError> {
-        let token = self.get_token(credential).await?;
+        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_BACKOFF_SECS: u64 = 30;
 
-        self.rate_limit().await;
-
-        let resp = self
-            .client
-            .get(url)
-            .header("Authorization", format!("Bearer {token}"))
-            .send()
-            .await
-            .map_err(|e| AppError::BadGateway(format!("feishu request failed: {e}")))?;
-
-        let status = resp.status();
-
-        // Handle 429 rate limit
-        if status.as_u16() == 429 {
-            let reset_secs = resp
-                .headers()
-                .get("x-ogw-ratelimit-reset")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            warn!("feishu 429 rate limit, sleeping {reset_secs}s");
-            tokio::time::sleep(Duration::from_secs(reset_secs)).await;
-
-            // Retry once
+        let mut token = self.get_token(credential).await?;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
             self.rate_limit().await;
-            let retry_resp = self
+
+            let resp = self
                 .client
                 .get(url)
                 .header("Authorization", format!("Bearer {token}"))
                 .send()
                 .await
-                .map_err(|e| AppError::BadGateway(format!("feishu retry failed: {e}")))?;
-            let retry_status = retry_resp.status();
-            let retry_text = retry_resp
+                .map_err(|e| AppError::BadGateway(format!("feishu request failed: {e}")))?;
+
+            let status = resp.status();
+
+            // 429 rate limit — back off (capped) and retry while attempts remain.
+            if status.as_u16() == 429 && attempt < MAX_ATTEMPTS {
+                let reset_secs = resp
+                    .headers()
+                    .get("x-ogw-ratelimit-reset")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .min(MAX_BACKOFF_SECS);
+                warn!("feishu 429 rate limit (attempt {attempt}/{MAX_ATTEMPTS}), sleeping {reset_secs}s");
+                tokio::time::sleep(Duration::from_secs(reset_secs)).await;
+                continue;
+            }
+
+            // 401 — invalidate + refresh the token and retry while attempts remain.
+            if status.as_u16() == 401 && attempt < MAX_ATTEMPTS {
+                warn!("feishu 401 unauthorized (attempt {attempt}/{MAX_ATTEMPTS}), refreshing token");
+                self.invalidate_token().await;
+                token = self.fetch_token(credential).await?;
+                continue;
+            }
+
+            let text = resp
                 .text()
                 .await
-                .map_err(|e| AppError::BadGateway(format!("feishu retry body: {e}")))?;
-            if !retry_status.is_success() {
+                .map_err(|e| AppError::BadGateway(format!("feishu response body: {e}")))?;
+
+            if !status.is_success() {
                 return Err(AppError::BadGateway(format!(
-                    "feishu retry returned {retry_status}: {retry_text}"
+                    "feishu returned {status}: {text}"
                 )));
             }
-            return Ok(retry_text);
+
+            return Ok(text);
         }
-
-        // Handle 401 — invalidate token and retry once
-        if status.as_u16() == 401 {
-            self.invalidate_token().await;
-            let new_token = self.fetch_token(credential).await?;
-            self.rate_limit().await;
-            let retry_resp = self
-                .client
-                .get(url)
-                .header("Authorization", format!("Bearer {new_token}"))
-                .send()
-                .await
-                .map_err(|e| AppError::BadGateway(format!("feishu 401 retry failed: {e}")))?;
-            let retry_status = retry_resp.status();
-            let retry_text = retry_resp
-                .text()
-                .await
-                .map_err(|e| AppError::BadGateway(format!("feishu 401 retry body: {e}")))?;
-            if !retry_status.is_success() {
-                return Err(AppError::BadGateway(format!(
-                    "feishu 401 retry returned {retry_status}: {retry_text}"
-                )));
-            }
-            return Ok(retry_text);
-        }
-
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| AppError::BadGateway(format!("feishu response body: {e}")))?;
-
-        if !status.is_success() {
-            return Err(AppError::BadGateway(format!(
-                "feishu returned {status}: {text}"
-            )));
-        }
-
-        Ok(text)
     }
 
     /// Parse a Feishu API envelope, checking `code == 0`.
@@ -472,10 +445,15 @@ impl KnowledgeConnector for FeishuConnector {
                 all_blocks.extend(items);
             }
 
-            if data.has_more.unwrap_or(false) {
-                page_token = data.page_token;
-            } else {
-                break;
+            // Advance only on an explicit non-empty next token. A malformed
+            // response (`has_more=true` but missing/empty page_token) would
+            // otherwise re-request the first page forever (each iteration also
+            // sleeps on the rate limiter, so it hangs the whole sync).
+            match data.page_token {
+                Some(tok) if data.has_more.unwrap_or(false) && !tok.is_empty() => {
+                    page_token = Some(tok);
+                }
+                _ => break,
             }
         }
 

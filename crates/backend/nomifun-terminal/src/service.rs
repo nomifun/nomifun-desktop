@@ -664,7 +664,12 @@ impl TerminalService {
                 writeback_eagerness: Some(&outcome.writeback_eagerness),
                 target_id: &id_str,
                 has_search_tool: tool_available,
-                has_write_tool: false,
+                // The same scoped MCP bridge that exposes knowledge_search also
+                // exposes knowledge_write, so point the model at the tool (not
+                // the file-write prose) when write-back is on and the tool will
+                // actually be injected — mirroring the ACP assembler. `mounts`
+                // is already non-empty here (early return above).
+                has_write_tool: tool_available && outcome.writeback,
             },
         ) {
             // README.md is on the mount engine's MANAGED_KEEP whitelist, so later

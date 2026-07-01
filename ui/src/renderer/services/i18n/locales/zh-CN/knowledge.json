@@ -420,7 +420,8 @@
     "webTitleOptional": "标题（可选）",
     "webUrlList": "网址列表",
     "webUrlMax": "（最多 16 条）",
-    "webUrlRequired": "请至少填写一个网址"
+    "webUrlRequired": "请至少填写一个网址",
+    "webUrlInvalid": "网址格式不正确，需以 http:// 或 https:// 开头：{{url}}"
   },
   "subtitle": "集中管理你的专属领域知识（Markdown 文档目录）。会话挂载知识库后即可作为拓展知识来源，多个会话可复用同一个库；开启回血后会话还能持续沉淀新知识。也可以直接向目录中放入 .md 文件。",
   "tabs": {

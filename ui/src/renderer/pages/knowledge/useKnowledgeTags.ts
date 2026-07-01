@@ -35,6 +35,17 @@ export function useKnowledgeTags() {
     void refresh();
   }, [refresh]);
 
+  // Re-list when ANY client mutates tags (this instance, another component, or
+  // another window) — tag CRUD broadcasts `knowledge.tag-changed`. Without this
+  // a tag created in one view (e.g. the create studio) never appeared in
+  // another's filter bar / tag→label map until remount.
+  useEffect(() => {
+    const unsub = ipcBridge.knowledge.onTagChanged.on(() => {
+      void refresh();
+    });
+    return () => unsub();
+  }, [refresh]);
+
   const createTag = useCallback(
     async (label: string, color?: string) => {
       const tag = await ipcBridge.knowledge.createTag.invoke({ label, color });

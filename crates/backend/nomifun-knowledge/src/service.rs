@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::autogen::{self, KnowledgeCompleter};
-use crate::connector::{ConnectorCredential, ConnectorIdentity, ConnectorScope, KnowledgeConnector, RemoteDocRef, SyncCursor};
+use crate::connector::{ConnectorCredential, ConnectorIdentity, ConnectorScope, KnowledgeConnector, RemoteDocRef, SyncCursor, SyncPage};
 use crate::events::KnowledgeEventEmitter;
 use crate::mount::{self, MountSpec};
 use crate::source_url::{self, HttpFetcher, PageFetcher};
@@ -248,6 +248,12 @@ pub struct MountOutcome {
     /// `conservative` or `aggressive` ("回写意识"); meaningful only while
     /// `writeback` is true.
     pub writeback_eagerness: String,
+    /// Raw `channel_write_enabled` opt-in from the binding. Carried verbatim
+    /// (independent of `writeback`) so the nomi factory can resolve the
+    /// external-IM-channel write policy with the SAME value the ACP path reads
+    /// at write time — without it the nomi path reconstructs the binding with a
+    /// `false` default and channel write-back is permanently disabled.
+    pub channel_write_enabled: bool,
 }
 
 /// What the model addressed for a write: an opaque `handle` (preferred — from
@@ -641,27 +647,53 @@ impl KnowledgeService {
         let cred = self.load_credential(&cred_ref).await?;
         let scope = ConnectorScope(source.scope.clone().unwrap_or(serde_json::Value::Null));
 
-        // Resume the incremental cursor from persisted sync state.
+        // Resume the incremental cursor from persisted sync state. The
+        // watermark (remote max edit_time) is the real filter input; legacy
+        // rows without one fall back to `last_sync_at`.
         let prev_sync = source.sync.clone().unwrap_or_default();
-        let cursor = SyncCursor { last_sync_at: prev_sync.last_sync_at, opaque: prev_sync.cursor.clone() };
+        let prev_watermark = prev_sync.watermark.or(prev_sync.last_sync_at);
+        let cursor = SyncCursor { last_sync_at: prev_watermark, opaque: prev_sync.cursor.clone() };
 
         let root = PathBuf::from(&row.root_path);
         let snap_dir = root.join(source_url::SNAPSHOT_REL_DIR);
 
         // Phase 1 — paginate list_documents, collecting refs + tombstones.
-        // The terminal page's `updated_cursor` is the one we persist.
+        // A mid-pagination failure is NON-fatal: keep whatever pages we got and
+        // record the error (the watermark is held below so the run is retried),
+        // rather than discarding a large partial sync.
         let mut all_docs: Vec<RemoteDocRef> = Vec::new();
         let mut deleted_ids: Vec<String> = Vec::new();
         let mut page_token: Option<String> = None;
-        let final_cursor = loop {
-            let page = connector.list_documents(&cred, &scope, &cursor, page_token.as_deref()).await?;
-            all_docs.extend(page.docs);
-            deleted_ids.extend(page.deleted_ids);
-            match page.next_page_token {
-                Some(tok) if !tok.is_empty() => page_token = Some(tok),
-                _ => break page.updated_cursor,
+        let mut last_opaque = prev_sync.cursor.clone();
+        let mut list_errored = false;
+        loop {
+            match connector.list_documents(&cred, &scope, &cursor, page_token.as_deref()).await {
+                Ok(page) => {
+                    let SyncPage { docs, deleted_ids: dels, next_page_token, updated_cursor } = page;
+                    all_docs.extend(docs);
+                    deleted_ids.extend(dels);
+                    last_opaque = updated_cursor.opaque;
+                    match next_page_token {
+                        Some(tok) if !tok.is_empty() => page_token = Some(tok),
+                        _ => break,
+                    }
+                }
+                Err(e) => {
+                    // The very first page failing with nothing collected is a
+                    // genuine sync failure — surface it. A later page failing
+                    // leaves a usable partial set.
+                    if all_docs.is_empty() && deleted_ids.is_empty() {
+                        return Err(e);
+                    }
+                    tracing::warn!(error = %e, "feishu pagination failed mid-run; syncing partial set");
+                    list_errored = true;
+                    break;
+                }
             }
-        };
+        }
+        // Remote high-water-mark across ALL pages (the per-page cursor only sees
+        // the last page since the same input cursor is passed each page).
+        let batch_max_edit = all_docs.iter().map(|d| d.edit_time).max();
 
         // Phase 2 — serial fetch → compress → snapshot (deterministic slug per
         // remote_id, so deletions below can target files without frontmatter
@@ -679,20 +711,7 @@ impl KnowledgeService {
                 }
             };
 
-            let mut body = fetched_doc.markdown;
-            if body.len() > autogen::SNAPSHOT_COMPRESS_THRESHOLD
-                && let Some(c) = completer.as_deref()
-            {
-                let input = source_url::truncate_to_bytes(&body, autogen::SNAPSHOT_LLM_INPUT_MAX);
-                match c.complete(autogen::SNAPSHOT_COMPRESS_SYSTEM, input).await {
-                    Ok(condensed) if !condensed.trim().is_empty() => body = condensed.trim().to_owned(),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(remote_id = %fetched_doc.remote_id, error = %e, "snapshot compression failed; storing raw"),
-                }
-            }
-            if body.len() > source_url::SNAPSHOT_MAX_BYTES {
-                body = source_url::truncate_to_bytes(&body, source_url::SNAPSHOT_MAX_BYTES).to_owned();
-            }
+            let body = condense_snapshot_body(fetched_doc.markdown, completer.as_deref()).await;
 
             let slug_base = connector_doc_slug(&fetched_doc.remote_id);
             let mut slug = slug_base.clone();
@@ -740,13 +759,31 @@ impl KnowledgeService {
             }
         }
 
-        // Persist the cursor + last-sync stamp + any error summary.
-        let last_error = if errors.is_empty() { None } else { Some(errors.join("; ")) };
+        // Persist the cursor + watermark + last-sync stamp + any error summary.
+        let had_errors = list_errored || !errors.is_empty();
+        let last_error = if errors.is_empty() {
+            list_errored.then(|| "pagination failed mid-run; partial sync".to_owned())
+        } else {
+            Some(errors.join("; "))
+        };
         let last_sync_at = Some(now_ms());
+        // Advance the remote watermark ONLY on a fully clean run. If any doc
+        // fetch/write failed (or pagination was partial), hold the previous
+        // watermark so every changed doc — including the failed ones — is
+        // re-evaluated next run instead of being skipped forever.
+        let watermark = if had_errors {
+            prev_watermark
+        } else {
+            match (prev_watermark, batch_max_edit) {
+                (Some(p), Some(b)) => Some(p.max(b)),
+                (p, b) => b.or(p),
+            }
+        };
         source.sync = Some(ConnectorSyncState {
             interval_minutes: prev_sync.interval_minutes,
             last_sync_at,
-            cursor: final_cursor.opaque,
+            watermark,
+            cursor: last_opaque,
             last_error,
         });
         // Keep the URL-source stamp coherent too (mount/info reads it).
@@ -1134,7 +1171,7 @@ impl KnowledgeService {
                 .await
                 .map_err(|e| AppError::Internal(format!("failed to create parent dirs: {e}")))?;
         }
-        let tmp = path.with_extension("md.tmp");
+        let tmp = atomic_tmp_path(&path);
         tokio::fs::write(&tmp, content)
             .await
             .map_err(|e| AppError::Internal(format!("failed to write file: {e}")))?;
@@ -1670,22 +1707,7 @@ impl KnowledgeService {
             format!("{url}: {e}")
         })?;
 
-        let mut body = page.markdown;
-        if body.len() > autogen::SNAPSHOT_COMPRESS_THRESHOLD
-            && let Some(completer) = completer
-        {
-            let input = source_url::truncate_to_bytes(&body, autogen::SNAPSHOT_LLM_INPUT_MAX);
-            match completer.complete(autogen::SNAPSHOT_COMPRESS_SYSTEM, input).await {
-                Ok(condensed) if !condensed.trim().is_empty() => body = condensed.trim().to_owned(),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(url, error = %e, "snapshot compression failed; storing raw");
-                }
-            }
-        }
-        if body.len() > source_url::SNAPSHOT_MAX_BYTES {
-            body = source_url::truncate_to_bytes(&body, source_url::SNAPSHOT_MAX_BYTES).to_owned();
-        }
+        let body = condense_snapshot_body(page.markdown, completer).await;
         Ok(PreparedSnapshot {
             title: page.title,
             body,
@@ -1934,6 +1956,7 @@ impl KnowledgeService {
             writeback: binding.enabled && binding.writeback,
             writeback_mode: binding.writeback_mode,
             writeback_eagerness: binding.writeback_eagerness,
+            channel_write_enabled: binding.channel_write_enabled,
         }
     }
 
@@ -2494,15 +2517,57 @@ async fn prune_orphan_snapshots(root: &Path, entries: &[KnowledgeSourceEntry]) {
 }
 
 /// Atomic text write (temp sibling + rename), creating parent dirs.
+/// Condense an oversized snapshot body for storage and flag lossy results.
+/// Above the compress threshold (and with a completer) the body is
+/// LLM-summarized; the summarizer's input is byte-capped, so a body larger than
+/// that cap is summarized from its HEAD only. A final hard cap bounds storage.
+/// When either path drops content, a visible marker is appended so a partial
+/// snapshot is never mistaken — by the user OR the agent — for the full doc.
+async fn condense_snapshot_body(body: String, completer: Option<&dyn KnowledgeCompleter>) -> String {
+    let original_len = body.len();
+    let mut out = body;
+    let mut summarized_from_head = false;
+    if out.len() > autogen::SNAPSHOT_COMPRESS_THRESHOLD
+        && let Some(completer) = completer
+    {
+        let input_truncated = out.len() > autogen::SNAPSHOT_LLM_INPUT_MAX;
+        let input = source_url::truncate_to_bytes(&out, autogen::SNAPSHOT_LLM_INPUT_MAX);
+        match completer.complete(autogen::SNAPSHOT_COMPRESS_SYSTEM, input).await {
+            Ok(condensed) if !condensed.trim().is_empty() => {
+                out = condensed.trim().to_owned();
+                summarized_from_head = input_truncated;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "snapshot compression failed; storing raw"),
+        }
+    }
+    let mut hard_truncated = false;
+    if out.len() > source_url::SNAPSHOT_MAX_BYTES {
+        out = source_url::truncate_to_bytes(&out, source_url::SNAPSHOT_MAX_BYTES).to_owned();
+        hard_truncated = true;
+    }
+    if summarized_from_head {
+        out.push_str(&format!(
+            "\n\n> ⚠️ 注:本快照由原文前 {} KB 摘要生成(原文约 {} KB),后半内容未纳入。\n",
+            autogen::SNAPSHOT_LLM_INPUT_MAX / 1024,
+            original_len / 1024
+        ));
+    } else if hard_truncated {
+        out.push_str(&format!(
+            "\n\n> ⚠️ 注:本快照内容已截断至 {} KB 上限。\n",
+            source_url::SNAPSHOT_MAX_BYTES / 1024
+        ));
+    }
+    out
+}
+
 async fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| AppError::Internal(format!("failed to create parent dirs: {e}")))?;
     }
-    let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
+    let tmp = atomic_tmp_path(path);
     tokio::fs::write(&tmp, content)
         .await
         .map_err(|e| AppError::Internal(format!("failed to write file: {e}")))?;
@@ -2511,6 +2576,20 @@ async fn write_text_atomic(path: &Path, content: &str) -> Result<(), AppError> {
         return Err(AppError::Internal(format!("failed to finalize file: {e}")));
     }
     Ok(())
+}
+
+/// A collision-free sibling temp path for atomic write+rename. Two concurrent
+/// writers targeting the same file MUST NOT share a temp name (they would
+/// truncate each other); the pid+counter suffix makes each unique. The `.tmp`
+/// tail keeps the temp out of `is_md` listings/search, and an orphan left by a
+/// crash is harmless (never listed).
+fn atomic_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}.{}.tmp", std::process::id(), n));
+    PathBuf::from(name)
 }
 
 /// Max chars of the mount-time `summary` extracted from a base's README.
@@ -2640,16 +2719,68 @@ async fn build_toc(root: &Path) -> Vec<String> {
 /// First `# `-style heading of a markdown file, read from the first KB only
 /// (bounds IO for large files); single line, truncated to keep the prompt
 /// row compact.
+/// First ATX markdown heading (`# …` … `###### …`) in `text`, trimmed. Requires
+/// whitespace (or end-of-line) after the `#` run, so a shebang `#!/bin/sh`, a
+/// `#hashtag`, or a `# comment` inside code is NOT mistaken for a title; skips
+/// fenced code blocks (``` / ~~~) and a leading YAML front-matter block (whose
+/// `# comment` lines and `key: #x` are not headings).
+fn first_atx_heading(text: &str) -> Option<String> {
+    let mut in_fence: Option<char> = None;
+    let mut in_frontmatter = false;
+    let mut started = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        // A leading `---` (first non-empty line) opens a YAML front-matter block.
+        if !started && !trimmed.is_empty() {
+            started = true;
+            if trimmed == "---" {
+                in_frontmatter = true;
+                continue;
+            }
+        }
+        if in_frontmatter {
+            if trimmed == "---" || trimmed == "..." {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+        // Toggle fenced code-block state on ``` / ~~~ (a fence only closes on the
+        // same marker char it opened with).
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let fence_char = trimmed.chars().next().unwrap_or('`');
+            match in_fence {
+                Some(open) if open == fence_char => in_fence = None,
+                Some(_) => {}
+                None => in_fence = Some(fence_char),
+            }
+            continue;
+        }
+        if in_fence.is_some() {
+            continue;
+        }
+        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) {
+            let rest = &trimmed[hashes..];
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                let title = rest.trim();
+                if !title.is_empty() {
+                    return Some(title.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn first_heading(path: &Path) -> Option<String> {
     use std::io::Read;
-    let mut buf = vec![0u8; 1024];
+    // 4 KiB is enough to clear a typical YAML front-matter block before the
+    // first heading (the old 1 KiB could be entirely front-matter).
+    let mut buf = vec![0u8; 4096];
     let mut file = std::fs::File::open(path).ok()?;
     let n = file.read(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf[..n]);
-    let title = text
-        .lines()
-        .find_map(|l| l.trim().strip_prefix('#').map(|t| t.trim_start_matches('#').trim().to_owned()))
-        .filter(|t| !t.is_empty())?;
+    let title = first_atx_heading(&text)?;
     Some(title.chars().take(60).collect())
 }
 
@@ -2675,13 +2806,7 @@ fn query_terms(query_lc: &str) -> Vec<String> {
 /// First markdown heading (`# ...`) text, trimmed of leading `#`/space, or "".
 /// The content-string counterpart of [`first_heading`] (which reads from disk).
 fn first_heading_text(content: &str) -> String {
-    for line in content.lines().take(40) {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix('#') {
-            return rest.trim_start_matches('#').trim().to_string();
-        }
-    }
-    String::new()
+    first_atx_heading(content).unwrap_or_default()
 }
 
 /// Score a markdown doc against the query. Returns `(score, snippet)` or `None`
@@ -2960,6 +3085,7 @@ impl KnowledgeService {
             })
             .await?;
 
+        self.emitter.emit_tag_changed();
         Ok(KnowledgeTag {
             key,
             label: label.to_owned(),
@@ -2996,6 +3122,7 @@ impl KnowledgeService {
             .into_iter()
             .find(|r| r.key == key)
             .ok_or_else(|| AppError::NotFound(format!("knowledge tag {key}")))?;
+        self.emitter.emit_tag_changed();
         Ok(KnowledgeTag {
             key: row.key,
             label: row.label,
@@ -3024,10 +3151,15 @@ impl KnowledgeService {
                 };
                 base.updated_at = now_ms();
                 self.repo.update_base(&base).await?;
+                // The base's tag chips changed — refresh any base list/detail
+                // view (the tag-changed signal below only refreshes tag maps).
+                let info = self.row_to_info(base).await;
+                self.emitter.emit_base_updated(&info);
             }
         }
         // 2. Delete the tag row itself.
         self.repo.delete_knowledge_tag(key).await?;
+        self.emitter.emit_tag_changed();
         Ok(())
     }
 }
@@ -3198,6 +3330,32 @@ mod tests {
         assert!(safe_md_path(root, "").is_err());
         #[cfg(windows)]
         assert!(safe_md_path(root, "C:\\evil.md").is_err());
+    }
+
+    #[test]
+    fn first_atx_heading_is_strict_and_skips_noise() {
+        // Plain ATX heading.
+        assert_eq!(first_atx_heading("# 标题\n正文").as_deref(), Some("标题"));
+        assert_eq!(first_atx_heading("### Third level\n").as_deref(), Some("Third level"));
+        // Requires whitespace after the run: a shebang / hashtag is NOT a heading.
+        assert_eq!(first_atx_heading("#!/bin/sh\n# 真标题").as_deref(), Some("真标题"));
+        assert_eq!(first_atx_heading("#hashtag\nplain").as_deref(), None);
+        // 7+ hashes is not a heading.
+        assert_eq!(first_atx_heading("####### too deep\n").as_deref(), None);
+        // Fenced code blocks are skipped (the `# rm` inside is a comment).
+        assert_eq!(
+            first_atx_heading("```sh\n# rm -rf /\n```\n## 真标题\n").as_deref(),
+            Some("真标题")
+        );
+        // Leading YAML front-matter (incl. its `# comment`) is skipped.
+        assert_eq!(
+            first_atx_heading("---\ntitle: x\n# not a heading\n---\n# 文档标题\n").as_deref(),
+            Some("文档标题")
+        );
+        // No heading anywhere.
+        assert_eq!(first_atx_heading("just text\nmore text\n"), None);
+        // Closing-hash run trimmed via the leading-run + trim only when spaced.
+        assert_eq!(first_atx_heading("#  spaced  \n").as_deref(), Some("spaced"));
     }
 
     #[tokio::test]
@@ -5336,7 +5494,7 @@ mod tests {
     /// moves a vanished doc into `snapshots/_trash/` (never hard-deletes).
     #[tokio::test]
     async fn connector_sync_writes_snapshots_persists_cursor_and_trashes_deletions() {
-        use crate::connector::{FetchedConnectorDoc, SyncPage};
+        use crate::connector::FetchedConnectorDoc;
         use nomifun_db::DbError;
         use nomifun_db::models::ConnectorCredentialRow;
         use std::sync::Mutex as StdMutex;
@@ -5476,6 +5634,9 @@ mod tests {
         assert_eq!(sync.last_error, None);
         assert!(sync.last_sync_at.is_some());
         assert_eq!(sync.cursor, serde_json::json!({ "p": 1 }), "terminal page cursor persisted");
+        // Watermark is the REMOTE max edit_time (20), not local now_ms — this is
+        // what the incremental filter resumes from, avoiding clock-skew misses.
+        assert_eq!(sync.watermark, Some(20), "watermark = max remote edit_time");
 
         // Second sync: DOCBBB deleted → moved to _trash, DOCAAA survives.
         *conn.docs.lock().unwrap() =
