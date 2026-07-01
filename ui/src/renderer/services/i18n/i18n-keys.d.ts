@@ -544,6 +544,8 @@ export type I18nKey =
   | 'conversation.orchestration.planning'
   | 'conversation.orchestration.resizeCanvas'
   | 'conversation.orchestration.startTitle'
+  | 'conversation.pending.creating'
+  | 'conversation.pending.startingAutoWork'
   | 'conversation.sendbox.hint'
   | 'conversation.sessionMetrics.cacheHitCaption'
   | 'conversation.sessionMetrics.cacheHitRate'
