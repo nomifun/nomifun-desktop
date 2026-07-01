@@ -15,6 +15,7 @@
     "build:signed": "bash scripts/desktop-build-signed.sh",
     "build:updater": "CI=true tauri build --config apps/desktop/tauri.conf.json --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}' && bun scripts/prune-build.mjs --post",
     "make:latest": "bun scripts/make-latest-json.mjs",
+    "release:mac": "bun scripts/run-mac-release.mjs",
     "release:win": "bun scripts/run-win-release.mjs",
     "build:ui": "bun run --filter=./ui build",
     "serve:web": "bun scripts/prune-build.mjs && bun scripts/free-ports.mjs 8787 && cargo run -p nomifun-web",
