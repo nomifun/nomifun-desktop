@@ -15,6 +15,7 @@ import { memberShortLabel } from '@/renderer/pages/orchestrator/RunDetail/member
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useOrchestration } from './OrchestrationContext';
 import NodePreconfigPanel from './NodePreconfigPanel';
+import RouteErrorBoundary from '@/renderer/components/layout/RouteErrorBoundary';
 import ReadOnlyConversationView from '@/renderer/pages/orchestrator/RunDetail/ReadOnlyConversationView';
 import styles from './projectedWorkerView.module.css';
 
@@ -338,11 +339,15 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
           Not-started / loading covered; otherwise the worker's own conversation
           with its full composer (model pill, attachments, @, slash, send). */}
       <div className={styles.body}>
-        {conversationId === undefined ? (
-          canConfig ? (
+        <RouteErrorBoundary>
+          {conversationId === undefined ? (
+            canConfig ? (
             // Pending node — no worker conversation yet. The body IS the 启动前配置台
-            // (model override + 预置要求), applied automatically at dispatch.
-            <NodePreconfigPanel runId={runId} task={task} settled={false} onSaved={payload.refetch} />
+            // (model override + 预置要求), applied automatically at dispatch. Own
+            // scroll container so it fills the pane and is fully reachable.
+            <div className='flex-1 min-h-0 overflow-y-auto'>
+              <NodePreconfigPanel runId={runId} task={task} settled={false} onSaved={payload.refetch} />
+            </div>
           ) : (
             <div className={styles.center}>
               <span className={styles.emptyIcon}>
@@ -361,9 +366,12 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
         ) : loading ? (
           <Spin loading className='flex flex-1 items-center justify-center' />
         ) : conversation ? (
-          <div className='flex flex-1 min-h-0 flex-col'>
-            {/* Settled node — a collapsible 重跑配置 (model + 预置要求) above the
-                read-only transcript; the change applies on the next 重跑. */}
+          // Settled node — an OPTIONAL collapsible 重跑配置 above the read-only
+          // transcript. Rendered as SIBLINGS of the flex-col `.body` (NO wrapper
+          // div) so ReadOnlyConversationView (NomiChat, `flex-1`) keeps filling the
+          // remaining height exactly as before — wrapping it in a plain block broke
+          // NomiChat's flex sizing (the composer floated to the top).
+          <>
             {canConfig && (
               <div className='shrink-0 border-b border-solid border-[var(--color-border-2)]'>
                 <div
@@ -389,17 +397,22 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
                   />
                 </div>
                 {configOpen && (
-                  <div className='border-t border-solid border-[var(--color-border-2)]'>
+                  <div className='max-h-340px overflow-y-auto border-t border-solid border-[var(--color-border-2)]'>
                     <NodePreconfigPanel runId={runId} task={task} settled onSaved={payload.refetch} />
                   </div>
                 )}
               </div>
             )}
-            <div className='flex-1 min-h-0'>
-              <ReadOnlyConversationView conversation={conversation} agent_name={task.title} />
-            </div>
+            <ReadOnlyConversationView conversation={conversation} agent_name={task.title} />
+          </>
+        ) : canConfig ? (
+          // A conversation id exists but the record couldn't load — still let the
+          // user configure this node instead of showing a blank body.
+          <div className='flex-1 min-h-0 overflow-y-auto'>
+            <NodePreconfigPanel runId={runId} task={task} settled onSaved={payload.refetch} />
           </div>
         ) : null}
+        </RouteErrorBoundary>
       </div>
     </div>
   );
