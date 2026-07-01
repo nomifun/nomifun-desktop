@@ -427,14 +427,20 @@ mod tests {
     async fn set_behavior_policy_overwrites_column_and_misses_unknown_row() {
         let (repo, _db) = setup().await;
         let updated = repo
-            .set_behavior_policy("agent_builtin_opencode", r#"{"supports_team":true}"#)
+            .set_behavior_policy("agent_builtin_opencode", r#"{"supports_side_question":true}"#)
             .await
             .unwrap()
             .expect("opencode row exists");
-        assert_eq!(updated.behavior_policy.as_deref(), Some(r#"{"supports_team":true}"#));
+        assert_eq!(
+            updated.behavior_policy.as_deref(),
+            Some(r#"{"supports_side_question":true}"#)
+        );
         // Re-read confirms persistence.
         let row = repo.get("agent_builtin_opencode").await.unwrap().unwrap();
-        assert_eq!(row.behavior_policy.as_deref(), Some(r#"{"supports_team":true}"#));
+        assert_eq!(
+            row.behavior_policy.as_deref(),
+            Some(r#"{"supports_side_question":true}"#)
+        );
         // Unknown id is a no-op returning None.
         assert!(repo.set_behavior_policy("missing", "{}").await.unwrap().is_none());
     }

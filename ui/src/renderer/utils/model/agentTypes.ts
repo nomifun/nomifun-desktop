@@ -42,12 +42,6 @@ export type AgentEnvEntry = {
  */
 export type BehaviorPolicy = {
   supports_side_question?: boolean;
-  /**
-   * Whether the agent is allowed into multi-agent team mode (MCP stdio capable).
-   * Set by the manual `team-capable` override or derived from MCP capability
-   * detection. Read defensively — older rows may not carry it.
-   */
-  supports_team?: boolean;
 };
 
 /**
@@ -89,8 +83,6 @@ export type AgentMetadata = {
   enabled: boolean;
   /** True iff the backend resolved the spawn command on `$PATH` at hydrate time. */
   available: boolean;
-  /** True when the agent supports team mode (MCP stdio capable). Computed by backend. */
-  team_capable?: boolean;
 
   /** Pre-resolution spawn command as stored in the catalog (e.g. "bun"). */
   command?: string;

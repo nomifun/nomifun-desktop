@@ -6,8 +6,8 @@
  */
 
 import React from 'react';
-import { Avatar, Button, Switch, Tooltip, Typography } from '@arco-design/web-react';
-import { Delete, EditTwo, Help, Robot } from '@icon-park/react';
+import { Avatar, Button, Switch, Typography } from '@arco-design/web-react';
+import { Delete, EditTwo, Robot } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { resolveAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
@@ -49,21 +49,6 @@ type AgentCardProps =
       type: 'detected';
       agent: DetectedAgent;
       onGoToChat: () => void;
-      /** Multi-agent team eligibility (MCP stdio capable). Renders the team toggle when provided. */
-      teamCapable?: boolean;
-      /** Whether the agent declared MCP capability in its ACP handshake. When false, opting it into a team is risky. */
-      mcpDeclared?: boolean;
-      /** Toggles the manual team-capable override; absent = no toggle rendered. */
-      onToggleTeam?: (supportsTeam: boolean) => void;
-      /** Disables the toggle (e.g. while the override request is in flight). */
-      teamToggleLoading?: boolean;
-      /**
-       * Locks the team toggle ON and disables it. Used for the built-in Nomi
-       * agent, which the backend hard-whitelists as team-capable
-       * (`TEAM_CAPABLE_BACKENDS`) — toggling it off would silently revert, so we
-       * surface it as a fixed, non-editable state instead.
-       */
-      teamLocked?: boolean;
     }
   | {
       type: 'installable';
@@ -86,7 +71,7 @@ const AgentCard: React.FC<AgentCardProps> = (props) => {
   const goToChatButtonClassName = '!w-full !justify-center !rounded-10px !text-12px';
 
   if (props.type === 'detected') {
-    const { agent, onGoToChat, teamCapable, mcpDeclared, onToggleTeam, teamToggleLoading, teamLocked } = props;
+    const { agent, onGoToChat } = props;
     const extensionAvatar = resolveExtensionAssetUrl(agent.isExtension ? agent.avatar : undefined);
     const logo =
       extensionAvatar ||
@@ -96,10 +81,6 @@ const AgentCard: React.FC<AgentCardProps> = (props) => {
         custom_agent_id: agent.custom_agent_id,
         isExtension: agent.isExtension,
       });
-
-    // The risk hint is only meaningful before opting in: an agent that hasn't
-    // declared MCP capability may fail to spawn its MCP stdio bridge in a team.
-    const showTeamRisk = Boolean(onToggleTeam) && !teamCapable && mcpDeclared === false;
 
     return (
       <div className='flex min-h-[154px] flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px transition-colors hover:border-[var(--color-border-3)]'>
@@ -117,28 +98,6 @@ const AgentCard: React.FC<AgentCardProps> = (props) => {
             {t('settings.agentManagement.installed')}
           </Typography.Text>
         </div>
-
-        {onToggleTeam && (
-          <div className='mb-8px flex items-center justify-center gap-6px'>
-            <Typography.Text className='text-11px text-t-secondary'>
-              {t('settings.agentManagement.allowTeam')}
-            </Typography.Text>
-            {showTeamRisk && (
-              <Tooltip content={t('settings.agentManagement.teamRiskHint')} position='top'>
-                <span className='inline-flex shrink-0 cursor-help'>
-                  <Help theme='outline' size='12' className='text-warning-6' />
-                </span>
-              </Tooltip>
-            )}
-            <Switch
-              size='small'
-              checked={teamLocked || Boolean(teamCapable)}
-              disabled={teamLocked}
-              loading={teamToggleLoading}
-              onChange={(v) => onToggleTeam(v)}
-            />
-          </div>
-        )}
 
         <Button size='small' type='secondary' onClick={onGoToChat} className={goToChatButtonClassName}>
           {t('settings.agentManagement.goToChat')}

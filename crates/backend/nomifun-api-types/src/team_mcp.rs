@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Passed through `AcpBuildExtra::guide_mcp_config` by the factory so that
 /// `build_new_session_request` can inject the Guide as a stdio MCP server
-/// when the backend is team-capable and this is not a team session.
+/// when a caller explicitly supplies Guide configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuideMcpConfig {
     pub port: u16,

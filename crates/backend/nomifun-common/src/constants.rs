@@ -28,36 +28,6 @@ pub const BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// File upload size limit (30 MB).
 pub const UPLOAD_MAX_SIZE: usize = 30 * 1024 * 1024;
 
-// --- Team mode ---
-
-/// Hard-coded backends that always support team mode, regardless of ACP capability detection.
-pub const TEAM_CAPABLE_BACKENDS: &[&str] = &["claude", "codex", "gemini", "nomi", "codebuddy"];
-
-/// Determine if an agent supports team mode based on its persisted `agent_capabilities` JSON.
-///
-/// Returns `true` if:
-/// 1. The backend is in the hard whitelist, OR
-/// 2. The `agent_capabilities` JSON contains an `mcp_capabilities` / `mcpCapabilities` / `mcp`
-///    field (per ACP spec, presence of any MCP transport implies stdio support).
-pub fn is_team_capable(backend: &str, agent_capabilities: Option<&serde_json::Value>) -> bool {
-    if TEAM_CAPABLE_BACKENDS.contains(&backend) {
-        return true;
-    }
-    has_mcp_capability(agent_capabilities)
-}
-
-/// Check whether `agent_capabilities` JSON declares any MCP transport.
-/// Per ACP spec: stdio is the baseline; if any transport is declared, the agent supports MCP.
-pub fn has_mcp_capability(agent_capabilities: Option<&serde_json::Value>) -> bool {
-    let Some(caps) = agent_capabilities else {
-        return false;
-    };
-    caps.get("mcp_capabilities")
-        .or_else(|| caps.get("mcpCapabilities"))
-        .or_else(|| caps.get("mcp"))
-        .is_some()
-}
-
 // --- Image processing ---
 
 pub const SUPPORTED_IMAGE_EXTENSIONS: &[&str] = &[".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".svg"];

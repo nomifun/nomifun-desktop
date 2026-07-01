@@ -969,17 +969,6 @@ export const acpConversation = {
     (p) => `/api/agents/${p.id}/enabled`,
     (p) => ({ enabled: p.enabled })
   ),
-  /**
-   * Manual override of an agent's team-mode eligibility (MCP stdio capable).
-   * Promotes an ACP agent the capability heuristics missed into team mode — or
-   * demotes a non-whitelist one back out. Whitelisted agents stay team-capable
-   * even when set false (backend re-asserts); the response carries the recomputed
-   * `team_capable` / `behavior_policy.supports_team`.
-   */
-  setAgentTeamCapable: httpPatch<AgentMetadata, { id: string; supports_team: boolean }>(
-    (p) => `/api/agents/${p.id}/team-capable`,
-    (p) => ({ supports_team: p.supports_team })
-  ),
   checkAgentHealth: httpPost<{ available: boolean; latency?: number; error?: string }, { backend: string }>(
     '/api/agents/health-check'
   ),
