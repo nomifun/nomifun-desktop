@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/brand/og-cover.svg" alt="NomiFun — 完全开源 · 本地优先的超级 AI 工作站" width="820">
+  <img src="docs/images/readme-00-orchestration-hero.png" alt="NomiFun 编排会话、角色沉淀与 DAG 画布" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
@@ -36,10 +36,16 @@
   <a href="docs/README.zh.md">📖 文档</a>&nbsp;·&nbsp;
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 下载</a>&nbsp;·&nbsp;
+  <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
 
 </div>
+
+---
+
+> [!IMPORTANT]
+> **公益开源与数据风险声明**：这是一个公益开源项目，不承担迭代过程中用户数据丢失损坏的责任。NomiFun 仍处于快速迭代阶段，请在升级、迁移、体验实验功能或接入真实工作数据前自行做好备份。
 
 ---
 
@@ -81,30 +87,39 @@
 <div align="center">
 
 <p>
-  🎬 <b>宣传视频：</b><a href="https://www.youtube.com/watch?v=Z28XyhvNh_E">https://www.youtube.com/watch?v=Z28XyhvNh_E</a>
+  🎬 <b>演示视频：</b>
+  中国区：
+  <a href="https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209">抖音</a>
+  ·
+  <a href="https://www.bilibili.com/video/BV1kwKZ6UE5X/">B 站</a>
+  &nbsp;|&nbsp;
+  海外：
+  <a href="https://youtu.be/AsEToBDFR9s">YouTube</a>
+  ·
+  <a href="https://x.com/colir0/status/2072001821640437776?s=20">X</a>
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 桌面工作台，会话、桌面伙伴与项目指标同屏展示" width="100%">
-  <br/><sub><b>桌面工作台：会话、伙伴与实时会话指标</b></sub>
+  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 工作编排会话与 DAG 画布" width="100%">
+  <br/><sub><b>工作编排：会话、角色沉淀与 DAG 画布</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/gs-01-introduction-hero.png" alt="首页 / 新建会话"><br/><sub><b>首页与会话</b></sub></td>
-    <td width="50%"><img src="docs/images/channels-01-overview.png" alt="伙伴 IM 渠道"><br/><sub><b>伙伴 · IM 渠道</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-05-companions.png" alt="桌面伙伴总览"><br/><sub><b>桌面伙伴 · 记忆与成长</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-07-requirements.png" alt="需求平台列表"><br/><sub><b>需求平台 · AutoWork 入口</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/autowork-03-kanban.png" alt="需求看板"><br/><sub><b>需求 · AutoWork 看板</b></sub></td>
-    <td width="50%"><img src="docs/images/webui-01-settings-overview.png" alt="开放能力"><br/><sub><b>开放能力总线</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-06-knowledge.png" alt="知识库列表"><br/><sub><b>知识库 · 本地领域知识</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="新建智能体终端"><br/><sub><b>终端 · 能力开放给 Agent CLI</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/terminal-03-driving-session.png" alt="终端会话"><br/><sub><b>智能体驱动的终端</b></sub></td>
-    <td width="50%"><img src="docs/images/webui-04-qr-login-phone.png" alt="手机扫码登录"><br/><sub><b>WebUI · 扫码即连</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-03-assistants.png" alt="助手与 Skill 能力库"><br/><sub><b>助手 & Skill · 场景化能力库</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="模型与 Agent 管理"><br/><sub><b>模型 & Agent · 统一管理与接入</b></sub></td>
   </tr>
 </table>
 
-<sub>均为真实应用内截图。完整截图清单与采集方式见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
+<sub>均为 2026-07-01 从当前运行中的 NomiFun 桌面应用截取，并保留 2560px 宽度版本。完整截图清单与采集方式见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
 
 </div>
 
@@ -176,6 +191,25 @@ NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开
 - **经 ACP 直连约 19 个外部智能体** —— Claude Code、Codex、Gemini、Qwen、Kimi、Cursor、Copilot、Goose、OpenCode、Droid 等，NomiFun 为它们提供模型*以及*自家的原生能力（computer/browser/knowledge/gateway，经注入的 MCP 桥）。
 - **处处可用** —— 这些原生能力对内置智能体、ACP 智能体、聊天界面**以及**终端一律可用。
 
+### 🔌 大模型供应商快捷入口
+
+NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度、模型能力和数据政策选择供应商，注册后把 API Key 填到 NomiFun 的 **模型 & Agent** 页面即可使用。以下均为第三方服务，费用、可用地区、速率限制与数据处理规则以各家官方说明为准。
+
+| 供应商 | 快速入口 | 推荐关注点 |
+|---|---|---|
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.stepfun.ai" alt="StepFun logo" width="20" height="20"> **StepFun / 阶跃星辰** | [开放平台](https://platform.stepfun.ai/) | Step 系列模型，适合中文、Agent 与性价比场景 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.kimi.ai" alt="Kimi logo" width="20" height="20"> **Kimi / Moonshot AI** | [API Key](https://platform.kimi.ai/console/api-keys) | 长上下文、中文写作、代码与通用任务 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=bigmodel.cn" alt="GLM logo" width="20" height="20"> **GLM / 智谱 BigModel** | [API Key](https://open.bigmodel.cn/usercenter/apikeys) | GLM 系列、通用推理、代码与企业接入 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=www.volcengine.com" alt="Doubao logo" width="20" height="20"> **Doubao / 火山方舟** | [API Key](https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey) | 豆包系列模型，适合国内云账号与企业部署链路 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=help.aliyun.com" alt="Qwen logo" width="20" height="20"> **Qwen / 通义千问 / 百炼** | [API Key](https://bailian.console.aliyun.com/?tab=model#/api-key) | Qwen 系列、DashScope 生态与阿里云工作流 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.minimax.io" alt="MiniMax logo" width="20" height="20"> **MiniMax / MinMax** | [API Key](https://platform.minimax.io/user-center/basic-information/interface-key) | MiniMax 模型、长文本、多模态与语音能力 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=mimo.mi.com" alt="MiMo logo" width="20" height="20"> **MiMo / 小米** | [官网](https://mimo.mi.com/) | MiMo 系列模型与小米生态能力 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.deepseek.com" alt="DeepSeek logo" width="20" height="20"> **DeepSeek** | [API Key](https://platform.deepseek.com/api_keys) | 推理、代码与高性价比模型调用 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=openrouter.ai" alt="OpenRouter logo" width="20" height="20"> **OpenRouter** | [API Key](https://openrouter.ai/keys) | 多模型聚合、统一账单、备用路由与模型对比 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.claude.com" alt="Claude logo" width="20" height="20"> **Claude / Anthropic** | [API Key](https://platform.claude.com/settings/keys) | Claude 系列、长文本、代码与 Claude Code 生态 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=openai.com" alt="OpenAI logo" width="20" height="20"> **GPT / OpenAI** | [GPT 模型](https://platform.openai.com/docs/models) · [API Key](https://platform.openai.com/api-keys) | GPT 模型、OpenAI API、Agent 工作流、代码与通用任务 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=aistudio.google.com" alt="Gemini logo" width="20" height="20"> **Gemini / Google AI** | [API Key](https://aistudio.google.com/app/apikey) | Gemini 系列、多模态、超长上下文与 Google AI Studio |
+
 ### 💻 终端模式
 
 > 指南：[`docs/guides/terminal.zh.md`](docs/guides/terminal.zh.md)
@@ -242,7 +276,7 @@ packaging/      web 宿主的 Linux 部署支持
 
 ## 🚀 快速开始
 
-> ℹ️ **目前还没有预编译安装包** —— 请从源码安装，或用 Docker 跑服务器。安装包发布请关注 [Releases](https://github.com/nomifun/nomifun-tauri/releases)。
+> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
 
 **前置依赖**
 
@@ -397,10 +431,10 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 | 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
 | ✉️ **邮箱** | `www.nomifun.com/contact` <sub>（占位 · 待确认）</sub> |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
-| 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) |
-| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
-| ▶️ **YouTube** | [@NomiFun-o2y](https://www.youtube.com/@NomiFun-o2y) |
-| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) |
+| 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
+| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) · [演示视频](https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209) |
+| ▶️ **YouTube** | [@NomiFun-o2y](https://www.youtube.com/@NomiFun-o2y) · [演示视频](https://youtu.be/AsEToBDFR9s) |
+| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) · [演示帖](https://x.com/colir0/status/2072001821640437776?s=20) |
 | 🎬 **TikTok** | [@colir0luo](https://www.tiktok.com/@colir0luo) |
 
 **加入交流群** —— 扫码即可：
