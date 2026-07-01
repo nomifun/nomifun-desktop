@@ -63,8 +63,12 @@ bun run make:latest
 
 ## Windows 发版
 
-必须在 Windows 机器上执行。前提是 macOS 侧已经建好该版本的 GitHub Release（含 macOS 资产
-和 `latest.json` 的 darwin 条目）——本节负责在 Windows 上把 Windows 产物「补」进去。
+必须在 Windows 机器上执行。一键脚本会自动判定两种场景：
+
+- **追加(APPEND)**：该版本的 GitHub Release 已存在（通常 macOS 侧先发过）——只补 Windows
+  产物、把 windows 条目并进 `latest.json`。
+- **首发(CREATE)**：该版本还没有 Release（Windows 先发）——建 tag、建 Release（带 release
+  note）、上传 Windows 产物；可用 `-Version` 顺带打版本号。
 
 ### 一键发版（推荐）
 
@@ -79,15 +83,34 @@ bun run make:latest
 
 ```powershell
 git pull
-bun run release:win            # pull→校验 Release→清旧产物→构建→合并 latest.json→上传+clobber→提交推送→校验
-bun run release:win -DryRun    # 只跑只读前置检查并打印计划，不构建/不上传/不推送
-bun run release:win -NoPush    # 构建+上传，但不提交/推送 latest.json（改动留本地）
+
+# 追加（macOS 已先发，补 Windows）：
+bun run release:win
+
+# 首发（Windows 先发）：-Version 顺带 bump，-NotesFile/-Notes 提供 release note（首发必填）
+bun run release:win -Version 0.1.14 -NotesFile notes.md
+bun run release:win -Version 0.1.14 -Notes "- 修复若干问题"
+
+# 通用开关：
+bun run release:win -DryRun     # 只读预检并打印计划（含判定出的模式），不 bump/构建/上传/推送
+bun run release:win -NoPush     # APPEND：仍上传但不提交推送；CREATE：只本地 bump/构建，不建 Release
+bun run release:win -SkipPull   # 跳过 git pull
 ```
 
-脚本自动完成：读取 `.env.release` 里的 `GH_TOKEN` 并注入 `gh`、加载签名私钥、校验
-`v<version>` Release 已存在、清理旧版本残留 NSIS 产物、构建更新产物、`make:latest` 合并
-windows 条目、`gh release upload --clobber`、以作者 `nomifun` 提交 `latest.json` 回 `main`、
-拉取 updater 端点校验。失败会明确报错并中断。
+**版本号**：单一真源是根 `Cargo.toml [workspace.package].version`。追加模式用当前版本；首发
+时若带 `-Version X.Y.Z` 且与当前不同，脚本先跑 `bun run bump` 打版本号，再以 `nomifun`
+署名提交、打 tag、建 Release（不带 `-Version` 则按当前版本走）。
+
+**Release note（对 LLM 友好）**：走命令行、不与 CHANGELOG 耦合，且 **GitHub Release 正文与
+`latest.json` 的 `notes` 共用同一份**。多行说明建议先写到 `.md` 再用 `-NotesFile` 传入
+（PowerShell 传多行参数不稳，脚本内部也用文件中转）。**首发若既没 `-NotesFile` 也没
+`-Notes`，脚本直接报错，不会建出空说明的 Release**；追加模式 note 可选（不传则沿用既有，
+`latest.json notes` 由 CHANGELOG 当前版本小节兜底）。
+
+脚本自动完成：读 `.env.release` 的 `GH_TOKEN` 注入 `gh`、加载签名私钥、判定模式、清理旧版本
+残留 NSIS 产物、构建更新产物、`make:latest` 合并 windows 条目、上传（追加 `--clobber` / 首发
+`gh release create`）、以 `nomifun` 提交 `latest.json`（首发含 bump）回 `main`、拉取 updater
+端点校验。任何一步失败都会明确报错并中断。
 
 > 未启用 Authenticode 时，手动安装包仍可能触发 SmartScreen / 未知发布者提示；自动更新验签
 > 走 Tauri updater 的 minisign 签名，与 Authenticode 无关，一键脚本已覆盖。
