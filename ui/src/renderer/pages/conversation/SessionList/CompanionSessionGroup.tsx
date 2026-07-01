@@ -12,7 +12,7 @@ import { customFigureMetaOf } from '@renderer/pages/companion/characters/customM
 import { useCompanions } from '@renderer/pages/nomi/useNomi';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { Message, Tooltip } from '@arco-design/web-react';
-import { Setting } from '@icon-park/react';
+import { Right, Setting } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -25,6 +25,10 @@ interface Props {
   collapsed?: boolean;
   /** Closes the mobile drawer / clears tooltips after navigating, mirrors the workpath list. */
   onSessionClick?: () => void;
+  /** Fold state of the group (persisted in useWorkpathUiState). Ignored in the collapsed rail. */
+  expanded?: boolean;
+  /** Toggles the persisted fold state. */
+  onToggleExpanded?: () => void;
 }
 
 const modelReadyOf = (c: ICompanionWithStatus) => Boolean(c.model?.provider_id && c.model?.model);
@@ -41,7 +45,13 @@ const modelReadyOf = (c: ICompanionWithStatus) => Boolean(c.model?.provider_id &
  *
  * 不触碰工作会话过滤器：伙伴会话仍被 useConversationListSync 过滤出项目分组，故不会重复列出。
  */
-const CompanionSessionGroup: React.FC<Props> = ({ activeConversationId, collapsed = false, onSessionClick }) => {
+const CompanionSessionGroup: React.FC<Props> = ({
+  activeConversationId,
+  collapsed = false,
+  onSessionClick,
+  expanded = true,
+  onToggleExpanded,
+}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { companions } = useCompanions();
@@ -145,72 +155,98 @@ const CompanionSessionGroup: React.FC<Props> = ({ activeConversationId, collapse
 
   return (
     <div className='min-w-0 pb-6px mb-2px border-b border-solid border-[var(--color-border-1)]'>
-      <div className='px-2px pb-6px'>
-        <div className='h-22px px-2px flex items-center justify-between gap-8px select-none group/comphdr'>
-          <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate'>
-            {t('sessionList.companionGroup')}
-          </span>
-          <span className='flex items-center gap-6px shrink-0'>
-            <span className='text-12px text-t-tertiary leading-none'>{companions.length}</span>
-            <Tooltip content={t('sessionList.companionManage')} position='top' mini>
-              <span
-                role='button'
-                aria-label={t('sessionList.companionManage')}
-                onClick={handleManage}
-                className='flex items-center justify-center w-18px h-18px rd-5px text-t-tertiary opacity-0 group-hover/comphdr:opacity-100 hover:!text-primary-6 hover:bg-fill-2 transition-all cursor-pointer'
-              >
-                <Setting theme='outline' size='13' />
-              </span>
-            </Tooltip>
-          </span>
-        </div>
+      {/* Foldable section header. The fold chevron sits on the RIGHT so the label
+          stays flush-left, aligned with the sibling 「项目/工作路径」 caption (a plain,
+          non-foldable label). Clicking anywhere on the row toggles the persisted
+          fold state (default expanded). */}
+      <div
+        className='group/comphdr flex items-center gap-6px h-24px pl-4px pr-4px cursor-pointer select-none rd-6px hover:bg-fill-2 transition-colors min-w-0'
+        onClick={() => onToggleExpanded?.()}
+      >
+        <span className='text-13px text-t-tertiary group-hover/comphdr:text-t-primary transition-colors font-[500] leading-none tracking-wide truncate min-w-0'>
+          {t('sessionList.companionGroup')}
+        </span>
+        <span className='text-12px text-t-tertiary leading-none shrink-0'>{companions.length}</span>
+        <span className='ml-auto flex items-center gap-2px shrink-0'>
+          <Tooltip content={t('sessionList.companionManage')} position='top' mini>
+            <span
+              role='button'
+              aria-label={t('sessionList.companionManage')}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleManage();
+              }}
+              className='hidden group-hover/comphdr:flex items-center justify-center w-18px h-18px rd-5px text-t-tertiary hover:!text-primary-6 hover:bg-fill-2 transition-all cursor-pointer'
+            >
+              <Setting theme='outline' size='13' />
+            </span>
+          </Tooltip>
+          <button
+            type='button'
+            aria-label={expanded ? t('common.collapse') : t('common.expand')}
+            aria-expanded={expanded}
+            className='size-18px flex items-center justify-center text-t-tertiary group-hover/comphdr:text-t-primary transition-colors shrink-0 bg-transparent border-none p-0 cursor-pointer'
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleExpanded?.();
+            }}
+          >
+            <Right
+              theme='outline'
+              size={12}
+              className={classNames('transition-transform duration-150', { 'rotate-90': expanded })}
+            />
+          </button>
+        </span>
       </div>
 
-      <div className='flex flex-col gap-2px'>
-        {companions.map((c) => {
-          const active = activeConversationId != null && sessionMap.get(c.id) === activeConversationId;
-          const modelReady = modelReadyOf(c);
-          return (
-            <div
-              key={c.id}
-              onClick={() => void handleOpen(c)}
-              className={classNames(
-                'group flex items-center gap-8px shrink-0 rd-10px px-8px py-6px cursor-pointer transition-colors box-border',
-                active ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
-              )}
-            >
-              <div className='relative shrink-0'>
-                <CompanionAvatar
-                  character={c.character}
-                  companionId={c.id}
-                  customFigure={customFigureMetaOf(c)}
-                  mood={(c.status.mood as CompanionMood) || 'content'}
-                  activity='idle'
-                  size={32}
-                />
-                <span
-                  className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2 border-[var(--color-bg-1)]'
-                  style={{ background: modelReady ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
-                  title={modelReady ? undefined : t('nomi.chat.modelUnset')}
-                />
+      {expanded && (
+        <div className='flex flex-col gap-2px mt-2px'>
+          {companions.map((c) => {
+            const active = activeConversationId != null && sessionMap.get(c.id) === activeConversationId;
+            const modelReady = modelReadyOf(c);
+            return (
+              <div
+                key={c.id}
+                onClick={() => void handleOpen(c)}
+                className={classNames(
+                  'group flex items-center gap-8px shrink-0 rd-10px px-8px py-6px cursor-pointer transition-colors box-border',
+                  active ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+                )}
+              >
+                <div className='relative shrink-0'>
+                  <CompanionAvatar
+                    character={c.character}
+                    companionId={c.id}
+                    customFigure={customFigureMetaOf(c)}
+                    mood={(c.status.mood as CompanionMood) || 'content'}
+                    activity='idle'
+                    size={32}
+                  />
+                  <span
+                    className='absolute -right-1px -bottom-1px w-9px h-9px rd-full border-2 border-[var(--color-bg-1)]'
+                    style={{ background: modelReady ? 'rgb(var(--success-6))' : 'rgb(var(--warning-6))' }}
+                    title={modelReady ? undefined : t('nomi.chat.modelUnset')}
+                  />
+                </div>
+                <div className='flex flex-col gap-1px min-w-0 flex-1'>
+                  <span
+                    className={classNames(
+                      'text-13px font-600 truncate min-w-0',
+                      active ? '!text-primary-6' : 'text-t-primary'
+                    )}
+                  >
+                    {c.name}
+                  </span>
+                  <span className={classNames('text-11px', active ? 'text-primary-6 opacity-70' : 'text-t-tertiary')}>
+                    Lv{c.status.level}
+                  </span>
+                </div>
               </div>
-              <div className='flex flex-col gap-1px min-w-0 flex-1'>
-                <span
-                  className={classNames(
-                    'text-13px font-600 truncate min-w-0',
-                    active ? '!text-primary-6' : 'text-t-primary'
-                  )}
-                >
-                  {c.name}
-                </span>
-                <span className={classNames('text-11px', active ? 'text-primary-6 opacity-70' : 'text-t-tertiary')}>
-                  Lv{c.status.level}
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

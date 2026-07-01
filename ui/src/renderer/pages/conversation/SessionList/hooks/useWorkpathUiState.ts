@@ -16,10 +16,12 @@ import type { SessionKind } from '../utils/workpathTree';
  * - `nomifun:workpath-pinned`              string[]; array order is the manual pin order
  * - `nomifun:workpath-expansion`           Record<workpathKey, boolean>; drawers default to COLLAPSED
  * - `nomifun:workpath-subgroup-expansion`  Record<`${workpathKey}:${kind}`, boolean>; subgroups default to EXPANDED
+ * - `nomifun:companion-group-expanded`     boolean; the 桌面伙伴 group defaults to EXPANDED
  */
 export const WORKPATH_PINNED_STORAGE_KEY = 'nomifun:workpath-pinned';
 export const WORKPATH_EXPANSION_STORAGE_KEY = 'nomifun:workpath-expansion';
 export const WORKPATH_SUBGROUP_STORAGE_KEY = 'nomifun:workpath-subgroup-expansion';
+export const COMPANION_GROUP_STORAGE_KEY = 'nomifun:companion-group-expanded';
 
 const WORKPATH_UI_EVENT = 'nomifun:workpath-ui-changed';
 
@@ -59,6 +61,19 @@ const readExpansion = (): Record<string, boolean> => readJson<Record<string, boo
 
 const readSubgroup = (): Record<string, boolean> => readJson<Record<string, boolean>>(WORKPATH_SUBGROUP_STORAGE_KEY, {});
 
+/** The 桌面伙伴 group stores a bare boolean (not an object), so it can't ride readJson
+ *  (which rejects non-objects). Default EXPANDED: only an explicit stored `false` collapses it. */
+const readCompanionExpanded = (): boolean => {
+  if (typeof window === 'undefined') return true;
+  try {
+    const raw = localStorage.getItem(COMPANION_GROUP_STORAGE_KEY);
+    if (raw == null) return true;
+    return JSON.parse(raw) !== false;
+  } catch {
+    return true;
+  }
+};
+
 const subgroupKey = (workpathKey: string, kind: SessionKind): string => `${workpathKey}:${kind}`;
 
 export type WorkpathUiState = {
@@ -75,12 +90,16 @@ export type WorkpathUiState = {
   toggleSubgroup: (workpathKey: string, kind: SessionKind) => void;
   /** Idempotently expand a kind subgroup (used by reveal-on-create). */
   expandSubgroup: (workpathKey: string, kind: SessionKind) => void;
+  /** The 桌面伙伴 group's fold state. Default: expanded. */
+  companionGroupExpanded: boolean;
+  toggleCompanionGroup: () => void;
 };
 
 export const useWorkpathUiState = (): WorkpathUiState => {
   const [pinnedKeys, setPinnedKeys] = useState<string[]>(() => readPinned());
   const [expansion, setExpansion] = useState<Record<string, boolean>>(() => readExpansion());
   const [subgroup, setSubgroup] = useState<Record<string, boolean>>(() => readSubgroup());
+  const [companionGroupExpanded, setCompanionGroupExpanded] = useState<boolean>(() => readCompanionExpanded());
 
   // Cross-instance sync: same-window via CustomEvent, cross-window via 'storage'.
   useEffect(() => {
@@ -88,6 +107,7 @@ export const useWorkpathUiState = (): WorkpathUiState => {
       if (!storageKey || storageKey === WORKPATH_PINNED_STORAGE_KEY) setPinnedKeys(readPinned());
       if (!storageKey || storageKey === WORKPATH_EXPANSION_STORAGE_KEY) setExpansion(readExpansion());
       if (!storageKey || storageKey === WORKPATH_SUBGROUP_STORAGE_KEY) setSubgroup(readSubgroup());
+      if (!storageKey || storageKey === COMPANION_GROUP_STORAGE_KEY) setCompanionGroupExpanded(readCompanionExpanded());
     };
     const handleUiEvent = (event: Event) => {
       reload((event as CustomEvent<WorkpathUiChangeDetail>).detail?.storageKey ?? null);
@@ -96,7 +116,8 @@ export const useWorkpathUiState = (): WorkpathUiState => {
       if (
         event.key === WORKPATH_PINNED_STORAGE_KEY ||
         event.key === WORKPATH_EXPANSION_STORAGE_KEY ||
-        event.key === WORKPATH_SUBGROUP_STORAGE_KEY
+        event.key === WORKPATH_SUBGROUP_STORAGE_KEY ||
+        event.key === COMPANION_GROUP_STORAGE_KEY
       ) {
         reload(event.key);
       }
@@ -160,6 +181,12 @@ export const useWorkpathUiState = (): WorkpathUiState => {
     setSubgroup(next);
   }, []);
 
+  const toggleCompanionGroup = useCallback(() => {
+    const next = !readCompanionExpanded();
+    writeJson(COMPANION_GROUP_STORAGE_KEY, next);
+    setCompanionGroupExpanded(next);
+  }, []);
+
   return {
     pinnedKeys,
     togglePinned,
@@ -169,5 +196,7 @@ export const useWorkpathUiState = (): WorkpathUiState => {
     isSubgroupExpanded,
     toggleSubgroup,
     expandSubgroup,
+    companionGroupExpanded,
+    toggleCompanionGroup,
   };
 };
