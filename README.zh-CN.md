@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/brand/og-cover.svg" alt="NomiFun — 完全开源 · 本地优先的超级 AI 工作站" width="820">
+  <img src="docs/images/readme-00-orchestration-hero.png" alt="NomiFun 编排会话、角色沉淀与 DAG 画布" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
@@ -36,10 +36,16 @@
   <a href="docs/README.zh.md">📖 文档</a>&nbsp;·&nbsp;
   <a href="#-快速开始">🚀 快速开始</a>&nbsp;·&nbsp;
   <a href="https://github.com/nomifun/nomifun-tauri/releases">📦 下载</a>&nbsp;·&nbsp;
+  <a href="https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA">百度网盘</a>&nbsp;·&nbsp;
   <a href="#-联系我们--社区">💬 社区</a>
 </p>
 
 </div>
+
+---
+
+> [!IMPORTANT]
+> **公益开源与数据风险声明**：这是一个公益开源项目，不承担迭代过程中用户数据丢失损坏的责任。NomiFun 仍处于快速迭代阶段，请在升级、迁移、体验实验功能或接入真实工作数据前自行做好备份。
 
 ---
 
@@ -81,30 +87,39 @@
 <div align="center">
 
 <p>
-  🎬 <b>宣传视频：</b><a href="https://www.youtube.com/watch?v=Z28XyhvNh_E">https://www.youtube.com/watch?v=Z28XyhvNh_E</a>
+  🎬 <b>演示视频：</b>
+  中国区：
+  <a href="https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209">抖音</a>
+  ·
+  <a href="https://www.bilibili.com/video/BV1kwKZ6UE5X/">B 站</a>
+  &nbsp;|&nbsp;
+  海外：
+  <a href="https://youtu.be/AsEToBDFR9s">YouTube</a>
+  ·
+  <a href="https://x.com/colir0/status/2072001821640437776?s=20">X</a>
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 桌面工作台，会话、桌面伙伴与项目指标同屏展示" width="100%">
-  <br/><sub><b>桌面工作台：会话、伙伴与实时会话指标</b></sub>
+  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 工作编排会话与 DAG 画布" width="100%">
+  <br/><sub><b>工作编排：会话、角色沉淀与 DAG 画布</b></sub>
 </p>
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/gs-01-introduction-hero.png" alt="首页 / 新建会话"><br/><sub><b>首页与会话</b></sub></td>
-    <td width="50%"><img src="docs/images/channels-01-overview.png" alt="伙伴 IM 渠道"><br/><sub><b>伙伴 · IM 渠道</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-05-companions.png" alt="桌面伙伴总览"><br/><sub><b>桌面伙伴 · 记忆与成长</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-07-requirements.png" alt="需求平台列表"><br/><sub><b>需求平台 · AutoWork 入口</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/autowork-03-kanban.png" alt="需求看板"><br/><sub><b>需求 · AutoWork 看板</b></sub></td>
-    <td width="50%"><img src="docs/images/webui-01-settings-overview.png" alt="开放能力"><br/><sub><b>开放能力总线</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-06-knowledge.png" alt="知识库列表"><br/><sub><b>知识库 · 本地领域知识</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="新建智能体终端"><br/><sub><b>终端 · 能力开放给 Agent CLI</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/terminal-03-driving-session.png" alt="终端会话"><br/><sub><b>智能体驱动的终端</b></sub></td>
-    <td width="50%"><img src="docs/images/webui-04-qr-login-phone.png" alt="手机扫码登录"><br/><sub><b>WebUI · 扫码即连</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-03-assistants.png" alt="助手与 Skill 能力库"><br/><sub><b>助手 & Skill · 场景化能力库</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="模型与 Agent 管理"><br/><sub><b>模型 & Agent · 统一管理与接入</b></sub></td>
   </tr>
 </table>
 
-<sub>均为真实应用内截图。完整截图清单与采集方式见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
+<sub>均为 2026-07-01 从当前运行中的 NomiFun 桌面应用截取，并保留 2560px 宽度版本。完整截图清单与采集方式见 <a href="docs/images/SCREENSHOTS.md">截图 manifest</a>。</sub>
 
 </div>
 
@@ -242,7 +257,7 @@ packaging/      web 宿主的 Linux 部署支持
 
 ## 🚀 快速开始
 
-> ℹ️ **目前还没有预编译安装包** —— 请从源码安装，或用 Docker 跑服务器。安装包发布请关注 [Releases](https://github.com/nomifun/nomifun-tauri/releases)。
+> 📦 **下载安装包**：优先使用 [GitHub Releases](https://github.com/nomifun/nomifun-tauri/releases)；中国大陆下载可使用 [百度网盘镜像](https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA)（分享名：`nomifun`）。也可以从源码安装，或用 Docker 跑服务器。
 
 **前置依赖**
 
@@ -397,10 +412,10 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 | 🐙 **GitHub** | [nomifun/nomifun-tauri](https://github.com/nomifun/nomifun-tauri) · [Issues](https://github.com/nomifun/nomifun-tauri/issues) · [Releases](https://github.com/nomifun/nomifun-tauri/releases) |
 | ✉️ **邮箱** | `www.nomifun.com/contact` <sub>（占位 · 待确认）</sub> |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
-| 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) |
-| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
-| ▶️ **YouTube** | [@NomiFun-o2y](https://www.youtube.com/@NomiFun-o2y) |
-| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) |
+| 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
+| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) · [演示视频](https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209) |
+| ▶️ **YouTube** | [@NomiFun-o2y](https://www.youtube.com/@NomiFun-o2y) · [演示视频](https://youtu.be/AsEToBDFR9s) |
+| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) · [演示帖](https://x.com/colir0/status/2072001821640437776?s=20) |
 | 🎬 **TikTok** | [@colir0luo](https://www.tiktok.com/@colir0luo) |
 
 **加入交流群** —— 扫码即可：
