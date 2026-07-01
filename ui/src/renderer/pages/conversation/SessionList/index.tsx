@@ -663,8 +663,14 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       {modals}
       <div className='min-w-0'>
         {/* 桌面伙伴专属工作空间分组（roster-driven，置于项目/工作路径之上）。仅交互式、
-            不在此新建；点击伙伴行跳转其唯一会话 /conversation/:id。 */}
-        <CompanionSessionGroup activeConversationId={activeConversationId} onSessionClick={onSessionClick} />
+            不在此新建；可折叠（状态持久化于 useWorkpathUiState，默认展开）；
+            点击伙伴行跳转其唯一会话 /conversation/:id。 */}
+        <CompanionSessionGroup
+          activeConversationId={activeConversationId}
+          onSessionClick={onSessionClick}
+          expanded={ui.companionGroupExpanded}
+          onToggleExpanded={ui.toggleCompanionGroup}
+        />
 
         <div data-testid='workpath-section-toolbar' className='px-2px pb-6px'>
           <div className='h-22px px-2px flex items-center justify-between gap-8px select-none'>
