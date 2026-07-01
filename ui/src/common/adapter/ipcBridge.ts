@@ -89,6 +89,7 @@ import type {
   TRun,
   TRunDetail,
   TSteer,
+  TTaskConfigUpdate,
   TTaskSpecUpdate,
 } from '../types/orchestrator/orchestratorTypes';
 import type {
@@ -2859,6 +2860,14 @@ export const orchestrator = {
     // (400) for a blank spec or a running task; a later rerun uses the new spec.
     updateTaskSpec: httpPatch<void, { run_id: string; task_id: string; updates: TTaskSpecUpdate }>(
       (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/spec`,
+      (p) => p.updates
+    ),
+    // 启动前配置台 (迁移 025): set/clear a node's per-task model override + 预置要求.
+    // FULL replace of the three fields (null/blank clears); rejected (400) for a
+    // running task. A pending node picks these up at dispatch; a settled node on
+    // the next rerun.
+    setTaskConfig: httpPatch<void, { run_id: string; task_id: string; updates: TTaskConfigUpdate }>(
+      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/config`,
       (p) => p.updates
     ),
     // List one directory level under a run's working directory (read-only). Root
