@@ -6,7 +6,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, type Edge, type ReactFlowInstance } from '@xyflow/react';
+import { ReactFlow, Background, BackgroundVariant, Controls, MiniMap, Position, type Edge, type NodeHandle, type ReactFlowInstance } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import './dag-canvas.css';
 import { Branch } from '@icon-park/react';
@@ -232,6 +232,16 @@ const FIT_VIEW_OPTIONS = { padding: 0.12, maxZoom: 1.6 } as const;
 const MINIMAP_NODE_W = 220;
 const MINIMAP_NODE_H = 96;
 
+/** Card width — mirrors the `w-220px` on every node card; the declared handles'
+ * `x` is its horizontal center. */
+const CARD_W = 220;
+/** Fallback source-handle Y (≈ card bottom) used ONLY for the one frame before a
+ * node is measured (main is a short crown+label card; task cards are taller).
+ * The measured height refines it; the edge renders regardless. See the declared
+ * `handles` note in the `nodes` memo below. */
+const MAIN_FALLBACK_H = 64;
+const TASK_FALLBACK_H = MINIMAP_NODE_H;
+
 /**
  * The MiniMap's LITERAL mirror of {@link taskStatusMeta}.
  *
@@ -447,31 +457,61 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
       const group = parseGroupLabel(task.pattern_config);
       if (group && !hueByGroup.has(group)) hueByGroup.set(group, hueForGroup(group));
     }
-    // Carry react-flow's LAST MEASURED size back onto each rebuilt node object.
+    // ROOT-CAUSE FIX for "画布连线丢失 / 点击后连线乱跳" — declare each node's
+    // handle bounds so they reproduce react-flow's DOM measurement TO THE PIXEL.
     //
-    // WHY (root cause of "画布线条经常丢失"): this canvas drives `nodes` as a
-    // controlled prop and rebuilds every node object on each render (live refetch /
-    // selection). On re-adoption `@xyflow/system`'s `parseHandles` does:
-    //   `if (!userNode.handles) return !userNode.measured ? undefined : prev.handleBounds`
-    // — so a rebuilt node WITHOUT `measured` has its `handleBounds` RESET to
-    // `undefined` every render. An edge whose source/target handleBounds are missing
-    // resolves to a null position and `EdgeWrapper` returns `null` → the connecting
-    // line VANISHES. It only reappears if the node's ResizeObserver re-fires, which
-    // it does NOT when the card's size is unchanged (e.g. a node flips to 「已完成」
-    // at the same height) — so the lines stay gone. Feeding `measured` back makes
-    // `parseHandles` PRESERVE the prior handleBounds → lines never drop, no flicker.
+    // WHY the lines dropped: this canvas drives `nodes` as a controlled prop and
+    // rebuilds every node OBJECT each render (live refetch / selection). On
+    // re-adoption `@xyflow/system` recomputes `handleBounds = parseHandles(...)`,
+    // and a node WITHOUT an explicit `handles` array falls into
+    // `!userNode.measured ? undefined : prev` → in the pre-measure window (first
+    // frame; lazy-remount before `onInit`) `handleBounds` is RESET to undefined →
+    // `getEdgePosition` fails `isNodeInitialized` → the edge renders null and,
+    // with the card size unchanged, never re-measures back.
     //
-    // Plain ref read (safe in render); `undefined` before first measure, where
-    // `initialWidth/Height` + the card's CSS auto-size take over. `measured` is NOT
-    // applied as an inline DOM dimension (`getNodeInlineStyleDimensions` reads
-    // `width`/`initialWidth`, never `measured`), so the card keeps `w-220px` + auto
-    // height — only the minimap/bounds read the real measured size.
-    const measuredOf = (nodeId: string): { width: number; height: number } | undefined => {
+    // WHY declaring handles alone made them JITTER on click: react-flow keeps
+    // measuring the real `<Handle>` DOM and OVERWRITES `internals.handleBounds`
+    // via the ResizeObserver, while every re-adopt rebuilds them from the
+    // DECLARED array — so the endpoint flips between the two whenever they differ.
+    // The cure is to make the declared bounds resolve to the SAME endpoint the
+    // DOM yields, so it doesn't matter which path wrote last.
+    //
+    // react-flow stores a handle's TOP-LEFT relative to the node and, for an
+    // edge, resolves the endpoint as Top→(x+w/2, y) / Bottom→(x+w/2, y+h). The
+    // default `.react-flow__handle` is `left:50%` + `translate(-50%, ∓50%)`, so a
+    // W×H card's top/bottom handles measure to centers (W/2, 0) / (W/2, H) with
+    // their box overhanging the edge by half the glyph. Reproducing that exactly
+    // means top-left = (W/2 − HANDLE_SZ/2, edgeY − HANDLE_SZ/2) with the real
+    // glyph size — and feeding react-flow's own measured W/H so declared ≡
+    // measured (the fallback covers only the single pre-measure frame; the edge
+    // still renders then, just refines once measured).
+    const HANDLE_SZ = 7; // must match the width/height on TaskNode/MainNode <Handle>
+    const measuredDimsOf = (nodeId: string): { w: number; h: number } | undefined => {
       const m = rfRef.current?.getInternalNode(nodeId)?.measured;
-      return typeof m?.width === 'number' && typeof m?.height === 'number'
-        ? { width: m.width, height: m.height }
+      return typeof m?.width === 'number' && m.width > 0 && typeof m?.height === 'number' && m.height > 0
+        ? { w: m.width, h: m.height }
         : undefined;
     };
+    const targetTop = (w: number): NodeHandle => ({
+      id: null,
+      type: 'target',
+      position: Position.Top,
+      x: w / 2 - HANDLE_SZ / 2,
+      y: -HANDLE_SZ / 2,
+      width: HANDLE_SZ,
+      height: HANDLE_SZ,
+    });
+    const sourceBottom = (w: number, h: number): NodeHandle => ({
+      id: null,
+      type: 'source',
+      position: Position.Bottom,
+      x: w / 2 - HANDLE_SZ / 2,
+      y: h - HANDLE_SZ / 2,
+      width: HANDLE_SZ,
+      height: HANDLE_SZ,
+    });
+    const taskHandles = (w: number, h: number): NodeHandle[] => [targetTop(w), sourceBottom(w, h)];
+    const mainHandles = (w: number, h: number): NodeHandle[] => [sourceBottom(w, h)];
     // BACKWARD COMPAT: when no `onOpenMain` is given we shift NOTHING — `offsetY`
     // is 0 so the position object is computed exactly as before (and the array
     // below holds only task nodes, with no injected main / edges).
@@ -506,10 +546,10 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
         // selected ring the instant the content area switches to this task.
         selected: activeTaskId != null && task.id === activeTaskId,
         position: pos,
-        // Preserve handleBounds across the controlled re-adoption (keeps the DAG's
-        // connecting lines from vanishing) — see `measuredOf`. Undefined before the
-        // node's first measure, where the size hints below take over.
-        measured: measuredOf(task.id),
+        // Pixel-exact handle bounds (see the note above `measuredDimsOf`) — never
+        // drop, never jitter on click. Falls back to the card width / a
+        // representative height only for the single frame before measurement.
+        handles: taskHandles(measuredDimsOf(task.id)?.w ?? CARD_W, measuredDimsOf(task.id)?.h ?? TASK_FALLBACK_H),
         // Size hints so the MiniMap can render this node's rect (see
         // MINIMAP_NODE_W/H). `initialWidth/Height` give react-flow a non-zero
         // size for the minimap WITHOUT pinning the rendered card's DOM size, so
@@ -594,9 +634,9 @@ const DagCanvas: React.FC<DagCanvasProps> = ({ runId, onOpenTask, onOpenMain, ma
       // two affordances stay visually distinct (task = blue ring, main = brand ring).
       selected: false,
       position: { x: mainX, y: 0 },
-      // Preserve handleBounds across re-adoption (keeps the main→root lines from
-      // vanishing) — see `measuredOf`.
-      measured: measuredOf(MAIN_NODE_ID),
+      // Pixel-exact source-handle bounds (see the note above `measuredDimsOf`) —
+      // keeps the main→root lines from dropping or jittering on click.
+      handles: mainHandles(measuredDimsOf(MAIN_NODE_ID)?.w ?? CARD_W, measuredDimsOf(MAIN_NODE_ID)?.h ?? MAIN_FALLBACK_H),
       initialWidth: MINIMAP_NODE_W,
       initialHeight: MINIMAP_NODE_H,
       data: {
