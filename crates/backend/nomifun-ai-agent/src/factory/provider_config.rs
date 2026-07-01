@@ -129,6 +129,10 @@ pub async fn resolve_provider_config(
     if let Some(path) = fields.compat_overrides.api_path {
         config.compat.api_path = Some(path);
     }
+    // NB: compat_overrides.supports_image is intentionally NOT applied here —
+    // this one-shot path (IDMM sidecar) builds text-only messages, so image
+    // stripping is moot. Only the nomi agent manager applies it. Do not add it
+    // for "consistency"; it would be dead config on this path.
 
     Ok(config)
 }
