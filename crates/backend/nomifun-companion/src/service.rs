@@ -10,6 +10,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::collector::{self, Collector, SharedConfig};
+use crate::archiver::Archiver;
 use crate::companion::CompanionThreads;
 use crate::events::CompanionEventEmitter;
 use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
@@ -124,6 +125,10 @@ pub struct CompanionService {
     /// Companion thread management (real nomi conversations). Unset when the
     /// host wires the companion without a conversation service (tests).
     companion: tokio::sync::OnceCell<CompanionThreads>,
+    /// Session-window archiver; late-wired (with a real conversation port) in
+    /// [`Self::attach_companion`], since it needs the conversation service.
+    /// Held so a future "archive now" can reach it. Unset in tests.
+    archiver: std::sync::OnceLock<Arc<Archiver>>,
     /// Delete-cascade hooks, late-wired by the app assembly (same pattern as
     /// `companion`). Empty when never set (tests).
     cleanup_hooks: std::sync::OnceLock<Vec<Arc<dyn CompanionCleanupHook>>>,
@@ -243,6 +248,7 @@ impl CompanionService {
             evolution,
             skill_paths,
             companion: tokio::sync::OnceCell::new(),
+            archiver: std::sync::OnceLock::new(),
             cleanup_hooks: std::sync::OnceLock::new(),
         }))
     }
@@ -260,6 +266,27 @@ impl CompanionService {
         self.evolution.set_transcript(Arc::new(crate::evolution::ConversationTranscriptSource::new(
             conversations.conversation_repo().clone(),
         )));
+        // Spawn the session-window archiver now that a real conversation port
+        // exists. The loop no-ops every tick while `archive.enabled` is false
+        // (opt-in), so an unconfigured install pays nothing. `OnceLock::set`
+        // guards against a double-spawn if attach is ever called twice.
+        if self.archiver.get().is_none() {
+            let archiver = Arc::new(Archiver {
+                store: self.store.clone(),
+                config: self.config.clone(),
+                registry: self.registry.clone(),
+                // Reuse the learn completer + model — one background LLM config.
+                completer: self.learner.completer.clone(),
+                port: Arc::new(crate::archive_port::ConversationArchivePort::new(
+                    conversations.clone(),
+                    task_manager.clone(),
+                )),
+                run_lock: Arc::new(Mutex::new(())),
+            });
+            if self.archiver.set(archiver.clone()).is_ok() {
+                archiver.spawn();
+            }
+        }
         let _ = self.companion.set(CompanionThreads {
             store: self.store.clone(),
             config: self.config.clone(),
