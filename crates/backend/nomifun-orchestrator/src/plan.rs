@@ -29,16 +29,9 @@ use nomifun_db::models::Provider;
 /// How many tokens the planner may use for its one-shot DAG completion.
 const PLAN_MAX_TOKENS: u32 = 4096;
 
-/// Appended to the plan user prompt on a RETRY, after the lead's first reply could
-/// not be parsed into a task DAG — a last, strict nudge back to the JSON contract
-/// (weak / low-reasoning "flash" models often ignore the JSON-only instruction on
-/// the first pass).
-const PLAN_RETRY_REMINDER: &str = "重要:上一次没有输出可解析的规划。现在【只】输出一个 JSON 对象 {\"tasks\":[...]},不要任何解释、前后缀或 ``` 代码围栏。若目标可拆分为多步骤/可并行,请给出多个带 depends_on 依赖的子任务;确实原子才用单任务。";
-
 /// Non-silent notice pushed to the lead-thinking stream when planning FALLS BACK to
-/// the single-task DAG (both the first attempt AND the retry failed to yield a
-/// parseable plan). Lets the user see the auto-decomposition failed instead of a
-/// mysterious single node.
+/// the single-task DAG (the lead did not emit a parseable plan). Lets the user see
+/// the auto-decomposition failed instead of a mysterious single node.
 const PLAN_FALLBACK_NOTICE: &str = "\n\n⚠️ 未能将目标自动拆解为多任务(规划模型未产出有效的任务结构)。已回退为单任务并停在待批准——建议细化目标后重新规划,或改用推理更强的模型。";
 
 /// Max length of the fallback task title derived from the goal.
@@ -396,29 +389,26 @@ impl PlanProducer for LlmPlanProducer {
         // With a sink, stream the lead deltas through it (the returned text is STILL
         // just the TextDelta concat — byte-identical to one_shot); without a sink,
         // take the non-streaming one-shot path (zero change).
-        let raw = run_lead_completion(&cfg, PLAN_SYSTEM, user.clone(), PLAN_MAX_TOKENS, sink).await?;
+        let raw = run_lead_completion(&cfg, PLAN_SYSTEM, user, PLAN_MAX_TOKENS, sink).await?;
         if let Some(dag) = parse_plan_opt(&raw) {
             return Ok(dag);
         }
 
         // The lead did NOT emit a parseable task DAG — common with weak / low-
-        // reasoning "flash" models that ignore the JSON-only contract on the first
-        // pass (the reported 会话6 bug: a single silent fallback node). RETRY ONCE
-        // with a strict, format-focused reminder before giving up.
-        tracing::warn!("planner output unparseable on first attempt; retrying once with a strict format reminder");
-        let retry_user = format!("{user}\n\n{PLAN_RETRY_REMINDER}");
-        let raw2 = run_lead_completion(&cfg, PLAN_SYSTEM, retry_user, PLAN_MAX_TOKENS, sink).await?;
-        if let Some(dag) = parse_plan_opt(&raw2) {
-            return Ok(dag);
-        }
-
-        // Still no valid DAG after the retry. Surface a NON-SILENT warning through
-        // the lead-thinking stream (best-effort) so the user learns the auto-
-        // decomposition failed — rather than silently seeing one node — then degrade
-        // to the single-task fallback so the engine still has something. The caller's
-        // `interactive` default (Path A / conversation entry) then PARKS the run at
-        // awaiting_plan_approval, so this failed plan is never auto-executed.
-        tracing::warn!(raw_len = raw2.len(), "planner output unparseable after retry; using single-task fallback DAG");
+        // reasoning "flash" models. Surface a NON-SILENT warning through the lead-
+        // thinking stream (best-effort) so the user learns the auto-decomposition
+        // failed rather than silently seeing one node, then degrade to the single-
+        // task fallback so the engine still has something. The conversation entry's
+        // `interactive` default then PARKS the run for approval — a failed plan is
+        // never auto-executed.
+        //
+        // **No retry.** A second synchronous LLM call here doubled planning latency;
+        // on the conversation path (a SYNCHRONOUS `nomi_run_create` tool call) that
+        // blocked the lead turn long enough for a slow/weak model to re-invoke the
+        // tool every ~60s → 会话9's multiple orphaned `planning` runs + a 200s+
+        // "stuck" turn. A single attempt bounds latency; the conversation path also
+        // now plans in the BACKGROUND (see caps_orchestrator) so it never blocks.
+        tracing::warn!(raw_len = raw.len(), "planner output unparseable; using single-task fallback DAG");
         if let Some(sink) = sink {
             (sink)(LeadDeltaKind::Text, PLAN_FALLBACK_NOTICE);
         }
