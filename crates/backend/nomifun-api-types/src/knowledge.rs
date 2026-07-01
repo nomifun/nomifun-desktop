@@ -88,9 +88,17 @@ pub struct ConnectorSyncState {
     /// Optional periodic-sync interval (minutes); `None` = manual only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_minutes: Option<u32>,
-    /// Last successful sync (epoch ms).
+    /// Last successful sync (epoch ms, local wall-clock). For display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<i64>,
+    /// Remote high-water-mark: the max document `edit_time` (epoch ms, the
+    /// REMOTE's clock) successfully synced so far. This — not `last_sync_at` —
+    /// is the incremental filter watermark fed back on the next run. Keeping
+    /// them separate avoids clock-skew misses: a local `now_ms()` watermark can
+    /// exceed the remote `edit_time` of docs edited near sync time and skip
+    /// them forever. `None` on legacy rows falls back to `last_sync_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<i64>,
     /// Connector-specific opaque cursor carried across runs.
     #[serde(default)]
     pub cursor: serde_json::Value,

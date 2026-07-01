@@ -461,7 +461,7 @@ const KnowledgeDetailPage: React.FC = () => {
 
   // ─── Data hooks ─────────────────────────────────────────────────────────────
   const { base, files, loading, error, refresh } = useKnowledgeBase(id);
-  const { items: inboxItems, refresh: refreshInbox } = useKnowledgeInbox(id);
+  const { items: inboxItems, loading: inboxLoading, refresh: refreshInbox } = useKnowledgeInbox(id);
   const { choice: modelChoice, setChoice: setModelChoice } = useKnowledgeAutogenModel();
   const { tags: allTags, createTag } = useKnowledgeTags();
 
@@ -524,6 +524,15 @@ const KnowledgeDetailPage: React.FC = () => {
       setSelectedPath(files.length > 0 ? files[0].rel_path : null);
     }
   }, [files, selectedPath]);
+
+  // Reset per-base view state when switching knowledge bases — the route param
+  // changes but React reuses this component instance, so the previous base's
+  // document search query / edit mode would otherwise leak into the next base
+  // (looking like "documents missing"). selectedPath is reconciled above.
+  useEffect(() => {
+    setFileSearch('');
+    setEditMode(false);
+  }, [id]);
 
   // Load file content
   useEffect(() => {
@@ -658,7 +667,10 @@ const KnowledgeDetailPage: React.FC = () => {
 
   const relativeTime = useMemo(() => {
     if (!base?.updated_at) return '';
-    const diffMs = Date.now() - base.updated_at * 1000;
+    // updated_at is already epoch-MILLIS (TimestampMs / now_ms() on the backend);
+    // KnowledgeCard's formatRelativeTime treats it as ms directly. The stray
+    // `* 1000` here pushed it ~1.7e15, making diffMin always < 1 → forever "刚刚".
+    const diffMs = Date.now() - base.updated_at;
     const diffMin = Math.floor(diffMs / 60000);
     if (diffMin < 1) return t('knowledge.detail.justNow', { defaultValue: '刚刚' });
     if (diffMin < 60) return t('knowledge.detail.minutesAgo', { defaultValue: '{{n}} 分钟前', n: diffMin });
@@ -775,7 +787,7 @@ const KnowledgeDetailPage: React.FC = () => {
             <Dropdown
               droplist={
                 <Menu>
-                  <Menu.Item key='export' onClick={() => Message.info(t('knowledge.detail.exportPlaceholder', { defaultValue: '导出功能开发中' }))}>
+                  <Menu.Item key='export' onClick={() => setTab('set')}>
                     {t('knowledge.detail.export', { defaultValue: '导出' })}
                   </Menu.Item>
                   <Menu.Item key='openFolder' onClick={() => void handleOpenFolder()}>
@@ -794,7 +806,7 @@ const KnowledgeDetailPage: React.FC = () => {
                       {t('knowledge.detail.connector', { defaultValue: '连接器' })}
                     </span>
                   </Menu.Item>
-                  <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]' onClick={() => Message.info(t('knowledge.detail.deletePlaceholder', { defaultValue: '请在设置 Tab 中删除' }))}>
+                  <Menu.Item key='delete' className='!text-[rgb(var(--danger-6))]' onClick={() => setTab('set')}>
                     {t('knowledge.detail.delete', { defaultValue: '删除知识库' })}
                   </Menu.Item>
                 </Menu>
@@ -1034,8 +1046,8 @@ const KnowledgeDetailPage: React.FC = () => {
             }
           >
             <div className='pt-16px'>
-              {base && inboxItems.length > 0 ? (
-                <InboxReviewPanel baseId={base.id} items={inboxItems} loading={false} onChanged={handleInboxChanged} />
+              {base && (inboxLoading || inboxItems.length > 0) ? (
+                <InboxReviewPanel baseId={base.id} items={inboxItems} loading={inboxLoading} onChanged={handleInboxChanged} />
               ) : (
                 <Empty description={t('knowledge.detail.inboxEmpty', { defaultValue: '暂无待审内容' })} />
               )}

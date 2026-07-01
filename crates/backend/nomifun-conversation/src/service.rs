@@ -2598,6 +2598,7 @@ impl ConversationService {
             obj.remove("knowledge_writeback");
             obj.remove("knowledge_writeback_mode");
             obj.remove("knowledge_writeback_eagerness");
+            obj.remove("knowledge_channel_write_enabled");
             return;
         }
         debug!(
@@ -2622,6 +2623,10 @@ impl ConversationService {
         obj.insert(
             "knowledge_writeback_eagerness".into(),
             serde_json::Value::String(outcome.writeback_eagerness),
+        );
+        obj.insert(
+            "knowledge_channel_write_enabled".into(),
+            serde_json::Value::Bool(outcome.channel_write_enabled),
         );
     }
 
@@ -3192,8 +3197,12 @@ fn knowledge_binding_target<'a>(extra: &'a serde_json::Value, conversation_id: &
 fn knowledge_mounts_signature(outcome: &nomifun_knowledge::MountOutcome) -> String {
     let mounts = serde_json::to_string(&outcome.mounts).unwrap_or_default();
     format!(
-        "{}|{}|{}|{}",
-        mounts, outcome.writeback, outcome.writeback_mode, outcome.writeback_eagerness
+        "{}|{}|{}|{}|{}",
+        mounts,
+        outcome.writeback,
+        outcome.writeback_mode,
+        outcome.writeback_eagerness,
+        outcome.channel_write_enabled
     )
 }
 

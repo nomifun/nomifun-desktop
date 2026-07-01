@@ -250,6 +250,27 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
           setSubmitting(false);
           return;
         }
+        // Validate each URL is a well-formed http(s) address before submitting:
+        // snapshot mode fails on first fetch for a malformed URL, and live mode
+        // would otherwise silently store a dead source.
+        const invalidEntry = entries.find((e) => {
+          try {
+            const u = new URL(e.url);
+            return u.protocol !== 'http:' && u.protocol !== 'https:';
+          } catch {
+            return true;
+          }
+        });
+        if (invalidEntry) {
+          Message.warning(
+            t('knowledge.studio.webUrlInvalid', {
+              defaultValue: '网址格式不正确,需以 http:// 或 https:// 开头:{{url}}',
+              url: invalidEntry.url,
+            })
+          );
+          setSubmitting(false);
+          return;
+        }
         source = { kind: 'url', mode: urlMode, entries };
       } else if (sourceType === 'feishu') {
         if (!sourceConfigValue.credentialId) {

@@ -77,6 +77,7 @@ export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
   writeback: false,
   writeback_mode: 'staged',
   writeback_eagerness: 'conservative',
+  channel_write_enabled: false,
   kb_ids: [],
 });
 

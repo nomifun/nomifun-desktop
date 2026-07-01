@@ -42,4 +42,11 @@ impl KnowledgeEventEmitter {
     pub fn emit_binding_changed<T: serde::Serialize>(&self, binding: &T) {
         self.broadcast("knowledge.binding-changed", binding);
     }
+
+    /// A tag was created / renamed / recolored / reordered / deleted. Consumers
+    /// (the filter bar, tag→label maps, the management modal) just re-list, so
+    /// the payload is a bare signal rather than a per-entity diff.
+    pub fn emit_tag_changed(&self) {
+        self.broadcast("knowledge.tag-changed", &serde_json::json!({}));
+    }
 }
