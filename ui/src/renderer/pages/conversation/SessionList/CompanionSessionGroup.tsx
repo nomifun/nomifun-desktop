@@ -12,7 +12,6 @@ import { customFigureMetaOf } from '@renderer/pages/companion/characters/customM
 import { useCompanions } from '@renderer/pages/nomi/useNomi';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { Message, Tooltip } from '@arco-design/web-react';
-import { Right } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -149,35 +148,17 @@ const CompanionSessionGroup: React.FC<Props> = ({
 
   return (
     <div className='min-w-0 mb-2px'>
-      {/* 与「项目/工作路径」同款的纯 section 标题（无边框/无盒子/无 hover 底色），
-          仅右侧多一个折叠 chevron 作为开合指示。整行可点击切换持久化折叠态（默认展开）。 */}
+      {/* 与「项目/工作路径」完全同款的纯 section 标题（无边框/盒子/箭头，只有标签 + 数字）。
+          点击整行切换持久化折叠态（默认展开）。 */}
       <div className='px-2px'>
         <div
-          className='group/comphdr h-22px px-2px flex items-center gap-6px select-none cursor-pointer min-w-0'
+          className='h-22px px-2px flex items-center justify-between gap-8px select-none cursor-pointer min-w-0'
           onClick={() => onToggleExpanded?.()}
         >
           <span className='text-13px text-t-tertiary font-[500] leading-none tracking-wide truncate min-w-0'>
             {t('sessionList.companionGroup')}
           </span>
-          <span className='ml-auto flex items-center gap-4px shrink-0'>
-            <span className='text-12px text-t-tertiary leading-none'>{companions.length}</span>
-            <button
-              type='button'
-              aria-label={expanded ? t('common.collapse') : t('common.expand')}
-              aria-expanded={expanded}
-              className='size-16px flex items-center justify-center text-t-tertiary hover:text-t-primary transition-colors shrink-0 bg-transparent border-none p-0 cursor-pointer'
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleExpanded?.();
-              }}
-            >
-              <Right
-                theme='outline'
-                size={12}
-                className={classNames('transition-transform duration-150', { 'rotate-90': expanded })}
-              />
-            </button>
-          </span>
+          <span className='text-12px text-t-tertiary leading-none shrink-0'>{companions.length}</span>
         </div>
       </div>
 
