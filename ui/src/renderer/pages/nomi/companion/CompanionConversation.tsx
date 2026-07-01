@@ -17,7 +17,7 @@ import type { useCompanion } from '../useNomi';
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 interface Props {
-  /** 该伙伴的唯一专属 nomi 会话（由 ChatTab 载入后传入）。 */
+  /** 该伙伴的唯一专属 nomi 会话（由 CompanionChatPanel 载入后传入）。 */
   conversation: NomiConversation;
   /** 伙伴 profile + 乐观 patch 通道（模型唯一事实源入口）。 */
   companion: ReturnType<typeof useCompanion>;

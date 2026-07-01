@@ -1,5 +1,7 @@
 {
   "title": "Sessions",
+  "companionGroup": "Desktop Companions",
+  "companionManage": "Manage companions",
   "workpathSection": "Projects / workspaces",
   "defaultWorkpath": "Default workspace",
   "interactiveGroup": "Chats",
