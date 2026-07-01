@@ -1,11 +1,19 @@
 {
   "version": "0.1.14",
   "notes": "- Conversation: opening a new conversation now jumps in instantly with a visible loading state instead of a blank wait.\n- Updater: the update dialog shows its disclaimer at the bottom of the modal.\n- Keep the Baidu manual-download entry visible.\n- Release tooling: one-click macOS and Windows release flows (`bun run release:mac` / `release:win`) with automatic first-time vs. append detection.\n\nWindows packages ship first for this version; the macOS updater entry is added afterward from the Mac build machine.",
-  "pub_date": "2026-07-01T15:08:20.128Z",
+  "pub_date": "2026-07-01T15:20:03.474Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODk1LzQwSmRvbkt3c0dEeG1KSXlSd2d1L2ZtemM4RXZ3VCttM3lPT3hSTGZ0NlV6N1R1ekdBMWxUcVBRcFRZNnA5OUUzL2ZxQ1VGRXRKV2txODZPOFFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTE4NDk4CWZpbGU6Tm9taUZ1bl8wLjEuMTRfeDY0LXNldHVwLmV4ZQp2ZjY2M2lRenJzS1hsSVRpNWZSRnhqeStrMG81L0dyRGdqVUVIeUQyWGxwNWRmaTB1cFJ0UmhkbTUwUGhkaXZOV0RMTDNtMmZLUjN0N2NGTUQzZmVCUT09Cg==",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.14/NomiFun_0.1.14_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHlUTG41TE5McWJ2WjhXeHBySFZ5UGlONGtoYUdhUGJBMnlRTytwL3BVRTZDTm40TkdDVVNYOGpnOVZOZ0p6SmdUbFlzbDBWM2dTMlhSQUc1RitxUGdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTE4OTg0CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmV4TVFSNG9KSDFjR3QwdUVIMjMzd0dmWWtmajZqc3ZBdzdLWnpaN3F0M1VtcWw5SlJLcjBXMVRPL2JMTUFvZHZaU0gyRHdOMDc1MzN0am9CZ1J5MkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.14/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHlUTG41TE5McWJ2WjhXeHBySFZ5UGlONGtoYUdhUGJBMnlRTytwL3BVRTZDTm40TkdDVVNYOGpnOVZOZ0p6SmdUbFlzbDBWM2dTMlhSQUc1RitxUGdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTE4OTg0CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CmV4TVFSNG9KSDFjR3QwdUVIMjMzd0dmWWtmajZqc3ZBdzdLWnpaN3F0M1VtcWw5SlJLcjBXMVRPL2JMTUFvZHZaU0gyRHdOMDc1MzN0am9CZ1J5MkRBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.14/NomiFun.app.tar.gz"
     }
   }
 }
