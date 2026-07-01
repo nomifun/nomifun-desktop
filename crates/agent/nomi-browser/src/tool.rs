@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use nomi_browser_engine::progress::Progress;
 use nomi_browser_engine::{ActSpec, BrowserEngine, BrowserError, Capabilities, Effect, TypeInput};
-use nomi_browser_engine::{EngineConfig, Observation, create_engine};
+use nomi_browser_engine::{ChromeSource, EngineConfig, Observation, create_engine};
 use nomi_config::config::BrowserConfig;
 use nomi_protocol::ToolApprovalManager;
 use nomi_protocol::events::ToolCategory;
@@ -177,6 +177,11 @@ pub struct BrowserTool {
     /// Whether to request a visible window. Ignored by the engine when no
     /// display is available (forced headless).
     headful: bool,
+    /// **浏览器来源**（[`ChromeSource`]，与 `headful` 正交）：`Managed`（默认）= 内置/下载 CfT；
+    /// `System`（「我的浏览器」）= 系统已装 Chrome/Edge 本体优先。由 [`Self::new`] 从
+    /// `BrowserConfig.source` 解析（`with_data_dir` / 测试默认 `Managed`），`engine()` 透传给
+    /// `EngineConfig.chrome_source`。红线不变：两种来源都用专属 user-data-dir。
+    chrome_source: ChromeSource,
     /// Lazily-initialized browser engine. `Some(Err)` caches an unavailable
     /// backend (chrome not resolvable, launch/connect failure) so we don't
     /// retry per call — the same failure-cache discipline as `ComputerTool`'s
@@ -360,7 +365,11 @@ impl BrowserTool {
         let data_dir = nomi_config::config::app_config_dir()
             .map(|d| d.join("browser-data"))
             .unwrap_or_else(|| EngineConfig::default().data_dir);
-        Self::with_data_dir(data_dir, !config.headless)
+        let mut t = Self::with_data_dir(data_dir, !config.headless);
+        // 浏览器来源（「我的浏览器」）：从 BrowserConfig.source 解析（坏值静默退回 Managed）。
+        // 与 headful 正交；`with_policy` 无需带参——两开关都经 config.tools.browser.* 流入。
+        t.chrome_source = ChromeSource::from_source_str(&config.source);
+        t
     }
 
     /// **F1-sec: construct from the browser config + the session-bypass policy +
@@ -424,6 +433,9 @@ impl BrowserTool {
             // resource dir 后经 builder `.bundled_dir(...)` 注入。
             bundled_dir: None,
             headful,
+            // 默认来源 = Managed（内置/下载 CfT）。`new()` 从 BrowserConfig.source 覆写为 System；
+            // 仅有 data_dir 的调用方 / 测试保持 Managed（现行为，零回归）。
+            chrome_source: ChromeSource::Managed,
             engine: Mutex::new(None),
             last_snapshot: Mutex::new(None),
             secret_store: Mutex::new(None),
@@ -776,6 +788,9 @@ impl BrowserTool {
             // so the engine resolve chain is: env > bundled > data_dir > download.
             bundled_dir: self.bundled_dir.clone(),
             headful: self.headful,
+            // 浏览器来源（「我的浏览器」）：透传给引擎的 chrome 解析（System → 系统 Chrome/Edge 优先，
+            // 未探到回退 Managed）。红线不变：引擎仍用专属 user-data-dir 起独立托管实例。
+            chrome_source: self.chrome_source,
             // E4 下载沙箱落点：per-pet 隔离 workspace（companion.rs 的 {companion_id}/workspace）。
             // P3-G2 接线（去掉 F1-wire-workspace TODO）：bootstrap 把会话工作目录 `self.workspace`
             // 经 `with_policy` 灌进 `self.workspace_dir`，这里透传给引擎——下载落进

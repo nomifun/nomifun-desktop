@@ -65,6 +65,16 @@ export type ConfigKeyMap = {
   // tools (native CDP engine). Off by default; enabling it fetches Chrome on
   // first use. Read by the backend agent factory per session.
   'agent.browserUse': boolean | undefined;
+  // Silent browser (browser-use sub-setting, visibility axis): run the managed
+  // browser headless (no visible window). ON by default — removes the pop-up
+  // window. Off → a visible Chromium window pops up (watch/first-login). Maps to
+  // the backend headless flag; ignored on headless hosts (already forced headless).
+  'agent.browserUse.silent': boolean | undefined;
+  // Browser source (browser-use sub-setting, orthogonal to silent): 'managed'
+  // (default) = bundled/downloaded Chrome for Testing; 'system' = the user's
+  // installed Chrome/Edge binary (still an isolated profile — never the real
+  // profile). Read by the backend agent factory per session.
+  'agent.browserUse.source': 'managed' | 'system' | undefined;
   // Persistent login (browser-use sub-setting): keeps cookies/storage across
   // sessions in an encrypted vault. ON by default. When on, evaluate full-power
   // mode is blocked (security mutex). Read by the backend browser engine.
