@@ -384,6 +384,8 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   // One mounted base row.
   const renderBaseRow = (base: IKnowledgeBase) => {
     const isSelected = binding.kb_ids.includes(base.id);
+    const rootMissing = !base.root_exists;
+    const cannotSelect = rootMissing && !isSelected;
     const badge = getKindBadge(base.kind);
     const baseTags = base.tags.map((tk) => tagMap[tk]).filter((x): x is IKnowledgeTag => !!x);
     const firstTag = baseTags[0];
@@ -394,11 +396,12 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
           'flex items-center gap-9px rounded-8px border border-solid bg-[var(--color-bg-1)] px-8px py-7px cursor-pointer transition-colors',
           isSelected ? 'border-[rgba(var(--primary-6),0.38)]' : 'border-[var(--color-border-2)] hover:bg-fill-2',
           targetUnresolved && 'opacity-50 cursor-not-allowed',
+          cannotSelect && 'cursor-not-allowed opacity-65 hover:bg-[var(--color-bg-1)]',
         ]
           .filter(Boolean)
           .join(' ')}
         style={isSelected ? { background: tintBg('var(--primary-6)', 7) } : undefined}
-        onClick={() => !targetUnresolved && handleToggleBase(base.id)}
+        onClick={() => !targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.id)}
       >
         {/* Checkbox */}
         <span
@@ -427,11 +430,20 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
               {kindLabel(base.kind, t)}
             </span>
             <span className='knowledge-control-base-meta shrink-0 text-11px font-500 text-[var(--color-text-2)]'>
-              {base.kind === 'web'
-                ? t('knowledge.mount.realtime', { defaultValue: '实时' })
-                : t('knowledge.mount.fileCount', { defaultValue: '{{count}} 篇', count: base.file_count })}
+              {rootMissing
+                ? t('knowledge.mount.rootMissing', { defaultValue: '目录不可用' })
+                : base.kind === 'web'
+                  ? t('knowledge.mount.realtime', { defaultValue: '实时' })
+                  : t('knowledge.mount.fileCount', { defaultValue: '{{count}} 篇', count: base.file_count })}
             </span>
           </span>
+          {rootMissing && (
+            <span className='knowledge-control-root-missing mt-2px block text-11px leading-15px text-[rgb(var(--danger-6))]'>
+              {t('knowledge.mount.rootMissingHint', {
+                defaultValue: '源目录不存在或暂时不可访问，恢复目录后再挂载。',
+              })}
+            </span>
+          )}
           {firstTag && (
             <span className='mt-2px flex items-center gap-3px text-11px text-[var(--color-text-2)]'>
               <span
