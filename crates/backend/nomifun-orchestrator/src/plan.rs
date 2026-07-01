@@ -29,6 +29,18 @@ use nomifun_db::models::Provider;
 /// How many tokens the planner may use for its one-shot DAG completion.
 const PLAN_MAX_TOKENS: u32 = 4096;
 
+/// Appended to the plan user prompt on a RETRY, after the lead's first reply could
+/// not be parsed into a task DAG — a last, strict nudge back to the JSON contract
+/// (weak / low-reasoning "flash" models often ignore the JSON-only instruction on
+/// the first pass).
+const PLAN_RETRY_REMINDER: &str = "重要:上一次没有输出可解析的规划。现在【只】输出一个 JSON 对象 {\"tasks\":[...]},不要任何解释、前后缀或 ``` 代码围栏。若目标可拆分为多步骤/可并行,请给出多个带 depends_on 依赖的子任务;确实原子才用单任务。";
+
+/// Non-silent notice pushed to the lead-thinking stream when planning FALLS BACK to
+/// the single-task DAG (both the first attempt AND the retry failed to yield a
+/// parseable plan). Lets the user see the auto-decomposition failed instead of a
+/// mysterious single node.
+const PLAN_FALLBACK_NOTICE: &str = "\n\n⚠️ 未能将目标自动拆解为多任务(规划模型未产出有效的任务结构)。已回退为单任务并停在待批准——建议细化目标后重新规划,或改用推理更强的模型。";
+
 /// Max length of the fallback task title derived from the goal.
 const FALLBACK_TITLE_LEN: usize = 60;
 
@@ -381,14 +393,36 @@ impl PlanProducer for LlmPlanProducer {
         };
 
         let user = build_plan_user_prompt(goal, members, &descriptions);
-        // B2: with a sink, stream the lead deltas through it (the returned text is
-        // STILL just the TextDelta concat — byte-identical to one_shot); without a
-        // sink, take the original non-streaming one-shot path (zero change).
-        let raw = run_lead_completion(&cfg, PLAN_SYSTEM, user, PLAN_MAX_TOKENS, sink).await?;
+        // With a sink, stream the lead deltas through it (the returned text is STILL
+        // just the TextDelta concat — byte-identical to one_shot); without a sink,
+        // take the non-streaming one-shot path (zero change).
+        let raw = run_lead_completion(&cfg, PLAN_SYSTEM, user.clone(), PLAN_MAX_TOKENS, sink).await?;
+        if let Some(dag) = parse_plan_opt(&raw) {
+            return Ok(dag);
+        }
 
-        // parse_plan is fail-soft: a bad/empty reply degrades to a single-task DAG
-        // rather than erroring out, so the engine always has an executable plan.
-        Ok(parse_plan(&raw, goal))
+        // The lead did NOT emit a parseable task DAG — common with weak / low-
+        // reasoning "flash" models that ignore the JSON-only contract on the first
+        // pass (the reported 会话6 bug: a single silent fallback node). RETRY ONCE
+        // with a strict, format-focused reminder before giving up.
+        tracing::warn!("planner output unparseable on first attempt; retrying once with a strict format reminder");
+        let retry_user = format!("{user}\n\n{PLAN_RETRY_REMINDER}");
+        let raw2 = run_lead_completion(&cfg, PLAN_SYSTEM, retry_user, PLAN_MAX_TOKENS, sink).await?;
+        if let Some(dag) = parse_plan_opt(&raw2) {
+            return Ok(dag);
+        }
+
+        // Still no valid DAG after the retry. Surface a NON-SILENT warning through
+        // the lead-thinking stream (best-effort) so the user learns the auto-
+        // decomposition failed — rather than silently seeing one node — then degrade
+        // to the single-task fallback so the engine still has something. The caller's
+        // `interactive` default (Path A / conversation entry) then PARKS the run at
+        // awaiting_plan_approval, so this failed plan is never auto-executed.
+        tracing::warn!(raw_len = raw2.len(), "planner output unparseable after retry; using single-task fallback DAG");
+        if let Some(sink) = sink {
+            (sink)(LeadDeltaKind::Text, PLAN_FALLBACK_NOTICE);
+        }
+        Ok(fallback_dag(goal))
     }
 
     async fn adjust(
@@ -666,19 +700,28 @@ fn build_plan_user_prompt(
 /// returns a single-task fallback DAG derived from `goal` (so the engine always
 /// has an executable plan).
 pub fn parse_plan(raw: &str, goal: &str) -> PlannedDag {
-    match extract_json_object(raw).and_then(|json| serde_json::from_str::<PlannedDag>(&json).ok()) {
-        Some(dag) if !dag.tasks.is_empty() => dag,
-        Some(_) => {
-            tracing::warn!("planner output parsed but tasks were empty; using fallback DAG");
-            fallback_dag(goal)
-        }
+    match parse_plan_opt(raw) {
+        Some(dag) => dag,
         None => {
             tracing::warn!(
                 raw_len = raw.len(),
-                "planner output unparseable (no valid JSON task DAG); using fallback DAG"
+                "planner output unparseable/empty (no valid JSON task DAG); using fallback DAG"
             );
             fallback_dag(goal)
         }
+    }
+}
+
+/// Parse the raw model text into a [`PlannedDag`], returning `None` on ANY failure
+/// (no JSON object, malformed JSON, wrong shape, or an empty `tasks` array) —
+/// **without** the goal-derived fallback. This is the non-fallback core so callers
+/// that need to KNOW planning failed (to retry, or to warn the user) can branch on
+/// the `None`; [`parse_plan`] wraps this with the single-task fallback so the engine
+/// always has an executable plan.
+pub fn parse_plan_opt(raw: &str) -> Option<PlannedDag> {
+    match extract_json_object(raw).and_then(|json| serde_json::from_str::<PlannedDag>(&json).ok()) {
+        Some(dag) if !dag.tasks.is_empty() => Some(dag),
+        _ => None,
     }
 }
 
@@ -1548,6 +1591,25 @@ mod tests {
             dag.tasks[0].rationale.as_deref(),
             Some("fallback: planner output unparseable")
         );
+    }
+
+    // parse_plan_opt is the NON-fallback core: it returns None on every failure mode
+    // (so `produce` can retry / warn instead of silently falling back — the 会话6 fix),
+    // and Some only for a parseable, non-empty task DAG.
+    #[test]
+    fn parse_plan_opt_returns_none_on_every_failure_mode() {
+        assert!(parse_plan_opt("I'm sorry, I cannot help.").is_none(), "prose/garbage → None");
+        assert!(parse_plan_opt(r#"{"tasks":[]}"#).is_none(), "empty tasks → None");
+        assert!(parse_plan_opt(r#"{"tasks":[{"title":"x" "#).is_none(), "malformed JSON → None");
+        assert!(parse_plan_opt("").is_none(), "empty string → None");
+    }
+
+    #[test]
+    fn parse_plan_opt_returns_some_for_valid_dag() {
+        let raw = r#"{"tasks":[{"title":"A","spec":"a","depends_on":[]},{"title":"B","spec":"b","depends_on":[0]}]}"#;
+        let dag = parse_plan_opt(raw).expect("valid multi-task DAG → Some");
+        assert_eq!(dag.tasks.len(), 2);
+        assert_eq!(dag.tasks[1].depends_on, vec![0]);
     }
 
     #[test]
