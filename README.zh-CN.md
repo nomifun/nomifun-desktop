@@ -207,7 +207,7 @@ NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.deepseek.com" alt="DeepSeek logo" width="20" height="20"> **DeepSeek** | [API Key](https://platform.deepseek.com/api_keys) | 推理、代码与高性价比模型调用 |
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=openrouter.ai" alt="OpenRouter logo" width="20" height="20"> **OpenRouter** | [API Key](https://openrouter.ai/keys) | 多模型聚合、统一账单、备用路由与模型对比 |
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=platform.claude.com" alt="Claude logo" width="20" height="20"> **Claude / Anthropic** | [API Key](https://platform.claude.com/settings/keys) | Claude 系列、长文本、代码与 Claude Code 生态 |
-| <img src="https://www.google.com/s2/favicons?sz=64&domain=developers.openai.com" alt="Codex logo" width="20" height="20"> **Codex / OpenAI** | [Codex](https://developers.openai.com/codex) · [API Key](https://platform.openai.com/api-keys) | Codex、OpenAI API、代码 Agent 与通用模型 |
+| <img src="https://www.google.com/s2/favicons?sz=64&domain=openai.com" alt="OpenAI logo" width="20" height="20"> **GPT / OpenAI** | [GPT 模型](https://platform.openai.com/docs/models) · [API Key](https://platform.openai.com/api-keys) | GPT 模型、OpenAI API、Agent 工作流、代码与通用任务 |
 | <img src="https://www.google.com/s2/favicons?sz=64&domain=aistudio.google.com" alt="Gemini logo" width="20" height="20"> **Gemini / Google AI** | [API Key](https://aistudio.google.com/app/apikey) | Gemini 系列、多模态、超长上下文与 Google AI Studio |
 
 ### 💻 终端模式
