@@ -133,7 +133,8 @@ impl ProviderCompat {
         }
     }
 
-    // --- Resolved accessors (Option<bool> → bool with false default) ---
+    // --- Resolved accessors (Option<bool> → bool; false default, except
+    //     supports_image() which defaults true — see its doc comment) ---
 
     pub fn merge_assistant_messages(&self) -> bool {
         self.merge_assistant_messages.unwrap_or(false)
