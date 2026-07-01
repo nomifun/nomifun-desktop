@@ -1,19 +1,15 @@
 {
-  "version": "0.1.11",
+  "version": "0.1.12",
   "notes": "- Documentation overhaul for public website and open-source preparation.\n- Clarified desktop, web, remote access, AutoWork, scheduled tasks, and\n  packaging documentation.\n- Removed proprietary PDF skill assets from the bundled built-in skills.",
-  "pub_date": "2026-06-30T18:40:16.541Z",
+  "pub_date": "2026-07-01T04:00:05.435Z",
   "platforms": {
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODUyOGZOZkJtU3NZQzhEOUs3bEozbjRiN2o1cS9jQTlyc2R1YVMvNlNsaGZOUDljYVRDT2M1ZHYxS0VoWlhkVVhkbDI3K0d2MGF0MlQ3RGRYR295N2djPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODM5ODcwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck42eHdpT1R0eWZKYWxPR0cxVlhUaTQzMEprZGNFTXYzNGxTUE5TbnAzVW5ienFEbzNqb21zUGhpbkhua1ozUng3c2U5Z0h4c0g3MUJmZWNEU0VhU0RRPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.11/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJMWkNwNmRyWWx6bVZZVTB3UjdIeFVvODBuWisrVkFUVHlHdmFIbUJxQjlQRFlteGJmZ0IrSFJ3enQyYUhUamU2TzE1ditKd0lPQU8zR3k4OFVqZVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODc4MjQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnRyVWo1OUdDelBHSTBJWXJzcDVuWjkyblgrRmppcXFibWtnUnkvQ2pLU2ZCa0tXL3o1TDJoZW1SQjVGU1dtZ1lCMUZRaWd0WER2TENYaFB5a3cxc0FnPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.12/NomiFun.app.tar.gz"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODUyOGZOZkJtU3NZQzhEOUs3bEozbjRiN2o1cS9jQTlyc2R1YVMvNlNsaGZOUDljYVRDT2M1ZHYxS0VoWlhkVVhkbDI3K0d2MGF0MlQ3RGRYR295N2djPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODM5ODcwCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ck42eHdpT1R0eWZKYWxPR0cxVlhUaTQzMEprZGNFTXYzNGxTUE5TbnAzVW5ienFEbzNqb21zUGhpbkhua1ozUng3c2U5Z0h4c0g3MUJmZWNEU0VhU0RRPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.11/NomiFun.app.tar.gz"
-    },
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODFZenBoVkZUdUZiemxuUXR6anhWMjhnTm1DR3FvSmRndVlhR2tuYjQ3L2dSL3hoU1FBeGtyeWFnU1FNRnloVVBTOEx1OTlnTStkTmJGZVBpQjNHeUE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODQ0Nzg2CWZpbGU6Tm9taUZ1bl8wLjEuMTFfeDY0LXNldHVwLmV4ZQpiMitjWDU3Q1hJd1dWblYyV1E3M2psbTYyMDNqWE9OREdhMndCRm15d0pHbk91MitBc0VaWWxqMW1XK1daWU92N0pFSFJRR0xaRTgvdHAwNFhxek5Cdz09Cg==",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.11/NomiFun_0.1.11_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJMWkNwNmRyWWx6bVZZVTB3UjdIeFVvODBuWisrVkFUVHlHdmFIbUJxQjlQRFlteGJmZ0IrSFJ3enQyYUhUamU2TzE1ditKd0lPQU8zR3k4OFVqZVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODc4MjQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnRyVWo1OUdDelBHSTBJWXJzcDVuWjkyblgrRmppcXFibWtnUnkvQ2pLU2ZCa0tXL3o1TDJoZW1SQjVGU1dtZ1lCMUZRaWd0WER2TENYaFB5a3cxc0FnPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.12/NomiFun.app.tar.gz"
     }
   }
 }
