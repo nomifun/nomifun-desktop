@@ -56,4 +56,13 @@ describe('KnowledgeControl search helpers', () => {
     expect(source.includes('knowledge-control-base-meta')).toBe(true);
     expect(source.includes('mt-2px flex items-center gap-8px text-11px text-[var(--color-text-2)]')).toBe(false);
   });
+
+  test('keeps unavailable local-folder bases visible but non-selectable', () => {
+    const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
+
+    expect(source.includes('const rootMissing = !base.root_exists;')).toBe(true);
+    expect(source.includes('knowledge-control-root-missing')).toBe(true);
+    expect(source.includes('!targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.id)')).toBe(true);
+    expect(source.includes("t('knowledge.mount.rootMissing'")).toBe(true);
+  });
 });
