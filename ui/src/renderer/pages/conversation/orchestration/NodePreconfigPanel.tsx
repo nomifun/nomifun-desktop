@@ -7,7 +7,7 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Input } from '@arco-design/web-react';
-import { Brain, Config, Write } from '@icon-park/react';
+import { Brain, SettingOne, Write } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TModelRef, TRunTask } from '@/common/types/orchestrator/orchestratorTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
@@ -113,7 +113,7 @@ const NodePreconfigPanel: React.FC<NodePreconfigPanelProps> = ({ runId, task, se
             border: '1px solid color-mix(in srgb, rgb(var(--primary-6)) 28%, transparent)',
           }}
         >
-          <Config theme='outline' size='16' strokeWidth={3} className='line-height-0' />
+          <SettingOne theme='outline' size='16' strokeWidth={3} className='line-height-0' />
         </span>
         <div className='min-w-0 flex flex-col'>
           <span className='text-14px font-600 text-[var(--color-text-1)] truncate'>

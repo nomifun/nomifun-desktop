@@ -7,7 +7,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Dropdown, Menu, Spin } from '@arco-design/web-react';
-import { Brain, Comment, Down, Left, Redo, CheckOne, Config } from '@icon-park/react';
+import { Brain, Comment, Down, Left, Redo, CheckOne, SettingOne } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { OpenTaskPayload } from '@/renderer/pages/orchestrator/RunDetail/DagCanvas';
@@ -387,7 +387,7 @@ const ProjectedWorkerView: React.FC<ProjectedWorkerViewProps> = ({ payload }) =>
                   }}
                   className='flex cursor-pointer select-none items-center gap-6px px-16px py-9px text-12px font-600 text-[var(--color-text-2)] hover:text-[var(--color-text-1)]'
                 >
-                  <Config theme='outline' size='13' strokeWidth={3} className='line-height-0 text-[rgb(var(--primary-6))]' />
+                  <SettingOne theme='outline' size='13' strokeWidth={3} className='line-height-0 text-[rgb(var(--primary-6))]' />
                   <span>{t('orchestrator.run.preconfig.rerunConfig', { defaultValue: '重跑配置（模型 / 预置要求）' })}</span>
                   <Down
                     theme='outline'
