@@ -31,6 +31,7 @@ export interface CreateProviderRequest {
   enabled?: boolean;
   capabilities?: ModelCapability[];
   context_limit?: number;
+  model_context_limits?: Record<string, number>;
   model_protocols?: Record<string, string>;
   model_descriptions?: Record<string, string>;
   model_enabled?: Record<string, boolean>;
@@ -52,6 +53,7 @@ export interface UpdateProviderRequest {
   enabled?: boolean;
   capabilities?: ModelCapability[];
   context_limit?: number;
+  model_context_limits?: Record<string, number>;
   model_protocols?: Record<string, string>;
   model_descriptions?: Record<string, string>;
   model_enabled?: Record<string, boolean>;

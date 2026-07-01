@@ -96,6 +96,9 @@ struct CreateProviderParams {
     /// Optional context-window limit override (token count).
     #[serde(default)]
     context_limit: Option<i64>,
+    /// Optional per-model context-window overrides.
+    #[serde(default)]
+    model_context_limits: Option<HashMap<String, i64>>,
     /// Optional AWS Bedrock configuration (required when platform = "bedrock").
     /// Pass the full BedrockConfig object as JSON.
     #[serde(default)]
@@ -127,6 +130,9 @@ struct UpdateProviderParams {
     /// Override context-window limit (omit to keep).
     #[serde(default)]
     context_limit: Option<i64>,
+    /// Replace per-model context-window overrides (omit to keep).
+    #[serde(default)]
+    model_context_limits: Option<HashMap<String, i64>>,
     /// AWS Bedrock configuration update (omit to keep).
     #[serde(default)]
     bedrock_config: Option<Value>,
@@ -216,6 +222,7 @@ async fn create_provider(deps: Arc<GatewayDeps>, p: CreateProviderParams) -> Val
         enabled: p.enabled.unwrap_or(true),
         capabilities: vec![],
         context_limit: p.context_limit,
+        model_context_limits: p.model_context_limits,
         model_protocols: None,
         model_descriptions: None,
         model_enabled: None,
@@ -254,6 +261,7 @@ async fn update_provider(deps: Arc<GatewayDeps>, p: UpdateProviderParams) -> Val
         enabled: p.enabled,
         capabilities: None,
         context_limit: p.context_limit,
+        model_context_limits: p.model_context_limits,
         model_protocols: None,
         model_descriptions: None,
         model_enabled: None,

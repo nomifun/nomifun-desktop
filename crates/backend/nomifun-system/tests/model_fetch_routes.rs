@@ -63,6 +63,7 @@ async fn create_provider(db: &nomifun_db::Database, platform: &str, base_url: &s
             enabled: true,
             capabilities: "[]",
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,

@@ -1,6 +1,6 @@
 import type { IProvider } from '@/common/config/storage';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
-import { Form, Input, InputNumber, Message, Select, Tag } from '@arco-design/web-react';
+import { Form, Input, Message, Select, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import React, { useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -89,11 +89,15 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): vo
         onOk={async () => {
           try {
             const values = await form.validate();
+            const { context_limit: _contextLimit, model_context_limits: _modelContextLimits, ...formValues } = values;
+            const nextModels = Array.isArray(values.model) ? values.model : [values.model];
             const updatedProvider: IProvider = {
               ...data,
-              ...values,
+              ...formValues,
               // Ensure models is always an array
-              models: Array.isArray(values.model) ? values.model : [values.model],
+              models: nextModels,
+              context_limit: data?.context_limit,
+              model_context_limits: data?.model_context_limits,
             };
 
             // Add Bedrock configuration if platform is Bedrock
@@ -161,17 +165,6 @@ const EditModeModal = ModalHOC<{ data?: IProvider; onChange(data: IProvider): vo
                 onBlur={() => {
                   if (!isFullUrl) void modelListState.mutate();
                 }}
-              />
-            </Form.Item>
-
-            <Form.Item
-              field='context_limit'
-              label={t('settings.contextLimit', { defaultValue: '上下文窗口 (tokens)' })}
-            >
-              <InputNumber
-                min={0}
-                style={{ width: '100%' }}
-                placeholder={t('settings.contextLimitPlaceholder', { defaultValue: '留空 = 默认 200k' })}
               />
             </Form.Item>
 

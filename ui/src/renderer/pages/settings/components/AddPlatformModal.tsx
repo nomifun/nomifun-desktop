@@ -5,7 +5,7 @@ import { prefixedId } from '@/common/utils';
 import { isGoogleApisHost } from '@/common/utils/urlValidation';
 import ModalHOC from '@/renderer/utils/ui/ModalHOC';
 import { copyText } from '@/renderer/utils/ui/clipboard';
-import { Button, Form, Input, InputNumber, Message, Popover, Select, Switch } from '@arco-design/web-react';
+import { Button, Form, Input, Message, Popover, Select, Switch } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { LinkCloud, Edit, Search, Loading, Info, Copy } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -25,6 +25,7 @@ import {
   type PlatformConfig,
 } from '@/renderer/utils/model/modelPlatforms';
 import type { DeepLinkAddProviderDetail } from '@/renderer/hooks/system/useDeepLink';
+import { ContextLimitSelect } from './ContextLimitSelect';
 
 /**
  * 预设供应商的 API 地址示例（用于 base_url 旁的 tips 弹层）
@@ -393,6 +394,8 @@ const AddPlatformModal = ModalHOC<{
           ? t(selectedPlatform.i18nKey)
           : (selectedPlatform?.name ?? values.platform);
         const name = String(values.name ?? '').trim() || presetName;
+        const contextLimit =
+          typeof values.context_limit === 'number' && values.context_limit > 0 ? values.context_limit : undefined;
         const provider: IProvider = {
           id: prefixedId('prov'),
           platform: selectedPlatform?.platform ?? 'custom',
@@ -403,7 +406,7 @@ const AddPlatformModal = ModalHOC<{
           api_key: isBedrock ? '' : values.api_key,
           models: [values.model],
           is_full_url: isFullUrl,
-          context_limit: values.context_limit,
+          model_context_limits: contextLimit ? { [values.model]: contextLimit } : undefined,
         };
 
         // Add Bedrock configuration if platform is Bedrock
@@ -643,18 +646,6 @@ const AddPlatformModal = ModalHOC<{
             </div>
           )}
 
-          {/* 上下文窗口 / Context window */}
-          <Form.Item
-            field='context_limit'
-            label={t('settings.contextLimit', { defaultValue: '上下文窗口 (tokens)' })}
-          >
-            <InputNumber
-              min={0}
-              style={{ width: '100%' }}
-              placeholder={t('settings.contextLimitPlaceholder', { defaultValue: '留空 = 默认 200k' })}
-            />
-          </Form.Item>
-
           {/* API Key */}
           <Form.Item
             hidden={isBedrock}
@@ -858,6 +849,14 @@ const AddPlatformModal = ModalHOC<{
               }
               options={isFullUrl ? [] : modelListState.data?.models || []}
             />
+          </Form.Item>
+
+          {/* 上下文窗口 / Context window */}
+          <Form.Item
+            field='context_limit'
+            label={t('settings.contextLimit', { defaultValue: '上下文窗口 (tokens)' })}
+          >
+            <ContextLimitSelect />
           </Form.Item>
 
           {/* New API 协议选择 / New API Protocol Selection */}

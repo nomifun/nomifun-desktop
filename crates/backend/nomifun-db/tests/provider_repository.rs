@@ -25,6 +25,7 @@ fn sample_params() -> CreateProviderParams<'static> {
         enabled: true,
         capabilities: r#"[{"type":"text"}]"#,
         context_limit: Some(200000),
+        model_context_limits: None,
         model_protocols: None,
         model_descriptions: None,
         model_enabled: None,
@@ -72,6 +73,7 @@ async fn create_with_all_optional_fields() {
     let r = repo().await;
     let p = r
         .create(CreateProviderParams {
+            model_context_limits: Some(r#"{"m1":128000}"#),
             model_protocols: Some(r#"{"m1":"openai"}"#),
             model_descriptions: Some(r#"{"m1":"擅长前端"}"#),
             model_enabled: Some(r#"{"m1":true}"#),

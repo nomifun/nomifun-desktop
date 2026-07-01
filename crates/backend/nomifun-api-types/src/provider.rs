@@ -134,6 +134,8 @@ pub struct ProviderResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_context_limits: Option<HashMap<String, i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model_protocols: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_descriptions: Option<HashMap<String, String>>,
@@ -171,6 +173,8 @@ pub struct CreateProviderRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_limits: Option<HashMap<String, i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_protocols: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_descriptions: Option<HashMap<String, String>>,
@@ -201,6 +205,7 @@ pub struct UpdateProviderRequest {
     pub enabled: Option<bool>,
     pub capabilities: Option<Vec<ModelCapability>>,
     pub context_limit: Option<i64>,
+    pub model_context_limits: Option<HashMap<String, i64>>,
     pub model_protocols: Option<HashMap<String, String>>,
     pub model_descriptions: Option<HashMap<String, String>>,
     pub model_enabled: Option<HashMap<String, bool>>,
@@ -484,6 +489,7 @@ mod tests {
                 is_user_selected: None,
             }],
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: Some(HashMap::from([("claude-sonnet-4-20250514".into(), true)])),
@@ -518,6 +524,7 @@ mod tests {
             enabled: true,
             capabilities: vec![],
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,
@@ -610,6 +617,7 @@ mod tests {
             "api_key": "sk-test",
             "models": ["gpt-4", "gpt-3.5"],
             "model_protocols": {"gpt-4": "openai"},
+            "model_context_limits": {"gpt-4": 128000, "gpt-3.5": 32000},
             "model_enabled": {"gpt-4": true, "gpt-3.5": false},
             "model_health": {
                 "gpt-4": {"status": "healthy", "last_check": 1712345678000_i64, "latency": 320}
@@ -619,6 +627,10 @@ mod tests {
         assert_eq!(
             req.model_protocols.as_ref().unwrap().get("gpt-4"),
             Some(&"openai".to_string())
+        );
+        assert_eq!(
+            req.model_context_limits.as_ref().unwrap().get("gpt-4"),
+            Some(&128000)
         );
         assert_eq!(req.model_enabled.as_ref().unwrap().get("gpt-4"), Some(&true));
         assert_eq!(req.model_enabled.as_ref().unwrap().get("gpt-3.5"), Some(&false));
@@ -640,6 +652,7 @@ mod tests {
             enabled: true,
             capabilities: vec![],
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: None,
             model_enabled: None,

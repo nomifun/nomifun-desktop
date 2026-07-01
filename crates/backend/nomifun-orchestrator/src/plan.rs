@@ -1810,6 +1810,7 @@ mod tests {
             enabled: true,
             capabilities: "[]".to_string(),
             context_limit: None,
+            model_context_limits: None,
             model_protocols: None,
             model_descriptions: model_descriptions.map(str::to_string),
             model_enabled: None,
