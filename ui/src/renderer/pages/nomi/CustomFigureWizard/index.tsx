@@ -8,7 +8,6 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Alert, Button, Input, Modal, Progress, Slider, Spin, Steps } from '@arco-design/web-react';
 import { IconUpload } from '@arco-design/web-react/icon';
-import classNames from 'classnames';
 import { ipcBridge } from '@/common';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import { uploadFileViaHttp } from '@renderer/services/FileService';
@@ -17,7 +16,7 @@ import type { MatteMethod, MatteRequest, MatteResponse } from '@renderer/service
 import FrameStep, { clampHeadBox, type HeadBox } from './FrameStep';
 
 /**
- * CustomFigureWizard — DIY figure three-step modal: pick (file/drag/paste) →
+ * CustomFigureWizard — DIY figure three-step modal: pick (file/paste) →
  * matte (Worker ML-first cutout with heuristic redo) → frame (head-box + size
  * tier + name), finishing by uploading the cutout to the shared **figure
  * library** (`POST /api/companion/figures`). Decoupled from any companion: `onDone` hands
@@ -99,7 +98,6 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
 
   const [step, setStep] = useState<Step>('pick');
   const [pickError, setPickError] = useState<string | null>(null);
-  const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState<{ phase: 'download' | 'infer' | 'process'; loaded?: number; total?: number } | null>(null);
   const [matteFailed, setMatteFailed] = useState(false);
   /** ML 抠图模型经后端代理也拉不到（离线/上游全挂）——已降级快速抠图，提示用户。 */
@@ -298,7 +296,6 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
     if (!open) return;
     setStep('pick');
     setPickError(null);
-    setDragging(false);
     setProgress(null);
     setMatteFailed(false);
     setModelUnavailable(false);
@@ -368,29 +365,10 @@ const CustomFigureWizard: React.FC<CustomFigureWizardProps> = ({ open, onClose, 
     <div className='flex flex-col gap-12px'>
       <div
         onClick={() => inputRef.current?.click()}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          const file = e.dataTransfer?.files?.[0];
-          if (file) handleFile(file);
-        }}
-        className={classNames(
-          'group flex flex-col items-center justify-center gap-12px h-260px rd-16px cursor-pointer transition-all duration-200 border-2 border-dashed',
-          dragging
-            ? 'border-[var(--color-primary)] bg-primary-1 scale-[1.01]'
-            : 'border-[var(--color-border-2)] bg-gradient-to-b from-[var(--color-fill-1)] to-[var(--color-fill-2)] hover:border-[var(--color-primary)]'
-        )}
+        className='group flex flex-col items-center justify-center gap-12px h-260px rd-16px cursor-pointer transition-all duration-200 border-2 border-solid border-[var(--color-border-2)] bg-gradient-to-b from-[var(--color-fill-1)] to-[var(--color-fill-2)] hover:border-[var(--color-primary)]'
       >
         <span
-          className={classNames(
-            'flex items-center justify-center w-64px h-64px rd-full text-30px transition-all duration-200',
-            dragging ? 'bg-[var(--color-primary)] text-white scale-110' : 'bg-primary-1 text-primary-6 group-hover:scale-105'
-          )}
+          className='flex items-center justify-center w-64px h-64px rd-full text-30px transition-all duration-200 bg-primary-1 text-primary-6 group-hover:scale-105'
         >
           <IconUpload />
         </span>
