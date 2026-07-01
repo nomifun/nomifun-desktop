@@ -136,9 +136,19 @@ The companion you talk to every day quietly becomes the assistant who *gets* you
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
 - **One brain, many faces.** Run multiple companions that share a common memory hub, while each keeps its own **private** memory and can mount different domain knowledge bases. Teach *one* companion well, then have it teach the others.
+- **Chat with them where you already work.** Companion chats now live in the main **Sessions** UI under a dedicated desktop-companion group, while `/nomi` stays focused on companion management.
 - **It learns you (opt-in, on by default after a one-time consent).** A background learner distills your usage into durable memories; a deterministic evolution engine mines your recurring multi-step tool sequences into **draft skills** it proposes for your review. Memory is fully **visible and editable**.
 - **Skills that spread.** Companions generate their own skills, discuss them with you, and can **gift** a skill to another companion (the recipient gets a copy) — opt-in shared learning across your roster.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
+
+### 🧠 Conversation-native orchestration
+
+Start from a normal conversation, then let NomiFun expand the job into a live DAG when the task deserves it.
+
+- **Conversation first.** Launch multi-agent work from the same chat you are already using, then open the orchestration rail / floating canvas without leaving that conversation.
+- **Per-node preflight control.** Before a worker starts, override its model and add a preset brief; settled nodes can be rerun with the same pre-configuration.
+- **Review before execution.** Interactive runs stop at plan-ready and surface an in-conversation approval banner, so you can adjust the DAG before work begins.
+- **Project real worker transcripts.** Click any node to read that worker's actual conversation in the main content area, then jump back to `main` to keep steering the lead agent.
 
 ### 🤖 Unattended automation — Requirements + AutoWork + IDMM
 
@@ -170,6 +180,9 @@ Self-built, **in-process Rust** — no Playwright, no Node, no third-party autom
 
 - **Computer use** — accessibility tree + Set-of-Marks overlay + OCR, steering the model to act on real UI elements instead of guessing pixels. macOS (AXUIElement + Vision OCR) and Windows (UI Automation) are complete; Linux (AT-SPI2) is partial.
 - **Browser use** — an in-process Chromium CDP engine with ARIA observation, an egress **firewall** with out-of-band approval, and an origin-bound secret vault so credentials never reach the LLM.
+- **Modes that match the job** — desktop builds default to silent browser runs in the bundled Chromium, but you can switch to your own system Chrome / Edge when site compatibility matters.
+- **One-click login reuse** — open a visible "Log into my browser" window once, then later silent agent runs reuse that authenticated state from a shared profile with encrypted backup.
+- **Approval with visual context** — silent-mode high-risk browser approvals can include a current-page screenshot, so you do not have to approve blindly from text alone.
 - **Guarded by design** — every action carries a danger × surface approval matrix; irreversible actions wait for explicit confirmation.
 
 > ℹ️ Computer/browser control ship with the **desktop app**. The headless web/server host omits them by design.
@@ -191,6 +204,8 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 - **Built-in `nomi` agent** — no extra install. Works with **26+ model providers/presets** (OpenAI, Anthropic, Gemini + Vertex AI, AWS Bedrock, DeepSeek, OpenRouter, Moonshot/Kimi, Qwen/Dashscope, Zhipu/GLM, MiniMax, SiliconFlow, xAI, Volcengine/Doubao, and more) across **4 wire protocols**, plus the **New API** aggregator gateway.
 - **~19 external agents over ACP** — connect Claude Code, Codex, Gemini, Qwen, Kimi, Cursor, Copilot, Goose, OpenCode, Droid, and more, and NomiFun feeds them models *and* its native capabilities (computer/browser/knowledge/gateway) over injected MCP bridges.
 - **Everywhere** — the native capabilities are available to the built-in agent, to ACP agents, in the chat UI, **and** in the terminal.
+- **Graceful multimodal fallback** — if a selected provider/model rejects image input, NomiFun strips the images, retries in the same conversation, and leaves an inline notice instead of killing the session.
+- **Per-model context tuning** — override context-window limits per model when an upstream platform reports bad defaults or hides them, improving routing and long-context budgeting.
 
 ### 🔌 Model providers: quick setup links
 
