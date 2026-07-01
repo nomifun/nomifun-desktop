@@ -1357,7 +1357,7 @@ pub fn build_office_state(services: &AppServices) -> OfficeRouterState {
     let watch_manager = Arc::new(OfficecliWatchManager::new(spawner, services.event_bus.clone()));
 
     let snapshot_service = Arc::new(OfficeSnapshotService::new(data_dir));
-    let star_office_detector = Arc::new(StarOfficeDetector::new(outbound_http_client()));
+    let star_office_detector = Arc::new(StarOfficeDetector::local());
     let conversion_service = Arc::new(ConversionService::new(None));
     let proxy_service = Arc::new(ProxyService::new(watch_manager.clone()));
 

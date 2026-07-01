@@ -353,7 +353,7 @@ mod tests {
         let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
 
         let snapshot = Arc::new(SnapshotService::new(std::path::Path::new("/tmp/test")));
-        let detector = Arc::new(StarOfficeDetector::new(reqwest::Client::new()));
+        let detector = Arc::new(StarOfficeDetector::local());
         let conversion = Arc::new(ConversionService::new(None));
         let proxy = Arc::new(ProxyService::new(wm.clone()));
 

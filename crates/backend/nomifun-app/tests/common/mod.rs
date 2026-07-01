@@ -94,8 +94,9 @@ pub async fn build_app_with_mock_version(
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = AppServices::from_config(db, &AppConfig::default()).await.unwrap();
     let (mut states, _) = build_module_states(&services).await;
+    let http_client = reqwest::Client::builder().no_proxy().build().unwrap();
     states.system.version_check_service =
-        VersionCheckService::with_api_base(reqwest::Client::new(), current_version.to_owned(), mock_server.uri());
+        VersionCheckService::with_api_base(http_client, current_version.to_owned(), mock_server.uri());
     let router = create_router_with_states(&services, states);
     (router, services)
 }

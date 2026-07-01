@@ -372,7 +372,10 @@ mod tests {
     }
 
     async fn post_tool(port: u16, token: Option<&str>, body: Value) -> (u16, Value) {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client should build");
         let mut req = client.post(format!("http://127.0.0.1:{port}/tool")).json(&body);
         if let Some(t) = token {
             req = req.header("Authorization", format!("Bearer {t}"));

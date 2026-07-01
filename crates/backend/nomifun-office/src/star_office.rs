@@ -33,6 +33,14 @@ impl StarOfficeDetector {
         }
     }
 
+    pub fn local() -> Self {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("local Star Office detector HTTP client should build");
+        Self::new(client)
+    }
+
     pub async fn detect(&self, preferred_url: Option<&str>, force: bool, timeout_ms: Option<u64>) -> Option<String> {
         self.detect_inner(preferred_url, force, timeout_ms, true).await
     }
@@ -354,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_no_service_returns_none() {
-        let detector = StarOfficeDetector::new(reqwest::Client::new());
+        let detector = StarOfficeDetector::local();
         let result = detector
             .detect_exact(Some("http://localhost:59999"), false, Some(50))
             .await;
@@ -363,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_cache_miss_stored() {
-        let detector = StarOfficeDetector::new(reqwest::Client::new());
+        let detector = StarOfficeDetector::local();
         let _ = detector
             .detect_exact(Some("http://localhost:59998"), false, Some(50))
             .await;

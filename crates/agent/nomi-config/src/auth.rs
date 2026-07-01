@@ -268,9 +268,13 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn test_http_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
     fn test_manager(dir: &std::path::Path) -> OAuthManager {
         OAuthManager {
-            client: reqwest::Client::new(),
+            client: test_http_client(),
             config: AuthConfig::default(),
             credentials_path: dir.join("auth.json"),
         }
@@ -342,7 +346,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         let manager = OAuthManager {
-            client: reqwest::Client::new(),
+            client: test_http_client(),
             config: AuthConfig {
                 auth_url: mock_server.uri(),
                 token_url: format!("{}/token", mock_server.uri()),

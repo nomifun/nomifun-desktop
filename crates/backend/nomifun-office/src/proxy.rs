@@ -48,6 +48,7 @@ pub struct ProxyResponse {
 impl ProxyService {
     pub fn new(watch_manager: Arc<OfficecliWatchManager>) -> Self {
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(PROXY_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()

@@ -13,10 +13,15 @@ import NomiModal from '@/renderer/components/base/NomiModal';
 import MarkdownView from '@/renderer/components/Markdown';
 import type { UpdateDownloadProgressEvent, UpdateReleaseInfo, AutoUpdateStatus } from '@/common/update/updateTypes';
 import { useTranslation } from 'react-i18next';
+import { getUpdateErrorMessageKey } from './updateErrorMessage';
 
 type UpdateStatus = 'checking' | 'upToDate' | 'available' | 'downloading' | 'downloaded' | 'success' | 'error';
 
 type UpdateInfo = UpdateReleaseInfo;
+
+const BAIDU_RELEASE_MIRROR_URL = 'https://pan.baidu.com/s/5GPonoJNrwJ7GciBSDgXLaA';
+const PRODUCT_WEBSITE_URL = 'https://www.nomifun.com';
+const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
 
 const UpdateModal: React.FC = () => {
   const { t } = useTranslation();
@@ -50,9 +55,21 @@ const UpdateModal: React.FC = () => {
   const hasCompatibleManualAsset = Boolean(updateInfo?.recommendedAsset);
 
   const openReleasePage = () => {
-    if (!releasePageUrl) return;
-    void ipcBridge.shell.openExternal.invoke(releasePageUrl).catch((error) => {
+    const target = releasePageUrl || GITHUB_RELEASES_PAGE;
+    void ipcBridge.shell.openExternal.invoke(target).catch((error) => {
       console.error('Failed to open release page:', error);
+    });
+  };
+
+  const openBaiduReleaseMirror = () => {
+    void ipcBridge.shell.openExternal.invoke(BAIDU_RELEASE_MIRROR_URL).catch((error) => {
+      console.error('Failed to open Baidu release mirror:', error);
+    });
+  };
+
+  const openProductWebsite = () => {
+    void ipcBridge.shell.openExternal.invoke(PRODUCT_WEBSITE_URL).catch((error) => {
+      console.error('Failed to open product website:', error);
     });
   };
 
@@ -111,7 +128,11 @@ const UpdateModal: React.FC = () => {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Update check failed:', err);
-      setErrorMsg(msg);
+      const errorMessageKey = getUpdateErrorMessageKey(msg);
+      setErrorMsg(errorMessageKey === 'update.releaseFeedUnavailable' ? t(errorMessageKey) : msg || t(errorMessageKey));
+      if (errorMessageKey === 'update.releaseFeedUnavailable') {
+        setReleasePageUrl((url) => url || GITHUB_RELEASES_PAGE);
+      }
       setStatus('error');
     }
   };
@@ -288,6 +309,10 @@ const UpdateModal: React.FC = () => {
     });
   };
 
+  const renderDisclaimer = (className = '') => (
+    <div className={`text-12px leading-18px text-[rgb(var(--warning-6))] ${className}`}>{t('update.disclaimer')}</div>
+  );
+
   const renderContent = () => {
     switch (status) {
       case 'checking':
@@ -355,6 +380,33 @@ const UpdateModal: React.FC = () => {
                 {t('update.noCompatibleAssetManual')}
               </div>
             )}
+
+            <div className='mx-24px mt-12px px-12px py-10px rounded-8px border border-solid border-[rgba(var(--primary-6),0.16)] bg-[rgba(var(--primary-6),0.06)] text-12px leading-18px text-t-secondary'>
+              <div>{t('update.downloadSourceHint')}</div>
+              <div className='mt-4px'>
+                {t('update.baiduMirrorHint')}{' '}
+                <button
+                  type='button'
+                  onClick={openBaiduReleaseMirror}
+                  title={BAIDU_RELEASE_MIRROR_URL}
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                >
+                  {t('update.baiduMirrorLink')}
+                </button>
+              </div>
+              <div className='mt-4px'>
+                {t('update.productWebsiteHint')}{' '}
+                <button
+                  type='button'
+                  onClick={openProductWebsite}
+                  title={PRODUCT_WEBSITE_URL}
+                  className='cursor-pointer border-0 bg-transparent p-0 text-12px leading-18px text-[rgb(var(--primary-6))] underline-offset-2 hover:underline'
+                >
+                  {PRODUCT_WEBSITE_URL}
+                </button>
+              </div>
+              {renderDisclaimer('mt-8px border-t border-solid border-[rgba(var(--warning-6),0.18)] pt-8px')}
+            </div>
 
             {/* Release notes content */}
             <div className='flex-1 min-h-0 overflow-y-auto px-24px py-16px custom-scrollbar'>
@@ -446,16 +498,23 @@ const UpdateModal: React.FC = () => {
             </div>
             <div className='text-16px text-t-primary font-600 mb-8px'>{t('update.errorTitle')}</div>
             <div className='text-13px text-t-tertiary mb-24px text-center max-w-360px'>{errorMsg}</div>
-            <div className='flex gap-12px'>
+            <div className='flex flex-wrap justify-center gap-12px'>
               <Button size='small' onClick={checkForUpdates} icon={<Refresh size='14' />} className='!px-16px'>
                 {t('common.retry')}
               </Button>
-              {releasePageUrl && (
-                <Button type='primary' size='small' onClick={openReleasePage} className='!px-16px'>
-                  {t('update.goToRelease')}
-                </Button>
-              )}
+              <Button type='primary' size='small' onClick={openReleasePage} className='!px-16px'>
+                {t('update.goToRelease')}
+              </Button>
+              <Button size='small' onClick={openBaiduReleaseMirror} className='!px-16px'>
+                {t('update.baiduMirrorLink')}
+              </Button>
+              <Button size='small' onClick={openProductWebsite} className='!px-16px'>
+                {t('update.productWebsiteLink')}
+              </Button>
             </div>
+            {renderDisclaimer(
+              'mt-18px max-w-420px border-t border-solid border-[rgba(var(--warning-6),0.18)] pt-12px text-center'
+            )}
           </div>
         );
     }

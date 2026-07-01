@@ -361,9 +361,20 @@ fn safe_zip_entry_path(name: &str) -> Result<PathBuf, AppError> {
         return Err(invalid());
     }
     let mut safe_path = PathBuf::new();
+    let mut saw_normal = false;
     for component in path.components() {
         match component {
-            Component::Normal(part) => safe_path.push(part),
+            Component::Normal(part) => {
+                if !saw_normal {
+                    let first = part.to_string_lossy();
+                    let bytes = first.as_bytes();
+                    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                        return Err(invalid());
+                    }
+                    saw_normal = true;
+                }
+                safe_path.push(part);
+            }
             Component::CurDir => {}
             _ => return Err(invalid()),
         }

@@ -72,7 +72,7 @@ async fn mock_star_office_server(
 
 #[tokio::test]
 async fn so1_no_service_returns_none() {
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let port = allocate_port();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(50)).await;
@@ -85,7 +85,7 @@ async fn so1_no_service_returns_none() {
 
 #[tokio::test]
 async fn so2_preferred_url_no_service() {
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let result = detector
         .detect_exact(Some("http://localhost:59990"), true, Some(50))
         .await;
@@ -100,7 +100,7 @@ async fn so2_preferred_url_no_service() {
 async fn so3_cache_hit_returns_cached() {
     let port = allocate_port();
     let url = format!("http://localhost:{port}");
-    let detector = Arc::new(StarOfficeDetector::new(reqwest::Client::new()));
+    let detector = Arc::new(StarOfficeDetector::local());
 
     let _ = detector.detect_exact(Some(&url), false, Some(50)).await;
 
@@ -123,7 +123,7 @@ async fn so3_cache_hit_returns_cached() {
 async fn so4_force_bypasses_cache() {
     let port = allocate_port();
     let url = format!("http://localhost:{port}");
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
 
     let _ = detector.detect_exact(Some(&url), false, Some(50)).await;
     let result = detector.detect_exact(Some(&url), true, Some(50)).await;
@@ -146,7 +146,7 @@ async fn so5_detect_available_service() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -170,7 +170,7 @@ async fn so6_exclude_openclaw() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -194,7 +194,7 @@ async fn health_step1_fail_returns_none() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -218,7 +218,7 @@ async fn health_step2_no_status_markers() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -242,7 +242,7 @@ async fn health_step3_no_feature_keywords() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -266,7 +266,7 @@ async fn detect_with_writing_status() {
     )
     .await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
 
@@ -285,7 +285,7 @@ async fn cache_stores_hit_after_success() {
     let handle =
         mock_star_office_server(port, true, r#"idle"#, "<html><body>star office dashboard</body></html>").await;
 
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let url = format!("http://localhost:{port}");
     let result = detector.detect_exact(Some(&url), true, Some(2000)).await;
     assert!(result.is_some());
@@ -302,7 +302,7 @@ async fn cache_stores_hit_after_success() {
 
 #[tokio::test]
 async fn cache_miss_ttl_expires() {
-    let detector = StarOfficeDetector::new(reqwest::Client::new());
+    let detector = StarOfficeDetector::local();
     let port = allocate_port();
     let url = format!("http://localhost:{port}");
 

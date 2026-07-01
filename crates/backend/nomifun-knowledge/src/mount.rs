@@ -189,11 +189,7 @@ fn cleanup_legacy_mount_root(workspace: &Path) {
 /// copies we created, never user originals.
 fn remove_mount_entry(path: &Path) {
     let result = if read_link_target(path).is_some() {
-        if path.is_dir() {
-            std::fs::remove_dir(path)
-        } else {
-            std::fs::remove_file(path)
-        }
+        remove_link_entry(path)
     } else if path.is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -201,6 +197,20 @@ fn remove_mount_entry(path: &Path) {
     };
     if let Err(e) = result {
         tracing::warn!(path = %path.display(), error = %e, "failed to remove stale knowledge mount entry");
+    }
+}
+
+#[cfg(unix)]
+fn remove_link_entry(path: &Path) -> io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_link_entry(path: &Path) -> io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
     }
 }
 
