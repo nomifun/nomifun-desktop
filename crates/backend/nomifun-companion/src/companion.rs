@@ -26,13 +26,17 @@ use crate::store::{CompanionThread, MEMORY_KINDS, MemoryFilter, MemoryScope, Com
 
 /// All companion conversations are owned by the local default user (the
 /// desktop --local single-user model; same constant the cron executor uses).
-const COMPANION_USER_ID: &str = "system_default_user";
+pub(crate) const COMPANION_USER_ID: &str = "system_default_user";
 
 /// Per-companion runtime-state key holding that companion's active companion thread.
 pub(crate) const ACTIVE_THREAD_KEY: &str = "companion_active_thread";
 
 const MEMORY_CHAR_BUDGET: usize = 6000;
 const MEMORY_PER_KIND: i64 = 5;
+/// How many recent day-digests to inject into a new window's system prompt, and
+/// the char budget for that block (separate from the memory snapshot budget).
+const DIGEST_INJECT_COUNT: i64 = 3;
+const DIGEST_CHAR_BUDGET: usize = 2000;
 
 /// "YYYY-MM-DD" (local time) for memory timestamps surfaced to the model —
 /// dating each memory lets the companion treat old task/requirement entries as
@@ -149,6 +153,28 @@ pub async fn build_companion_system_prompt(
         );
         for m in &memories {
             system.push_str(&format!("- [{}|{}] {}\n", format_date(m.created_at), m.kind, m.content));
+        }
+    }
+    // Recent day-digests (伙伴会话窗口归档): give a freshly-reset window continuity
+    // without replaying raw transcript. Local sessions only — remote (IM) prompts
+    // stay identity-only and lean. Naturally empty when archiving is off (there are
+    // no archived windows), so this costs nothing until the feature is enabled.
+    if !remote
+        && let Ok(digests) = store.list_digests(&profile.id, DIGEST_INJECT_COUNT).await
+        && !digests.is_empty()
+    {
+        system.push_str(
+            "\n\n## 最近的会话回顾（按天归档的日记，帮你记起最近和主人聊过什么，仅供理解上下文）\n",
+        );
+        let mut used = 0usize;
+        for d in &digests {
+            let Some(summary) = &d.digest else { continue };
+            let line = format!("- [{}] {}\n", format_date(d.started_at), summary.trim());
+            used += line.len();
+            if used > DIGEST_CHAR_BUDGET {
+                break;
+            }
+            system.push_str(&line);
         }
     }
     system
@@ -992,6 +1018,27 @@ mod tests {
         );
         assert!(prompt.contains("list 工具查重"));
         assert!(prompt.contains("合理默认"));
+    }
+
+    #[tokio::test]
+    async fn companion_system_prompt_injects_recent_day_digests_local_only() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let profile = CompanionProfileConfig::new("毛球", "ink");
+        // Seed one archived day-digest for this companion.
+        let w = store.ensure_open_window(&profile.id, "conv1", 0).await.unwrap();
+        store
+            .close_window(&w.id, "archived", Some("今天陪主人修了一下午 Rust 编译错误"), None, 20)
+            .await
+            .unwrap();
+
+        // Local session gets the day-digest recap block.
+        let local = build_companion_system_prompt(&store, &profile, None).await;
+        assert!(local.contains("最近的会话回顾"), "local prompt must inject recent day-digests");
+        assert!(local.contains("今天陪主人修了一下午 Rust 编译错误"));
+
+        // Remote (IM) prompt stays identity-only — no day-digest recap.
+        let remote = build_companion_system_prompt(&store, &profile, Some("telegram")).await;
+        assert!(!remote.contains("最近的会话回顾"), "remote prompt must not inject day-digests");
     }
 
     #[tokio::test]
