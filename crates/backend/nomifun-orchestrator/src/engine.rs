@@ -1413,14 +1413,31 @@ async fn resolve_task_member(
         .ok_or("run not found")?;
     let members: Vec<FleetMember> =
         serde_json::from_str(&run.fleet_snapshot).map_err(|_| "fleet snapshot unparseable")?;
-    match assignment {
+    let mut member = match assignment {
         Some(a) => members
             .into_iter()
             .find(|m| m.id == a.member_id)
-            .ok_or("assigned member not in snapshot"),
+            .ok_or("assigned member not in snapshot")?,
         // No assignment → default to member[0] (single-member fleet path).
-        None => members.into_iter().next().ok_or("fleet snapshot empty"),
+        None => members.into_iter().next().ok_or("fleet snapshot empty")?,
+    };
+    // 迁移 025 — per-task 模型覆盖(启动前配置台):当该节点同时设了 provider + model
+    // 覆盖时,用它们覆写解析出的成员的 provider/model(可选任意可用模型,不受 run 冻结
+    // 的 fleet 池限制),保留成员原有角色/persona/skills。门控于「两者都非空」——没有
+    // 覆盖的节点与 025 前逐字节一致(pending 调度 / rerun / loop 全走这里,一处即全覆盖)。
+    if let Ok(Some(task)) = deps.run_repo.get_task(task_id).await {
+        let ov_provider = task
+            .override_provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let ov_model = task.override_model.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        if let (Some(p), Some(m)) = (ov_provider, ov_model) {
+            member.provider_id = Some(p.to_string());
+            member.model = Some(m.to_string());
+        }
     }
+    Ok(member)
 }
 
 /// The completed upstream tasks' output summaries, in task order. Used to inject
@@ -1488,10 +1505,20 @@ fn compose_brief(
     task: &OrchRunTaskRow,
     upstream: &[(String, String)],
 ) -> String {
-    if task.kind == "synthesis" {
-        return compose_synthesis_brief(role_hint, task, upstream);
+    let mut out = if task.kind == "synthesis" {
+        compose_synthesis_brief(role_hint, task, upstream)
+    } else {
+        compose_agent_brief(role_hint, task, upstream)
+    };
+    // 迁移 025 — 用户预置要求(启动前配置台):作为独立一段追加到 worker brief,与
+    // 规划器写的 spec 分离(不覆盖它),读作明确的用户要求。门控于字段非空 —— 没有
+    // 预置要求的任务与 025 前逐字节一致。对 agent / synthesis 均生效(统一在此追加)。
+    if let Some(preset) = task.preset_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str("\n用户预置要求(请优先遵守):\n");
+        out.push_str(preset);
+        out.push('\n');
     }
-    compose_agent_brief(role_hint, task, upstream)
+    out
 }
 
 /// The unchanged `agent`-kind brief: role hint + task title/spec + completed
@@ -3743,6 +3770,9 @@ mod tests {
             kind: "agent".to_string(),
             pattern_config: None,
             next_retry_at: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -3775,6 +3805,9 @@ mod tests {
             kind: kind.to_string(),
             pattern_config: None,
             next_retry_at: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -3839,6 +3872,37 @@ mod tests {
         assert_eq!(brief, expected, "agent-kind brief must match the pre-023 framing exactly");
     }
 
+    // 迁移 025: a non-empty `preset_prompt` (启动前配置台) is APPENDED as its own
+    // section for BOTH agent and synthesis kinds; a blank/absent one changes
+    // nothing (zero-regression, gated on presence).
+    #[test]
+    fn compose_brief_appends_preset_requirement_gated_on_presence() {
+        // agent: preset appended AFTER the unchanged base brief.
+        let mut a = task_row_with_kind("agent", "Do X", "the spec");
+        let a_base = compose_brief(Some("writer"), &a, &[]);
+        assert!(!a_base.contains("用户预置要求"), "no preset → no section");
+        a.preset_prompt = Some("务必用中文，并附引用".to_string());
+        let a_with = compose_brief(Some("writer"), &a, &[]);
+        assert!(a_with.starts_with(&a_base), "preset is appended, base brief unchanged");
+        assert!(a_with.contains("用户预置要求"), "agent preset section present: {a_with}");
+        assert!(a_with.contains("务必用中文，并附引用"));
+
+        // synthesis: preset also appended (uniform in compose_brief).
+        let mut s = task_row_with_kind("synthesis", "Merge", "synthesize");
+        let up = vec![("A".to_string(), "a".to_string())];
+        let s_base = compose_brief(None, &s, &up);
+        s.preset_prompt = Some("只输出要点".to_string());
+        let s_with = compose_brief(None, &s, &up);
+        assert!(s_with.starts_with(&s_base), "synthesis preset appended after base");
+        assert!(s_with.contains("用户预置要求") && s_with.contains("只输出要点"));
+
+        // blank preset (whitespace only) → byte-for-byte unchanged.
+        let mut b = task_row_with_kind("agent", "Y", "s");
+        let b_base = compose_brief(None, &b, &[]);
+        b.preset_prompt = Some("   \n  ".to_string());
+        assert_eq!(compose_brief(None, &b, &[]), b_base, "blank preset appends nothing");
+    }
+
     #[test]
     fn aggregate_summary_is_non_empty_and_counts_done() {
         let mk = |title: &str, status: &str, summary: Option<&str>| OrchRunTaskRow {
@@ -3859,6 +3923,9 @@ mod tests {
             kind: "agent".to_string(),
             pattern_config: None,
             next_retry_at: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -8898,6 +8965,9 @@ mod tests {
             kind: "agent".to_string(),
             pattern_config: None,
             next_retry_at: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: 0,
             updated_at: 0,
         }

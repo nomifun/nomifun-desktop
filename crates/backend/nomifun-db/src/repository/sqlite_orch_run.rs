@@ -221,6 +221,9 @@ impl IRunRepository for SqliteRunRepository {
             kind: p.kind,
             pattern_config: p.pattern_config,
             next_retry_at: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: now,
             updated_at: now,
         })
@@ -324,6 +327,27 @@ impl IRunRepository for SqliteRunRepository {
         q = q.bind(now_ms());
         q = q.bind(id);
         q.execute(&self.pool).await?;
+        Ok(())
+    }
+
+    async fn set_task_overrides(
+        &self,
+        id: &str,
+        override_provider_id: Option<String>,
+        override_model: Option<String>,
+        preset_prompt: Option<String>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE orch_run_tasks SET override_provider_id = ?, override_model = ?, \
+             preset_prompt = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&override_provider_id)
+        .bind(&override_model)
+        .bind(&preset_prompt)
+        .bind(now_ms())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

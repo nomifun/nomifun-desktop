@@ -1899,6 +1899,9 @@ mod tests {
             role: Some("研究".to_string()),
             kind: "agent".to_string(),
             pattern_config: None,
+            override_provider_id: None,
+            override_model: None,
+            preset_prompt: None,
             created_at: 0,
             updated_at: 0,
         }

@@ -204,6 +204,19 @@ pub trait IRunRepository: Send + Sync {
     /// field is `None`. Bumps `updated_at` whenever any column changes.
     async fn update_task(&self, id: &str, p: UpdateTaskParams) -> Result<(), sqlx::Error>;
 
+    /// FULL-replace a task's 「启动前配置台」overrides (迁移 025): the per-task model
+    /// override (`override_provider_id` / `override_model`) and 预置要求
+    /// (`preset_prompt`). `None` clears a column. Bumps `updated_at`. Separate from
+    /// [`update_task`] so the many existing `UpdateTaskParams` call sites stay
+    /// untouched.
+    async fn set_task_overrides(
+        &self,
+        id: &str,
+        override_provider_id: Option<String>,
+        override_model: Option<String>,
+        preset_prompt: Option<String>,
+    ) -> Result<(), sqlx::Error>;
+
     /// Delete ONE task (`DELETE FROM orch_run_tasks WHERE id = ?`). The task-keyed
     /// `ON DELETE CASCADE` FKs (migration 018) sweep out that task's dependency
     /// edges (`orch_run_task_deps`, where the task is blocker OR blocked) and its
