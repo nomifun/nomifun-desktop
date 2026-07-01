@@ -46,7 +46,7 @@ const repo = flag('repo', DEFAULT_REPO);
 const out = flag('out', DEFAULT_OUT);
 const collect = flag('collect', false) === true;
 const version = flag('version') || readWorkspaceVersion();
-const notes = flag('notes') || readChangelogNotes() || `NomiFun v${version}`;
+const notes = flag('notes') || readChangelogNotes(version) || `NomiFun v${version}`;
 const distDir = join(ROOT, 'dist/desktop');
 
 // 单一真源版本号：根 Cargo.toml 的 [workspace.package].version。
@@ -68,13 +68,24 @@ function readWorkspaceVersion() {
   process.exit(1);
 }
 
-// 发布说明：取 CHANGELOG.md 顶部第一个版本小节（两个 `## ` 之间）的正文；读不到返回 null。
-function readChangelogNotes() {
+// 发布说明：从 CHANGELOG.md 取当前版本小节的正文。优先匹配标题里含本次 version 的
+// 小节（如 `## v0.1.13 - ...`）；匹配不到则退回第一个**非 Unreleased** 小节。跳过
+// `## Unreleased`（占位内容如 "No unreleased changes yet."）——补发平台包时若误取它，
+// 会把 latest.json 里已写好的发布说明覆盖成占位。读不到返回 null。
+function readChangelogNotes(version) {
   const p = join(ROOT, 'CHANGELOG.md');
   if (!existsSync(p)) return null;
   const lines = readFileSync(p, 'utf8').split('\n');
-  const start = lines.findIndex((l) => /^##\s+/.test(l));
-  if (start === -1) return null;
+  const heads = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##\s+/.test(lines[i])) heads.push(i);
+  }
+  if (heads.length === 0) return null;
+  const isUnreleased = (i) => /^##\s+unreleased\b/i.test(lines[i]);
+  const namesVersion = (i) => version && lines[i].includes(version);
+  let start = heads.find(namesVersion);
+  if (start === undefined) start = heads.find((i) => !isUnreleased(i));
+  if (start === undefined) return null;
   const body = [];
   for (let i = start + 1; i < lines.length; i++) {
     if (/^##\s+/.test(lines[i])) break;
