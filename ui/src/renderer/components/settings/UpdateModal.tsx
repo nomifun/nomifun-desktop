@@ -419,7 +419,6 @@ const UpdateModal: React.FC = () => {
                   {PRODUCT_WEBSITE_URL}
                 </button>
               </div>
-              {renderDisclaimer('mt-8px border-t border-solid border-[rgba(var(--warning-6),0.18)] pt-8px')}
             </div>
 
             {/* Release notes content */}
@@ -529,9 +528,6 @@ const UpdateModal: React.FC = () => {
                 {t('update.productWebsiteLink')}
               </Button>
             </div>
-            {renderDisclaimer(
-              'mt-18px max-w-420px border-t border-solid border-[rgba(var(--warning-6),0.18)] pt-12px text-center'
-            )}
           </div>
         );
     }
@@ -553,7 +549,12 @@ const UpdateModal: React.FC = () => {
         overflow: 'hidden',
       }}
     >
-      <div className='flex flex-col h-full w-full'>{renderContent()}</div>
+      <div className='flex flex-col h-full w-full'>
+        <div className='min-h-0 flex-1'>{renderContent()}</div>
+        {renderDisclaimer(
+          'shrink-0 border-t border-solid border-[rgba(var(--warning-6),0.18)] bg-fill-1/60 px-20px py-10px text-center'
+        )}
+      </div>
     </NomiModal>
   );
 };
