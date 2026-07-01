@@ -1685,11 +1685,26 @@ impl BrowserTool {
         // gate, fall back to the TakeoverController's handle/future — whose handle has no UI
         // to resolve it, so it fail-closes (preserving exact pre-Phase-D behavior).
         let confirmed = if let Some(gate) = &self.approval_gate {
+            // Phase 3: attach a current-page preview so a SILENT (headless) session can still
+            // show the user what they're approving (no visible window needed). Best-effort:
+            // reuse the same redaction-aware `engine.screenshot()` `do_screenshot` uses; a
+            // capture failure MUST NOT block the ask (attach None, still surface the text) —
+            // the redline keystone (only explicit Approve releases) stays intact regardless.
+            let screenshot = match self.engine().await {
+                Ok(engine) => engine.screenshot().await.ok().map(|png| {
+                    format!(
+                        "data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(&png)
+                    )
+                }),
+                Err(_) => None,
+            };
             let ask = crate::approval::ApprovalAsk {
                 kind: crate::approval::ApprovalKind::IrreversibleAction {
                     action: action.to_string(),
                     description,
                 },
+                screenshot,
             };
             gate.request_approval(ask).await.is_approved()
         } else {
