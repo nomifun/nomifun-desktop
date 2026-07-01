@@ -1,7 +1,7 @@
 {
   "version": "0.1.12",
   "notes": "- Documentation overhaul for public website and open-source preparation.\n- Clarified desktop, web, remote access, AutoWork, scheduled tasks, and\n  packaging documentation.\n- Removed proprietary PDF skill assets from the bundled built-in skills.",
-  "pub_date": "2026-07-01T04:00:05.435Z",
+  "pub_date": "2026-07-01T04:19:20.408Z",
   "platforms": {
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJMWkNwNmRyWWx6bVZZVTB3UjdIeFVvODBuWisrVkFUVHlHdmFIbUJxQjlQRFlteGJmZ0IrSFJ3enQyYUhUamU2TzE1ditKd0lPQU8zR3k4OFVqZVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODc4MjQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnRyVWo1OUdDelBHSTBJWXJzcDVuWjkyblgrRmppcXFibWtnUnkvQ2pLU2ZCa0tXL3o1TDJoZW1SQjVGU1dtZ1lCMUZRaWd0WER2TENYaFB5a3cxc0FnPT0K",
@@ -10,6 +10,10 @@
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJMWkNwNmRyWWx6bVZZVTB3UjdIeFVvODBuWisrVkFUVHlHdmFIbUJxQjlQRFlteGJmZ0IrSFJ3enQyYUhUamU2TzE1ditKd0lPQU8zR3k4OFVqZVFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODc4MjQxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnRyVWo1OUdDelBHSTBJWXJzcDVuWjkyblgrRmppcXFibWtnUnkvQ2pLU2ZCa0tXL3o1TDJoZW1SQjVGU1dtZ1lCMUZRaWd0WER2TENYaFB5a3cxc0FnPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.12/NomiFun.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOCtHcGs5MUNrQUZVM09KOFdXaWhPMVFsMjQ1WXFBMmNkNUtyeXE3VWc0b1JzdkFzTVhRVHZ3OWw3V080T203bkxvVDRvQ0ZmeGFEWUszb2kwUmJCa0FrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyODc5NDcyCWZpbGU6Tm9taUZ1bl8wLjEuMTJfeDY0LXNldHVwLmV4ZQpkNkpiUEFtTVh2WjhYQTdLK0xBL3hIek52V0E5OFpyRWNHa1JKMzZodVE5Z2V3MVRhZ1U4c3BieDRwUzlIUDY3NDJRVlNLUGczcXpKbTNIM1RHa0lCQT09Cg==",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.12/NomiFun_0.1.12_x64-setup.exe"
     }
   }
 }
