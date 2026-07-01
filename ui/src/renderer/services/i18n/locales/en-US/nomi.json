@@ -392,7 +392,7 @@
     "stepPick": "Pick image",
     "stepMatte": "Auto cutout",
     "stepFrame": "Frame & size",
-    "dropHint": "Click to choose or drop an image here (JPG / PNG / WebP / GIF)",
+    "dropHint": "Click to choose an image (JPG / PNG / WebP / GIF)",
     "pasteHint": "You can also paste an image with Ctrl/Cmd+V",
     "copyrightHint": "Make sure you have the rights to use this image; do not upload infringing content",
     "tolerance": "Tolerance",

@@ -6,6 +6,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
+import enNomi from '../../services/i18n/locales/en-US/nomi.json';
+import zhNomi from '../../services/i18n/locales/zh-CN/nomi.json';
 
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
@@ -59,5 +61,15 @@ describe('Custom figure card action polish', () => {
       expect(source.includes('border-t border-solid border-[var(--color-border-2)]')).toBe(false);
       expect(source.includes('gap-12px pt-14px mt-2px')).toBe(false);
     }
+  });
+
+  test('custom figure upload entry no longer advertises or handles drag upload', () => {
+    const wizard = readSource(new URL('./CustomFigureWizard/index.tsx', import.meta.url));
+
+    expect(zhNomi.customFigure.dropHint.includes('拖拽')).toBe(false);
+    expect(/\b(drag|drop)\b/.test(enNomi.customFigure.dropHint.toLowerCase())).toBe(false);
+    expect(wizard.includes('onDragOver')).toBe(false);
+    expect(wizard.includes('onDragLeave')).toBe(false);
+    expect(wizard.includes('onDrop')).toBe(false);
   });
 });

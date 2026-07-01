@@ -392,7 +392,7 @@
     "stepPick": "选择图片",
     "stepMatte": "智能抠图",
     "stepFrame": "取景与尺寸",
-    "dropHint": "点击选择或拖拽图片到这里（JPG / PNG / WebP / GIF）",
+    "dropHint": "点击选择图片（JPG / PNG / WebP / GIF）",
     "pasteHint": "也可以直接 Ctrl/Cmd+V 粘贴图片",
     "copyrightHint": "请确认你拥有这张图片的使用权，请勿上传侵权内容",
     "tolerance": "容差",
