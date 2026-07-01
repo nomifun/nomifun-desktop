@@ -70,7 +70,6 @@ mod tests {
             behavior_policy: BehaviorPolicy::default(),
             yolo_id: yolo_id.map(ToOwned::to_owned),
             sort_order: 3130,
-            team_capable: false,
             handshake: AgentHandshake::default(),
         }
     }

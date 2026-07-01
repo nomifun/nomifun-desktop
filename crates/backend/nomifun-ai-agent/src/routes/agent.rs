@@ -5,7 +5,6 @@
 //! - `GET  /api/agents`         — list available agents
 //! - `POST /api/agents/refresh` — refresh agent list (e.g. after new agent is added to the system)
 //! - `POST /api/agents/test`    — test custom agent configuration (e.g. LLM connection)
-//! - `PATCH /api/agents/{id}/team-capable` — manual `supports_team` override
 
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
@@ -15,7 +14,7 @@ use axum::routing::{get, patch, post, put};
 use nomifun_api_types::{
     AcpHealthCheckRequest, AcpHealthCheckResponse, AgentMetadata, ApiResponse, CustomAgentUpsertRequest,
     DeleteCustomAgentResponse, ProviderHealthCheckRequest, ProviderHealthCheckResponse, SetEnabledRequest,
-    SetTeamCapableRequest, TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
+    TryConnectCustomAgentRequest, TryConnectCustomAgentResponse,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -29,7 +28,6 @@ pub fn agent_routes(state: AgentRouterState) -> Router {
         .route("/api/agents/health-check", post(health_check))
         .route("/api/agents/provider-health-check", post(provider_health_check))
         .route("/api/agents/{id}/enabled", patch(set_agent_enabled))
-        .route("/api/agents/{id}/team-capable", patch(set_agent_team_capable))
         .route("/api/agents/custom", post(create_custom))
         .route("/api/agents/custom/{id}", put(update_custom).delete(delete_custom))
         .route("/api/agents/custom/try-connect", post(try_connect_custom))
@@ -118,17 +116,5 @@ async fn set_agent_enabled(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
         state.service.set_agent_enabled(&id, req.enabled).await?,
-    )))
-}
-
-async fn set_agent_team_capable(
-    State(state): State<AgentRouterState>,
-    Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
-    body: Result<Json<SetTeamCapableRequest>, JsonRejection>,
-) -> Result<Json<ApiResponse<AgentMetadata>>, AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(
-        state.service.set_agent_team_capable(&id, req.supports_team).await?,
     )))
 }
