@@ -2763,6 +2763,7 @@ export type I18nKey =
   | 'settings.autoInjectedSkillsBadge'
   | 'settings.autoPreviewOfficeFiles'
   | 'settings.autoPreviewOfficeFilesDesc'
+  | 'settings.baiduManualDownload'
   | 'settings.baseUrl'
   | 'settings.baseUrlAutoFix'
   | 'settings.baseUrlHint'
