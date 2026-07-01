@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AddUser, Check, Down, Experiment, Up } from '@icon-park/react';
 import { ipcBridge } from '@/common';
@@ -73,6 +73,31 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
   const [savedNames, setSavedNames] = useState<Set<string>>(() => new Set());
   /** Role names whose save call is currently in flight. */
   const [savingNames, setSavingNames] = useState<Set<string>>(() => new Set());
+
+  // Map a plain vertical mouse wheel onto the lane's horizontal scroll. A bare
+  // wheel does NOT scroll a horizontal-overflow container in Chromium/WebView2
+  // unless Shift is held, so mouse-only users couldn't reach the overflowing
+  // cards; trackpad horizontal gestures are left untouched. A callback ref
+  // (re)attaches a NON-passive listener on every mount so it survives the
+  // collapse / role-less null-return cycles (a plain useEffect keyed on state
+  // would miss the null→cards remount). `preventDefault` needs the non-passive
+  // listener — React's own onWheel is passive and would ignore it.
+  const wheelCleanup = useRef<(() => void) | null>(null);
+  const laneRef = useCallback((el: HTMLDivElement | null) => {
+    wheelCleanup.current?.();
+    wheelCleanup.current = null;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return; // nothing to scroll
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return; // let native horizontal through
+      el.scrollLeft += e.deltaY;
+      e.preventDefault();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    wheelCleanup.current = () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  // Detach on unmount so we never leak the listener.
+  useEffect(() => () => wheelCleanup.current?.(), []);
 
   // member_id → fleet member (the run's fleet snapshot).
   const memberById = useMemo(() => {
@@ -263,15 +288,24 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
       </div>
 
       {!collapsed && (
-        <div className='flex flex-wrap gap-10px px-16px pb-12px'>
+        // Single horizontal lane — the candidates NEVER wrap onto extra rows
+        // (which would grow this `shrink-0` banner and squeeze the `flex-1`
+        // canvas below). Overflowing cards scroll right instead; the global 6px
+        // scrollbar (base.css) surfaces on hover and the next card peeks past the
+        // right edge, both hinting there is more to scroll to.
+        <div
+          ref={laneRef}
+          className='flex flex-nowrap gap-10px overflow-x-auto overflow-y-hidden px-16px pb-12px'
+        >
           {visible.map((candidate) => {
             const saved = savedNames.has(candidate.name);
             const saving = savingNames.has(candidate.name);
             return (
               <div
                 key={candidate.name}
-                className='flex min-w-220px flex-1 flex-col gap-8px rd-10px border border-b-base bg-2 p-12px'
-                style={{ maxWidth: '320px' }}
+                // Fixed width + `shrink-0` so cards keep their size and overflow
+                // horizontally instead of squeezing to fit the lane.
+                className='flex w-248px shrink-0 flex-col gap-8px rd-10px border border-b-base bg-2 p-12px'
               >
                 <div className='flex items-start justify-between gap-8px'>
                   <div className='min-w-0'>
