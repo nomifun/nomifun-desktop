@@ -192,11 +192,19 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // same non-empty id.
     let lead_conv_id = parse_lead_conv_id(&ctx.conversation_id);
 
+    // Resolve the effective autonomy. A Path-A run (bound to a lead conversation =
+    // the desktop 智能编排 entry) defaults to `interactive` so the plan PARKS at
+    // `awaiting_plan_approval` for the user to review/adjust/approve before it runs
+    // — matching the in-conversation approval banner. An explicit caller value still
+    // wins; a pure MCP / no-session call (no lead conv) keeps the `supervised`
+    // default (it has no approval UI to park for). Fixes 会话6: the lead model
+    // omitted autonomy → supervised → the plan auto-executed with no approval.
+    let autonomy = default_autonomy(p.autonomy, lead_conv_id);
+
     // Build the ad-hoc request from the EXPLICIT params: work_dir straight from the
-    // arg, autonomy passed through so an omitted value falls to `create_adhoc`'s own
-    // `supervised` default, lead_conv_id = the parsed calling-conversation id.
+    // arg, resolved autonomy, lead_conv_id = the parsed calling-conversation id.
     let req =
-        build_adhoc_request(p.goal, p.work_dir, model_range, p.autonomy, role_members, lead_conv_id, lead_model);
+        build_adhoc_request(p.goal, p.work_dir, model_range, autonomy, role_members, lead_conv_id, lead_model);
 
     // 4. Create: synthesize the fleet from the model range + park in `planning`.
     let run = match deps.orchestrator_run_service.create_adhoc(&user, req).await {
@@ -366,6 +374,20 @@ fn build_adhoc_request(
         // The 主模型 (planner/lead) when the range is curated/explicit; `None` for
         // an uncurated Auto run (engine keeps its positional default).
         lead_model,
+    }
+}
+
+/// Resolve the effective autonomy for an ad-hoc run created via the caps front
+/// door. An explicit, non-blank caller value always wins. Otherwise a Path-A run
+/// (bound to a lead conversation = the desktop 智能编排 entry) defaults to
+/// `interactive` so the plan parks at `awaiting_plan_approval` for the user to
+/// review/approve before it runs; a pure MCP / no-session call (no lead conv)
+/// returns `None` so `create_adhoc` applies its `supervised` default (no approval
+/// UI to park for).
+fn default_autonomy(explicit: Option<String>, lead_conv_id: Option<i64>) -> Option<String> {
+    match explicit {
+        Some(a) if !a.trim().is_empty() => Some(a),
+        _ => lead_conv_id.map(|_| "interactive".to_string()),
     }
 }
 
@@ -825,6 +847,31 @@ mod tests {
         assert!(req.autonomy.is_none(), "omitted autonomy → None (service default applies)");
         assert!(req.work_dir.is_none(), "omitted work_dir → None (temp dir)");
         assert!(req.lead_conv_id.is_none());
+    }
+
+    // 会话6 fix: the conversation entry (Path A, a lead conversation is bound) must
+    // default to `interactive` so the plan PARKS for approval instead of auto-running.
+    #[test]
+    fn default_autonomy_lead_conv_defaults_interactive() {
+        assert_eq!(default_autonomy(None, Some(6)).as_deref(), Some("interactive"), "lead conv → parks");
+        assert_eq!(
+            default_autonomy(Some("   ".into()), Some(6)).as_deref(),
+            Some("interactive"),
+            "blank autonomy treated as omitted → parks"
+        );
+    }
+
+    #[test]
+    fn default_autonomy_explicit_value_always_wins() {
+        assert_eq!(default_autonomy(Some("supervised".into()), Some(6)).as_deref(), Some("supervised"));
+        assert_eq!(default_autonomy(Some("interactive".into()), None).as_deref(), Some("interactive"));
+    }
+
+    #[test]
+    fn default_autonomy_no_lead_conv_stays_unset() {
+        // Pure MCP / no-session → None so create_adhoc applies its `supervised`
+        // default (no approval UI to park for).
+        assert_eq!(default_autonomy(None, None), None);
     }
 
     // The deterministic homepage channel: the exact `extra.orchestrator_model_range`
