@@ -61,6 +61,11 @@ pub struct ProviderCompat {
     /// Available effort levels for this provider (e.g., ["low", "medium", "high"]).
     /// Only meaningful when supports_effort is true.
     pub effort_levels: Option<Vec<String>>,
+
+    /// 该模型是否支持图片输入(多模态)。None = 默认支持(true)。
+    /// 为 Some(false) 时 OpenAI provider 的 build_messages 会剔除图片、改文字占位。
+    /// 由 VisionUnsupportedRegistry 在工厂构建时按 provider+model 注入,不持久化。
+    pub supports_image: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -124,6 +129,7 @@ impl ProviderCompat {
             supports_thinking: user.supports_thinking.or(defaults.supports_thinking),
             supports_effort: user.supports_effort.or(defaults.supports_effort),
             effort_levels: user.effort_levels.or(defaults.effort_levels),
+            supports_image: user.supports_image.or(defaults.supports_image),
         }
     }
 
@@ -171,6 +177,11 @@ impl ProviderCompat {
 
     pub fn effort_levels(&self) -> &[String] {
         self.effort_levels.as_deref().unwrap_or(&[])
+    }
+
+    /// 是否支持图片输入。**默认 true**——只有被显式标记不支持时才 false。
+    pub fn supports_image(&self) -> bool {
+        self.supports_image.unwrap_or(true)
     }
 }
 
@@ -404,6 +415,32 @@ mod tests {
         assert!(!compat2.supports_thinking());
         assert!(compat2.supports_effort());
         assert_eq!(compat2.effort_levels(), &["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn supports_image_defaults_true_when_unset() {
+        let compat = ProviderCompat::default();
+        assert!(compat.supports_image());
+    }
+
+    #[test]
+    fn supports_image_false_when_set_false() {
+        let compat = ProviderCompat {
+            supports_image: Some(false),
+            ..Default::default()
+        };
+        assert!(!compat.supports_image());
+    }
+
+    #[test]
+    fn merge_user_supports_image_wins() {
+        let defaults = ProviderCompat::default();
+        let user = ProviderCompat {
+            supports_image: Some(false),
+            ..Default::default()
+        };
+        let merged = ProviderCompat::merge(defaults, user);
+        assert!(!merged.supports_image());
     }
 
     #[test]
