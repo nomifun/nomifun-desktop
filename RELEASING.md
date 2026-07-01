@@ -170,6 +170,29 @@ Use this order for every desktop release.
 Use this when a macOS Release already exists and you later continue from a
 Windows build machine.
 
+**One-click (recommended).** After a one-time setup, repeat with a single command:
+
+1. Copy the updater private key `apps/desktop/signing/nomifun-updater.key` from
+   your key store (gitignored; must match the `pubkey` in `tauri.conf.json`).
+2. Copy `apps/desktop/signing/.env.release.example` to `.env.release` (gitignored)
+   and set `GH_TOKEN=...` (a classic PAT with `repo`, or a fine-grained PAT with
+   Contents: read/write on this repo).
+
+   ```powershell
+   git pull
+   bun run release:win            # pull -> verify Release -> clean -> build -> merge latest.json -> upload --clobber -> commit & push -> verify
+   bun run release:win -DryRun    # read-only preflight (gh/token/Release/key/version), no build or upload
+   bun run release:win -NoPush    # build + upload, but leave the latest.json change local
+   ```
+
+The script loads `GH_TOKEN` from `.env.release`, loads the signing key, verifies
+the `v<version>` Release exists, removes stale NSIS artifacts, builds updater
+artifacts, merges the `windows-x86_64` entry via `make:latest`, uploads with
+`--clobber`, commits `latest.json` back to `main` as author `nomifun`, and
+verifies the updater endpoint. It aborts with a clear error on any failure.
+
+**Manual steps** (equivalent to what the script runs internally):
+
 1. Pull the release commit/tag and confirm the same version.
 
    ```powershell

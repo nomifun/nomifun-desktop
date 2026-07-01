@@ -63,7 +63,38 @@ bun run make:latest
 
 ## Windows 发版
 
-必须在 Windows 机器上执行。先拉到与当前 Release 一致的代码：
+必须在 Windows 机器上执行。前提是 macOS 侧已经建好该版本的 GitHub Release（含 macOS 资产
+和 `latest.json` 的 darwin 条目）——本节负责在 Windows 上把 Windows 产物「补」进去。
+
+### 一键发版（推荐）
+
+一次性配置好后即可反复一键：
+
+1. 从密钥库拷入 updater 私钥 `apps/desktop/signing/nomifun-updater.key`（keyID
+   `F3AA272E60AA7952`，已被 gitignore，必须与 `tauri.conf.json` 内嵌 `pubkey` 匹配）。
+2. 复制 `apps/desktop/signing/.env.release.example` 为 `.env.release`（已被 gitignore），
+   填入 `GH_TOKEN=...`（`repo` 权限的经典 PAT，或对本仓库 Contents:read/write 的细粒度 PAT）。
+
+然后：
+
+```powershell
+git pull
+bun run release:win            # pull→校验 Release→清旧产物→构建→合并 latest.json→上传+clobber→提交推送→校验
+bun run release:win -DryRun    # 只跑只读前置检查并打印计划，不构建/不上传/不推送
+bun run release:win -NoPush    # 构建+上传，但不提交/推送 latest.json（改动留本地）
+```
+
+脚本自动完成：读取 `.env.release` 里的 `GH_TOKEN` 并注入 `gh`、加载签名私钥、校验
+`v<version>` Release 已存在、清理旧版本残留 NSIS 产物、构建更新产物、`make:latest` 合并
+windows 条目、`gh release upload --clobber`、以作者 `nomifun` 提交 `latest.json` 回 `main`、
+拉取 updater 端点校验。失败会明确报错并中断。
+
+> 未启用 Authenticode 时，手动安装包仍可能触发 SmartScreen / 未知发布者提示；自动更新验签
+> 走 Tauri updater 的 minisign 签名，与 Authenticode 无关，一键脚本已覆盖。
+
+### 手动分步（等价于一键脚本内部流程）
+
+先拉到与当前 Release 一致的代码：
 
 ```powershell
 git pull
