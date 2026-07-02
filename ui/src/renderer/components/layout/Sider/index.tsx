@@ -21,6 +21,7 @@ import {
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
+  SiderOutboundEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -87,6 +88,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleNomiClick = () => navTo('/nomi');
+  const handleOutboundClick = () => navTo('/outbound');
   const handleAssistantSkillsClick = () => navTo('/assistants?tab=assistants');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
@@ -177,6 +179,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
+            />
+            {/* Outbound employees (外呼员工) — public-service companions */}
+            <SiderOutboundEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/outbound')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleOutboundClick}
             />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />

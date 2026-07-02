@@ -3099,6 +3099,14 @@ export type IFigureUpdatePatch = {
   size_tier?: 's' | 'm' | 'l';
 };
 
+/**
+ * Public-facing posture of a companion (外呼员工 / outbound-employee feature).
+ * `private` (default) = a normal owner-facing desktop 伙伴 with full capabilities.
+ * `public_service` = a locked-down public-facing agent (外呼员工): chat + knowledge
+ * retrieval only; shell / file / computer / browser are gated off.
+ */
+export type CompanionExposure = 'private' | 'public_service';
+
 /** One companion's profile — `companions/{companion_id}/config.json`. */
 export interface ICompanionProfile {
   id: string;
@@ -3109,6 +3117,11 @@ export interface ICompanionProfile {
   model: ICompanionModelRef;
   appearance: ICompanionWindowConfig;
   created_at: number;
+  /**
+   * Public-facing posture. Optional on the wire so a client talking to a backend
+   * that predates the field degrades to `private` (a plain desktop 伙伴).
+   */
+  exposure?: CompanionExposure;
 }
 
 /** Shared skill-evolution settings (P1/P2 backend; P3 surfaces in UI). */
@@ -3201,6 +3214,27 @@ export interface ICompanionCreatedEvent {
 /** `companion.deleted` */
 export interface ICompanionDeletedEvent {
   companion_id: string;
+}
+
+/** Surface a companion-audit entry originated from. */
+export type CompanionAuditSurface = 'channel' | 'desktop' | 'remote';
+/** What an audit-log row records: a conversation turn, or an exposure toggle. */
+export type CompanionAuditKind = 'turn' | 'exposure_change';
+/**
+ * One reverse-chronological audit-log row for a companion (外呼员工 审计日志).
+ * Hand-defined (NOT from generated bindings) against the pinned backend contract:
+ * `GET /api/companion/companions/{id}/audit?limit=50`
+ *   → ApiResponse<{ entries: ICompanionAuditEntry[] }>, most-recent-first.
+ */
+export interface ICompanionAuditEntry {
+  id: string;
+  /** Epoch milliseconds. */
+  at: number;
+  surface: CompanionAuditSurface;
+  /** IM platform when `surface === 'channel'` (e.g. "telegram"); null otherwise. */
+  channel_platform: string | null;
+  kind: CompanionAuditKind;
+  detail: string;
 }
 
 export const companion = {
@@ -3313,6 +3347,24 @@ export const companion = {
   ),
   deleteCompanion: httpDelete<void, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}`),
   getCompanionStatus: httpGet<ICompanionStatus, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}/status`),
+  /**
+   * Set a companion's public-facing posture (外呼员工 招聘 / 退回). `public_service`
+   * locks it to chat + knowledge retrieval (shell/file/computer/browser gated off);
+   * `private` restores a normal desktop 伙伴. Returns the updated profile.
+   */
+  setExposure: httpPut<ICompanionProfile, { companion_id: string; exposure: CompanionExposure }>(
+    (p) => `/api/companion/companions/${p.companion_id}/exposure`,
+    (p) => ({ exposure: p.exposure })
+  ),
+  /**
+   * Reverse-chronological audit log of a companion's outward activity (turns +
+   * exposure changes), most-recent-first. Degrades to an empty list when the
+   * backend hasn't shipped the endpoint yet (404 silenced → the UI shows 暂无记录).
+   */
+  getCompanionAudit: httpGet<{ entries: ICompanionAuditEntry[] }, { companion_id: string; limit?: number }>(
+    (p) => `/api/companion/companions/${p.companion_id}/audit?limit=${p.limit ?? 50}`,
+    { silentStatuses: [404] }
+  ),
   /** Ingest a DIY figure image previously landed in the temp upload root via `/api/fs/upload` (two-phase upload). */
   uploadFigure: httpPost<void, { companion_id: string; source_path: string }>(
     (p) => `/api/companion/companions/${p.companion_id}/figure`,
