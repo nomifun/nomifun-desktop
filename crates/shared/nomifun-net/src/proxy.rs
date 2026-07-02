@@ -133,6 +133,17 @@ fn clear_system_proxy_cache() {
 }
 
 fn command_stdout_with_timeout(command: &mut Command, timeout: Duration) -> Option<String> {
+    // CREATE_NO_WINDOW: these detection helpers spawn console-subsystem CLIs
+    // (`reg`/`scutil`/`gsettings`/`kreadconfig`). The packaged desktop build is a
+    // GUI-subsystem app with no attached console, so without this flag Windows
+    // allocates a fresh console that flashes on screen for each spawn. Matches the
+    // repo-wide convention (nomi-computer, nomi-tools, nomi-mcp, nomi-config, …).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -341,16 +352,20 @@ fn detect_platform_proxy() -> Option<SystemProxyConfig> {
 
 #[cfg(target_os = "windows")]
 fn detect_platform_proxy() -> Option<SystemProxyConfig> {
+    // ProxyEnable gates everything: when it is off (the default on most machines)
+    // parse_windows_proxy_settings returns None regardless of the other values, so
+    // skip the ProxyServer/ProxyOverride reads to avoid two extra `reg` spawns.
     let proxy_enable = read_windows_internet_settings("ProxyEnable")
-        .and_then(|value| parse_windows_proxy_enable(&value));
+        .and_then(|value| parse_windows_proxy_enable(&value))
+        .unwrap_or(false);
+    if !proxy_enable {
+        return None;
+    }
+
     let proxy_server = read_windows_internet_settings("ProxyServer").unwrap_or_default();
     let proxy_override = read_windows_internet_settings("ProxyOverride");
 
-    parse_windows_proxy_settings(
-        proxy_enable.unwrap_or(false),
-        &proxy_server,
-        proxy_override.as_deref(),
-    )
+    parse_windows_proxy_settings(true, &proxy_server, proxy_override.as_deref())
 }
 
 #[cfg(target_os = "windows")]
