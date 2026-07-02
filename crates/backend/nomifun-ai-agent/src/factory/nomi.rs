@@ -604,24 +604,53 @@ async fn read_string_pref(deps: &AgentFactoryDeps, key: &str, host_default: &str
     }
 }
 
-/// App UI language default, used when no settings repo is wired (tests), no
-/// settings row is persisted yet (fresh install), or the read fails. Matches
+/// App UI language default — the final fallback when no language is persisted
+/// AND the host OS locale is unavailable. Matches
 /// `SystemSettingsResponse::default().language` in `nomifun-api-types`.
 const DEFAULT_APP_LANGUAGE: &str = "en-US";
 
-/// Read the app UI language live from system settings (mirrors `read_bool_pref`).
-/// Falls back to [`DEFAULT_APP_LANGUAGE`] when the repo is absent, no row exists,
-/// the stored value is blank, or the read errors — so a companion always gets a
-/// well-formed directive. Takes the bare repo option (not the whole deps) so it
-/// is trivially unit-testable.
-async fn read_app_language(settings_repo: Option<&Arc<dyn ISettingsRepository>>) -> String {
-    let Some(repo) = settings_repo else {
-        return DEFAULT_APP_LANGUAGE.to_owned();
-    };
-    match repo.get_settings().await {
-        Ok(Some(settings)) if !settings.language.trim().is_empty() => settings.language,
-        _ => DEFAULT_APP_LANGUAGE.to_owned(),
+/// Normalize an arbitrary locale tag to the reply-language directive's supported
+/// axis. [`reply_language_directive`] only distinguishes `zh-CN` from everything
+/// else, so any Chinese locale (`zh`, `zh_CN`, `zh-Hans`, `zh-Hans-CN`, …) folds
+/// to `zh-CN`; any other tag is returned normalized (→ English directive).
+fn normalize_lang(code: &str) -> String {
+    let c = code.trim().replace('_', "-");
+    if c.to_ascii_lowercase().starts_with("zh") {
+        "zh-CN".to_owned()
+    } else {
+        c
     }
+}
+
+/// Resolve the effective app language: an explicitly **persisted** System-Settings
+/// value wins; otherwise fall back to the host **OS locale** (so a fresh install
+/// on a Chinese system replies in Chinese without the owner touching settings —
+/// 首轮跟随系统语言); finally [`DEFAULT_APP_LANGUAGE`]. `os_locale` is injected so
+/// the resolution is deterministically unit-testable.
+fn resolve_language(persisted: Option<&str>, os_locale: Option<&str>) -> String {
+    if let Some(l) = persisted.map(str::trim).filter(|s| !s.is_empty()) {
+        return normalize_lang(l);
+    }
+    if let Some(l) = os_locale.map(str::trim).filter(|s| !s.is_empty()) {
+        return normalize_lang(l);
+    }
+    DEFAULT_APP_LANGUAGE.to_owned()
+}
+
+/// Read the effective app UI language live (mirrors `read_bool_pref`): the
+/// persisted System-Settings value if set, else the host OS locale, else
+/// [`DEFAULT_APP_LANGUAGE`]. Read per build so a language switch — or first-run OS
+/// detection — takes effect on the next agent (re)build. Takes the bare repo
+/// option (not the whole deps) so the persisted branch is trivially testable.
+async fn read_app_language(settings_repo: Option<&Arc<dyn ISettingsRepository>>) -> String {
+    let persisted = match settings_repo {
+        Some(repo) => match repo.get_settings().await {
+            Ok(Some(settings)) if !settings.language.trim().is_empty() => Some(settings.language),
+            _ => None,
+        },
+        None => None,
+    };
+    resolve_language(persisted.as_deref(), sys_locale::get_locale().as_deref())
 }
 
 /// Map a stored app-language code to the reply-language directive appended LAST
@@ -1277,29 +1306,33 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn read_app_language_falls_back_to_en_us() {
-        // No repo wired (tests / standalone composition).
-        assert_eq!(read_app_language(None).await, "en-US");
-        // No persisted row yet (fresh install).
-        assert_eq!(
-            read_app_language(Some(&settings_repo(Ok(None)))).await,
-            "en-US"
-        );
-        // Blank stored value.
-        assert_eq!(
-            read_app_language(Some(&settings_repo(Ok(Some(settings_row("   ")))))).await,
-            "en-US"
-        );
-        // Read error.
-        assert_eq!(
-            read_app_language(Some(&settings_repo(Err(())))).await,
-            "en-US"
-        );
+    #[test]
+    fn resolve_language_prefers_persisted_then_os_then_default() {
+        // Persisted setting always wins (ignores OS locale).
+        assert_eq!(resolve_language(Some("en-US"), Some("zh-CN")), "en-US");
+        assert_eq!(resolve_language(Some("zh-CN"), Some("en-US")), "zh-CN");
+        // No persisted value → follow the OS locale (首轮跟随系统语言).
+        assert_eq!(resolve_language(None, Some("zh-CN")), "zh-CN");
+        assert_eq!(resolve_language(Some("  "), Some("zh_CN")), "zh-CN");
+        assert_eq!(resolve_language(None, Some("en-US")), "en-US");
+        // Neither → hard default.
+        assert_eq!(resolve_language(None, None), "en-US");
+        assert_eq!(resolve_language(Some(""), Some("   ")), "en-US");
+    }
+
+    #[test]
+    fn normalize_lang_folds_every_chinese_locale_to_zh_cn() {
+        for zh in ["zh", "zh-CN", "zh_CN", "zh-Hans", "zh-Hans-CN", "ZH-cn"] {
+            assert_eq!(normalize_lang(zh), "zh-CN", "{zh} must fold to zh-CN");
+        }
+        // Non-Chinese tags are returned normalized (→ English directive).
+        assert_eq!(normalize_lang("en_US"), "en-US");
+        assert_eq!(normalize_lang("fr-FR"), "fr-FR");
     }
 
     #[tokio::test]
     async fn read_app_language_returns_persisted_language() {
+        // A persisted value wins over whatever OS locale the test host reports.
         assert_eq!(
             read_app_language(Some(&settings_repo(Ok(Some(settings_row("zh-CN")))))).await,
             "zh-CN"

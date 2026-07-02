@@ -112,6 +112,7 @@ prost = "0.13"
 semver = "1"
 dirs = "6"
 regex = "1"
+sys-locale = "0.3"
 
 # --- File system ---
 include_dir = "0.7"
