@@ -188,7 +188,7 @@ const PublicAgentDetailPage: React.FC = () => {
                 {active === 'knowledge' && <KnowledgeSection agent={agent} patch={patch} message={message} />}
                 {active === 'policy' && <PolicySection agent={agent} patch={patch} message={message} />}
                 {active === 'audit' && <AuditSection agent={agent} patch={patch} message={message} />}
-                {active === 'channels' && <ChannelsSection />}
+                {active === 'channels' && <ChannelsSection agent={agent} message={message} />}
               </div>
             </div>
           </>

@@ -3742,6 +3742,22 @@ export const publicAgent = {
   clearAudit: httpDelete<{ deleted_days: number }, { id: string; older_than_days: number }>(
     (p) => `/api/public-agents/${p.id}/audit?older_than_days=${p.older_than_days}`
   ),
+  /** The public agent bound to a channel platform (`null` when unbound / bound to a companion). */
+  getChannelBinding: httpGet<{ public_agent_id: string | null }, { platform: string }>(
+    (p) => `/api/channels/${p.platform}/public-agent`
+  ),
+  /**
+   * Bind (or unbind with `null`) a channel platform to a public agent. A non-null
+   * id also clears that platform's companion binding server-side (a platform bot
+   * serves EITHER a companion OR a public agent).
+   */
+  setChannelBinding: httpPut<
+    { public_agent_id: string | null },
+    { platform: string; public_agent_id: string | null }
+  >(
+    (p) => `/api/channels/${p.platform}/public-agent`,
+    (p) => ({ public_agent_id: p.public_agent_id })
+  ),
 };
 
 export const knowledge = {
