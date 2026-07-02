@@ -1,7 +1,7 @@
 {
   "version": "0.1.16",
-  "notes": "- 新增/补全国内模型供应商与 Token/Coding Plan 预设：Doubao/Ark、DashScope/Qwen、GLM、Qianfan、StepFun、MiniMax、Xiaomi MiMo。\n- 适配非标准 OpenAI-compatible base path，避免 Coding/Token Plan endpoint 被错误裁剪。\n- 支持 `tp-` Token Plan key 和 MiMo Token Plan CN/SGP/AMS endpoint 识别。",
-  "pub_date": "2026-07-02T10:34:30.819Z",
+  "notes": "- Improved orchestration reliability and control: DAG node pre-configuration,\n  per-node model selection, explicit in-conversation approval before execution,\n  and fixes for broken DAG lines, orphaned running nodes, one-node planning, and\n  blank pending states.\n- Added graceful handling for providers/models that do not support image input:\n  image capability tracking, proactive image removal, retry without interrupting\n  the conversation, and a visible in-conversation notice.\n- Expanded browser-use controls with silent mode defaults, managed/system\n  browser source selection, persistent encrypted browser login, a one-click\n  browser login action, and screenshot context for silent approvals.\n- Fixed WebUI credential persistence across restarts and added per-model context\n  window configuration.\n- Polished updater error handling, local update test clients, README screenshots,\n  provider quick links, and contact assets.\n- Packaging note: this Mac-side release publishes macOS installer and updater\n  assets. Windows and Linux packages must be added later from their native build\n  machines.",
+  "pub_date": "2026-07-02T11:22:42.974Z",
   "platforms": {
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNNbGd1disvU1ppTVBNbnR4Y0djRloyRFlTclpCcXBrTkxQZGFYTzE1NEgzQTRrNS9ZQzBFYm9LMFc1K3pOcmpMQnJybE1iTVZSaVUvTllPaWFFR2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTg4MzI5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnMwNUxTSjlYMEswaEppZnlwalBCdjQwSVNVTDh4djYxaE1DcHRXLzJyZUpHWDNBc01KZUYxeFBtWHljZVI4bmJ6M3pUdU9sQldDOEJBS1piU3dPNENRPT0K",
@@ -10,6 +10,10 @@
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNNbGd1disvU1ppTVBNbnR4Y0djRloyRFlTclpCcXBrTkxQZGFYTzE1NEgzQTRrNS9ZQzBFYm9LMFc1K3pOcmpMQnJybE1iTVZSaVUvTllPaWFFR2c4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTg4MzI5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnMwNUxTSjlYMEswaEppZnlwalBCdjQwSVNVTDh4djYxaE1DcHRXLzJyZUpHWDNBc01KZUYxeFBtWHljZVI4bmJ6M3pUdU9sQldDOEJBS1piU3dPNENRPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.16/NomiFun.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJoWEErdGJrTXAvU2VKQ29kZ2RLU0w3ZjR4TnZEUW5hdloxMk5oQUQvQzZ2WnErUE16QWs0RllsaVVDYzM4WXZVeDFqTVVPNHFwcjBlWTlDVUx0QkE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyOTkxMzYyCWZpbGU6Tm9taUZ1bl8wLjEuMTZfeDY0LXNldHVwLmV4ZQp1cjVMUXd3Z28za1U5VmpUVGdzNzRleGN1cktLb2hZTkhSUE80MXhONHYzbE5YdWhJWFd3UnpBeWN6czJ5MjZFcnBGK0JYTkxPcDVEaUMvRWFpT09BQT09Cg==",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.1.16/NomiFun_0.1.16_x64-setup.exe"
     }
   }
 }
