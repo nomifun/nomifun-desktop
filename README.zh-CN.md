@@ -89,14 +89,10 @@
 <p>
   🎬 <b>演示视频：</b>
   中国区：
-  <a href="https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209">抖音</a>
-  ·
   <a href="https://www.bilibili.com/video/BV1kwKZ6UE5X/">B 站</a>
   &nbsp;|&nbsp;
   海外：
   <a href="https://youtu.be/AsEToBDFR9s">YouTube</a>
-  ·
-  <a href="https://x.com/colir0/status/2072001821640437776?s=20">X</a>
 </p>
 
 <p>
@@ -454,9 +450,9 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 | ✉️ **邮箱** | `www.nomifun.com/contact` <sub>（占位 · 待确认）</sub> |
 | 📕 **小红书** | [NomiFun](https://xhslink.com/m/4x6ti8n6cA1) |
 | 📺 **哔哩哔哩** | [NomiFun](https://b23.tv/0UhgKDh) · [演示视频](https://www.bilibili.com/video/BV1kwKZ6UE5X/) |
-| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) · [演示视频](https://www.douyin.com/user/self?from_tab_name=main&modal_id=7657100052061523209) |
+| 🎵 **抖音** | [NomiFun](https://v.douyin.com/MDT5QVdYaJk/) |
 | ▶️ **YouTube** | [@NomiFun-o2y](https://www.youtube.com/@NomiFun-o2y) · [演示视频](https://youtu.be/AsEToBDFR9s) |
-| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) · [演示帖](https://x.com/colir0/status/2072001821640437776?s=20) |
+| 𝕏 **X (Twitter)** | [@colir0](https://x.com/colir0) |
 | 🎬 **TikTok** | [@colir0luo](https://www.tiktok.com/@colir0luo) |
 
 **加入交流群** —— 扫码即可：
@@ -476,7 +472,7 @@ NomiFun **完全开源、毫无保留**。个人与企业都可以在它之上�
 
 [Apache-2.0](LICENSE) © 2025–2026 NomiFun。
 
-第三方署名见 [`NOTICE`](NOTICE)，其中包括 NomiFun 在迁移到当前 Tauri/Rust 架构之前最初 fork 自的 [AionUi](https://github.com/iOfficeAI/AionUi) 项目。
+第三方署名见 [`NOTICE`](NOTICE)。
 
 <div align="center">
 <br/>
