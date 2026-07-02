@@ -673,7 +673,7 @@ fn append_knowledge_context(
 /// directory are supplied to the orchestration tools at runtime, so the prompt
 /// instructs the lead not to ask for them. Kept as a `const` so the composition
 /// is unit-testable without standing up the async factory.
-pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。对复杂、可拆分为多个并行/有依赖子任务的需求：调用工具 `nomi_run_create(goal)` 把需求拆成任务 DAG 并行执行（模型范围与工作目录会自动取用），随后用 `nomi_run_status`/`nomi_run_result` 跟进并向用户汇报进展与产出。对多个相互独立、无需拆解的并行小任务：改用 `nomi_spawn(tasks)` 直接并行扇出（无需规划、立即执行、每个子任务在画布上可见）。不要询问 workspace 或 fleet——它们已不存在。";
+pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。需要并行开几个子 agent 干活（研究、分析、各自独立产出等）时——默认用 `nomi_spawn(tasks)`：无需规划、立即并行执行，每个子任务在画布上实时可见状态与转录。只有当任务真正复杂、需要先由 planner 拆成有依赖关系的任务 DAG 时，才用 `nomi_run_create(goal)`（模型范围与工作目录会自动取用、随即自动开跑）。派发拿到 run_id 后，直接告诉用户已在后台并行执行、进度可在右侧编排画布实时查看，然后结束本轮——不要自己轮询等待，也不要重复创建：子任务全部完成或失败时，系统会自动把结果回执给你，届时你再向用户汇总或调整策略。用户若中途询问进度，才用 `nomi_run_status` 查一次。不要询问 workspace 或 fleet——它们已不存在。";
 
 /// 进程内 Spawn 门控（纯函数，可单测）：本地桌面网关会话（desktop_gateway 且非
 /// IM 渠道）禁用进程内 Spawn —— 子 agent 改走 nomi_spawn 编排扇出（每个子任务

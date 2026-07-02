@@ -26,7 +26,8 @@ pub mod worker;
 
 pub use engine::{
     ConversationCanceller, ConversationSteerer, DEFAULT_MAX_PARALLEL, DEFAULT_WORKER_TIMEOUT,
-    NoopConversationCanceller, NoopConversationSteerer, RunEngine, RunEngineDeps,
+    LeadReporter, NoopConversationCanceller, NoopConversationSteerer, NoopLeadReporter, RunEngine,
+    RunEngineDeps, RunOutcome,
 };
 pub use error::OrchestratorError;
 pub use events::OrchestratorRunEventEmitter;
