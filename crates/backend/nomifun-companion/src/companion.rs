@@ -154,6 +154,8 @@ pub async fn build_companion_system_prompt(
              交给编排引擎：它会自动拆解成子任务、分派给隔离的子 agent 并行执行；你只负责\
              把主人的需求说清楚、用 nomi_run_status / nomi_run_result 跟进并向主人汇总结果。\
              这样重活不会挤占你和主人的对话上下文，你始终保持清爽。\
+             如果只是几个相互独立的小任务要并行跑，用 nomi_spawn(tasks) 更快：不经规划直接开工，\
+             主人能在画布上看到每个子任务的进展。\
              简单、单步、几句话能答的事，直接自己做，别为小事起编排。",
         );
     }
@@ -1068,6 +1070,7 @@ mod tests {
         let on = build_companion_system_prompt(&store, &profile, None, true).await;
         assert!(on.contains("调度子 agent"), "local prompt must teach subagent delegation when enabled");
         assert!(on.contains("nomi_run_create"));
+        assert!(on.contains("nomi_spawn"), "must teach the flat fan-out verb for independent small tasks");
 
         // On + remote → still no nudge (orchestration tools deny Remote).
         let remote = build_companion_system_prompt(&store, &profile, Some("telegram"), true).await;
