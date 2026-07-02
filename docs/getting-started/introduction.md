@@ -77,9 +77,7 @@ NomiFun is in active development. [STATUS.md](../../STATUS.md) is the compact
 current-state snapshot. Design and audit history is not kept in the repo; consult
 git history for past decisions.
 
-## Acknowledgments
+## License
 
-NomiFun began as a fork of the open-source
-[AionUi](https://github.com/iOfficeAI/AionUi) project and has since been
-substantially refactored around a Tauri + Rust architecture. NomiFun is released
-under the Apache-2.0 License.
+NomiFun is released under the Apache-2.0 License. See
+[`NOTICE`](../../NOTICE) for third-party attributions.

@@ -127,7 +127,7 @@ if ($releaseExists) { $Mode = 'APPEND' } else { $Mode = 'CREATE' }
 $NotesContent = $null
 if ($NotesFile) {
   if (-not (Test-Path $NotesFile)) { Fail "找不到 -NotesFile 指定的文件: $NotesFile" }
-  $NotesContent = (Get-Content $NotesFile -Raw).Trim()
+  $NotesContent = (Get-Content $NotesFile -Raw -Encoding UTF8).Trim()
 } elseif ($Notes) {
   $NotesContent = $Notes.Trim()
 }
@@ -194,7 +194,7 @@ Write-Host "▶ 合并 latest.json ..."
 if ($NotesTmp) { & bun scripts/make-latest-json.mjs --notes-file $NotesTmp } else { & bun scripts/make-latest-json.mjs }
 if ($LASTEXITCODE -ne 0) { Fail "make:latest 失败。" }
 
-$manifest = Get-Content $LatestJson -Raw | ConvertFrom-Json
+$manifest = Get-Content $LatestJson -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($manifest.version -ne $TargetVersion) { Fail "latest.json version($($manifest.version)) != $TargetVersion。" }
 if (-not $manifest.platforms.'windows-x86_64') { Fail "latest.json 缺少 windows-x86_64 条目，合并异常。" }
 
