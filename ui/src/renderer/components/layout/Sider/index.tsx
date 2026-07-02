@@ -21,7 +21,7 @@ import {
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
-  SiderOutboundEntry,
+  SiderPublicServiceEntry,
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
@@ -43,7 +43,7 @@ interface SiderProps {
  * content-area secondary sidebar (`ConversationShell` / `ContentSider`),
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
- * 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
+ * 对外服务 (对外伙伴), 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
  * 增强工具 (助手&Skill / MCP), and a bottom-pinned 设置 group
  * (模型&Agent + the footer).
  */
@@ -88,7 +88,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleNomiClick = () => navTo('/nomi');
-  const handleOutboundClick = () => navTo('/outbound');
+  const handlePublicServiceClick = () => navTo('/public-companions');
   const handleAssistantSkillsClick = () => navTo('/assistants?tab=assistants');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
@@ -180,13 +180,15 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
             />
-            {/* Outbound employees (外呼员工) — public-service companions */}
-            <SiderOutboundEntry
+            {/* 对外服务 — public-facing customer-service agents (对外伙伴), a domain
+                fully separate from the desktop-companion group above. */}
+            <SiderSectionHeader label={t('common.siderSection.publicService')} collapsed={collapsed} />
+            <SiderPublicServiceEntry
               isMobile={isMobile}
-              isActive={pathname.startsWith('/outbound')}
+              isActive={pathname.startsWith('/public-companions')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handleOutboundClick}
+              onClick={handlePublicServiceClick}
             />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
