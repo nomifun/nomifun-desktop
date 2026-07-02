@@ -205,27 +205,28 @@ pub(super) async fn build(
     // (legacy ones migrated forward by stamping the token). See Session::owner_token.
     let owner_token: Option<String> = options.conversation_created_at.map(|c| c.to_string());
     let conv_created_ms = options.conversation_created_at;
-    let accept_owned = |mut session: nomi_agent::session::Session| -> Option<nomi_agent::session::Session> {
-        if !nomi_agent::session::session_belongs_to(
-            session.owner_token.as_deref(),
-            session.created_at.timestamp_millis(),
-            owner_token.as_deref(),
-            conv_created_ms,
-        ) {
-            warn!(
-                conversation_id = %ctx.conversation_id,
-                session_id = %session.id,
-                "Discarding stale nomi session (belongs to a prior conversation that reused this id); starting fresh"
-            );
-            return None;
-        }
-        // Matching or legacy(None) stamp that postdates the conversation: accept,
-        // migrating legacy forward by stamping the owner token.
-        if session.owner_token.is_none() {
-            session.owner_token = owner_token.clone();
-        }
-        Some(session)
-    };
+    let accept_owned =
+        |mut session: nomi_agent::session::Session| -> Option<nomi_agent::session::Session> {
+            if !nomi_agent::session::session_belongs_to(
+                session.owner_token.as_deref(),
+                session.created_at.timestamp_millis(),
+                owner_token.as_deref(),
+                conv_created_ms,
+            ) {
+                warn!(
+                    conversation_id = %ctx.conversation_id,
+                    session_id = %session.id,
+                    "Discarding stale nomi session (belongs to a prior conversation that reused this id); starting fresh"
+                );
+                return None;
+            }
+            // Matching or legacy(None) stamp that postdates the conversation: accept,
+            // migrating legacy forward by stamping the owner token.
+            if session.owner_token.is_none() {
+                session.owner_token = owner_token.clone();
+            }
+            Some(session)
+        };
 
     let resume_session = {
         let session_mgr = SessionManager::new(session_directory.clone(), 100);
@@ -594,11 +595,15 @@ async fn read_app_language(settings_repo: Option<&Arc<dyn ISettingsRepository>>)
 /// `zh-CN` selects Chinese (supported set lives in `nomifun-system`).
 fn reply_language_directive(lang: &str) -> &'static str {
     match lang {
-        "zh-CN" => "【回复语言】无论上文的指令或记忆使用何种语言，都请始终用简体中文回复主人——\
-                    除非主人主动用其他语言和你说话，或明确要求你换一种语言。",
-        _ => "[Reply language] Regardless of the language used in the instructions or memories \
+        "zh-CN" => {
+            "【回复语言】无论上文的指令或记忆使用何种语言，都请始终用简体中文回复主人——\
+                    除非主人主动用其他语言和你说话，或明确要求你换一种语言。"
+        }
+        _ => {
+            "[Reply language] Regardless of the language used in the instructions or memories \
               above, always reply to the owner in English — unless the owner writes to you in \
-              another language or explicitly asks you to switch.",
+              another language or explicitly asks you to switch."
+        }
     }
 }
 
@@ -705,6 +710,8 @@ pub(crate) fn map_nomi_provider(
 /// Mirrors the frontend `envBuilder.ts` logic:
 /// - Strips trailing `/v1` from base_url (nomi appends its own path)
 /// - Gemini: prepends `/v1beta/openai` and overrides `api_path`
+/// - Domestic OpenAI-compatible providers with nonstandard version paths keep
+///   their configured base URL and append `/chat/completions`
 /// - OpenAI official (`api.openai.com`): sets `max_completion_tokens`
 pub(crate) fn resolve_nomi_url_and_compat(
     platform: &str,
@@ -727,6 +734,12 @@ pub(crate) fn resolve_nomi_url_and_compat(
         return (Some(base), compat);
     }
 
+    if uses_configured_openai_chat_base(platform) {
+        let base = raw_base_url.trim_end_matches('/').to_owned();
+        compat.api_path = Some("/chat/completions".to_owned());
+        return (Some(base).filter(|u| !u.is_empty()), compat);
+    }
+
     let normalized = normalize_nomi_base_url(raw_base_url);
     let base_url = Some(normalized).filter(|u| !u.is_empty());
 
@@ -735,6 +748,21 @@ pub(crate) fn resolve_nomi_url_and_compat(
     }
 
     (base_url, compat)
+}
+
+fn uses_configured_openai_chat_base(platform: &str) -> bool {
+    matches!(
+        platform,
+        "ark"
+            | "ark-coding-plan"
+            | "stepfun"
+            | "stepfun-plan"
+            | "dashscope-coding"
+            | "zhipu"
+            | "glm-coding-plan"
+            | "qianfan"
+            | "qianfan-coding-plan"
+    )
 }
 
 fn is_openai_host(url: &str) -> bool {
@@ -1163,7 +1191,10 @@ mod tests {
         // en-US, unknown codes, and the empty string all resolve to English.
         for lang in ["en-US", "fr-FR", "zh-TW", ""] {
             let d = reply_language_directive(lang);
-            assert!(d.contains("in English"), "{lang} should map to English: {d}");
+            assert!(
+                d.contains("in English"),
+                "{lang} should map to English: {d}"
+            );
             assert!(!d.contains("简体中文"), "{lang} must not select Chinese");
         }
     }
@@ -1173,14 +1204,20 @@ mod tests {
         // No repo wired (tests / standalone composition).
         assert_eq!(read_app_language(None).await, "en-US");
         // No persisted row yet (fresh install).
-        assert_eq!(read_app_language(Some(&settings_repo(Ok(None)))).await, "en-US");
+        assert_eq!(
+            read_app_language(Some(&settings_repo(Ok(None)))).await,
+            "en-US"
+        );
         // Blank stored value.
         assert_eq!(
             read_app_language(Some(&settings_repo(Ok(Some(settings_row("   ")))))).await,
             "en-US"
         );
         // Read error.
-        assert_eq!(read_app_language(Some(&settings_repo(Err(())))).await, "en-US");
+        assert_eq!(
+            read_app_language(Some(&settings_repo(Err(())))).await,
+            "en-US"
+        );
     }
 
     #[tokio::test]
@@ -1473,6 +1510,55 @@ mod tests {
             resolve_nomi_url_and_compat("custom", "https://api.deepseek.com/v1", "openai", false);
         assert_eq!(base_url.as_deref(), Some("https://api.deepseek.com"));
         assert!(compat.api_path.is_none());
+    }
+
+    #[test]
+    fn resolve_domestic_openai_compatible_platforms_use_configured_chat_base() {
+        for (platform, base) in [
+            ("ark", "https://ark.cn-beijing.volces.com/api/v3"),
+            ("stepfun", "https://api.stepfun.com/v1"),
+            ("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
+            ("qianfan", "https://qianfan.baidubce.com/v2"),
+        ] {
+            let (base_url, compat) = resolve_nomi_url_and_compat(platform, base, "openai", false);
+            assert_eq!(base_url.as_deref(), Some(base), "platform={platform}");
+            assert_eq!(
+                compat.api_path.as_deref(),
+                Some("/chat/completions"),
+                "platform={platform}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_coding_plan_platforms_use_chat_completions_at_configured_base() {
+        for (platform, base) in [
+            (
+                "ark-coding-plan",
+                "https://ark.cn-beijing.volces.com/api/coding/v3",
+            ),
+            ("stepfun-plan", "https://api.stepfun.com/step_plan/v1"),
+            (
+                "dashscope-coding",
+                "https://coding.dashscope.aliyuncs.com/v1",
+            ),
+            (
+                "glm-coding-plan",
+                "https://open.bigmodel.cn/api/coding/paas/v4",
+            ),
+            (
+                "qianfan-coding-plan",
+                "https://qianfan.baidubce.com/v2/coding",
+            ),
+        ] {
+            let (base_url, compat) = resolve_nomi_url_and_compat(platform, base, "openai", false);
+            assert_eq!(base_url.as_deref(), Some(base), "platform={platform}");
+            assert_eq!(
+                compat.api_path.as_deref(),
+                Some("/chat/completions"),
+                "platform={platform}"
+            );
+        }
     }
 
     #[test]
@@ -1851,7 +1937,7 @@ mod tests {
         // external-IM-channel write policy. Before the fix this field was never
         // threaded, so the reconstructed binding defaulted it to false and
         // channel write-back was permanently Disabled on the nomi engine.
-        use nomifun_knowledge::{resolve_write_policy, KnowledgeBinding, WriteMode, WriteSurface};
+        use nomifun_knowledge::{KnowledgeBinding, WriteMode, WriteSurface, resolve_write_policy};
 
         // Absent in JSON → serde default false (the previous, broken behavior).
         let off: NomiBuildExtra = serde_json::from_value(serde_json::json!({

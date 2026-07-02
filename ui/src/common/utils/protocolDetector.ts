@@ -178,8 +178,9 @@ export const PROTOCOL_SIGNATURES: ProtocolSignature[] = [
     // - 标准格式: sk-xxx
     // - 项目 Key: sk-proj-xxx
     // - 服务账号: sk-svcacct-xxx
+    // - 部分 Token Plan: tp-xxx
     // - 第三方服务可能使用其他格式
-    keyPattern: /^sk-[A-Za-z0-9-_]{20,}$/,
+    keyPattern: /^(sk|tp)-[A-Za-z0-9-_]{20,}$/,
     urlPatterns: [
       /api\.openai\.com/, // OpenAI 官方
       /\.openai\.azure\.com/, // Azure OpenAI
@@ -201,6 +202,8 @@ export const PROTOCOL_SIGNATURES: ProtocolSignature[] = [
       /api\.minimaxi\.com/, // MiniMax China
       /api\.minimax\.io/, // MiniMax Global
       /platform\.minimaxi\.com/, // MiniMax Platform
+      /api\.xiaomimimo\.com/, // Xiaomi MiMo API
+      /token-plan-(cn|sgp|ams)\.xiaomimimo\.com/, // Xiaomi MiMo Token Plan
       /localhost/, // 本地服务
       /127\.0\.0\.1/, // 本地服务
       /0\.0\.0\.0/, // 本地服务
