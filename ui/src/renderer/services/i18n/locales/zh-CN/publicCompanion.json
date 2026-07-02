@@ -1,0 +1,153 @@
+{
+  "title": "对外伙伴",
+  "subtitle": "面向陌生人的企业级客服 —— 窄而深：只做问答与知识库检索，高危能力一律关闭。",
+  "siderTitle": "对外伙伴",
+  "status": {
+    "enabled": "已启用",
+    "disabled": "已停用"
+  },
+  "trust": {
+    "qa": "仅问答与知识检索",
+    "locked": "终端 / 文件 / 电脑 / 浏览器 等高危能力已关闭",
+    "audited": "全程审计留痕"
+  },
+  "card": {
+    "knowledge": "公开知识库",
+    "channels": "绑定渠道",
+    "channelsPending": "渠道部署功能后端集成中",
+    "served": "近 7 日服务",
+    "metricPending": "指标将在后端集成后开放",
+    "modelReady": "模型已配置",
+    "modelUnset": "未配置模型"
+  },
+  "empty": {
+    "title": "还没有对外伙伴",
+    "desc": "创建一位对外伙伴，绑定公开知识库与服务守则，让它安全地接待陌生用户。",
+    "action": "创建第一位对外伙伴"
+  },
+  "create": {
+    "title": "创建对外伙伴",
+    "action": "创建对外伙伴",
+    "desc": "为面向陌生人的客服起个名字。创建后可在专属管理页配置话术、模型、知识库与服务守则。",
+    "nameLabel": "名称",
+    "namePlaceholder": "例如：官网售前客服",
+    "nameRequired": "请填写对外伙伴名称",
+    "submit": "创建",
+    "ok": "已创建对外伙伴"
+  },
+  "detail": {
+    "back": "返回对外伙伴",
+    "notFound": "找不到该对外伙伴",
+    "subtitle": "面向陌生人的企业级客服"
+  },
+  "nav": {
+    "overview": "概览",
+    "identity": "身份 & 话术",
+    "knowledge": "知识库",
+    "policy": "服务守则",
+    "audit": "审计 & 分析",
+    "channels": "渠道部署"
+  },
+  "overview": {
+    "statusTitle": "服务状态",
+    "statusDesc": "启用后对外伙伴开始接待陌生用户；停用则暂停一切对外服务。",
+    "createdAt": "创建于 {{date}}",
+    "enabledOk": "已启用，开始对外服务",
+    "disabledOk": "已停用，暂停对外服务",
+    "metricKb": "公开知识库",
+    "metricGrounded": "知识库模式",
+    "groundedOn": "严格",
+    "groundedOff": "宽松",
+    "metricRetention": "审计保留",
+    "retentionDays": "{{n}} 天",
+    "metricModel": "对话模型",
+    "modelOk": "已配置",
+    "modelUnset": "未配置",
+    "dangerTitle": "删除对外伙伴",
+    "dangerDesc": "永久删除该对外伙伴及其审计记录。此操作不可撤销。",
+    "deleteTitle": "删除对外伙伴？",
+    "deleteBody": "删除后该对外伙伴的配置与审计记录将一并移除，且无法恢复。绑定的知识库本身不会被删除。",
+    "deletedOk": "已删除"
+  },
+  "identity": {
+    "title": "身份 & 话术",
+    "desc": "设定对外伙伴的名称、开场问候，以及回答陌生人时应遵循的语气。",
+    "nameLabel": "名称",
+    "nameHint": "展示给内部与访客的名字。",
+    "nameRequired": "名称不能为空",
+    "greetingLabel": "开场白",
+    "greetingHint": "访客开启对话时看到的第一句欢迎语。",
+    "greetingPlaceholder": "例如：您好，我是官网客服小助手，很高兴为您解答产品相关问题～",
+    "toneLabel": "语气规范",
+    "toneHint": "希望它以怎样的口吻回复（专业 / 亲切 / 简洁…）。",
+    "tonePlaceholder": "例如：始终礼貌、专业、简洁；多用「您」；不确定时坦诚说明并引导留下联系方式。",
+    "modelLabel": "对话模型",
+    "modelHint": "对外伙伴回答陌生人时使用的模型。",
+    "modelProvider": "选择模型提供商",
+    "modelName": "选择模型",
+    "unsaved": "有未保存的改动",
+    "discard": "放弃"
+  },
+  "knowledge": {
+    "title": "知识库",
+    "desc": "选择对外伙伴可检索的平台知识库；它只会引用这些知识库中的内容回答陌生用户。",
+    "selectPlaceholder": "选择公开知识库（可多选）",
+    "noBases": "暂无知识库，请先在「知识库」中创建。",
+    "groundedTitle": "严格模式",
+    "groundedHint": "开启后，对外伙伴只会依据所绑定知识库中的内容作答；找不到依据时会明确说明，而不会自由发挥。适合合规要求高的对外场景。",
+    "groundedBadge": "严格模式",
+    "groundedOnOk": "已开启严格模式",
+    "groundedOffOk": "已关闭严格模式",
+    "groundedStateOn": "只答知识库内内容",
+    "groundedStateOff": "允许结合通用知识作答"
+  },
+  "policy": {
+    "title": "服务守则",
+    "desc": "约定对外伙伴的业务范围、禁谈话题与合规话术；它在接待陌生用户时会严格遵循这些规则。",
+    "insertTemplate": "插入模板",
+    "template": "业务范围：\n- 仅回答与本公司产品 / 服务相关的问题。\n\n禁谈话题：\n- 不讨论价格谈判、内部信息、竞品评价、政治宗教等敏感话题。\n\n合规话术：\n- 无法确定时，请引导用户联系人工客服，切勿编造答案。\n- 涉及个人隐私 / 账号操作时，提示用户通过官方渠道验证身份。",
+    "placeholder": "在这里写下对外伙伴必须遵守的服务守则（业务范围 / 禁谈话题 / 合规话术）。点击右上角「插入模板」快速开始。"
+  },
+  "audit": {
+    "title": "审计日志",
+    "desc": "对外伙伴的对外活动留痕（对话与配置变更），倒序展示。",
+    "searchPlaceholder": "搜索内容…",
+    "kindAll": "全部",
+    "kindTurn": "对话",
+    "kindExposure": "配置变更",
+    "days7": "最近 7 天",
+    "days30": "最近 30 天",
+    "days90": "最近 90 天",
+    "daysAll": "全部时间",
+    "empty": "暂无记录",
+    "loadMore": "加载更多",
+    "retentionTitle": "审计保留与清理",
+    "retentionDesc": "设置审计记录的保留天数，并可立即清理更早的历史记录。",
+    "retentionLabel": "审计保留天数",
+    "daysSuffix": "天",
+    "cleanupLabel": "清理更早记录",
+    "cleanupPrefix": "早于",
+    "cleanupTitle": "清理历史审计？",
+    "cleanupBody": "将永久删除 {{n}} 天前的审计记录，此操作不可撤销。",
+    "cleanupConfirm": "清理",
+    "cleanupOk": "已清理 {{n}} 天前的记录",
+    "justNow": "刚刚",
+    "minutesAgo": "{{n}} 分钟前",
+    "hoursAgo": "{{n}} 小时前",
+    "daysAgo": "{{n}} 天前",
+    "surfaceChannel": "社交渠道",
+    "surfaceRemote": "远程",
+    "surfaceDesktop": "桌面"
+  },
+  "channels": {
+    "title": "渠道部署",
+    "desc": "把这位对外伙伴部署到真实的对外触点。",
+    "pending": "后端集成中",
+    "placeholderTitle": "渠道部署（后端集成中）",
+    "placeholderDesc": "渠道绑定将在后端集成完成后开放。届时可在此处把对外伙伴接入社交渠道与网页 / API 触点。",
+    "imTitle": "社交 / IM 渠道",
+    "imDesc": "把对外伙伴接入 Telegram、飞书等渠道，代表你接待陌生用户。",
+    "webTitle": "网页 / API 接入",
+    "webDesc": "通过网页挂件或 API 把对外伙伴嵌入你的站点与业务系统。"
+  }
+}

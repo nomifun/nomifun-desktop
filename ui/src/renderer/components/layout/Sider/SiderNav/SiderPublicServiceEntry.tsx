@@ -7,11 +7,11 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Tooltip } from '@arco-design/web-react';
-import { Shield } from '@icon-park/react';
+import { Headset } from '@icon-park/react';
 import classNames from 'classnames';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
-interface SiderOutboundEntryProps {
+interface SiderPublicServiceEntryProps {
   isMobile: boolean;
   isActive: boolean;
   collapsed: boolean;
@@ -19,8 +19,8 @@ interface SiderOutboundEntryProps {
   onClick: () => void;
 }
 
-/** 外呼员工 (public-service companions) — top-level rail entry. Mirrors SiderNomiEntry. */
-const SiderOutboundEntry: React.FC<SiderOutboundEntryProps> = ({
+/** 对外伙伴 (Public Companion) — top-level rail entry under the 对外服务 group. Mirrors SiderNomiEntry. */
+const SiderPublicServiceEntry: React.FC<SiderPublicServiceEntryProps> = ({
   isMobile,
   isActive,
   collapsed,
@@ -28,7 +28,7 @@ const SiderOutboundEntry: React.FC<SiderOutboundEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const title = t('outbound.siderTitle', { defaultValue: '外呼员工' });
+  const title = t('publicCompanion.siderTitle', { defaultValue: '对外伙伴' });
 
   if (collapsed) {
     return (
@@ -40,7 +40,7 @@ const SiderOutboundEntry: React.FC<SiderOutboundEntryProps> = ({
           )}
           onClick={onClick}
         >
-          <Shield
+          <Headset
             theme='outline'
             size='20'
             fill='currentColor'
@@ -63,7 +63,7 @@ const SiderOutboundEntry: React.FC<SiderOutboundEntryProps> = ({
         onClick={onClick}
       >
         <span className='size-22px flex items-center justify-center shrink-0'>
-          <Shield theme='outline' size='16' fill='currentColor' className='block leading-none' style={{ lineHeight: 0 }} />
+          <Headset theme='outline' size='16' fill='currentColor' className='block leading-none' style={{ lineHeight: 0 }} />
         </span>
         <span className='collapsed-hidden text-14px font-[500] leading-24px'>{title}</span>
       </div>
@@ -71,4 +71,4 @@ const SiderOutboundEntry: React.FC<SiderOutboundEntryProps> = ({
   );
 };
 
-export default SiderOutboundEntry;
+export default SiderPublicServiceEntry;
