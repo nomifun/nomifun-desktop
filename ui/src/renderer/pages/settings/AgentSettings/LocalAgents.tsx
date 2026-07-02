@@ -11,7 +11,7 @@ import classNames from 'classnames';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { useAgents } from '@/renderer/hooks/agent/useAgents';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import { Button, Message, Typography } from '@arco-design/web-react';
+import { Button, Typography } from '@arco-design/web-react';
 import { Home, Plus } from '@icon-park/react';
 import React, { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -59,39 +59,6 @@ const LocalAgents: React.FC = () => {
 
   const { start: startNomiInstall } = useNomiQuickStart();
   const [installingBackend, setInstallingBackend] = useState<string | null>(null);
-
-  // Per-agent in-flight guard for the team-capable override request.
-  const [teamToggleBusy, setTeamToggleBusy] = useState<string | null>(null);
-
-  /**
-   * Whether the agent declared MCP capability in its ACP handshake. Mirrors the
-   * backend's `is_team_capable` heuristic (constants.rs): an `agent_capabilities`
-   * object carrying an `mcp_capabilities` / `mcpCapabilities` / `mcp` field
-   * implies MCP stdio support. Used only to decide whether to surface the
-   * "未声明 MCP 能力" risk hint next to the toggle.
-   */
-  const agentDeclaresMcp = useCallback((agent: AgentMetadata): boolean => {
-    const caps = agent.handshake?.agent_capabilities;
-    if (!caps || typeof caps !== 'object') return false;
-    const rec = caps as Record<string, unknown>;
-    return rec.mcp_capabilities !== undefined || rec.mcpCapabilities !== undefined || rec.mcp !== undefined;
-  }, []);
-
-  const handleToggleTeam = useCallback(
-    async (agent: AgentMetadata, supportsTeam: boolean) => {
-      setTeamToggleBusy(agent.id);
-      try {
-        await ipcBridge.acpConversation.setAgentTeamCapable.invoke({ id: agent.id, supports_team: supportsTeam });
-        await mutateAgents();
-      } catch (err) {
-        console.error('toggle team-capable failed:', err);
-        Message.error(t('settings.agentManagement.teamToggleFailed'));
-      } finally {
-        setTeamToggleBusy(null);
-      }
-    },
-    [mutateAgents, t]
-  );
 
   const handleOneClickInstall = useCallback(
     async (agent: SupportedAgent) => {
@@ -242,11 +209,6 @@ const LocalAgents: React.FC = () => {
             type='detected'
             agent={nomiAgent}
             onGoToChat={() => goToChatWithAgent(nomiAgent)}
-            teamCapable={nomiAgent.team_capable}
-            mcpDeclared={agentDeclaresMcp(nomiAgent)}
-            teamToggleLoading={teamToggleBusy === nomiAgent.id}
-            onToggleTeam={(v) => void handleToggleTeam(nomiAgent, v)}
-            teamLocked
           />
         )}
         {otherDetected.map((agent) => (
@@ -255,10 +217,6 @@ const LocalAgents: React.FC = () => {
             type='detected'
             agent={agent}
             onGoToChat={() => goToChatWithAgent(agent)}
-            teamCapable={agent.team_capable}
-            mcpDeclared={agentDeclaresMcp(agent)}
-            teamToggleLoading={teamToggleBusy === agent.id}
-            onToggleTeam={(v) => void handleToggleTeam(agent, v)}
           />
         ))}
       </div>

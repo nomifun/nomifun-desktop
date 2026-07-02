@@ -119,20 +119,6 @@ impl AgentService {
             .ok_or_else(|| AppError::Internal(format!("Agent '{id}' not visible after enable toggle")))
     }
 
-    /// Manually promote / demote an agent's
-    /// `behavior_policy.supports_team` flag. Powers
-    /// `PATCH /api/agents/{id}/team-capable`. The registry persists the
-    /// merged policy to the DB column and refreshes its cached copy,
-    /// recomputing `team_capable` through the existing OR chain — the
-    /// whitelist / MCP-probe heuristics are untouched.
-    pub async fn set_agent_team_capable(
-        &self,
-        id: &str,
-        supports_team: bool,
-    ) -> Result<AgentMetadata, AppError> {
-        self.registry().set_supports_team(id, supports_team).await
-    }
-
     async fn upsert_custom_row(
         &self,
         id: &str,

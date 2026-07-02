@@ -15,4 +15,10 @@ describe('KnowledgeCard footer layout', () => {
     expect(cardSource.includes('absolute bottom-16px right-16px')).toBe(false);
     expect(cardSource.includes('group-hover:pointer-events-auto')).toBe(true);
   });
+
+  test('surfaces missing local folders directly on the card', () => {
+    expect(cardSource.includes('knowledge-card-root-missing')).toBe(true);
+    expect(cardSource.includes('!base.root_exists')).toBe(true);
+    expect(cardSource.includes("t('knowledge.card.rootMissing'")).toBe(true);
+  });
 });

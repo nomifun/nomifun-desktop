@@ -279,7 +279,6 @@ mod tests {
             behavior_policy: nomifun_api_types::BehaviorPolicy::default(),
             yolo_id: Some("full-access".into()),
             sort_order: 3110,
-            team_capable: true,
             handshake: nomifun_api_types::AgentHandshake::default(),
         }
     }

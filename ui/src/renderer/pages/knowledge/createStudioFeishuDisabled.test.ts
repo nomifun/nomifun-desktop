@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   FEISHU_KNOWLEDGE_CREATION_ENABLED,
+  canSubmitStudioSourceConfig,
   canSubmitStudioSourceType,
   normalizeStudioInitialKind,
 } from './CreateStudio/sourceTypes';
@@ -26,6 +27,19 @@ describe('CreateStudio Feishu creation gate', () => {
     expect(canSubmitStudioSourceType('local')).toBe(true);
     expect(canSubmitStudioSourceType('web')).toBe(true);
     expect(canSubmitStudioSourceType('import')).toBe(true);
+  });
+
+  test('requires an explicit folder path before submitting a local-folder source', () => {
+    expect(canSubmitStudioSourceConfig('local', {})).toEqual({
+      ok: false,
+      messageKey: 'knowledge.studio.localFolderRequired',
+    });
+    expect(canSubmitStudioSourceConfig('local', { rootPath: '   ' })).toEqual({
+      ok: false,
+      messageKey: 'knowledge.studio.localFolderRequired',
+    });
+    expect(canSubmitStudioSourceConfig('local', { rootPath: '/Users/muri/docs' })).toEqual({ ok: true });
+    expect(canSubmitStudioSourceConfig('blank', {})).toEqual({ ok: true });
   });
 
   test('wires visible Feishu shortcuts to the disabled creation flag', () => {
