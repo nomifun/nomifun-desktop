@@ -45,6 +45,7 @@ use nomifun_orchestrator::{
     RunService, WorkerRunner,
 };
 use nomifun_companion::CompanionRouterState;
+use nomifun_public_agent::PublicAgentRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
 use nomifun_requirement::RequirementRouterState;
 use nomifun_shell::ShellRouterState;
@@ -82,6 +83,7 @@ pub struct ModuleStates {
     pub idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
     pub companion: CompanionRouterState,
+    pub public_agent: PublicAgentRouterState,
     pub webhook: WebhookRouterState,
     /// 智能编排 (orchestration): fleet + workspace CRUD state (P0).
     pub orchestrator: OrchestratorRouterState,
@@ -214,6 +216,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
         companion: companion_state,
+        public_agent: PublicAgentRouterState::new(services.public_agent_service.clone()),
         webhook: build_webhook_state(services),
         // P3b: arm IDMM supervision on the orchestrator engine's DEDICATED
         // ConversationService (the one worker turns run on) by handing it the
