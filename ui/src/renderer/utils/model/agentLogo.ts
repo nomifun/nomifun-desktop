@@ -2,7 +2,6 @@
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
- * Based on AionUi (https://github.com/iOfficeAI/AionUi)
  *
  * 统一的 Agent Logo 映射工具
  * Unified Agent Logo mapping utility
