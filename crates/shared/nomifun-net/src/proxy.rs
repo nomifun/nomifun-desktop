@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::OnceLock;
 
 use tracing::{debug, warn};
 
@@ -29,7 +28,7 @@ pub fn apply_detected_proxy(mut builder: reqwest::ClientBuilder) -> reqwest::Cli
         return builder;
     };
 
-    let no_proxy = effective_no_proxy(config);
+    let no_proxy = effective_no_proxy(&config);
 
     if let Some(proxy_url) = config.all_proxy.as_deref() {
         match reqwest::Proxy::all(proxy_url) {
@@ -81,12 +80,11 @@ where
         return Vec::new();
     };
 
-    proxy_env_from_config(config, &configured_names, &process_names)
+    proxy_env_from_config(&config, &configured_names, &process_names)
 }
 
-fn system_proxy_config() -> Option<&'static SystemProxyConfig> {
-    static CONFIG: OnceLock<Option<SystemProxyConfig>> = OnceLock::new();
-    CONFIG.get_or_init(detect_system_proxy).as_ref()
+fn system_proxy_config() -> Option<SystemProxyConfig> {
+    detect_system_proxy()
 }
 
 fn process_has_proxy_env() -> bool {
@@ -211,7 +209,34 @@ fn effective_no_proxy(config: &SystemProxyConfig) -> Option<reqwest::NoProxy> {
 }
 
 fn detect_system_proxy() -> Option<SystemProxyConfig> {
+    #[cfg(test)]
+    if let Some(config) = take_test_system_proxy_config() {
+        return config;
+    }
+
     detect_platform_proxy()
+}
+
+#[cfg(test)]
+static TEST_SYSTEM_PROXY_CONFIGS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::VecDeque<Option<SystemProxyConfig>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+#[cfg(test)]
+fn set_test_system_proxy_configs(configs: Vec<Option<SystemProxyConfig>>) {
+    let mut guard = TEST_SYSTEM_PROXY_CONFIGS
+        .lock()
+        .expect("test system proxy config lock");
+    guard.clear();
+    guard.extend(configs);
+}
+
+#[cfg(test)]
+fn take_test_system_proxy_config() -> Option<Option<SystemProxyConfig>> {
+    TEST_SYSTEM_PROXY_CONFIGS
+        .lock()
+        .expect("test system proxy config lock")
+        .pop_front()
 }
 
 #[cfg(target_os = "macos")]
@@ -407,6 +432,36 @@ fn normalize_no_proxy_item(item: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_proxy_config_reads_current_detection_each_call() {
+        let first = SystemProxyConfig {
+            http_proxy: Some("http://127.0.0.1:7890".to_owned()),
+            https_proxy: Some("http://127.0.0.1:7890".to_owned()),
+            all_proxy: None,
+            no_proxy: None,
+        };
+        let second = SystemProxyConfig {
+            http_proxy: Some("http://127.0.0.1:7900".to_owned()),
+            https_proxy: Some("http://127.0.0.1:7900".to_owned()),
+            all_proxy: None,
+            no_proxy: None,
+        };
+
+        set_test_system_proxy_configs(vec![Some(first), Some(second)]);
+
+        let first_config = system_proxy_config().expect("first proxy config");
+        assert_eq!(
+            first_config.http_proxy.as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+
+        let second_config = system_proxy_config().expect("second proxy config");
+        assert_eq!(
+            second_config.http_proxy.as_deref(),
+            Some("http://127.0.0.1:7900")
+        );
+    }
 
     #[test]
     fn proxy_env_from_config_adds_upper_and_lowercase_keys() {

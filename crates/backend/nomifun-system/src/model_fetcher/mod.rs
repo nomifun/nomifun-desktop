@@ -11,6 +11,8 @@ use nomifun_db::IProviderRepository;
 
 use crate::provider::deserialize_opt;
 
+type HttpClientFactory = Arc<dyn Fn() -> reqwest::Client + Send + Sync>;
+
 /// Internal configuration extracted from a provider row for model fetching.
 #[derive(Debug)]
 pub(crate) struct FetchConfig {
@@ -25,7 +27,7 @@ pub(crate) struct FetchConfig {
 pub struct ModelFetchService {
     repo: Arc<dyn IProviderRepository>,
     encryption_key: [u8; 32],
-    http_client: reqwest::Client,
+    http_client: HttpClientFactory,
 }
 
 impl ModelFetchService {
@@ -37,8 +39,20 @@ impl ModelFetchService {
         Self {
             repo,
             encryption_key,
-            http_client,
+            http_client: Arc::new(move || http_client.clone()),
         }
+    }
+
+    pub fn new_dynamic(repo: Arc<dyn IProviderRepository>, encryption_key: [u8; 32]) -> Self {
+        Self {
+            repo,
+            encryption_key,
+            http_client: Arc::new(nomifun_net::http_client),
+        }
+    }
+
+    fn http_client(&self) -> reqwest::Client {
+        (self.http_client)()
     }
 
     /// Fetch models for a provider by ID. If `try_fix` is true and the
@@ -77,13 +91,14 @@ impl ModelFetchService {
         config: &FetchConfig,
         try_fix: bool,
     ) -> Result<FetchModelsResponse, AppError> {
-        match fetchers::fetch_for_platform(&self.http_client, config).await {
+        let http_client = self.http_client();
+        match fetchers::fetch_for_platform(&http_client, config).await {
             Ok(models) => Ok(FetchModelsResponse {
                 models,
                 fixed_base_url: None,
             }),
             Err(err) if try_fix && supports_url_fix(&config.platform) => {
-                url_fixer::try_fix_url(&self.http_client, config)
+                url_fixer::try_fix_url(&http_client, config)
                     .await
                     .map_err(|_| err)
             }
