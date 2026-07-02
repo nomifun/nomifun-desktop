@@ -1,16 +1,25 @@
 use std::{
     collections::HashSet,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+
+// Subprocess primitives are only needed by the macOS/Linux detection path (and
+// the cross-platform timeout test). Windows reads the registry natively, so
+// gating these keeps a Windows release build free of unused-import warnings.
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+use std::{
     io::Read,
     process::{Command, Stdio},
-    sync::{LazyLock, Mutex},
     thread,
-    time::{Duration, Instant},
 };
 
 use tracing::{debug, warn};
 
 const SYSTEM_PROXY_CACHE_TTL: Duration = Duration::from_millis(250);
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const SYSTEM_PROXY_COMMAND_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const PROXY_ENV_KEYS: &[&str] = &[
@@ -132,6 +141,7 @@ fn clear_system_proxy_cache() {
     *SYSTEM_PROXY_CACHE.lock().expect("system proxy cache lock") = None;
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn command_stdout_with_timeout(command: &mut Command, timeout: Duration) -> Option<String> {
     // CREATE_NO_WINDOW: these detection helpers spawn console-subsystem CLIs
     // (`reg`/`scutil`/`gsettings`/`kreadconfig`). The packaged desktop build is a
@@ -352,71 +362,24 @@ fn detect_platform_proxy() -> Option<SystemProxyConfig> {
 
 #[cfg(target_os = "windows")]
 fn detect_platform_proxy() -> Option<SystemProxyConfig> {
-    // ProxyEnable gates everything: when it is off (the default on most machines)
-    // parse_windows_proxy_settings returns None regardless of the other values, so
-    // skip the ProxyServer/ProxyOverride reads to avoid two extra `reg` spawns.
-    let proxy_enable = read_windows_internet_settings("ProxyEnable")
-        .and_then(|value| parse_windows_proxy_enable(&value))
-        .unwrap_or(false);
-    if !proxy_enable {
+    // Read the WinINET proxy settings straight from the registry via the Win32
+    // API instead of shelling out to `reg`: no console-window flash, no blocking
+    // process spawn, and REG_SZ values decode as UTF-16 (no OEM-codepage
+    // corruption of non-ASCII bypass entries).
+    let key = windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .ok()?;
+
+    // ProxyEnable (REG_DWORD) gates everything; when it is off (the default on
+    // most machines) skip the rest.
+    if key.get_u32("ProxyEnable").unwrap_or(0) == 0 {
         return None;
     }
 
-    let proxy_server = read_windows_internet_settings("ProxyServer").unwrap_or_default();
-    let proxy_override = read_windows_internet_settings("ProxyOverride");
+    let proxy_server = key.get_string("ProxyServer").unwrap_or_default();
+    let proxy_override = key.get_string("ProxyOverride").ok();
 
     parse_windows_proxy_settings(true, &proxy_server, proxy_override.as_deref())
-}
-
-#[cfg(target_os = "windows")]
-fn read_windows_internet_settings(name: &str) -> Option<String> {
-    let stdout = command_stdout_with_timeout(
-        Command::new("reg").args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            "/v",
-            name,
-        ]),
-        SYSTEM_PROXY_COMMAND_TIMEOUT,
-    )?;
-    parse_windows_reg_value(&stdout, name)
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_reg_value(text: &str, name: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        let mut parts = line.split_whitespace();
-        let Some(value_name) = parts.next() else {
-            continue;
-        };
-        if !value_name.eq_ignore_ascii_case(name) {
-            continue;
-        }
-        parts.next()?;
-        let value = parts.collect::<Vec<_>>().join(" ");
-        return non_empty(&value);
-    }
-
-    None
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_proxy_enable(value: &str) -> Option<bool> {
-    let value = value.trim();
-    if let Some(hex) = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-    {
-        return u32::from_str_radix(hex, 16).ok().map(|value| value != 0);
-    }
-    if value.eq_ignore_ascii_case("true") {
-        return Some(true);
-    }
-    if value.eq_ignore_ascii_case("false") {
-        return Some(false);
-    }
-    value.parse::<u32>().ok().map(|value| value != 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -577,6 +540,7 @@ fn enabled_proxy_url(
     proxy_url(scheme, host?, port?)
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
@@ -642,14 +606,8 @@ fn normalize_no_proxy_item(item: &str) -> Option<String> {
     if item.eq_ignore_ascii_case("<local>") {
         return Some("localhost".to_owned());
     }
-    match item {
-        "127.*" => return Some("127.0.0.0/8".to_owned()),
-        "10.*" => return Some("10.0.0.0/8".to_owned()),
-        "192.168.*" => return Some("192.168.0.0/16".to_owned()),
-        _ => {}
-    }
-    if item.starts_with("172.") {
-        return Some("172.16.0.0/12".to_owned());
+    if let Some(cidr) = ip_octet_wildcard_to_cidr(item) {
+        return Some(cidr);
     }
     if let Some(domain) = item.strip_prefix("*.") {
         return Some(format!(".{domain}"));
@@ -658,6 +616,31 @@ fn normalize_no_proxy_item(item: &str) -> Option<String> {
         return (!domain.is_empty()).then(|| domain.to_owned());
     }
     Some(item.to_owned())
+}
+
+/// Translate a trailing-octet IPv4 wildcard (`10.*`, `192.168.*`, `169.254.*`,
+/// `172.16.*`, …) into the equivalent CIDR so reqwest's `NoProxy` matches by
+/// address. Returns `None` when the leading labels are not all valid octets —
+/// i.e. it is a host/domain pattern (e.g. `172.corp.com`) rather than an IP
+/// block, so the caller passes it through unchanged. This replaces a set of
+/// hard-coded cases (which silently dropped `169.254.*`-style ranges) and a
+/// `starts_with("172.")` branch that wrongly collapsed public `172.32+`
+/// addresses and `172.`-prefixed hostnames into the private `/12`.
+fn ip_octet_wildcard_to_cidr(item: &str) -> Option<String> {
+    let prefix = item.strip_suffix(".*")?;
+    let labels: Vec<&str> = prefix.split('.').collect();
+    if labels.is_empty() || labels.len() > 3 {
+        return None;
+    }
+    let mut octets = [0u8; 4];
+    for (idx, label) in labels.iter().enumerate() {
+        octets[idx] = label.parse::<u8>().ok()?;
+    }
+    let prefix_len = labels.len() * 8;
+    Some(format!(
+        "{}.{}.{}.{}/{}",
+        octets[0], octets[1], octets[2], octets[3], prefix_len
+    ))
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -735,10 +718,14 @@ fn parse_windows_proxy_override(value: Option<&str>) -> Vec<String> {
     for item in value.split(';') {
         let item = item.trim();
         if item.eq_ignore_ascii_case("<local>") {
+            // WinINET `<local>` means "bypass any host name without a dot" (bare
+            // intranet names). reqwest's NoProxy cannot express that rule, so map
+            // it to the loopback set it can honour. Note: the earlier `.local`
+            // injection was wrong — `.local` is the mDNS suffix, not the WinINET
+            // dot-less semantics, and would over-bypass hosts WinINET proxies.
             items.push("localhost".to_owned());
             items.push("127.0.0.1".to_owned());
             items.push("::1".to_owned());
-            items.push(".local".to_owned());
             continue;
         }
         if !item.is_empty() {
@@ -972,7 +959,19 @@ fn normalize_proxy_url(default_scheme: &str, value: &str) -> Option<String> {
         });
     let endpoint = endpoint.trim().trim_end_matches('/');
     let (host, port) = split_proxy_endpoint(endpoint)?;
+    // WinINET (and KDE) allow a portless proxy address; default the port by
+    // scheme instead of dropping the whole proxy.
+    let port = port.unwrap_or_else(|| default_proxy_port(scheme.as_str()));
     proxy_url(&scheme, host, port)
+}
+
+#[cfg(any(test, target_os = "windows", target_os = "linux"))]
+fn default_proxy_port(scheme: &str) -> u16 {
+    match scheme {
+        "https" => 443,
+        "socks" | "socks5" | "socks5h" => 1080,
+        _ => 80,
+    }
 }
 
 #[cfg(any(test, target_os = "windows", target_os = "linux"))]
@@ -987,7 +986,7 @@ fn normalize_proxy_scheme(scheme: &str, default_scheme: &str) -> String {
 }
 
 #[cfg(any(test, target_os = "windows", target_os = "linux"))]
-fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, u16)> {
+fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, Option<u16>)> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
         return None;
@@ -995,16 +994,24 @@ fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, u16)> {
     if let Some(rest) = endpoint.strip_prefix('[') {
         let end = rest.find(']')?;
         let host = &endpoint[..=end + 1];
-        let port = rest[end + 1..].strip_prefix(':').and_then(parse_port)?;
+        let after = &rest[end + 1..];
+        let port = match after.strip_prefix(':') {
+            Some(port) => Some(parse_port(port)?),
+            None => None,
+        };
         return Some((host, port));
     }
 
-    let (host, port) = endpoint.rsplit_once(':')?;
-    let host = host.trim();
-    if host.is_empty() {
-        return None;
+    match endpoint.rsplit_once(':') {
+        Some((host, port)) => {
+            let host = host.trim();
+            if host.is_empty() {
+                return None;
+            }
+            Some((host, Some(parse_port(port)?)))
+        }
+        None => Some((endpoint, None)),
     }
-    Some((host, parse_port(port)?))
 }
 
 #[cfg(test)]
@@ -1274,6 +1281,88 @@ mod tests {
             None
         );
         assert_eq!(parse_windows_proxy_settings(true, "   ", None), None);
+    }
+
+    #[test]
+    fn parse_windows_proxy_settings_defaults_port_for_portless_proxy() {
+        // WinINET allows a bare host (Address filled, Port blank) → default 80,
+        // instead of dropping the whole proxy config.
+        let config =
+            parse_windows_proxy_settings(true, "proxy.corp.com", None).expect("proxy config");
+        assert_eq!(config.http_proxy.as_deref(), Some("http://proxy.corp.com:80"));
+        assert_eq!(config.https_proxy.as_deref(), Some("http://proxy.corp.com:80"));
+
+        let per_scheme =
+            parse_windows_proxy_settings(true, "http=proxy.corp.com;https=proxy.corp.com", None)
+                .expect("proxy config");
+        assert_eq!(
+            per_scheme.http_proxy.as_deref(),
+            Some("http://proxy.corp.com:80")
+        );
+    }
+
+    #[test]
+    fn parse_windows_proxy_override_local_maps_to_loopback_without_mdns() {
+        let items = parse_windows_proxy_override(Some("<local>"));
+        assert!(items.contains(&"localhost".to_owned()));
+        assert!(items.contains(&"127.0.0.1".to_owned()));
+        assert!(items.contains(&"::1".to_owned()));
+        // The old, incorrect `.local` (mDNS) expansion must be gone.
+        assert!(!items.iter().any(|item| item == ".local"));
+    }
+
+    #[test]
+    fn normalize_no_proxy_item_converts_ip_octet_wildcards_to_cidrs() {
+        assert_eq!(normalize_no_proxy_item("10.*").as_deref(), Some("10.0.0.0/8"));
+        assert_eq!(
+            normalize_no_proxy_item("192.168.*").as_deref(),
+            Some("192.168.0.0/16")
+        );
+        // Non-RFC1918 wildcard ranges are now honoured, not silently dropped.
+        assert_eq!(
+            normalize_no_proxy_item("169.254.*").as_deref(),
+            Some("169.254.0.0/16")
+        );
+        assert_eq!(
+            normalize_no_proxy_item("100.64.*").as_deref(),
+            Some("100.64.0.0/16")
+        );
+    }
+
+    #[test]
+    fn normalize_no_proxy_item_does_not_overreach_on_172_prefix() {
+        // Private 172.16/12 wildcard → a correct CIDR.
+        assert_eq!(
+            normalize_no_proxy_item("172.16.*").as_deref(),
+            Some("172.16.0.0/16")
+        );
+        // A public 172.x literal IP must pass through verbatim (reqwest honours it
+        // as an address), not collapse into the private /12.
+        assert_eq!(
+            normalize_no_proxy_item("172.32.10.5").as_deref(),
+            Some("172.32.10.5")
+        );
+        // A hostname merely starting with "172." is a domain, not an IP block.
+        assert_eq!(
+            normalize_no_proxy_item("172.corp.com").as_deref(),
+            Some("172.corp.com")
+        );
+    }
+
+    #[test]
+    fn normalize_no_proxy_item_preserves_domain_and_cidr_forms() {
+        assert_eq!(
+            normalize_no_proxy_item("*.example.com").as_deref(),
+            Some(".example.com")
+        );
+        assert_eq!(
+            normalize_no_proxy_item("10.0.0.0/8").as_deref(),
+            Some("10.0.0.0/8")
+        );
+        assert_eq!(
+            normalize_no_proxy_item("<local>").as_deref(),
+            Some("localhost")
+        );
     }
 
     #[test]
