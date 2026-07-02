@@ -668,6 +668,9 @@ impl AppServices {
             companion_prompt: Some(
                 companion_service.clone() as Arc<dyn nomifun_ai_agent::CompanionPromptProvider>
             ),
+            public_agent_provider: Some(
+                public_agent_service.clone() as Arc<dyn nomifun_ai_agent::PublicAgentProvider>
+            ),
         });
 
         // Agent factory is now wired. Future extension/custom agents

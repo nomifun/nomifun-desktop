@@ -48,7 +48,10 @@ pub use factory::provider_config::{
     one_shot_completion, resolve_provider_config, streaming_completion, streaming_completion_kinded,
     streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
-pub use factory::{AgentFactoryDeps, CompanionPromptProvider, build_agent_factory};
+pub use factory::{
+    AgentFactoryDeps, CompanionPromptProvider, PublicAgentProvider, PublicAgentRuntime,
+    build_agent_factory,
+};
 pub use idle_scanner::start_idle_scanner;
 #[cfg(feature = "browser-use")]
 pub use browser_fetcher::BrowserFetcher;

@@ -19,6 +19,7 @@ mod fsio;
 
 pub mod audit;
 pub mod config;
+pub mod provider;
 pub mod registry;
 pub mod routes;
 pub mod service;
