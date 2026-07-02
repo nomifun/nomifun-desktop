@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseApiKeyList } from './apiKeys';
+
 /**
  * NomiRouter 协议检测器
  * Protocol Detector for NomiRouter
@@ -53,7 +55,7 @@ export interface MultiKeyTestResult {
 export interface ProtocolDetectionRequest {
   /** Base URL */
   base_url: string;
-  /** API Key（可以是逗号或换行分隔的多个 Key）/ API Key (can be comma or newline separated) */
+  /** API Key（多个 Key 使用英文逗号分隔）/ API Key (comma-separated for multiple keys) */
   api_key: string;
   /** 超时时间（毫秒）/ Timeout in milliseconds */
   timeout?: number;
@@ -290,11 +292,7 @@ export const THIRD_PARTY_KEY_PATTERNS: Array<{ pattern: RegExp; name: string; pr
  * Parse multiple API keys from string
  */
 export function parseApiKeys(api_keyString: string): string[] {
-  if (!api_keyString) return [];
-  return api_keyString
-    .split(/[,\n]/)
-    .map((k) => k.trim())
-    .filter((k) => k.length > 0);
+  return parseApiKeyList(api_keyString);
 }
 
 /**

@@ -14,7 +14,7 @@ use crate::provider::deserialize_opt;
 type HttpClientFactory = Arc<dyn Fn() -> reqwest::Client + Send + Sync>;
 
 /// Internal configuration extracted from a provider row for model fetching.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FetchConfig {
     pub platform: String,
     pub base_url: String,
@@ -91,14 +91,15 @@ impl ModelFetchService {
         config: &FetchConfig,
         try_fix: bool,
     ) -> Result<FetchModelsResponse, AppError> {
+        let config = config.with_primary_api_key()?;
         let http_client = self.http_client();
-        match fetchers::fetch_for_platform(&http_client, config).await {
+        match fetchers::fetch_for_platform(&http_client, &config).await {
             Ok(models) => Ok(FetchModelsResponse {
                 models,
                 fixed_base_url: None,
             }),
             Err(err) if try_fix && supports_url_fix(&config.platform) => {
-                url_fixer::try_fix_url(&http_client, config)
+                url_fixer::try_fix_url(&http_client, &config)
                     .await
                     .map_err(|_| err)
             }
@@ -131,6 +132,22 @@ impl ModelFetchService {
     }
 }
 
+impl FetchConfig {
+    fn with_primary_api_key(&self) -> Result<Self, AppError> {
+        if self.platform == "bedrock" {
+            return Ok(self.clone());
+        }
+
+        let api_key = primary_api_key(&self.api_key)
+            .ok_or_else(|| AppError::BadRequest("apiKey is required".into()))?;
+
+        Ok(Self {
+            api_key,
+            ..self.clone()
+        })
+    }
+}
+
 /// Validate a `FetchModelsAnonymousRequest` — platform / base_url / api_key
 /// must all be non-empty after trim.
 fn validate_anonymous_request(req: &FetchModelsAnonymousRequest) -> Result<(), AppError> {
@@ -145,6 +162,13 @@ fn validate_anonymous_request(req: &FetchModelsAnonymousRequest) -> Result<(), A
         return Err(AppError::BadRequest("apiKey is required".into()));
     }
     Ok(())
+}
+
+fn primary_api_key(raw: &str) -> Option<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .find(|key| !key.is_empty())
+        .map(str::to_owned)
 }
 
 /// Platforms that support URL auto-fix (OpenAI-compatible).
