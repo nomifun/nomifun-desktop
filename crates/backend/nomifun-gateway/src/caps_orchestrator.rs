@@ -217,14 +217,18 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // same non-empty id.
     let lead_conv_id = parse_lead_conv_id(&ctx.conversation_id);
 
-    // Resolve the effective autonomy. A Path-A run (bound to a lead conversation =
-    // the desktop 智能编排 entry) defaults to `interactive` so the plan PARKS at
-    // `awaiting_plan_approval` for the user to review/adjust/approve before it runs
-    // — matching the in-conversation approval banner. An explicit caller value still
-    // wins; a pure MCP / no-session call (no lead conv) keeps the `supervised`
-    // default (it has no approval UI to park for). Fixes 会话6: the lead model
-    // omitted autonomy → supervised → the plan auto-executed with no approval.
-    let autonomy = default_autonomy(p.autonomy, lead_conv_id);
+    // Autonomy: pass the caller's explicit value straight through; when omitted,
+    // `create_adhoc` applies its own `supervised` default so the run AUTO-RUNS and
+    // the 主管 can follow it to completion IN-TURN (poll `nomi_run_status` /
+    // `nomi_run_result` and summarize) — the same engaged experience as `nomi_spawn`.
+    // A conversation-native run no longer forces `interactive`: the human
+    // plan-approval gate lives ONLY at the 编排 Tab front door
+    // (`routes.rs::create_adhoc_run`, which sets `interactive` explicitly on the
+    // request), so an in-chat fan-out never strands the 主管 at an unattended approval
+    // park (that was the「主 main 失联」bug). An explicit `autonomy: "interactive"`
+    // from the caller still parks — handled by the message branch below and the
+    // engine-start gate in `spawn_plan_and_start`.
+    let autonomy = p.autonomy;
 
     // Build the ad-hoc request from the EXPLICIT params: work_dir straight from the
     // arg, resolved autonomy, lead_conv_id = the parsed calling-conversation id.
@@ -267,10 +271,15 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // SYNCHRONOUS tool call blocked the lead turn so long the weak model kept
     // re-invoking `nomi_run_create` every ~60s → multiple orphaned `planning` runs +
     // a 200s+ "stuck" turn with no visible progress. Returning at once keeps the lead
-    // turn short and lets the canvas show planning live; an `interactive` run then
-    // parks for approval, and `spawn_plan_and_start` only starts the engine for
-    // non-interactive runs.
+    // turn short and lets the canvas show planning live. With the default `supervised`
+    // autonomy the run AUTO-STARTS once planned and the 主管 stays engaged — it follows
+    // the SAME run_id via `nomi_run_status`/`nomi_run_result` to completion and
+    // summarizes (no unattended approval park); `spawn_plan_and_start` starts the
+    // engine for it. An explicit `interactive` run still parks for approval, and the
+    // relay message then tells the 主管 to ask the user to approve first, THEN keep
+    // polling — so it is never「失联」either way.
     if lead_conv_id.is_some() {
+        let interactive = run.autonomy == "interactive";
         nomifun_orchestrator::spawn_plan_and_start(
             deps.orchestrator_run_service.clone(),
             deps.orchestrator_run_engine.as_ref().clone(),
@@ -280,7 +289,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
         return ok(json!({
             "run_id": run.id,
             "status": "planning",
-            "message": planning_started_message(),
+            "message": planning_started_message(interactive),
         }));
     }
 
@@ -418,20 +427,6 @@ fn build_adhoc_request(
     }
 }
 
-/// Resolve the effective autonomy for an ad-hoc run created via the caps front
-/// door. An explicit, non-blank caller value always wins. Otherwise a Path-A run
-/// (bound to a lead conversation = the desktop 智能编排 entry) defaults to
-/// `interactive` so the plan parks at `awaiting_plan_approval` for the user to
-/// review/approve before it runs; a pure MCP / no-session call (no lead conv)
-/// returns `None` so `create_adhoc` applies its `supervised` default (no approval
-/// UI to park for).
-fn default_autonomy(explicit: Option<String>, lead_conv_id: Option<i64>) -> Option<String> {
-    match explicit {
-        Some(a) if !a.trim().is_empty() => Some(a),
-        _ => lead_conv_id.map(|_| "interactive".to_string()),
-    }
-}
-
 /// Parse `ctx.conversation_id` (a `String`, empty when there is no calling
 /// conversation) into a lead conversation id. An empty id ⇒ `None` (MCP /
 /// no-session caller — regress to the no-lead behavior); a non-empty id is parsed
@@ -487,11 +482,18 @@ fn awaiting_plan_message(task_count: usize) -> String {
 }
 
 /// The 主管-facing relay message for a Path-A run whose planning was kicked off in
-/// the BACKGROUND (the calling conversation watches it live). The plan is not ready
-/// at return time, so instruct the lead to tell the user planning is underway in the
-/// canvas and to approve when it lands — do NOT keep calling the create tool.
-fn planning_started_message() -> String {
-    "编排已创建，正在后台拆解为任务图(可在右侧编排画布实时查看规划过程)。请告知用户:规划完成后会停在「待批准」,届时点「批准执行」或回复批准即可开始——现在无需再次创建编排,耐心等待规划完成即可。".to_string()
+/// the BACKGROUND (the calling conversation watches it live). Keeps the 主管 ENGAGED
+/// rather than stopping it: it must poll the SAME run_id to completion and summarize
+/// — mirroring the `nomi_spawn` follow-up contract, so the main chat never goes
+/// silent (the「主 main 失联」bug). It still guards against re-creating the run (会话9).
+/// `interactive` (explicit caller value only) prepends the approval-relay step, since
+/// such a run parks at `awaiting_plan_approval` before it can execute.
+fn planning_started_message(interactive: bool) -> String {
+    if interactive {
+        "编排已创建，正在后台拆解为任务图(可在右侧编排画布实时查看规划过程)。这是需人工批准的编排：规划完成后会停在「待批准」——请告知用户在编排面板点「批准执行」或直接回复批准，不要再次创建编排。批准后子任务会自动执行，全部完成或失败时系统会自动把结果回执给你，届时你再向用户汇总——你无需轮询等待。".to_string()
+    } else {
+        "编排已创建(run_id 见返回)，正在后台拆解为任务图并会自动开跑(可在右侧编排画布实时查看每个子 agent 的状态与产出)。请告诉用户已在后台并行执行、进度见画布，然后结束本轮——你无需轮询等待：全部完成或失败时系统会自动把结果回执给你，届时你再向用户汇总。不要再次创建编排；用户若中途询问进度，可用 nomi_run_status 查一次。".to_string()
+    }
 }
 
 // ── assistant → role member resolution (P4 Task 2) ─────────────────────────
@@ -739,9 +741,9 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         "并行执行 {n} 个子任务：{}",
         p.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("、")
     );
-    // 扁平扇出恒 supervised：即时并行、无审批门。绝不走 default_autonomy 的
-    // interactive 桌面默认（那是给 planner 拆的团队审批用的；nomi_spawn 的任务
-    // 是调用方显式给出的，park 在批准门会回归进程内 Spawn 的静默卡死体验）。
+    // 扁平扇出恒 supervised：即时并行、无审批门。绝不显式传 interactive——
+    // nomi_spawn 的任务是调用方显式给出的，park 在批准门会回归进程内 Spawn 的
+    // 静默卡死体验（人工审批门只在编排 Tab 前门保留）。
     let req = build_adhoc_request(
         goal,
         None,
@@ -818,7 +820,7 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         "run_id": run.id,
         "status": "running",
         "task_count": n,
-        "message": "子任务已在编排画布并行执行（用户能实时看到每个子 agent 的状态与产出）。用 nomi_run_status 跟进、nomi_run_result 取汇总，然后向用户总结。",
+        "message": "子任务已在编排画布并行执行，用户能实时看到每个子 agent 的状态与产出。请告诉用户已在后台并行执行、进度见右侧画布，然后结束本轮——你无需轮询等待：全部完成或失败时系统会自动把结果回执给你再汇总。不要重复创建编排；用户若中途询问进度，可用 nomi_run_status 查一次。",
     }))
 }
 
@@ -1044,29 +1046,32 @@ mod tests {
         assert!(req.lead_conv_id.is_none());
     }
 
-    // 会话6 fix: the conversation entry (Path A, a lead conversation is bound) must
-    // default to `interactive` so the plan PARKS for approval instead of auto-running.
+    // A conversation-native `nomi_run_create` now keeps the 主管 ENGAGED instead of
+    // stopping it (the fix for「主 main 失联」): the background-planning relay message
+    // must tell the 主管 to poll the same run to completion and summarize — the
+    // `nomi_spawn` follow-up contract — and must NOT tell it to just wait. It still
+    // guards against re-creating the run (会话9).
     #[test]
-    fn default_autonomy_lead_conv_defaults_interactive() {
-        assert_eq!(default_autonomy(None, Some(6)).as_deref(), Some("interactive"), "lead conv → parks");
-        assert_eq!(
-            default_autonomy(Some("   ".into()), Some(6)).as_deref(),
-            Some("interactive"),
-            "blank autonomy treated as omitted → parks"
-        );
-    }
+    fn planning_started_message_defers_to_auto_report() {
+        // Dispatch-and-ack: the run auto-runs and the engine auto-REPORTS the result
+        // back to the lead conversation on completion/failure — so the 主管 must NOT
+        // be told to busy-poll; it dispatches, acks, and waits for the auto-report.
+        let auto = planning_started_message(false);
+        assert!(auto.contains("自动"), "must mention the auto-report: {auto}");
+        assert!(auto.contains("回执"), "must mention the receipt back to the lead: {auto}");
+        assert!(auto.contains("无需轮询"), "must tell the 主管 NOT to busy-poll: {auto}");
+        assert!(auto.contains("不要再次创建编排"), "must still guard against re-creating (会话9): {auto}");
+        assert!(!auto.contains("持续用"), "must NOT instruct busy-polling: {auto}");
+        assert!(!auto.contains("耐心等待"), "must NOT tell the 主管 to just wait idly: {auto}");
+        // On-demand progress stays available.
+        assert!(auto.contains("nomi_run_status"), "keeps nomi_run_status as an on-demand option: {auto}");
 
-    #[test]
-    fn default_autonomy_explicit_value_always_wins() {
-        assert_eq!(default_autonomy(Some("supervised".into()), Some(6)).as_deref(), Some("supervised"));
-        assert_eq!(default_autonomy(Some("interactive".into()), None).as_deref(), Some("interactive"));
-    }
-
-    #[test]
-    fn default_autonomy_no_lead_conv_stays_unset() {
-        // Pure MCP / no-session → None so create_adhoc applies its `supervised`
-        // default (no approval UI to park for).
-        assert_eq!(default_autonomy(None, None), None);
+        // Interactive: still relays the approval step, but after approval the result
+        // is also auto-reported — no busy-poll.
+        let inter = planning_started_message(true);
+        assert!(inter.contains("批准"), "interactive must relay the approval step: {inter}");
+        assert!(inter.contains("自动"), "interactive must still auto-report after approval: {inter}");
+        assert!(inter.contains("无需轮询"), "interactive must NOT instruct busy-polling: {inter}");
     }
 
     // The deterministic homepage channel: the exact `extra.orchestrator_model_range`

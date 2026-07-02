@@ -40,9 +40,9 @@ use nomifun_office::{
     SnapshotService as OfficeSnapshotService, StarOfficeDetector,
 };
 use nomifun_orchestrator::{
-    ConversationCanceller, ConversationSteerer, ConversationWorkerRunner, LlmPlanProducer,
-    OrchestratorRouterState, OrchestratorRunEventEmitter, PlanProducer, RunEngine, RunEngineDeps,
-    RunService, WorkerRunner,
+    ConversationCanceller, ConversationSteerer, ConversationWorkerRunner, LeadReporter,
+    LlmPlanProducer, OrchestratorRouterState, OrchestratorRunEventEmitter, PlanProducer, RunEngine,
+    RunEngineDeps, RunOutcome, RunService, WorkerRunner,
 };
 use nomifun_companion::CompanionRouterState;
 use nomifun_realtime::{NoopMessageRouter, WsHandlerState};
@@ -890,7 +890,93 @@ impl ConversationSteerer for OrchestratorConversationSteerer {
     }
 }
 
-/// control-plane). P0 needed no AppServices singleton; P1a adds the Run
+/// Wraps [`ConversationService::steer_message`] so the [`RunEngine`] can report a
+/// run's terminal / notable outcome back to the LEAD conversation that launched it
+/// — re-engaging the master agent exactly once per notable event to summarize /
+/// re-strategize / relay, instead of the old LLM busy-poll loop. Unlike the worker
+/// steerer/canceller (which run as [`nomifun_auth::SYSTEM_USER_ID`] on
+/// orchestrator-owned worker conversations), the LEAD conversation is owned by a
+/// REAL user, so we resolve its owner from the row (mirroring cron's
+/// `resolve_target_conversation_user_id`) — a `SYSTEM_USER_ID` steer would fail the
+/// ownership check. The receipt PROMPT is `hidden:true` (it never shows as a user
+/// bubble); the master agent's summary REPLY is the visible turn. A dedicated
+/// `origin` keeps companion-memory / idmm from treating it as owner speech and lets
+/// tool gating recognize it. Best-effort: a missing lead conversation or a read
+/// error is a silent skip — a report must never fail the (already-finalized) run.
+struct OrchestratorLeadReporter {
+    conv: ConversationService,
+    task_manager: Arc<dyn IWorkerTaskManager>,
+}
+
+/// Build the hidden receipt prompt injected into the lead conversation for a run's
+/// outcome. It hands the master agent the per-node digest and tells it to
+/// summarize / re-strategize / relay — never to spawn a fresh orchestration (the
+/// 会话9 loop guard).
+fn compose_lead_receipt(run_id: &str, outcome: RunOutcome, brief: &str) -> String {
+    match outcome {
+        RunOutcome::Completed => format!(
+            "[编排回执] 你之前派发的子任务（run {run_id}）已全部完成。各节点产出：\n{brief}\n\
+             请据此用一段自然的话向用户汇总产出与结论。仅汇总，不要再发起新的编排。"
+        ),
+        RunOutcome::Failed => format!(
+            "[编排回执] 你之前派发的子任务（run {run_id}）执行失败。各节点状态与产出：\n{brief}\n\
+             请向用户说明哪些完成、哪些失败及可能原因；若可行，简述你将如何调整策略重试，\
+             否则请询问用户如何处理。不要重复创建相同编排。"
+        ),
+        RunOutcome::Stalled => format!(
+            "[编排回执] 你之前派发的子任务（run {run_id}）长时间无进展，已被系统判定为卡死并终止。\
+             已知进度：\n{brief}\n请如实告知用户，并说明你打算如何处理（重试/换方式/请用户确认）。\
+             不要重复创建相同编排。"
+        ),
+        RunOutcome::AwaitingApproval => format!(
+            "[编排回执] 编排（run {run_id}）计划已拟好，正等待用户批准后执行。\
+             请转达用户在编排面板点「批准执行」或直接回复批准。"
+        ),
+    }
+}
+
+#[async_trait::async_trait]
+impl LeadReporter for OrchestratorLeadReporter {
+    async fn report(
+        &self,
+        lead_conv_id: i64,
+        run_id: &str,
+        outcome: RunOutcome,
+        brief: &str,
+    ) -> Result<(), nomifun_common::AppError> {
+        // Resolve the lead conversation's REAL owner (steer_message enforces
+        // ownership). Missing conversation / read error → silent skip (best-effort).
+        let row = match self.conv.conversation_repo().get(lead_conv_id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(lead_conv_id, run_id, error = %e, "lead report: read owner failed — skipping");
+                return Ok(());
+            }
+        };
+        let owner = if row.user_id.trim().is_empty() {
+            nomifun_auth::SYSTEM_USER_ID.to_owned()
+        } else {
+            row.user_id
+        };
+        self.conv
+            .steer_message(
+                &owner,
+                &lead_conv_id.to_string(),
+                nomifun_api_types::SendMessageRequest {
+                    content: compose_lead_receipt(run_id, outcome, brief),
+                    files: vec![],
+                    inject_skills: vec![],
+                    hidden: true,
+                    origin: Some("orchestrator_report".to_owned()),
+                    channel_platform: None,
+                },
+                &self.task_manager,
+            )
+            .await
+            .map(|_msg_id| ())
+    }
+}
 /// [`RunService`] (create/plan/inspect/cancel) + [`RunEngine`] (serial execution
 /// loop). The fleet/workspace repos + the run repo are root-re-exported from
 /// `nomifun_db`; the worker runs tasks on real nomi conversations via a
@@ -972,6 +1058,13 @@ pub fn build_orchestrator_state(
             conv: conv_service.clone(),
             task_manager: services.worker_task_manager.clone(),
         });
+    // Lead 回执 hook：run 到终态时，把结果回执给发起它的 LEAD 会话（解析真实 owner
+    // 后 steer_message），触发主 agent 一次汇总/重策略——取代旧的 LLM busy-poll。
+    // 第三个 ConversationService 克隆，须在 conv_service 移入 worker 之前克隆。
+    let lead_reporter: Arc<dyn LeadReporter> = Arc::new(OrchestratorLeadReporter {
+        conv: conv_service.clone(),
+        task_manager: services.worker_task_manager.clone(),
+    });
     // Path B (B3): the `create_adhoc_run` route associates the originating
     // conversation as the run's lead (`link_orchestrator_run`) when the request
     // carries a `lead_conv_id`. Hand it the SAME already-constructed
@@ -1027,6 +1120,7 @@ pub fn build_orchestrator_state(
     let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo);
     engine_deps.cancel_conversation = cancel_conversation;
     engine_deps.steer_conversation = steer_conversation;
+    engine_deps.lead_reporter = lead_reporter;
     // B2: the engine summarizes a COMPLETED run with the SAME LlmPlanProducer the
     // RunService plans with — a one-shot lead summary. Shared `Arc`, so the lead is
     // resolved the same way (off the run's fleet snapshot). Fail-soft in the engine:
@@ -1039,6 +1133,23 @@ pub fn build_orchestrator_state(
     // foreground visit. Detached + best-effort, mirroring the requirement
     // orchestrator's `resume_persisted_bindings`.
     engine.resume_persisted_runs(run_repo);
+    // Run-level stall watchdog (safety net): periodically finalize any run stuck
+    // non-terminal with no live loop (soft-strand) or a long-hung `planning`
+    // (planner black hole) as failed(stalled) + report it to the lead — so no run is
+    // ever a silent black hole the master agent waits on forever. Detached; the
+    // engine's `Clone` shares the same deps/handles. A 120s startup delay lets
+    // boot-resume restart persisted loops first, so a resuming run is never
+    // mistaken for a strand (doubly guarded by `STRAND_GRACE_MS`).
+    {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            loop {
+                engine.reap_stalled_runs().await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        });
+    }
     OrchestratorRouterState::new(fleet, workspace, run_service, engine, route_conversation)
 }
 
