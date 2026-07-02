@@ -328,6 +328,11 @@ pub struct NomiBuildExtra {
     /// `build_worker_extra`）设置；普通会话恒空 = 不限制。
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+    /// 对外服务信任档（正交于 Surface）。后端设定；`PublicService` 令 nomi 工厂把
+    /// 会话硬钳到安全白名单（关网关 / computer / browser / spawn），覆盖任何上游
+    /// 传入的工具授予——execution-time 后端权威闸。缺省 `Private` = 今日行为，零回归。
+    #[serde(default)]
+    pub exposure: crate::ExposureMode,
 }
 
 fn default_nomi_max_tokens() -> u32 {
