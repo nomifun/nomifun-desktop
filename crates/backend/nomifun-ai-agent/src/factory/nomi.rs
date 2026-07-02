@@ -430,6 +430,13 @@ pub(super) async fn build(
         // Owning conversation instance identity — the nomi manager stamps it
         // onto the session after build so a future reused id is rejected.
         owner_token: owner_token.clone(),
+        // 进程内 Spawn 门控：本地桌面网关会话关闭（改走 nomi_spawn 可视化扇出）。
+        in_process_spawn: engine_spawn_enabled(
+            overrides.desktop_gateway,
+            overrides.channel_platform.as_deref(),
+        ),
+        // Per-session 工具白名单（受限角色的编排 worker；普通会话恒空）。
+        allowed_tools: overrides.allowed_tools.clone(),
     };
 
     let knowledge_kb_ids: Vec<String> = overrides
@@ -662,6 +669,14 @@ fn append_knowledge_context(
 /// instructs the lead not to ask for them. Kept as a `const` so the composition
 /// is unit-testable without standing up the async factory.
 pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。对复杂、可拆分为多个并行/有依赖子任务的需求：调用工具 `nomi_run_create(goal)` 把需求拆成任务 DAG 并行执行（模型范围与工作目录会自动取用），随后用 `nomi_run_status`/`nomi_run_result` 跟进并向用户汇报进展与产出。不要询问 workspace 或 fleet——它们已不存在。";
+
+/// 进程内 Spawn 门控（纯函数，可单测）：本地桌面网关会话（desktop_gateway 且非
+/// IM 渠道）禁用进程内 Spawn —— 子 agent 改走 nomi_spawn 编排扇出（每个子任务
+/// 在 DAG 画布上有状态与转录，不再静默）；IM 渠道 master（nomi_spawn 对 Remote
+/// 面拒绝，禁了就没有扇出手段）与其余会话保留进程内 Spawn。
+pub(crate) fn engine_spawn_enabled(desktop_gateway: bool, channel_platform: Option<&str>) -> bool {
+    !(desktop_gateway && channel_platform.is_none())
+}
 
 /// Decide whether a session should act as an orchestration lead (and thus get
 /// the 主管 prompt). Pure so the policy is unit-testable.
@@ -1758,6 +1773,16 @@ mod tests {
         // Non-lead with no base stays None (no injection).
         assert_eq!(compose_lead_prompt(None, None), None);
         assert_eq!(compose_lead_prompt(None, Some("member")), None);
+    }
+
+    #[test]
+    fn engine_spawn_enabled_policy() {
+        // 本地桌面网关会话（普通/伙伴）→ 禁进程内 Spawn（改走 nomi_spawn 可视化扇出）。
+        assert!(!engine_spawn_enabled(true, None));
+        // IM 渠道 master 会话：nomi_spawn 对 Remote 面拒绝，保留进程内 Spawn。
+        assert!(engine_spawn_enabled(true, Some("telegram")));
+        // 无网关会话 → 保留。
+        assert!(engine_spawn_enabled(false, None));
     }
 
     #[test]
