@@ -1,6 +1,17 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    io::Read,
+    process::{Command, Stdio},
+    sync::{LazyLock, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use tracing::{debug, warn};
+
+const SYSTEM_PROXY_CACHE_TTL: Duration = Duration::from_millis(250);
+const SYSTEM_PROXY_COMMAND_TIMEOUT: Duration = Duration::from_millis(750);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
@@ -18,6 +29,15 @@ struct SystemProxyConfig {
     all_proxy: Option<String>,
     no_proxy: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+struct CachedSystemProxyConfig {
+    detected_at: Instant,
+    config: Option<SystemProxyConfig>,
+}
+
+static SYSTEM_PROXY_CACHE: LazyLock<Mutex<Option<CachedSystemProxyConfig>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 pub fn apply_detected_proxy(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     if process_has_proxy_env() {
@@ -84,7 +104,72 @@ where
 }
 
 fn system_proxy_config() -> Option<SystemProxyConfig> {
-    detect_system_proxy()
+    system_proxy_config_with_cache_ttl(SYSTEM_PROXY_CACHE_TTL)
+}
+
+fn system_proxy_config_with_cache_ttl(ttl: Duration) -> Option<SystemProxyConfig> {
+    let now = Instant::now();
+    if let Some(entry) = SYSTEM_PROXY_CACHE
+        .lock()
+        .expect("system proxy cache lock")
+        .as_ref()
+        .filter(|entry| now.duration_since(entry.detected_at) < ttl)
+        .cloned()
+    {
+        return entry.config;
+    }
+
+    let config = detect_system_proxy();
+    *SYSTEM_PROXY_CACHE.lock().expect("system proxy cache lock") = Some(CachedSystemProxyConfig {
+        detected_at: now,
+        config: config.clone(),
+    });
+    config
+}
+
+#[cfg(test)]
+fn clear_system_proxy_cache() {
+    *SYSTEM_PROXY_CACHE.lock().expect("system proxy cache lock") = None;
+}
+
+fn command_stdout_with_timeout(command: &mut Command, timeout: Duration) -> Option<String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started_at = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait().ok()? {
+            let mut stdout = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout).ok()?;
+            }
+            if !status.success() {
+                return None;
+            }
+            return Some(String::from_utf8_lossy(&stdout).into_owned());
+        }
+
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+static TEST_SYSTEM_PROXY_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[cfg(test)]
+fn test_system_proxy_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_SYSTEM_PROXY_LOCK
+        .lock()
+        .expect("test system proxy lock")
 }
 
 fn process_has_proxy_env() -> bool {
@@ -241,18 +326,16 @@ fn take_test_system_proxy_config() -> Option<Option<SystemProxyConfig>> {
 
 #[cfg(target_os = "macos")]
 fn detect_platform_proxy() -> Option<SystemProxyConfig> {
-    use std::process::Command;
-
-    let output = Command::new("/usr/sbin/scutil")
-        .arg("--proxy")
-        .output()
-        .or_else(|_| Command::new("scutil").arg("--proxy").output())
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = command_stdout_with_timeout(
+        Command::new("/usr/sbin/scutil").arg("--proxy"),
+        SYSTEM_PROXY_COMMAND_TIMEOUT,
+    )
+    .or_else(|| {
+        command_stdout_with_timeout(
+            Command::new("scutil").arg("--proxy"),
+            SYSTEM_PROXY_COMMAND_TIMEOUT,
+        )
+    })?;
     parse_scutil_proxy(&stdout)
 }
 
@@ -272,22 +355,15 @@ fn detect_platform_proxy() -> Option<SystemProxyConfig> {
 
 #[cfg(target_os = "windows")]
 fn read_windows_internet_settings(name: &str) -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("reg")
-        .args([
+    let stdout = command_stdout_with_timeout(
+        Command::new("reg").args([
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
             "/v",
             name,
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+        ]),
+        SYSTEM_PROXY_COMMAND_TIMEOUT,
+    )?;
     parse_windows_reg_value(&stdout, name)
 }
 
@@ -366,42 +442,30 @@ fn detect_linux_kde_proxy() -> Option<SystemProxyConfig> {
 
 #[cfg(target_os = "linux")]
 fn read_gsettings_value(schema: &str, key: &str) -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("gsettings")
-        .args(["get", schema, key])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = command_stdout_with_timeout(
+        Command::new("gsettings").args(["get", schema, key]),
+        SYSTEM_PROXY_COMMAND_TIMEOUT,
+    )?;
     non_empty(&stdout)
 }
 
 #[cfg(target_os = "linux")]
 fn read_kde_proxy_value(key: &str) -> Option<String> {
-    use std::process::Command;
-
     for command in ["kreadconfig6", "kreadconfig5"] {
-        let output = Command::new(command)
-            .args([
+        let output = command_stdout_with_timeout(
+            Command::new(command).args([
                 "--file",
                 "kioslaverc",
                 "--group",
                 "Proxy Settings",
                 "--key",
                 key,
-            ])
-            .output();
-        let Ok(output) = output else {
+            ]),
+            SYSTEM_PROXY_COMMAND_TIMEOUT,
+        );
+        let Some(stdout) = output else {
             continue;
         };
-        if !output.status.success() {
-            continue;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(value) = non_empty(&stdout) {
             return Some(value);
         }
@@ -931,9 +995,12 @@ fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn system_proxy_config_reads_current_detection_each_call() {
+    fn system_proxy_config_reads_current_detection_when_cache_ttl_is_zero() {
+        let _guard = test_system_proxy_lock();
+        clear_system_proxy_cache();
         let first = SystemProxyConfig {
             http_proxy: Some("http://127.0.0.1:7890".to_owned()),
             https_proxy: Some("http://127.0.0.1:7890".to_owned()),
@@ -949,17 +1016,83 @@ mod tests {
 
         set_test_system_proxy_configs(vec![Some(first), Some(second)]);
 
-        let first_config = system_proxy_config().expect("first proxy config");
+        let first_config =
+            system_proxy_config_with_cache_ttl(Duration::ZERO).expect("first proxy config");
         assert_eq!(
             first_config.http_proxy.as_deref(),
             Some("http://127.0.0.1:7890")
         );
 
-        let second_config = system_proxy_config().expect("second proxy config");
+        let second_config =
+            system_proxy_config_with_cache_ttl(Duration::ZERO).expect("second proxy config");
         assert_eq!(
             second_config.http_proxy.as_deref(),
             Some("http://127.0.0.1:7900")
         );
+        clear_system_proxy_cache();
+    }
+
+    #[test]
+    fn system_proxy_config_reuses_detection_inside_cache_ttl() {
+        let _guard = test_system_proxy_lock();
+        clear_system_proxy_cache();
+        let first = SystemProxyConfig {
+            http_proxy: Some("http://127.0.0.1:7890".to_owned()),
+            https_proxy: Some("http://127.0.0.1:7890".to_owned()),
+            all_proxy: None,
+            no_proxy: None,
+        };
+        let second = SystemProxyConfig {
+            http_proxy: Some("http://127.0.0.1:7900".to_owned()),
+            https_proxy: Some("http://127.0.0.1:7900".to_owned()),
+            all_proxy: None,
+            no_proxy: None,
+        };
+
+        set_test_system_proxy_configs(vec![Some(first), Some(second)]);
+
+        let first_config = system_proxy_config_with_cache_ttl(Duration::from_secs(60))
+            .expect("first proxy config");
+        let cached_config = system_proxy_config_with_cache_ttl(Duration::from_secs(60))
+            .expect("cached proxy config");
+
+        assert_eq!(
+            first_config.http_proxy.as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        assert_eq!(
+            cached_config.http_proxy.as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+        clear_system_proxy_cache();
+    }
+
+    #[test]
+    fn command_stdout_with_timeout_returns_none_for_slow_commands() {
+        let mut command = slow_command();
+        let started = Instant::now();
+
+        let output = command_stdout_with_timeout(&mut command, Duration::from_millis(50));
+
+        assert_eq!(output, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timed-out command should return quickly"
+        );
+    }
+
+    #[cfg(unix)]
+    fn slow_command() -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 2; printf late"]);
+        command
+    }
+
+    #[cfg(windows)]
+    fn slow_command() -> std::process::Command {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "ping -n 3 127.0.0.1 > nul & echo late"]);
+        command
     }
 
     #[test]
@@ -1000,6 +1133,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn child_proxy_env_uses_current_macos_system_proxy_when_needed() {
+        let _guard = test_system_proxy_lock();
+        clear_system_proxy_cache();
         let Some(config) = detect_platform_proxy() else {
             return;
         };
@@ -1024,6 +1159,7 @@ mod tests {
                 assert!(values.contains(all_proxy));
             }
         }
+        clear_system_proxy_cache();
     }
 
     #[cfg(target_os = "macos")]
