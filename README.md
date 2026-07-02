@@ -539,7 +539,7 @@ We'd love to hear from you. The fastest way to reach us is GitHub; the social ch
 
 [Apache-2.0](LICENSE) © 2025–2026 NomiFun.
 
-See [`NOTICE`](NOTICE) for third-party attributions, including the [AionUi](https://github.com/iOfficeAI/AionUi) project that NomiFun originally forked from before its current Tauri/Rust architecture.
+See [`NOTICE`](NOTICE) for third-party attributions.
 
 <div align="center">
 <br/>
