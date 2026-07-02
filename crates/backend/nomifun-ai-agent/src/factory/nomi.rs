@@ -668,7 +668,7 @@ fn append_knowledge_context(
 /// directory are supplied to the orchestration tools at runtime, so the prompt
 /// instructs the lead not to ask for them. Kept as a `const` so the composition
 /// is unit-testable without standing up the async factory.
-pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。对复杂、可拆分为多个并行/有依赖子任务的需求：调用工具 `nomi_run_create(goal)` 把需求拆成任务 DAG 并行执行（模型范围与工作目录会自动取用），随后用 `nomi_run_status`/`nomi_run_result` 跟进并向用户汇报进展与产出。不要询问 workspace 或 fleet——它们已不存在。";
+pub(crate) const LEAD_ORCHESTRATOR_PROMPT: &str = "你是 NomiFun 的编排主管。用户已在本会话限定可用模型范围（见运行上下文）。对简单或单步需求：直接作答。对复杂、可拆分为多个并行/有依赖子任务的需求：调用工具 `nomi_run_create(goal)` 把需求拆成任务 DAG 并行执行（模型范围与工作目录会自动取用），随后用 `nomi_run_status`/`nomi_run_result` 跟进并向用户汇报进展与产出。对多个相互独立、无需拆解的并行小任务：改用 `nomi_spawn(tasks)` 直接并行扇出（无需规划、立即执行、每个子任务在画布上可见）。不要询问 workspace 或 fleet——它们已不存在。";
 
 /// 进程内 Spawn 门控（纯函数，可单测）：本地桌面网关会话（desktop_gateway 且非
 /// IM 渠道）禁用进程内 Spawn —— 子 agent 改走 nomi_spawn 编排扇出（每个子任务
@@ -1738,6 +1738,10 @@ mod tests {
         assert!(
             composed.contains("nomi_run_create"),
             "lead prompt must name the orchestration tool: {composed}"
+        );
+        assert!(
+            composed.contains("nomi_spawn"),
+            "lead prompt must teach the flat fan-out verb for independent small tasks: {composed}"
         );
         // Composition, not replacement: the provided base survives.
         assert!(
