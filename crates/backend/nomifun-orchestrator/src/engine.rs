@@ -1471,6 +1471,7 @@ async fn dispatch_task(
                     .update_task(
                         &task_id_for_started,
                         UpdateTaskParams {
+                            last_error: None,
                             status: None,
                             spec: None,
                             conversation_id: Some(Some(conv_id)),
@@ -1529,6 +1530,7 @@ async fn settle_task_outcome(
                 .update_task(
                     task_id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: Some("done".to_string()),
                         spec: None,
                         conversation_id: Some(Some(o.conversation_id)),
@@ -2264,6 +2266,7 @@ async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &Orch
         .update_task(
             &task.id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".to_string()),
                 spec: None,
                 conversation_id: None,
@@ -2690,6 +2693,7 @@ async fn settle_judge_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchR
         .update_task(
             &task.id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".to_string()),
                 spec: None,
                 conversation_id: None,
@@ -3182,6 +3186,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                 .update_task(
                     &task.id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: None,
                         spec: None,
                         conversation_id: None,
@@ -3219,6 +3224,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                 .update_task(
                     &body.id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: Some("pending".to_string()),
                         spec: None,
                         conversation_id: Some(None), // clear the prior round's conv
@@ -3264,6 +3270,7 @@ async fn finish_loop_controller(
         .update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some(status.to_string()),
                 spec: None,
                 conversation_id: None,
@@ -3326,6 +3333,7 @@ async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &s
         .update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some(status.to_string()),
                 spec: None,
                 conversation_id: None,
@@ -3349,6 +3357,16 @@ async fn mark_task_failed(
     conversation_id: Option<i64>,
     tokens: Option<i64>,
 ) {
+    // Lift a failure reason from the worker conversation's latest error marker
+    // (best-effort) and PERSIST it, so the lead-report / escalation / diagnostic
+    // tools can show WHY a node failed without re-reading the conversation. When no
+    // diagnostic marker exists (e.g. a plain timeout / empty reply), record a
+    // generic reason so escalation is never left with an empty "why".
+    let reason = match conversation_id {
+        Some(c) => deps.worker.last_error_summary(&c.to_string()).await,
+        None => None,
+    }
+    .unwrap_or_else(|| "worker 未产出结果（超时或无回复），无诊断错误标记".to_string());
     let _ = deps
         .run_repo
         .update_task(
@@ -3368,6 +3386,7 @@ async fn mark_task_failed(
                 graph_y: None,
                 pattern_config: None,
                 next_retry_at: None,
+                last_error: Some(Some(reason)),
             },
         )
         .await;
@@ -4161,6 +4180,7 @@ mod tests {
     #[test]
     fn compose_brief_includes_role_task_and_upstream() {
         let task = OrchRunTaskRow {
+            last_error: None,
             id: "rtask_1".to_string(),
             run_id: "run_1".to_string(),
             title: "Synthesize".to_string(),
@@ -4196,6 +4216,7 @@ mod tests {
     /// by the kind-aware compose_brief tests.
     fn task_row_with_kind(kind: &str, title: &str, spec: &str) -> OrchRunTaskRow {
         OrchRunTaskRow {
+            last_error: None,
             id: "rtask_k".to_string(),
             run_id: "run_1".to_string(),
             title: title.to_string(),
@@ -4314,6 +4335,7 @@ mod tests {
     #[test]
     fn aggregate_summary_is_non_empty_and_counts_done() {
         let mk = |title: &str, status: &str, summary: Option<&str>| OrchRunTaskRow {
+            last_error: None,
             id: format!("rtask_{title}"),
             run_id: "run_1".to_string(),
             title: title.to_string(),
@@ -9450,6 +9472,7 @@ mod tests {
     /// Build a minimal completed-run task row for the digest test.
     fn summary_task(title: &str, status: &str, output: Option<&str>) -> OrchRunTaskRow {
         OrchRunTaskRow {
+            last_error: None,
             id: format!("rtask_{title}"),
             run_id: "run_x".to_string(),
             title: title.to_string(),
