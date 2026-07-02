@@ -80,9 +80,6 @@ pub struct BehaviorPolicy {
     /// `_meta.<vendor>.options.resume` field.
     #[serde(default)]
     pub session_load_via_meta_field: bool,
-
-    #[serde(default)]
-    pub supports_team: bool,
 }
 
 /// Handshake-derived fields captured from the ACP init/session-response.
@@ -170,12 +167,6 @@ pub struct AgentMetadata {
     /// scheme is documented in `007_agent_metadata_sort_order.sql`.
     pub sort_order: i64,
 
-    /// Whether this agent supports team mode. Derived at hydrate time from
-    /// the hard whitelist + persisted `agent_capabilities` MCP declarations.
-    /// Not a persisted column.
-    #[serde(default)]
-    pub team_capable: bool,
-
     #[serde(default)]
     pub handshake: AgentHandshake,
 }
@@ -223,7 +214,6 @@ mod tests {
             behavior_policy: BehaviorPolicy::default(),
             yolo_id: None,
             sort_order: 3100,
-            team_capable: true,
             handshake: AgentHandshake::default(),
         };
         let v = serde_json::to_value(&meta).unwrap();
@@ -232,7 +222,7 @@ mod tests {
         assert!(v.get("resolved_command").is_none());
         assert_eq!(v["backend"], "claude");
         assert_eq!(v["available"], true);
-        assert_eq!(v["team_capable"], true);
+        assert!(v.get("team_capable").is_none());
         assert!(v.get("command").is_none());
         assert!(v.get("icon").is_none());
     }
@@ -280,18 +270,15 @@ mod behavior_policy_tests {
         assert!(!policy.supports_side_question);
         assert!(!policy.self_identity_sticky);
         assert!(!policy.session_load_via_meta_field);
-        assert!(!policy.supports_team);
     }
 
     #[test]
-    fn supports_team_defaults_false_and_roundtrips() {
-        let empty: BehaviorPolicy = serde_json::from_str("{}").unwrap();
-        assert!(!empty.supports_team);
+    fn legacy_supports_team_flag_is_ignored() {
+        let policy: BehaviorPolicy =
+            serde_json::from_str(r#"{"supports_team":true,"supports_side_question":true}"#).unwrap();
+        assert!(policy.supports_side_question);
 
-        let with_team: BehaviorPolicy = serde_json::from_str(r#"{"supports_team":true}"#).unwrap();
-        assert!(with_team.supports_team);
-
-        let serialized = serde_json::to_string(&with_team).unwrap();
-        assert!(serialized.contains("\"supports_team\":true"));
+        let serialized = serde_json::to_value(&policy).unwrap();
+        assert!(serialized.get("supports_team").is_none());
     }
 }

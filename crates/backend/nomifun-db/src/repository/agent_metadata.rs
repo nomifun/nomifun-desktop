@@ -44,12 +44,11 @@ pub trait IAgentMetadataRepository: Send + Sync {
     /// Toggle the `enabled` flag. Returns `true` if a row was updated.
     async fn set_enabled(&self, id: &str, enabled: bool) -> Result<bool, DbError>;
 
-    /// Overwrite the `behavior_policy` JSON column. Used by the manual
-    /// "team-capable" override so a user can promote an agent the
-    /// capability heuristics missed. The caller is responsible for
-    /// merging on top of the existing policy (this just persists the
-    /// serialized blob). Returns the updated row, or `Ok(None)` if no
-    /// row matches `id`.
+    /// Overwrite the `behavior_policy` JSON column. Used by custom-agent
+    /// upserts and catalog maintenance paths that need to persist typed
+    /// adapter behavior switches. The caller is responsible for merging on
+    /// top of the existing policy if partial updates are needed. Returns the
+    /// updated row, or `Ok(None)` if no row matches `id`.
     ///
     /// Defaulted so the many test-only stub repositories across the
     /// workspace need not implement it; the real SQLite repository

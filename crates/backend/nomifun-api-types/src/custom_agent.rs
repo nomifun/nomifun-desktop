@@ -51,19 +51,6 @@ pub struct SetEnabledRequest {
     pub enabled: bool,
 }
 
-/// Request body for `PATCH /api/agents/{id}/team-capable`.
-///
-/// Manual override that promotes (or demotes) an agent's
-/// `behavior_policy.supports_team` flag. Lets the user opt an agent
-/// the capability heuristics missed (a non-whitelist ACP CLI whose
-/// MCP support was never detected) into team mode — and back out if the
-/// promotion was a mistake. Setting `false` never strips capability the
-/// hard whitelist already grants.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetTeamCapableRequest {
-    pub supports_team: bool,
-}
-
 /// Response body for `DELETE /api/agents/custom/{id}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteCustomAgentResponse {

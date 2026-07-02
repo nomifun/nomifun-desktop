@@ -29,8 +29,8 @@ import { useCompanion, useCompanions, useCompanionShared } from './useNomi';
  *  `memories` lives in the companion domain (shared + that companion's private, scope-aware) so it
  *  is one click from the selected companion rather than buried under a "shared" domain switch.
  *  聊天已迁出管理中心 → 统一从「会话」侧边栏的桌面伙伴分组进入标准 /conversation/:id；
- *  本页只保留管理（形象/记忆/技能/知识/设置）。 */
-const COMPANION_TABS = ['overview', 'memories', 'knowledge', 'skills', 'remote', 'secrets', 'settings'] as const;
+ *  本页只保留管理（形象/远程/记忆/技能/知识/设置）。 */
+const COMPANION_TABS = ['overview', 'remote', 'memories', 'knowledge', 'skills', 'secrets', 'settings'] as const;
 const SHARED_TABS = ['collect', 'learn', 'suggestions', 'migrate'] as const;
 const ALL_TABS: readonly string[] = [...COMPANION_TABS, ...SHARED_TABS];
 /** Standalone figure-library domain (not companion-scoped, no tab set of its own). */
@@ -219,10 +219,10 @@ const NomiConfigPage: React.FC = () => {
                     <div className='shrink-0 mb-8px flex items-center justify-between gap-8px'>
                       <Radio.Group type='button' size='small' value={activeTab} onChange={setTab}>
                         <Radio value='overview'>{t('nomi.tabs.overview')}</Radio>
+                        <Radio value='remote'>{t('nomi.tabs.remote')}</Radio>
                         <Radio value='memories'>{t('nomi.tabs.memories')}</Radio>
                         <Radio value='knowledge'>{t('nomi.tabs.knowledge')}</Radio>
                         <Radio value='skills'>{t('nomi.tabs.skills', { defaultValue: '技能' })}</Radio>
-                        <Radio value='remote'>{t('nomi.tabs.remote')}</Radio>
                         <Radio value='secrets'>{t('nomi.tabs.secrets')}</Radio>
                         <Radio value='settings'>{t('nomi.tabs.settings')}</Radio>
                       </Radio.Group>

@@ -273,53 +273,6 @@ impl AgentRegistry {
         &self.repo
     }
 
-    /// Manually set `behavior_policy.supports_team` on a row and refresh
-    /// the cached copy.
-    ///
-    /// This is the escape hatch for agents the capability heuristics
-    /// miss: a non-whitelist ACP CLI whose `agent_capabilities` is still
-    /// NULL (never handshaken) — or doesn't declare MCP — is otherwise
-    /// permanently barred from team mode. The override rides the *first*
-    /// branch of the `team_capable` OR chain (`behavior_policy
-    /// .supports_team`), so the whitelist / MCP-probe logic is left
-    /// completely unchanged: setting `false` never strips capability the
-    /// whitelist already grants.
-    ///
-    /// The merge preserves every sibling `behavior_policy` flag — only
-    /// `supports_team` is touched. Returns the freshly-decoded
-    /// `AgentMetadata` (with `team_capable` recomputed), or `NotFound`
-    /// if no row matches `id`.
-    pub async fn set_supports_team(&self, id: &str, supports_team: bool) -> Result<AgentMetadata, AppError> {
-        let row = self
-            .repo
-            .get(id)
-            .await
-            .map_err(|e| AppError::Internal(format!("repo.get: {e}")))?
-            .ok_or_else(|| AppError::NotFound(format!("Agent '{id}' not found")))?;
-
-        // Merge on top of the existing policy so sibling flags survive.
-        let mut policy: BehaviorPolicy =
-            decode_json_field(row.behavior_policy.as_deref(), "behavior_policy").unwrap_or_default();
-        policy.supports_team = supports_team;
-        let policy_json = serde_json::to_string(&policy)
-            .map_err(|e| AppError::Internal(format!("encode behavior_policy: {e}")))?;
-
-        let updated = self
-            .repo
-            .set_behavior_policy(id, &policy_json)
-            .await
-            .map_err(|e| AppError::Internal(format!("repo.set_behavior_policy: {e}")))?
-            .ok_or_else(|| AppError::NotFound(format!("Agent '{id}' not found")))?;
-
-        // decode_row recomputes team_capable through the OR chain, so the
-        // override lands without re-implementing the heuristic here.
-        let (meta, _) = decode_row(updated).ok_or_else(|| {
-            AppError::Internal(format!("decode_row failed for '{id}' after behavior_policy update"))
-        })?;
-        let result = meta.clone();
-        self.by_id.write().await.insert(meta.id.clone(), meta);
-        Ok(result)
-    }
 }
 
 /// A catalog row is visible to callers when the user has it enabled
@@ -355,10 +308,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
         available_commands: parse_json(row.available_commands.as_deref(), "available_commands"),
     };
 
-    let backend_str = row.backend.as_deref().unwrap_or("");
-    let team_capable = behavior_policy.supports_team
-        || nomifun_common::constants::is_team_capable(backend_str, handshake.agent_capabilities.as_ref());
-
     let mut meta = AgentMetadata {
         id: row.id,
         icon: row.icon,
@@ -380,7 +329,6 @@ fn decode_row(row: AgentMetadataRow) -> Option<(AgentMetadata, Option<Unavailabl
         behavior_policy,
         yolo_id: row.yolo_id,
         sort_order: row.sort_order,
-        team_capable,
         handshake,
     };
 
@@ -853,154 +801,15 @@ mod tests {
         assert!(nomi.1.is_none());
     }
 
-    /// Task 3.1: a non-whitelist agent whose `agent_capabilities` is
-    /// NULL and whose `behavior_policy.supports_team` defaults to false
-    /// is *not* team-capable out of the box. Calling
-    /// `set_supports_team(.., true)` must (1) persist
-    /// `behavior_policy.supports_team = true` to the DB column and
-    /// (2) flip the cached row's `team_capable` to true — without
-    /// touching any other `behavior_policy` flag.
+    /// The `apply_handshake` path still backfills NULL `agent_capabilities`
+    /// on first handshake after the old Team metadata was removed from the
+    /// public agent shape.
     #[tokio::test]
-    async fn set_supports_team_overrides_team_capable_for_non_whitelist_agent() {
-        let reg = registry().await;
-
-        // OpenCode: backend "opencode" (not in TEAM_CAPABLE_BACKENDS),
-        // agent_capabilities NULL, behavior_policy
-        // {"supports_side_question":false} — the exact gap this fixes.
-        let id = "agent_builtin_opencode";
-        let before = reg.get(id).await.expect("opencode seed row");
-        assert!(
-            !before.team_capable,
-            "precondition: opencode must start non-team-capable"
-        );
-        assert!(!before.behavior_policy.supports_team);
-        assert!(before.handshake.agent_capabilities.is_none());
-
-        let updated = reg.set_supports_team(id, true).await.unwrap();
-        assert!(updated.behavior_policy.supports_team);
-        assert!(updated.team_capable, "team_capable must flip true via the OR chain");
-        // The override must not disturb sibling behavior flags.
-        assert!(
-            !updated.behavior_policy.supports_side_question,
-            "supports_side_question must remain false (merge, not replace)"
-        );
-
-        // (1) Persisted to the DB column — re-read the raw row.
-        let row = reg
-            .repo_handle()
-            .get(id)
-            .await
-            .unwrap()
-            .expect("opencode row still exists");
-        let persisted: BehaviorPolicy = serde_json::from_str(row.behavior_policy.as_deref().unwrap()).unwrap();
-        assert!(persisted.supports_team, "DB behavior_policy.supports_team must be true");
-        assert!(!persisted.supports_side_question);
-
-        // (2) The cached registry copy agrees (independent re-read).
-        let cached = reg.get(id).await.unwrap();
-        assert!(cached.behavior_policy.supports_team);
-        assert!(cached.team_capable);
-    }
-
-    /// Regression guard for the merge-vs-replace contract: the original
-    /// `*_overrides_team_capable_*` test seeds an agent whose sibling
-    /// flags are all `false`, so a buggy whole-policy *replace* would
-    /// emit byte-identical JSON to a correct merge and slip through. Here
-    /// we first stamp a *non-default* sibling flag
-    /// (`supports_side_question = true`) onto the DB column, then call
-    /// `set_supports_team(.., true)`. A merge keeps that sibling true;
-    /// a replace would silently reset it to false.
-    #[tokio::test]
-    async fn set_supports_team_preserves_sibling_flags() {
-        let reg = registry().await;
-        let id = "agent_builtin_opencode";
-
-        // Seed a non-default sibling flag directly on the DB column.
-        let seeded = BehaviorPolicy {
-            supports_side_question: true,
-            ..BehaviorPolicy::default()
-        };
-        let seeded_json = serde_json::to_string(&seeded).unwrap();
-        reg.repo_handle()
-            .set_behavior_policy(id, &seeded_json)
-            .await
-            .unwrap()
-            .expect("opencode row exists");
-
-        // Flip supports_team via the override path under test.
-        let updated = reg.set_supports_team(id, true).await.unwrap();
-
-        // (1) supports_team landed.
-        assert!(updated.behavior_policy.supports_team);
-        // (2) The pre-existing sibling flag survived — proves merge, not replace.
-        assert!(
-            updated.behavior_policy.supports_side_question,
-            "supports_side_question must survive the override (merge, not replace)"
-        );
-
-        // Persisted column agrees: both flags true after the merge.
-        let row = reg
-            .repo_handle()
-            .get(id)
-            .await
-            .unwrap()
-            .expect("opencode row still exists");
-        let persisted: BehaviorPolicy = serde_json::from_str(row.behavior_policy.as_deref().unwrap()).unwrap();
-        assert!(persisted.supports_team, "DB supports_team must be true");
-        assert!(
-            persisted.supports_side_question,
-            "DB supports_side_question must remain true (merge, not replace)"
-        );
-    }
-
-    /// Setting `supports_team` back to false reverts `team_capable`
-    /// for an agent that has no other path to team mode (non-whitelist,
-    /// no MCP caps). This guards the "user can recover from a mistaken
-    /// enable" requirement.
-    #[tokio::test]
-    async fn set_supports_team_can_revert_to_false() {
-        let reg = registry().await;
-        let id = "agent_builtin_opencode";
-
-        reg.set_supports_team(id, true).await.unwrap();
-        let reverted = reg.set_supports_team(id, false).await.unwrap();
-        assert!(!reverted.behavior_policy.supports_team);
-        assert!(
-            !reverted.team_capable,
-            "team_capable must fall back to false once the override is cleared"
-        );
-    }
-
-    /// The whitelist guard is independent of the override: a whitelist
-    /// backend stays team-capable even if the manual flag is false, and
-    /// setting it false must NOT strip team capability that the
-    /// whitelist already grants.
-    #[tokio::test]
-    async fn set_supports_team_false_does_not_strip_whitelist_capability() {
-        let reg = registry().await;
-        let claude = reg.find_builtin_by_backend("claude").await.unwrap();
-        assert!(claude.team_capable, "claude is whitelisted");
-
-        let updated = reg.set_supports_team(&claude.id, false).await.unwrap();
-        assert!(!updated.behavior_policy.supports_team);
-        assert!(
-            updated.team_capable,
-            "whitelist OR-branch keeps claude team-capable regardless of the manual flag"
-        );
-    }
-
-    /// Task 3.2: confirm the *existing* `apply_handshake` path already
-    /// backfills NULL `agent_capabilities` on first handshake AND
-    /// re-derives `team_capable` from the freshly-decoded row. No new
-    /// backfill logic is required — `apply_handshake_inner` routes the
-    /// updated row through `decode_row`, which recomputes the OR chain.
-    #[tokio::test]
-    async fn handshake_backfills_capabilities_and_flips_team_capable() {
+    async fn handshake_backfills_capabilities() {
         let reg = registry().await;
         let id = "agent_builtin_opencode";
 
         let before = reg.get(id).await.unwrap();
-        assert!(!before.team_capable);
         assert!(before.handshake.agent_capabilities.is_none());
 
         // First successful handshake delivers MCP capabilities.
@@ -1020,10 +829,6 @@ mod tests {
         assert!(
             after.handshake.agent_capabilities.is_some(),
             "agent_capabilities must be backfilled from the handshake"
-        );
-        assert!(
-            after.team_capable,
-            "team_capable must flip true once MCP capabilities are present (has_mcp_capability branch)"
         );
     }
 

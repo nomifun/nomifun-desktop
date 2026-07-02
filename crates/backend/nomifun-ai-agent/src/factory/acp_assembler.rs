@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_ignores_guide_for_team_capable_solo() {
+    fn resolve_mcp_servers_ignores_guide_for_builtin_solo() {
         let config = AcpBuildExtra {
             agent_id: None,
             backend: Some("claude".into()),
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_non_team_capable_backend_gets_none() {
+    fn resolve_mcp_servers_ignores_guide_for_unknown_backend() {
         let config = AcpBuildExtra {
             agent_id: None,
             backend: Some("unknown-backend".into()),

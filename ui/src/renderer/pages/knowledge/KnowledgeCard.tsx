@@ -131,6 +131,17 @@ function StatusBadges({
 }) {
   const badges: React.ReactNode[] = [];
 
+  if (!base.root_exists) {
+    badges.push(
+      <span
+        key='root-missing'
+        className='knowledge-card-root-missing inline-flex items-center rounded-6px px-8px py-2px text-10px font-600 border border-solid border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-[rgba(var(--danger-6),0.08)]'
+      >
+        {t('knowledge.card.rootMissing', { defaultValue: '目录不可用' })}
+      </span>
+    );
+  }
+
   if (base.source) {
     if (base.source.mode === 'live') {
       badges.push(

@@ -30,6 +30,7 @@ import TeachingCard from './TeachingCard';
 import TypeRail from './TypeRail';
 import TagPicker from './TagPicker';
 import {
+  canSubmitStudioSourceConfig,
   canSubmitStudioSourceType,
   normalizeStudioInitialKind,
   type StudioSourceType,
@@ -178,10 +179,17 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
   // ─── Submit Logic ─────────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
-    if (!canSubmitStudioSourceType(sourceType)) {
-      Message.warning(t('knowledge.studio.feishuDisabled', { defaultValue: '飞书知识空间创建暂不可用' }));
-      setSourceType('blank');
-      setSourceConfigValue({});
+    const sourceValidation = canSubmitStudioSourceConfig(sourceType, sourceConfigValue);
+    if (!sourceValidation.ok) {
+      const defaultValue =
+        sourceValidation.messageKey === 'knowledge.studio.localFolderRequired'
+          ? '请先选择本地文件夹'
+          : '飞书知识空间创建暂不可用';
+      Message.warning(t(sourceValidation.messageKey, { defaultValue }));
+      if (!canSubmitStudioSourceType(sourceType)) {
+        setSourceType('blank');
+        setSourceConfigValue({});
+      }
       return;
     }
 
