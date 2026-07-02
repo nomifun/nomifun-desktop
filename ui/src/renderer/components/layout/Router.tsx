@@ -24,6 +24,7 @@ const SourcesPage = React.lazy(() => import('@renderer/pages/requirements/Source
 const TerminalSessionPage = React.lazy(() => import('@renderer/pages/terminal/TerminalSessionPage'));
 const TerminalCreatePage = React.lazy(() => import('@renderer/pages/terminal/TerminalCreatePage'));
 const NomiConfigPage = React.lazy(() => import('@renderer/pages/nomi'));
+const OutboundEmployeesPage = React.lazy(() => import('@renderer/pages/outbound'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
 const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
@@ -217,6 +218,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           {/* Webhook config relocated into 扩展能力 */}
           <Route path='/other' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
           <Route path='/nomi' element={withRouteFallback(NomiConfigPage)} />
+          <Route path='/outbound' element={withRouteFallback(OutboundEmployeesPage)} />
           <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
           <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
         </Route>
