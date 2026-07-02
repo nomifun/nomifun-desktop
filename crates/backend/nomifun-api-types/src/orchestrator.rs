@@ -854,6 +854,7 @@ mod tests {
             },
             tasks: vec![
                 RunTask {
+                    last_error: None,
                     id: "task_1".to_string(),
                     run_id: "run_1".to_string(),
                     title: "Gather".to_string(),
@@ -883,6 +884,7 @@ mod tests {
                     updated_at: 1_700_000_400_000,
                 },
                 RunTask {
+                    last_error: None,
                     id: "task_2".to_string(),
                     run_id: "run_1".to_string(),
                     title: "Synthesize".to_string(),

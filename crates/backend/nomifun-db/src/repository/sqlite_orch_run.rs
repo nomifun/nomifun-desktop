@@ -752,6 +752,7 @@ mod tests {
         repo.update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".into()),
                 spec: None,
                 conversation_id: None,
