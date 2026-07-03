@@ -998,7 +998,6 @@ async fn wb_5a_shell_empty_command_replaced_with_empty() {
 }
 
 #[tokio::test]
-#[cfg(not(windows))] // Windows cmd does not support newline-separated commands in blocks
 async fn wb_5b_shell_block_multiline_command() {
     use crate::shell::execute_shell_commands;
     let content = "```!\necho line1\necho line2\n```";

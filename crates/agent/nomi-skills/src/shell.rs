@@ -374,13 +374,24 @@ mod tests {
     async fn test_stderr_formatted() {
         // Write to stderr only — cross-platform redirection
         let content = if cfg!(windows) {
-            "!`echo err 1>&2`"
+            "!`[Console]::Error.WriteLine('err')`"
         } else {
             "!`echo err >&2`"
         };
         let result = run(content).await.unwrap();
         assert!(result.contains("[stderr]"));
         assert!(result.contains("err"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_inline_shell_accepts_powershell_syntax() {
+        let content = "!`if (Test-Path .) { Write-Output shell_ok }`";
+        let result = run(content).await.unwrap();
+        assert!(
+            result.contains("shell_ok"),
+            "PowerShell output missing: {result}"
+        );
     }
 }
 

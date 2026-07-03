@@ -93,6 +93,12 @@ fix what you broke. Don't claim something works that you haven't run.",
     #[cfg(target_os = "windows")]
     {
         s.push_str(
+            "\n - On Windows, the Bash and exec_command tools run commands through PowerShell, \
+not cmd.exe or Unix bash. Use PowerShell syntax: `Get-ChildItem`, `Get-Content`, `Set-Location`, \
+`$env:NAME`, and `;` for sequential commands. If cmd.exe syntax is truly required, wrap it \
+explicitly as `cmd /C \"...\"`.",
+        );
+        s.push_str(
             "\n - To open an application, URL, file, or folder on Windows, use the Computer \
 tool's `launch` action when it is available — do NOT run `cmd /c start`, `Start-Process`, or \
 `explorer` in Bash to launch GUI apps or URLs. `cmd /c start` mis-parses the target as a window \
