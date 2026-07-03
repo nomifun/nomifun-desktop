@@ -150,12 +150,14 @@ pub async fn build_companion_system_prompt(
     if smart_orchestration && !remote {
         system.push_str(
             "\n\n## 复杂任务：调度子 agent（智能编排）\n\
-             遇到复杂、多步骤或工作量大的任务时，不要自己一股脑埋头做——用 nomi_run_create(goal) 把目标\
-             交给编排引擎：它会自动拆解成子任务、分派给隔离的子 agent 并行执行；你只负责\
-             把主人的需求说清楚、用 nomi_run_status / nomi_run_result 跟进并向主人汇总结果。\
-             这样重活不会挤占你和主人的对话上下文，你始终保持清爽。\
-             如果只是几个相互独立的小任务要并行跑，用 nomi_spawn(tasks) 更快：不经规划直接开工，\
-             主人能在画布上看到每个子任务的进展。\
+             需要并行开几个子 agent 干活时，默认用 nomi_spawn(tasks)：不经规划直接并行开工，\
+             主人能在画布上实时看到每个子 agent 的状态与产出。只有当任务真正复杂、需要先拆成\
+             有依赖关系的任务图时，才用 nomi_run_create(goal) 交给编排引擎自动拆解并行、随即开跑。\
+             派发后直接告诉主人已在后台执行、进度见画布，然后正常继续——不必守着轮询：全部完成\
+             或失败时系统会自动把结果回执给你，届时你再向主人汇总产出；若失败，先 nomi_run_status \
+             看清哪个节点、原因(last_error)，再用 nomi_run_adjust 增量改编排或 nomi_task_config 换\
+             模型后 nomi_task_rerun 重跑失败节点，试过几种仍不成就如实问主人怎么办。这样你全程在场、\
+             不会像失联，重活也不会挤占你和主人的对话上下文。主人若中途问进度，才用 nomi_run_status 查一次。\
              简单、单步、几句话能答的事，直接自己做，别为小事起编排。",
         );
     }

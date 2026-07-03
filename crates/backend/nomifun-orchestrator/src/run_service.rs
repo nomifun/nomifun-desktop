@@ -48,6 +48,13 @@ use crate::router::rank_members;
 /// Default autonomy when the create request omits it.
 const DEFAULT_AUTONOMY: &str = "supervised";
 
+/// Hard ceiling on the planner's single LLM completion (`plan()`). The planner
+/// itself has no retry/timeout, so an unresponsive provider would otherwise leave
+/// the run stuck in `planning` forever (a black hole). On elapse `plan()` returns a
+/// `Timeout` error → `spawn_plan_and_start` fail-soft leaves the run re-plannable,
+/// and the run-level stall watchdog reaps it if it stays stuck.
+const PLAN_TIMEOUT_SECS: u64 = 300;
+
 #[derive(Clone)]
 pub struct RunService {
     run_repo: Arc<dyn IRunRepository>,
@@ -285,9 +292,24 @@ impl RunService {
         // pre-B2 one-shot path — passing Some only adds the fan-out.
         let throttle = crate::plan::LeadThinkingThrottle::new(self.emitter.clone(), run_id, "plan");
         let sink = throttle.sink();
-        let produced = self.planner.produce(&run.goal, &members, Some(&sink)).await;
+        // 安全网：给 planner 的 LLM 单次 completion 加硬超时——planner 本身无重试、无
+        // 超时（plan.rs），底层若 hang 会让 run 永停 `planning`（黑洞）。到点即 Err，
+        // 经 `spawn_plan_and_start` fail-soft 留 `planning` 可重规划；run 级看门狗随后兜底。
+        let produced = tokio::time::timeout(
+            std::time::Duration::from_secs(PLAN_TIMEOUT_SECS),
+            self.planner.produce(&run.goal, &members, Some(&sink)),
+        )
+        .await;
         throttle.flush();
-        let mut dag: PlannedDag = produced?;
+        let produced = match produced {
+            Ok(res) => res,
+            Err(_elapsed) => {
+                return Err(AppError::Timeout(format!(
+                    "planning timed out after {PLAN_TIMEOUT_SECS}s (planner unresponsive); run left re-plannable"
+                )));
+            }
+        };
+        let dag: PlannedDag = produced?;
 
         // B3: the lead produced a DAG — narrate the decomposition phase before we
         // persist the tasks/edges (still a semantic key, no prose).
@@ -2347,6 +2369,7 @@ fn task_row_to_dto(row: OrchRunTaskRow) -> RunTask {
         override_provider_id: row.override_provider_id,
         override_model: row.override_model,
         preset_prompt: row.preset_prompt,
+        last_error: row.last_error,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
