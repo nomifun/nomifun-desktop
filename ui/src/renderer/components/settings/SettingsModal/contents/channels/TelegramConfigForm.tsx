@@ -266,7 +266,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   // Calculate remaining time
   const getRemainingTime = (expiresAt: number) => {
     const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000 / 60));
-    return `${remaining} min`;
+    return `${remaining} ${t('common.unit.minute_short')}`;
   };
 
   // Row-scoped credential lock — see LarkConfigForm for the rationale (was a
@@ -411,7 +411,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                   <div className='flex-1'>
                     <div className='flex items-center gap-8px'>
                       <span className='text-14px font-500 text-t-primary'>
-                        {pairing.display_name || 'Unknown User'}
+                        {pairing.display_name || t('common.unknownUser')}
                       </span>
                       <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
                         <button
@@ -484,7 +484,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
               {authorizedUsers.map((user) => (
                 <div key={user.id} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
                   <div className='flex-1'>
-                    <div className='text-14px font-500 text-t-primary'>{user.display_name || 'Unknown User'}</div>
+                    <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
                       {t('settings.assistant.platform', 'Platform')}: {user.platformType}
                       <span className='mx-8px'>|</span>

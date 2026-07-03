@@ -51,6 +51,7 @@
   "saveSuccess": "保存成功",
   "saveFailed": "保存失败",
   "unknownError": "未知错误",
+  "unknownUser": "未知用户",
   "confirmDelete": "确认删除",
   "deleteSuccess": "删除成功",
   "deleteFailed": "删除失败",
