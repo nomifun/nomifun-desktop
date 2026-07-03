@@ -141,13 +141,14 @@
   },
   "channels": {
     "title": "Channels",
-    "desc": "Deploy this public companion to real customer touchpoints.",
-    "pending": "Backend integration",
-    "placeholderTitle": "Channel deployment (backend integration in progress)",
-    "placeholderDesc": "Channel binding opens once backend integration is complete. You'll be able to connect this companion to social channels and web / API touchpoints here.",
-    "imTitle": "Social / IM channels",
-    "imDesc": "Connect the companion to Telegram, Feishu and more to serve strangers on your behalf.",
-    "webTitle": "Web / API",
-    "webDesc": "Embed the companion into your site and business systems via a web widget or API."
+    "desc": "Connect IM channel bots for this public companion: enter the bot credentials, enable and bind it, and strangers on that channel are served automatically and safely. Each channel bot serves a single object.",
+    "bindRow": "Bind to this companion",
+    "createBot": "Connect a bot",
+    "bindConfirm": "Once bound, this bot is served by \"{{name}}\" and the channel's active sessions are reset.",
+    "unbindConfirm": "Once unbound, this bot is no longer served by this public companion and the channel's active sessions are reset.",
+    "bindSuccess": "Now served by \"{{name}}\" — sessions on this channel were reset",
+    "otherBots": "{{num}} bot(s) bound to other objects",
+    "modelFollowsAgent": "This bot uses the public companion's chat model — configure it on the Identity & Voice tab",
+    "footerHint": "After you connect and bind a bot for a platform, strangers on that channel will be served by this public companion. The bot uses this companion's chat model."
   }
 }
