@@ -166,11 +166,14 @@ const WecomConfigForm: React.FC<WecomConfigFormProps> = ({
           secret: sec,
         },
       };
-      await channel.enablePlugin.invoke(
+      const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'wecom', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
           : { plugin_id: 'wecom', config }
       );
+      if (!result.success) {
+        throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+      }
 
       Message.success(t('settings.wecom.pluginEnabled', 'WeCom channel enabled'));
       const plugins = await channel.getPluginStatus.invoke();

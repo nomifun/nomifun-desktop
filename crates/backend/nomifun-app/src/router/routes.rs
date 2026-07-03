@@ -183,7 +183,41 @@ pub async fn create_router(services: &AppServices) -> Router {
     {
         let mgr = chan_mgr.clone();
         let factory = chan_factory.clone();
+        let companion_service = services.companion_service.clone();
+        let public_agent_service = services.public_agent_service.clone();
         tokio::spawn(async move {
+            // Self-heal ghost owner bindings BEFORE restoring: a channel row
+            // bound to a 伙伴 / 对外伙伴 that was deleted before the delete-hook
+            // existed (or missed by it) keeps reserving its bot identity
+            // (UNIQUE(type,bot_key)), so re-enabling that bot under a live owner
+            // fails with "already bound" forever. Unbind rows whose owner is no
+            // longer in the roster so they become adoptable again. Both rosters
+            // are scanned into memory at service construction, so an empty list
+            // here means the owner really is gone.
+            let live_companions: std::collections::HashSet<String> = companion_service
+                .list_companions()
+                .await
+                .into_iter()
+                .map(|c| c.id)
+                .filter(|id| !id.is_empty())
+                .collect();
+            let live_public_agents: std::collections::HashSet<String> = public_agent_service
+                .list()
+                .await
+                .into_iter()
+                .map(|a| a.id)
+                .filter(|id| !id.is_empty())
+                .collect();
+            // Safety valve: never mass-unbind on an ambiguous "no owners at all"
+            // signal (e.g. a roster that failed to load). If the user genuinely
+            // has zero companions AND zero public agents, there is nothing to
+            // reconcile against — skip rather than risk unbinding every row.
+            if live_companions.is_empty() && live_public_agents.is_empty() {
+                tracing::info!("reconcile_orphaned_owners: empty roster, skipping to avoid mass-unbind");
+            } else {
+                mgr.reconcile_orphaned_owners(&live_companions, &live_public_agents).await;
+            }
+
             if let Err(e) = mgr.restore_plugins(&factory).await {
                 tracing::warn!(error = %e, "failed to restore channel plugins");
             }

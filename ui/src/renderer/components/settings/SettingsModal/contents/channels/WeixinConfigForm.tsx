@@ -202,12 +202,14 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
 
   const enableWeixinPlugin = async (accountId: string, botToken: string) => {
     const config = { credentials: { account_id: accountId, bot_token: botToken } };
-    // enablePlugin returns void; success if no throw
-    await channel.enablePlugin.invoke(
+    const result = await channel.enablePlugin.invoke(
       channelTarget
         ? { plugin_id: channelTarget.channelId, plugin_type: 'weixin', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
         : { plugin_id: 'weixin', config }
     );
+    if (!result.success) {
+      throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+    }
     Message.success(t('settings.weixin.pluginEnabled', 'WeChat channel enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
