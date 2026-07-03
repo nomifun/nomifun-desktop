@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, test } from 'bun:test';
-import { isImeComposingKey, isSubmitGesture } from './useCompositionInput';
+import { isImeComposingKey, isSubmitGesture, isSystemTextEditingShortcut } from './useCompositionInput';
 
 describe('isImeComposingKey', () => {
   const base = { key: 'Enter' as const };
@@ -43,5 +43,29 @@ describe('isSubmitGesture', () => {
   });
   test('non-Enter never submits', () => {
     expect(isSubmitGesture({ key: 'a' }, 'enter')).toBe(false);
+  });
+});
+
+describe('isSystemTextEditingShortcut', () => {
+  test('recognizes copy and paste shortcuts on macOS and Windows/Linux', () => {
+    expect(isSystemTextEditingShortcut({ key: 'c', metaKey: true })).toBe(true);
+    expect(isSystemTextEditingShortcut({ key: 'v', metaKey: true })).toBe(true);
+    expect(isSystemTextEditingShortcut({ key: 'c', ctrlKey: true })).toBe(true);
+    expect(isSystemTextEditingShortcut({ key: 'v', ctrlKey: true })).toBe(true);
+    expect(isSystemTextEditingShortcut({ key: 'Insert', ctrlKey: true })).toBe(true);
+    expect(isSystemTextEditingShortcut({ key: 'Insert', shiftKey: true })).toBe(true);
+  });
+
+  test('recognizes other native textarea editing shortcuts', () => {
+    for (const key of ['a', 'x', 'z', 'y']) {
+      expect(isSystemTextEditingShortcut({ key, ctrlKey: true })).toBe(true);
+      expect(isSystemTextEditingShortcut({ key: key.toUpperCase(), metaKey: true })).toBe(true);
+    }
+  });
+
+  test('does not treat submit or app shortcuts as text editing shortcuts', () => {
+    expect(isSystemTextEditingShortcut({ key: 'Enter', metaKey: true })).toBe(false);
+    expect(isSystemTextEditingShortcut({ key: 'l', metaKey: true, shiftKey: true })).toBe(false);
+    expect(isSystemTextEditingShortcut({ key: 'c' })).toBe(false);
   });
 });
