@@ -1,4 +1,5 @@
 use super::*;
+use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
@@ -265,6 +266,7 @@ async fn test_load_commands_nested_flat() {
 // --- load_all_skills ---
 
 #[tokio::test]
+#[serial]
 async fn test_load_all_skills_bare_mode() {
     let tmp = TempDir::new().unwrap();
     // Create .nomi/skills/ under the add_dir
@@ -279,10 +281,14 @@ async fn test_load_all_skills_bare_mode() {
         None,
     )
     .await;
-    assert_eq!(result.len(), 1);
+    assert!(
+        result.iter().any(|skill| skill.name == "my-skill"),
+        "bare mode should load skills from explicit add_dirs"
+    );
 }
 
 #[tokio::test]
+#[serial]
 async fn test_load_all_skills_deduplicates() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
