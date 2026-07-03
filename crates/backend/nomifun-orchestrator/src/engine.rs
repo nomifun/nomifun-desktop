@@ -112,6 +112,78 @@ impl ConversationSteerer for NoopConversationSteerer {
     }
 }
 
+/// The terminal / notable outcome of a run, reported back to the LEAD conversation
+/// that launched it so the master agent is re-engaged exactly once per notable
+/// event to summarize / re-strategize / relay — instead of LLM-driven busy-polling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The run finished successfully.
+    Completed,
+    /// The run finished with a hard failure (a required task failed after its
+    /// retry budget, or a non-recoverable error).
+    Failed,
+    /// The run made no progress past the stall deadline and was force-finalized by
+    /// the watchdog (planner-hang / soft-strand safety net) — never a silent black hole.
+    Stalled,
+    /// An interactive run planned and parked awaiting the user's approval.
+    AwaitingApproval,
+}
+
+impl RunOutcome {
+    /// Stable lowercase tag (logs / the injected receipt discriminator).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOutcome::Completed => "completed",
+            RunOutcome::Failed => "failed",
+            RunOutcome::Stalled => "stalled",
+            RunOutcome::AwaitingApproval => "awaiting_approval",
+        }
+    }
+}
+
+/// Reports a run's terminal / notable outcome back to the LEAD conversation that
+/// launched it (`lead_conv_id`), re-engaging the master agent exactly once per
+/// notable event to summarize / re-strategize / relay to the user — replacing the
+/// old LLM busy-poll loop. The app injects an implementation wrapping
+/// [`ConversationService::steer_message`](nomifun_conversation::ConversationService::steer_message)
+/// (starts a fresh lead turn when the conversation is idle, injects into a live one
+/// otherwise), resolving the lead's REAL owner. A trait (not a bare `Fn`) so the
+/// impl can be `async` and the orchestrator crate stays free of a
+/// `nomifun-conversation` dependency — wired in `build_orchestrator_state`, exactly
+/// like [`ConversationSteerer`].
+#[async_trait]
+pub trait LeadReporter: Send + Sync {
+    /// Deliver `brief` about `run_id`'s `outcome` to conversation `lead_conv_id`.
+    /// Best-effort: callers only `warn!` on error — a report failure must NEVER
+    /// fail, block, or delay the run.
+    async fn report(
+        &self,
+        lead_conv_id: i64,
+        run_id: &str,
+        outcome: RunOutcome,
+        brief: &str,
+    ) -> Result<(), AppError>;
+}
+
+/// A [`LeadReporter`] that does nothing (returns `Ok`) — the default for harnesses
+/// / CLI / tests with no conversation layer. Unlike [`NoopConversationSteerer`] it
+/// succeeds silently (a report is best-effort; a no-op must not spam warnings).
+/// `build_orchestrator_state` overrides it with the real reporter.
+pub struct NoopLeadReporter;
+
+#[async_trait]
+impl LeadReporter for NoopLeadReporter {
+    async fn report(
+        &self,
+        _lead_conv_id: i64,
+        _run_id: &str,
+        _outcome: RunOutcome,
+        _brief: &str,
+    ) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
 /// A [`PlanProducer`] used ONLY as the engine's default run-summarizer (B2): it
 /// supports neither `produce` nor `adjust` (those stay on the real planner held
 /// by `RunService`) and its `summarize` errors via the trait default. This is the
@@ -160,6 +232,24 @@ pub const DEFAULT_MAX_WORKER_RETRIES: usize = 3;
 /// retry budget while staying snappy for a one-off blip. Overridable per
 /// [`RunEngineDeps`] (tests set [`Duration::ZERO`] for instant retries).
 pub const DEFAULT_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(5);
+
+/// Cap on a single auto-retry backoff (`retry_backoff_ms`), so a large retry
+/// budget with exponential growth can't schedule an absurd multi-hour wait. 60s
+/// comfortably spans a per-minute RPM window while staying recoverable.
+pub const MAX_RETRY_BACKOFF_MS: i64 = 60_000;
+
+/// Run-level stall watchdog: a `running` run whose execution loop is DEAD
+/// (`!is_running`) for at least this long is a soft-strand — the loop exited
+/// without writing a terminal status (e.g. `TerminalDecision::Break` / a panicked
+/// loop). Force-finalize it. Generous so a boot-resume loop restart or a transient
+/// sweep race never trips it; a HEALTHY `running` run always has a live loop and is
+/// excluded regardless of age.
+pub const STRAND_GRACE_MS: i64 = 5 * 60 * 1000;
+
+/// A `planning` run older than this has a hung/errored planner (the planner LLM is
+/// itself bounded by `PLAN_TIMEOUT_SECS`, so anything past that + margin is stuck /
+/// left re-plannable and abandoned) → force-finalize as stalled.
+pub const PLANNING_MAX_MS: i64 = 10 * 60 * 1000;
 
 /// Per-run async lock registry serializing the run-loop's **terminal-check +
 /// finish** against the rerun path's **reset + re-activation** (UC-2a 评审
@@ -249,6 +339,12 @@ pub struct RunEngineDeps {
     /// (P3b). Defaults to [`NoopConversationSteerer`] (which errors); the app sets
     /// a real one wrapping `ConversationService::steer_message`.
     pub steer_conversation: Arc<dyn ConversationSteerer>,
+    /// Reports a run's terminal / notable outcome back to the LEAD conversation
+    /// (`run.lead_conv_id`), re-engaging the master agent once per notable event
+    /// instead of busy-polling. Defaults to [`NoopLeadReporter`] (no-op); the app
+    /// sets a real one wrapping `ConversationService::steer_message` in
+    /// `build_orchestrator_state`. FAIL-SOFT: a report error never fails the run.
+    pub lead_reporter: Arc<dyn LeadReporter>,
     /// Per-run lock registry serializing the loop's terminal-check+finish with the
     /// rerun reset+re-activation (UC-2a 评审 Critical — see [`RunLocks`]). Reachable
     /// from `run_loop` (here, via `deps`) and `RunEngine::rerun_task` (via its
@@ -292,6 +388,7 @@ impl RunEngineDeps {
             ws_repo,
             cancel_conversation: Arc::new(NoopConversationCanceller),
             steer_conversation: Arc::new(NoopConversationSteerer),
+            lead_reporter: Arc::new(NoopLeadReporter),
             run_locks: Arc::new(RunLocks::new()),
             summarizer: Arc::new(NoopSummaryProducer),
             max_worker_retries: DEFAULT_MAX_WORKER_RETRIES,
@@ -415,6 +512,99 @@ impl RunEngine {
         tokio::spawn(async move {
             cancel_in_flight_conversations(&deps, &run_id).await;
         });
+    }
+
+    /// Run-level stall watchdog (safety net): finalize runs stuck non-terminal with
+    /// NO live execution loop (soft-strand) or a long-hung `planning` (planner black
+    /// hole) as `failed(stalled)`, so EVERY run eventually reaches a terminal state
+    /// and is reported to its lead — no silent black holes where the master agent
+    /// waits forever. Conservative: a healthy `running` run always has a live loop
+    /// (`is_running`), so it is NEVER touched regardless of age; only a `running`
+    /// run whose loop is dead past [`STRAND_GRACE_MS`], or a `planning` run older
+    /// than [`PLANNING_MAX_MS`], is a candidate. Idempotent + per-run-lock guarded.
+    /// The app spawns a periodic caller (e.g. every 60s).
+    pub async fn reap_stalled_runs(&self) {
+        let now = now_ms();
+        let mut candidates: Vec<OrchRunRow> = Vec::new();
+        // `running` with a DEAD loop past the grace = soft-strand (loop exited
+        // without a terminal write). A live loop → healthy → skipped here.
+        for row in self
+            .deps
+            .run_repo
+            .list_runs_by_status("running")
+            .await
+            .unwrap_or_default()
+        {
+            if !self.is_running(&row.id) && now.saturating_sub(row.updated_at) >= STRAND_GRACE_MS {
+                candidates.push(row);
+            }
+        }
+        // `planning` older than the ceiling = hung/errored planner.
+        for row in self
+            .deps
+            .run_repo
+            .list_runs_by_status("planning")
+            .await
+            .unwrap_or_default()
+        {
+            if now.saturating_sub(row.updated_at) >= PLANNING_MAX_MS {
+                candidates.push(row);
+            }
+        }
+        for row in candidates {
+            self.reap_one_stalled(row).await;
+        }
+    }
+
+    /// Finalize ONE stalled run as `failed(stalled)` under its per-run lock (re-
+    /// verifying it is still non-terminal — and, for a `running` run, still loop-
+    /// dead — so a concurrent finish/restart WINS), stop any residual handle +
+    /// cancel in-flight workers, then report `Stalled` to the lead (best-effort).
+    async fn reap_one_stalled(&self, row: OrchRunRow) {
+        let run_id = row.id.clone();
+        let lock = self.deps.run_locks.for_run(&run_id);
+        let finalized = {
+            let _guard = lock.lock().await;
+            match self.deps.run_repo.get_run(&run_id).await {
+                Ok(Some(r)) if matches!(r.status.as_str(), "running" | "planning") => {
+                    // A `running` run whose loop came back alive under the lock is
+                    // healthy after all — do not reap.
+                    if r.status == "running" && self.is_running(&run_id) {
+                        false
+                    } else {
+                        let summary = format!(
+                            "编排卡死：状态「{}」超过阈值无进展，已由看门狗终止。",
+                            r.status
+                        );
+                        finish_run(&self.deps, &run_id, "failed", Some(summary), None).await;
+                        true
+                    }
+                }
+                // Already terminal / gone → nothing to do.
+                _ => false,
+            }
+        };
+        if !finalized {
+            return;
+        }
+        warn!(run_id, "Run watchdog: reaped stalled run as failed(stalled)");
+        // Clean up any residual (dead/wedged) loop handle + in-flight worker convs.
+        self.stop(&run_id);
+        // Report to the lead so the master agent surfaces the stall (lock-free).
+        if let Some(lead_conv_id) = row.lead_conv_id {
+            let brief = match self.deps.run_repo.list_tasks(&run_id).await {
+                Ok(tasks) if !tasks.is_empty() => build_summary_digest(&tasks),
+                _ => "（run 长时间无进展，无已知节点产出）".to_string(),
+            };
+            if let Err(e) = self
+                .deps
+                .lead_reporter
+                .report(lead_conv_id, &run_id, RunOutcome::Stalled, &brief)
+                .await
+            {
+                warn!(run_id, error = %e, "stalled-run lead report failed");
+            }
+        }
     }
 
     /// Resume every persisted `running` run at boot. The running set (`handles`)
@@ -722,6 +912,11 @@ async fn run_loop(
     // pushed, so this is belt-and-suspenders against a status read race).
     let mut in_progress: HashSet<String> = HashSet::new();
 
+    // Terminal outcome to report back to the LEAD conversation AFTER the loop exits
+    // (lock-free, exactly-once). Set only on completed/failed; `Break` (stuck/read
+    // error) leaves it None → the run-level watchdog reports those.
+    let mut terminal_report: Option<(RunOutcome, String)> = None;
+
     loop {
         // (a) Cancelled → stop scheduling. Task 3 adds in-flight cancel
         // propagation; here we simply stop dispatching and let the loop unwind
@@ -972,8 +1167,10 @@ async fn run_loop(
                 /// All terminal, completable → summarize (no lock) then re-verify.
                 /// Carries the tasks (for the digest) + token total.
                 Completed { tasks: Vec<OrchRunTaskRow>, total_tokens: Option<i64> },
-                /// A task failed → finished `failed` under this guard already.
-                FinishedFailed,
+                /// A task failed → finished `failed` under this guard already;
+                /// carries the tasks so the after-loop lead report can build a
+                /// failure brief lock-free.
+                FinishedFailed { tasks: Vec<OrchRunTaskRow> },
                 /// No ready/in-flight work, but a task is `pending` waiting out its
                 /// transient-error retry backoff (`next_retry_at` in the future) →
                 /// idle-wait (NOT terminal, NOT stuck) and re-loop.
@@ -1019,7 +1216,7 @@ async fn run_loop(
                                 let total_tokens = sum_task_tokens(&tasks);
                                 finish_run(&deps, run_id, "failed", None, total_tokens).await;
                                 handles.remove_if(run_id, |_, h| h.generation == generation);
-                                TerminalDecision::FinishedFailed
+                                TerminalDecision::FinishedFailed { tasks }
                             } else {
                                 // Not terminal and nothing ready. Distinguish a
                                 // transient-error retry-in-backoff (a `pending` task
@@ -1069,7 +1266,13 @@ async fn run_loop(
                     tokio::time::sleep(RETRY_POLL_INTERVAL).await;
                     continue;
                 }
-                TerminalDecision::FinishedFailed | TerminalDecision::Break => break,
+                TerminalDecision::Break => break,
+                TerminalDecision::FinishedFailed { tasks } => {
+                    // 失败终态：run 已在 guard 内落 `failed` 且注销句柄。这里仅捕获给
+                    // lead 的失败简报（含各节点状态/部分产出），循环外锁free统一回执。
+                    terminal_report = Some((RunOutcome::Failed, build_summary_digest(&tasks)));
+                    break;
+                }
                 TerminalDecision::Completed { tasks, total_tokens } => {
                     // B2: synthesize a coherent run summary with a one-shot lead
                     // call — WITH NO LOCK HELD (the guard above was dropped). This is
@@ -1124,12 +1327,15 @@ async fn run_loop(
                         continue;
                     }
                     // Still terminal, no ready work → commit the completion.
-                    finish_run(&deps, run_id, "completed", Some(summary), total_tokens).await;
+                    finish_run(&deps, run_id, "completed", Some(summary.clone()), total_tokens).await;
                     // Deregister our handle UNDER the (re-acquired) lock so
                     // `is_running` flips false atomically with the terminal status
                     // write — a rerun serialized after us on this lock then observes
                     // a stopped loop and the route restarts it (no variant-A strand).
                     handles.remove_if(run_id, |_, h| h.generation == generation);
+                    // 完成终态：捕获 LLM 综合 summary 作 lead 回执素材。此处仍持有
+                    // 重取的 guard（break 时释放），仅做赋值(无 await)；真正回执在循环外锁free。
+                    terminal_report = Some((RunOutcome::Completed, summary));
                     break;
                 }
             }
@@ -1143,6 +1349,20 @@ async fn run_loop(
         }
         // Loop again — re-evaluate the ready set (newly unblocked) and the
         // terminal condition.
+    }
+
+    // Lead 回执（锁外、exactly-once）：run 到终态（completed/failed）后，把结果回执给
+    // 发起它的 lead 会话，触发主 agent 一次汇总/重策略——取代旧的 LLM busy-poll。
+    // best-effort：报告失败只 warn，绝不影响已落库的终态；`Break`(卡死/读错) 不回执，
+    // 由 run 级看门狗兜底；纯 MCP/无 lead 会话（lead_conv_id=None）的 run 不回执。
+    if let (Some((outcome, brief)), Some(lead_conv_id)) = (terminal_report, run.lead_conv_id) {
+        if let Err(e) = deps
+            .lead_reporter
+            .report(lead_conv_id, run_id, outcome, &brief)
+            .await
+        {
+            warn!(run_id, error = %e, "lead report failed (run already finalized)");
+        }
     }
 }
 
@@ -1251,6 +1471,7 @@ async fn dispatch_task(
                     .update_task(
                         &task_id_for_started,
                         UpdateTaskParams {
+                            last_error: None,
                             status: None,
                             spec: None,
                             conversation_id: Some(Some(conv_id)),
@@ -1309,6 +1530,7 @@ async fn settle_task_outcome(
                 .update_task(
                     task_id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: Some("done".to_string()),
                         spec: None,
                         conversation_id: Some(Some(o.conversation_id)),
@@ -1353,7 +1575,10 @@ async fn settle_task_outcome(
 fn retry_backoff_ms(base: Duration, attempt: i64) -> i64 {
     let base_ms = base.as_millis() as i64;
     let factor = 1i64.checked_shl(attempt.clamp(0, 16) as u32).unwrap_or(i64::MAX);
-    base_ms.saturating_mul(factor)
+    // Cap the exponential growth so a high retry budget can't schedule an absurd
+    // multi-hour backoff (`base · 2^attempt` explodes fast). Past the cap the delay
+    // is constant — still spaced out, but bounded and snappy to recover.
+    base_ms.saturating_mul(factor).min(MAX_RETRY_BACKOFF_MS)
 }
 
 /// Decide a failed worker turn's fate: AUTO-RETRY a transient/retryable provider
@@ -2041,6 +2266,7 @@ async fn settle_verify_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &Orch
         .update_task(
             &task.id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".to_string()),
                 spec: None,
                 conversation_id: None,
@@ -2467,6 +2693,7 @@ async fn settle_judge_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchR
         .update_task(
             &task.id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".to_string()),
                 spec: None,
                 conversation_id: None,
@@ -2959,6 +3186,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                 .update_task(
                     &task.id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: None,
                         spec: None,
                         conversation_id: None,
@@ -2996,6 +3224,7 @@ async fn settle_loop_task(deps: &Arc<RunEngineDeps>, run_id: &str, task: &OrchRu
                 .update_task(
                     &body.id,
                     UpdateTaskParams {
+                        last_error: None,
                         status: Some("pending".to_string()),
                         spec: None,
                         conversation_id: Some(None), // clear the prior round's conv
@@ -3041,6 +3270,7 @@ async fn finish_loop_controller(
         .update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some(status.to_string()),
                 spec: None,
                 conversation_id: None,
@@ -3103,6 +3333,7 @@ async fn update_task_status(deps: &Arc<RunEngineDeps>, task_id: &str, status: &s
         .update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some(status.to_string()),
                 spec: None,
                 conversation_id: None,
@@ -3126,6 +3357,16 @@ async fn mark_task_failed(
     conversation_id: Option<i64>,
     tokens: Option<i64>,
 ) {
+    // Lift a failure reason from the worker conversation's latest error marker
+    // (best-effort) and PERSIST it, so the lead-report / escalation / diagnostic
+    // tools can show WHY a node failed without re-reading the conversation. When no
+    // diagnostic marker exists (e.g. a plain timeout / empty reply), record a
+    // generic reason so escalation is never left with an empty "why".
+    let reason = match conversation_id {
+        Some(c) => deps.worker.last_error_summary(&c.to_string()).await,
+        None => None,
+    }
+    .unwrap_or_else(|| "worker 未产出结果（超时或无回复），无诊断错误标记".to_string());
     let _ = deps
         .run_repo
         .update_task(
@@ -3145,6 +3386,7 @@ async fn mark_task_failed(
                 graph_y: None,
                 pattern_config: None,
                 next_retry_at: None,
+                last_error: Some(Some(reason)),
             },
         )
         .await;
@@ -3506,6 +3748,182 @@ mod tests {
         assert!(deregistered, "engine loop should deregister after the run completes");
     }
 
+    // ── Lead 回执（LeadReporter）：run 到终态时 exactly-once 回执给发起会话 ────────
+
+    /// Records every lead report so a test can assert the terminal report fires
+    /// EXACTLY once with the right (lead_conv_id, run_id, outcome).
+    #[derive(Default)]
+    struct RecordingLeadReporter {
+        reports: Arc<Mutex<Vec<(i64, String, String)>>>,
+    }
+    #[async_trait]
+    impl LeadReporter for RecordingLeadReporter {
+        async fn report(
+            &self,
+            lead_conv_id: i64,
+            run_id: &str,
+            outcome: RunOutcome,
+            _brief: &str,
+        ) -> Result<(), AppError> {
+            self.reports
+                .lock()
+                .unwrap()
+                .push((lead_conv_id, run_id.to_string(), outcome.as_str().to_string()));
+            Ok(())
+        }
+    }
+
+    /// A worker that always fails (ok:false, no error marker) — with
+    /// `max_worker_retries = 0` the task fails immediately → the run fails.
+    struct AlwaysFailWorker;
+    #[async_trait]
+    impl WorkerRunner for AlwaysFailWorker {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            _task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            on_started(778);
+            Ok(WorkerOutcome { conversation_id: 778, text: None, ok: false, tokens: None })
+        }
+    }
+
+    /// Build an engine over a shared in-memory DB wired with a RecordingLeadReporter
+    /// and the given worker + retry budget; returns (run_service, engine, reporter).
+    async fn reporter_stack(
+        worker: Arc<dyn WorkerRunner>,
+        max_retries: usize,
+    ) -> (RunService, RunEngine, Arc<RecordingLeadReporter>) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let emitter = OrchestratorRunEventEmitter::new(Arc::new(RecordingBroadcaster::new()));
+        let planner: Arc<dyn PlanProducer> = Arc::new(ChainPlanProducer);
+        let run_service =
+            RunService::new(run_repo.clone(), fleet_repo, ws_repo.clone(), planner, emitter.clone());
+        let reporter = Arc::new(RecordingLeadReporter::default());
+        let mut engine_deps = RunEngineDeps::new(run_repo, worker, emitter, ws_repo);
+        engine_deps.worker_timeout = Duration::from_secs(5);
+        engine_deps.max_worker_retries = max_retries;
+        engine_deps.retry_backoff_base = Duration::ZERO;
+        engine_deps.lead_reporter = reporter.clone();
+        let engine = RunEngine::new(Arc::new(engine_deps));
+        (run_service, engine, reporter)
+    }
+
+    /// Create an ad-hoc run BOUND to a lead conversation (so the terminal report has
+    /// a target), plan it, and return the run id. `autonomous` → runs without a gate.
+    async fn adhoc_lead_run(run_service: &RunService, lead_conv_id: i64) -> String {
+        let run = run_service
+            .create_adhoc(
+                "u1",
+                CreateAdhocRunRequest {
+                    goal: "chain".to_string(),
+                    work_dir: Some("/tmp/lead-report".to_string()),
+                    model_range: ModelRange::Single {
+                        model: ModelRef {
+                            provider_id: "prov_x".to_string(),
+                            model: "claude-opus-4-8".to_string(),
+                        },
+                    },
+                    pinned_roles: vec![],
+                    role_members: vec![],
+                    autonomy: Some("autonomous".to_string()),
+                    max_parallel: None,
+                    lead_conv_id: Some(lead_conv_id),
+                    lead_model: None,
+                },
+            )
+            .await
+            .expect("create_adhoc");
+        run_service.plan(&run.id).await.expect("plan");
+        run.id
+    }
+
+    async fn wait_run_status(run_service: &RunService, run_id: &str, want: &str) -> bool {
+        for _ in 0..100 {
+            if let Ok(d) = run_service.get_detail(run_id).await {
+                if d.run.status == want {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn await_first_report(reporter: &RecordingLeadReporter) {
+        for _ in 0..40 {
+            if !reporter.reports.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// A COMPLETED run reports exactly once, with `Completed`, to its lead conv.
+    #[tokio::test]
+    async fn completed_run_reports_once_to_lead() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(777, "task output"));
+        let (run_service, engine, reporter) = reporter_stack(worker, 3).await;
+        let run_id = adhoc_lead_run(&run_service, 909).await;
+        engine.start(run_id.clone());
+        assert!(wait_run_status(&run_service, &run_id, "completed").await, "run must complete");
+        await_first_report(&reporter).await;
+        let reports = reporter.reports.lock().unwrap().clone();
+        assert_eq!(reports.len(), 1, "exactly one lead report on completion, got {reports:?}");
+        assert_eq!(reports[0].0, 909, "reported to the lead conversation");
+        assert_eq!(reports[0].2, "completed", "outcome is completed");
+    }
+
+    /// A FAILED run reports exactly once, with `Failed`, to its lead conv.
+    #[tokio::test]
+    async fn failed_run_reports_once_to_lead() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(AlwaysFailWorker);
+        // max_retries = 0 → the first failure is terminal (no retry-backoff wait).
+        let (run_service, engine, reporter) = reporter_stack(worker, 0).await;
+        let run_id = adhoc_lead_run(&run_service, 42).await;
+        engine.start(run_id.clone());
+        assert!(wait_run_status(&run_service, &run_id, "failed").await, "run must fail");
+        await_first_report(&reporter).await;
+        let reports = reporter.reports.lock().unwrap().clone();
+        assert_eq!(reports.len(), 1, "exactly one lead report on failure, got {reports:?}");
+        assert_eq!(reports[0].0, 42, "reported to the lead conversation");
+        assert_eq!(reports[0].2, "failed", "outcome is failed");
+    }
+
+    /// A permanently-failed task PERSISTS a `last_error` reason, surfaced on the DTO
+    /// for the lead's diagnosis. The mock worker has no error marker → the generic
+    /// timeout/no-reply fallback is recorded (never an empty "why").
+    #[tokio::test]
+    async fn failed_task_persists_last_error() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(AlwaysFailWorker);
+        let (run_service, engine, _reporter) = reporter_stack(worker, 0).await;
+        let run_id = adhoc_lead_run(&run_service, 7).await;
+        engine.start(run_id.clone());
+        assert!(wait_run_status(&run_service, &run_id, "failed").await, "run must fail");
+        let detail = run_service.get_detail(&run_id).await.expect("detail");
+        let failed = detail
+            .tasks
+            .iter()
+            .find(|t| t.status == "failed")
+            .expect("a failed task");
+        let err = failed.last_error.as_deref().unwrap_or("");
+        assert!(!err.is_empty(), "failed task must persist a last_error reason");
+        assert!(
+            err.contains("worker") || err.contains("超时") || err.contains("无回复"),
+            "generic fallback reason expected, got: {err}"
+        );
+    }
+
     // ── UC-2b: per-task token observability ───────────────────────────────────
 
     /// A worker that reports a FIXED token count on every task it runs, so a test
@@ -3786,6 +4204,7 @@ mod tests {
     #[test]
     fn compose_brief_includes_role_task_and_upstream() {
         let task = OrchRunTaskRow {
+            last_error: None,
             id: "rtask_1".to_string(),
             run_id: "run_1".to_string(),
             title: "Synthesize".to_string(),
@@ -3821,6 +4240,7 @@ mod tests {
     /// by the kind-aware compose_brief tests.
     fn task_row_with_kind(kind: &str, title: &str, spec: &str) -> OrchRunTaskRow {
         OrchRunTaskRow {
+            last_error: None,
             id: "rtask_k".to_string(),
             run_id: "run_1".to_string(),
             title: title.to_string(),
@@ -3939,6 +4359,7 @@ mod tests {
     #[test]
     fn aggregate_summary_is_non_empty_and_counts_done() {
         let mk = |title: &str, status: &str, summary: Option<&str>| OrchRunTaskRow {
+            last_error: None,
             id: format!("rtask_{title}"),
             run_id: "run_1".to_string(),
             title: title.to_string(),
@@ -9075,6 +9496,7 @@ mod tests {
     /// Build a minimal completed-run task row for the digest test.
     fn summary_task(title: &str, status: &str, output: Option<&str>) -> OrchRunTaskRow {
         OrchRunTaskRow {
+            last_error: None,
             id: format!("rtask_{title}"),
             run_id: "run_x".to_string(),
             title: title.to_string(),

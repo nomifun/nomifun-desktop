@@ -114,6 +114,15 @@ pub trait WorkerRunner: Send + Sync {
         false
     }
 
+    /// A short human-readable failure reason (`<code>: <message>`) from the
+    /// conversation's latest error marker, PERSISTED onto a permanently-failed task
+    /// so the lead-report / escalation / diagnostic tools can show WHY it failed
+    /// without re-reading the conversation. Default `None` (mock runners / no live
+    /// conversation store); the production [`ConversationWorkerRunner`] overrides it.
+    async fn last_error_summary(&self, _conversation_id: &str) -> Option<String> {
+        None
+    }
+
     /// 带角色的执行入口：默认忽略 `role` 委托给 [`Self::run`]（既有 mock/测试
     /// runner 零改动）。生产 [`ConversationWorkerRunner`] 覆写本方法，把受限
     /// 角色（searcher/reviewer/verifier）映射为 per-node 工具白名单 + 网关收缩。
@@ -170,6 +179,10 @@ impl WorkerRunner for ConversationWorkerRunner {
     /// marker and return its `error.retryable` flag (false when none / absent).
     async fn last_error_retryable(&self, conversation_id: &str) -> bool {
         self.read_latest_error_retryable(conversation_id).await
+    }
+
+    async fn last_error_summary(&self, conversation_id: &str) -> Option<String> {
+        self.read_latest_error_summary(conversation_id).await
     }
 
     async fn run(
@@ -374,6 +387,28 @@ impl ConversationWorkerRunner {
             Err(_) => false,
         }
     }
+
+    /// Read the conversation's latest error marker as a `<code>: <message>` string
+    /// (best-effort → `None` on any read/parse failure or when no error marker
+    /// exists). Mirrors [`Self::read_latest_error_retryable`]'s message-fetch path.
+    async fn read_latest_error_summary(&self, conv_id: &str) -> Option<String> {
+        let messages = self
+            .conv
+            .list_messages(
+                &self.user_id,
+                conv_id,
+                ListMessagesQuery {
+                    page: Some(1),
+                    page_size: Some(10),
+                    order: Some("desc".to_owned()),
+                    content_mode: None,
+                    cursor: None,
+                },
+            )
+            .await
+            .ok()?;
+        latest_error_summary(&serde_json::to_value(&messages).ok()?)
+    }
 }
 
 /// Assemble the worker conversation `extra`: yolo + desktopGateway + orchestrator
@@ -502,6 +537,32 @@ fn error_retryable_flag(v: &Value) -> Option<bool> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     )
+}
+
+/// The latest error marker rendered as a short `<code>: <message>` reason (or one
+/// of them if only one is present); `None` when no error marker exists. Mirrors
+/// [`latest_error_retryable`]'s array/single walk.
+fn latest_error_summary(v: &Value) -> Option<String> {
+    match v {
+        Value::Array(arr) => arr.iter().find_map(error_summary_str),
+        _ => error_summary_str(v),
+    }
+}
+
+fn error_summary_str(v: &Value) -> Option<String> {
+    let content = v.as_object()?.get("content")?;
+    if content.get("type").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let err = content.get("error")?;
+    let code = err.get("code").and_then(Value::as_str);
+    let message = err.get("message").and_then(Value::as_str);
+    match (code, message) {
+        (Some(c), Some(m)) => Some(format!("{c}: {m}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, Some(m)) => Some(m.to_string()),
+        (None, None) => None,
+    }
 }
 
 /// Fixed-outcome [`WorkerRunner`] for tests — returns the configured
