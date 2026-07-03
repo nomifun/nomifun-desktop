@@ -502,11 +502,24 @@ impl ChannelMessageService {
             ChannelError::MessageSendFailed("master agent profile not configured".into())
         })?;
 
-        let model = profile.public_agent_model(public_agent_id).await.ok_or_else(|| {
-            ChannelError::CompanionNotReady(
-                "这个对外服务还没有配置模型，请联系管理员在桌面端为它选择模型。".into(),
-            )
-        })?;
+        // Resolve the answering model: the public agent's OWN configured model
+        // wins; otherwise fall back to the platform's default model (mirrors the
+        // companion channel path) so a public agent is usable when a channel /
+        // platform model exists even if its own field is unset. Only when BOTH
+        // are empty do we refuse — with a precise pointer to where to set it.
+        let model = match profile.public_agent_model(public_agent_id).await {
+            Some(m) => m,
+            None => {
+                let fallback =
+                    resolved_model_to_provider(self.settings.get_model_config(platform).await?.as_ref());
+                if fallback.provider_id.is_empty() {
+                    return Err(ChannelError::CompanionNotReady(
+                        "这个对外伙伴还没有配置对话模型。请在桌面端「对外服务」→ 选择该伙伴 →「身份 & 话术」→「对话模型」中为它选择模型后再试。".into(),
+                    ));
+                }
+                fallback
+            }
+        };
 
         let extra = Self::build_public_agent_extra(platform, public_agent_id);
         let name = channel_conversation_name(platform, "nomi", None, session.chat_id.as_deref());

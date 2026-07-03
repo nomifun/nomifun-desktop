@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { IPublicAgent, IPublicAgentPatch } from '@/common/adapter/ipcBridge';
+import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 
 /**
  * 对外伙伴（Public Companion）花名册 —— 面向陌生人的企业级客服 agent 列表 + 创建。
@@ -17,6 +18,7 @@ import type { IPublicAgent, IPublicAgentPatch } from '@/common/adapter/ipcBridge
 export const usePublicAgents = () => {
   const [agents, setAgents] = useState<IPublicAgent[]>([]);
   const [loading, setLoading] = useState(true);
+  const { providers, getAvailableModels } = useModelProviderList();
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -37,10 +39,28 @@ export const usePublicAgents = () => {
   const create = useCallback(
     async (name: string): Promise<IPublicAgent> => {
       const created = await ipcBridge.publicAgent.create.invoke({ name });
+      // 开箱即用: seed the new agent's model from the machine's first available
+      // provider/model so it can answer strangers immediately (the owner can
+      // change it under 身份 & 话术). Best-effort — a missing model just means
+      // the owner must pick one in the console before the agent can serve.
+      if (!created.model?.provider_id) {
+        const provider = providers[0];
+        const model = provider ? (getAvailableModels(provider)[0] ?? '') : '';
+        if (provider && model) {
+          try {
+            await ipcBridge.publicAgent.patch.invoke({
+              id: created.id,
+              patch: { model: { provider_id: provider.id, model } },
+            });
+          } catch {
+            // Non-fatal: the console model picker remains the authoritative path.
+          }
+        }
+      }
       await refresh();
       return created;
     },
-    [refresh]
+    [providers, getAvailableModels, refresh]
   );
 
   return { agents, loading, refresh, create };
