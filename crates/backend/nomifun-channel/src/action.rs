@@ -152,18 +152,19 @@ impl ActionExecutor {
         let internal_user_id = match internal_user_id {
             Some(id) => id,
             None => {
-                // 对外伙伴自动接待 (SECURITY-CRITICAL): a platform bound to a PUBLIC
+                // 对外伙伴自动接待 (SECURITY-CRITICAL): a bot bound to a PUBLIC
                 // AGENT auto-serves unknown senders with NO pairing code — the
                 // public-agent session is hard-clamped to `PublicService` (safe
                 // tools only), which is the whole point of the feature. Auto-served
                 // strangers run under the owner/system identity (the clamp is the
                 // boundary, not the user id); their per-chat conversation gives
-                // per-stranger isolation. This bypass is gated STRICTLY on the
-                // platform being bound to a public agent — companion-bound and
-                // unbound platforms keep the pairing approval gate UNCHANGED.
+                // per-stranger isolation. This bypass is gated STRICTLY on the BOT
+                // (per-bot `assistant_plugins.public_agent_id`, keyed by the arriving
+                // `channel_id`) being bound to a public agent — companion-bound and
+                // unbound bots keep the pairing approval gate UNCHANGED.
                 if self
-                    .settings
-                    .get_master_agent_public_agent_id(msg.platform)
+                    .session_mgr
+                    .channel_public_agent_id(channel_id)
                     .await?
                     .is_some()
                 {
@@ -810,6 +811,7 @@ mod action_tests {
         users: Mutex<Vec<AssistantUserRow>>,
         sessions: Mutex<Vec<AssistantSessionRow>>,
         pairings: Mutex<Vec<PairingCodeRow>>,
+        plugins: Mutex<Vec<ChannelPluginRow>>,
     }
 
     impl MockRepo {
@@ -818,6 +820,7 @@ mod action_tests {
                 users: Mutex::new(Vec::new()),
                 sessions: Mutex::new(Vec::new()),
                 pairings: Mutex::new(Vec::new()),
+                plugins: Mutex::new(Vec::new()),
             }
         }
 
@@ -834,15 +837,34 @@ mod action_tests {
             };
             self.users.lock().unwrap().push(user);
         }
+
+        /// Seeds a bot channel row bound to a public agent, so the per-bot
+        /// auto-serve gate (`SessionManager::channel_public_agent_id`) resolves it.
+        fn add_public_agent_channel(&self, channel_id: &str, public_agent_id: &str) {
+            self.plugins.lock().unwrap().push(ChannelPluginRow {
+                id: channel_id.to_owned(),
+                r#type: "telegram".to_owned(),
+                name: "Telegram Bot".to_owned(),
+                enabled: true,
+                config: "{}".to_owned(),
+                status: None,
+                last_connected: None,
+                companion_id: None,
+                public_agent_id: Some(public_agent_id.to_owned()),
+                bot_key: None,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            });
+        }
     }
 
     #[async_trait::async_trait]
     impl IChannelRepository for MockRepo {
         async fn get_all_plugins(&self) -> Result<Vec<ChannelPluginRow>, DbError> {
-            Ok(vec![])
+            Ok(self.plugins.lock().unwrap().clone())
         }
-        async fn get_plugin(&self, _id: &str) -> Result<Option<ChannelPluginRow>, DbError> {
-            Ok(None)
+        async fn get_plugin(&self, id: &str) -> Result<Option<ChannelPluginRow>, DbError> {
+            Ok(self.plugins.lock().unwrap().iter().find(|p| p.id == id).cloned())
         }
         async fn upsert_plugin(&self, _row: &ChannelPluginRow) -> Result<(), DbError> {
             Ok(())
@@ -851,6 +873,9 @@ mod action_tests {
             Ok(())
         }
         async fn update_plugin_companion(&self, _id: &str, _companion_id: Option<&str>) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn update_plugin_public_agent(&self, _id: &str, _public_agent_id: Option<&str>) -> Result<(), DbError> {
             Ok(())
         }
         async fn update_plugin_bot_key(&self, _id: &str, _bot_key: &str) -> Result<(), DbError> {
@@ -1169,28 +1194,31 @@ mod action_tests {
 
     // ── 对外伙伴 pairing bypass (public-agent-bound platforms only) ─────────
 
-    /// A platform BOUND to a public agent auto-serves an unknown sender with NO
+    /// A bot BOUND to a public agent auto-serves an unknown sender with NO
     /// pairing code — the public-agent session is hard-clamped, so this is safe.
+    /// Per-bot: the binding lives on the arriving channel row.
     #[tokio::test]
     async fn public_agent_bound_platform_auto_serves_unknown_sender() {
-        // No authorized user; the platform is bound to a public agent.
-        let (executor, _repo) =
-            setup_with_prefs(&[("assistant.telegram.publicAgentId", "\"pubagent_1\"")]);
+        // No authorized user; the bot (channel `tg-1`) is bound to a public agent.
+        let (executor, repo) = setup();
+        repo.add_public_agent_channel("tg-1", "pubagent_1");
 
         let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
         let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
 
         match result {
             MessageResult::Dispatched { session_id, .. } => assert!(!session_id.is_empty()),
-            other => panic!("stranger on a public-agent platform must be auto-served, got {other:?}"),
+            other => panic!("stranger on a public-agent bot must be auto-served, got {other:?}"),
         }
     }
 
     /// The bypass is STRICTLY gated on a public-agent binding: a COMPANION-bound
-    /// platform still gates unknown senders behind pairing (never loosened).
+    /// bot still gates unknown senders behind pairing (never loosened).
     #[tokio::test]
     async fn companion_bound_platform_still_gates_unknown_sender() {
-        // Companion bound, but NO public-agent binding → pairing gate intact.
+        // Companion bound, but NO public-agent binding on the row → pairing gate
+        // intact. (channel_public_agent_id returns None for a row with no
+        // public_agent_id, and here there's no row at all.)
         let (executor, _repo) =
             setup_with_prefs(&[("assistant.telegram.companionId", "\"companion_1\"")]);
 
