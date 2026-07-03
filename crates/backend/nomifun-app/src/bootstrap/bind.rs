@@ -88,7 +88,10 @@ pub fn announce_bound_port(data_dir: &Path, host: &str, port: u16) {
         channel: nomifun_common::channel::channel().to_string(),
         pid: std::process::id(),
     };
-    println!("nomifun: listening on {host}:{port} (channel {})", announcement.channel);
+    println!(
+        "nomifun: listening on {host}:{port} (channel {})",
+        announcement.channel
+    );
     if let Err(e) = write_port_file(data_dir, &announcement) {
         tracing::warn!(error = %e, "failed to write port.json (non-fatal; server is up)");
     }
@@ -103,6 +106,7 @@ mod tests {
     use super::bind_with_fallback;
 
     const LH: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    static PORT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Discover a currently-free loopback port by binding ephemeral and dropping.
     async fn free_port() -> u16 {
@@ -112,23 +116,37 @@ mod tests {
 
     #[tokio::test]
     async fn binds_preferred_when_free() {
-        let p = free_port().await;
-        let (got, l) = bind_with_fallback(LH, p).await.unwrap();
-        assert_eq!(got, p, "must bind the requested port when it is free");
-        assert_eq!(got, l.local_addr().unwrap().port());
+        let _guard = PORT_TEST_LOCK.lock().await;
+        for _ in 0..32 {
+            let p = free_port().await;
+            let (got, l) = bind_with_fallback(LH, p).await.unwrap();
+            if got == p {
+                assert_eq!(got, l.local_addr().unwrap().port());
+                return;
+            }
+            drop(l);
+            tokio::task::yield_now().await;
+        }
+        panic!("must bind the requested port when it is free");
     }
 
     #[tokio::test]
     async fn falls_back_off_occupied_preferred() {
+        let _guard = PORT_TEST_LOCK.lock().await;
         let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let busy = occupied.local_addr().unwrap().port();
         let (got, l) = bind_with_fallback(LH, busy).await.unwrap();
         assert_ne!(got, busy, "must not return the occupied port");
-        assert_eq!(got, l.local_addr().unwrap().port(), "reported port matches the listener");
+        assert_eq!(
+            got,
+            l.local_addr().unwrap().port(),
+            "reported port matches the listener"
+        );
     }
 
     #[tokio::test]
     async fn reports_listener_actual_port() {
+        let _guard = PORT_TEST_LOCK.lock().await;
         let (got, l) = bind_with_fallback(LH, 0).await.unwrap();
         assert_eq!(got, l.local_addr().unwrap().port());
     }

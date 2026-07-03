@@ -12,7 +12,10 @@ use crate::port::{allocate_port, is_port_listening};
 use crate::types::DocType;
 
 const POLL_INTERVAL_MS: u64 = 100;
+#[cfg(not(test))]
 const POLL_MAX_ATTEMPTS: u32 = 150;
+#[cfg(test)]
+const POLL_MAX_ATTEMPTS: u32 = 3;
 const STOP_DELAY_MS: u64 = 500;
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -125,7 +128,9 @@ impl OfficecliWatchManager {
             Err(OfficeError::OfficecliNotFound) => {
                 self.broadcast_status(doc_type, PreviewState::Installing, None);
                 self.spawner.install_officecli().await?;
-                self.spawner.spawn_officecli(resolved, port, doc_type).await?
+                self.spawner
+                    .spawn_officecli(resolved, port, doc_type)
+                    .await?
             }
             Err(e) => return Err(e),
         };
@@ -190,9 +195,9 @@ impl OfficecliWatchManager {
     }
 
     pub fn is_active_watch_port(&self, port: u16) -> bool {
-        self.sessions
-            .iter()
-            .any(|entry| entry.port == port && matches!(entry.doc_type, DocType::Word | DocType::Excel))
+        self.sessions.iter().any(|entry| {
+            entry.port == port && matches!(entry.doc_type, DocType::Word | DocType::Excel)
+        })
     }
 
     pub fn active_session_count(&self) -> usize {
@@ -227,7 +232,8 @@ impl OfficecliWatchManager {
                 return;
             }
         };
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, data));
+        self.broadcaster
+            .broadcast(WebSocketMessage::new(event_name, data));
     }
 }
 
@@ -482,7 +488,10 @@ mod tests {
         }
     }
 
-    fn make_manager(spawner: Arc<MockSpawner>, broadcaster: Arc<RecordingBroadcaster>) -> OfficecliWatchManager {
+    fn make_manager(
+        spawner: Arc<MockSpawner>,
+        broadcaster: Arc<RecordingBroadcaster>,
+    ) -> OfficecliWatchManager {
         OfficecliWatchManager::new(spawner, broadcaster)
     }
 
@@ -509,7 +518,10 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        let port = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
         assert!(port > 0);
         assert_eq!(mgr.active_session_count(), 1);
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
@@ -525,8 +537,14 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let p1 = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
-        let p2 = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        let p1 = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
+        let p2 = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
 
         assert_eq!(p1, p2);
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
@@ -542,8 +560,14 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let p1 = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
-        let p2 = mgr.start(file.to_str().unwrap(), DocType::Excel).await.unwrap();
+        let p1 = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
+        let p2 = mgr
+            .start(file.to_str().unwrap(), DocType::Excel)
+            .await
+            .unwrap();
 
         assert_ne!(p1, p2);
         assert_eq!(mgr.active_session_count(), 2);
@@ -580,8 +604,12 @@ mod tests {
         std::fs::write(&f1, b"a").unwrap();
         std::fs::write(&f2, b"b").unwrap();
 
-        mgr.start(f1.to_str().unwrap(), DocType::Word).await.unwrap();
-        mgr.start(f2.to_str().unwrap(), DocType::Excel).await.unwrap();
+        mgr.start(f1.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
+        mgr.start(f2.to_str().unwrap(), DocType::Excel)
+            .await
+            .unwrap();
         assert_eq!(mgr.active_session_count(), 2);
 
         mgr.stop_all();
@@ -598,7 +626,10 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        let port = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
         assert!(mgr.is_active_port(port, DocType::Word));
         assert!(!mgr.is_active_port(port, DocType::Ppt));
         assert!(!mgr.is_active_port(12345, DocType::Word));
@@ -618,9 +649,18 @@ mod tests {
         std::fs::write(&excel_file, b"e").unwrap();
         std::fs::write(&ppt_file, b"p").unwrap();
 
-        let word_port = mgr.start(word_file.to_str().unwrap(), DocType::Word).await.unwrap();
-        let excel_port = mgr.start(excel_file.to_str().unwrap(), DocType::Excel).await.unwrap();
-        let ppt_port = mgr.start(ppt_file.to_str().unwrap(), DocType::Ppt).await.unwrap();
+        let word_port = mgr
+            .start(word_file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
+        let excel_port = mgr
+            .start(excel_file.to_str().unwrap(), DocType::Excel)
+            .await
+            .unwrap();
+        let ppt_port = mgr
+            .start(ppt_file.to_str().unwrap(), DocType::Ppt)
+            .await
+            .unwrap();
 
         assert!(mgr.is_active_watch_port(word_port));
         assert!(mgr.is_active_watch_port(excel_port));
@@ -639,7 +679,10 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        let port = mgr
+            .start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
         assert!(port > 0);
         assert_eq!(spawner.install_count.load(Ordering::SeqCst), 1);
         // First spawn fails (not installed), then install, then second spawn succeeds
@@ -656,7 +699,9 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        mgr.start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
 
         let events = broadcaster.events();
         assert!(events.len() >= 2);
@@ -677,10 +722,15 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        mgr.start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
 
         let events = broadcaster.events();
-        let states: Vec<&str> = events.iter().filter_map(|e| e.data["state"].as_str()).collect();
+        let states: Vec<&str> = events
+            .iter()
+            .filter_map(|e| e.data["state"].as_str())
+            .collect();
         assert!(states.contains(&"starting"));
         assert!(states.contains(&"installing"));
         assert!(states.contains(&"ready"));
@@ -705,7 +755,7 @@ mod tests {
         assert_eq!(last.data["state"], "error");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn port_timeout_on_no_listener() {
         let spawner = Arc::new(MockSpawner::new());
         spawner.start_listener.store(false, Ordering::SeqCst);
@@ -732,7 +782,9 @@ mod tests {
         let file = dir.path().join("test.pptx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Ppt).await.unwrap();
+        mgr.start(file.to_str().unwrap(), DocType::Ppt)
+            .await
+            .unwrap();
 
         // Give the spawned task a moment
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -749,7 +801,9 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word).await.unwrap();
+        mgr.start(file.to_str().unwrap(), DocType::Word)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(spawner.update_count.load(Ordering::SeqCst), 0);
