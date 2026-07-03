@@ -56,6 +56,7 @@ pub use idle_scanner::start_idle_scanner;
 #[cfg(feature = "browser-use")]
 pub use browser_fetcher::BrowserFetcher;
 pub use knowledge_completer::LiveKnowledgeCompleter;
+pub use knowledge_completer::resolve_default_model;
 pub use knowledge_retrieval::LiveKnowledgeRetrievalSink;
 pub use knowledge_writeback::LiveKnowledgeWritebackSink;
 pub use terminal_title_completer::LiveTerminalTitleCompleter;

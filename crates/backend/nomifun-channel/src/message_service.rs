@@ -502,24 +502,24 @@ impl ChannelMessageService {
             ChannelError::MessageSendFailed("master agent profile not configured".into())
         })?;
 
-        // Resolve the answering model: the public agent's OWN configured model
-        // wins; otherwise fall back to the platform's default model (mirrors the
-        // companion channel path) so a public agent is usable when a channel /
-        // platform model exists even if its own field is unset. Only when BOTH
-        // are empty do we refuse — with a precise pointer to where to set it.
-        let model = match profile.public_agent_model(public_agent_id).await {
-            Some(m) => m,
-            None => {
-                let fallback =
-                    resolved_model_to_provider(self.settings.get_model_config(platform).await?.as_ref());
-                if fallback.provider_id.is_empty() {
-                    return Err(ChannelError::CompanionNotReady(
-                        "这个对外伙伴还没有配置对话模型。请在桌面端「对外服务」→ 选择该伙伴 →「身份 & 话术」→「对话模型」中为它选择模型后再试。".into(),
-                    ));
-                }
-                fallback
-            }
-        };
+        // Resolve the answering model through the SINGLE authority
+        // `public_agent_model`: the agent's OWN configured model wins, else the
+        // app's default (first enabled provider + model, resolved from the
+        // provider catalog). It returns `None` ONLY when THIS running instance
+        // has no enabled model provider at all — so the error is truthful about
+        // the one remaining cause and points at 模型管理, instead of misleading
+        // the owner into thinking they must configure THIS agent's model (a fresh
+        // agent answers as soon as any provider exists — no per-agent setup).
+        //
+        // NOTE on diagnosis: if this fires while the owner "clearly configured a
+        // model", the provider lives in a DIFFERENT running instance/data-dir
+        // (e.g. installed Nomi vs Nomi-dev) than the one serving this channel —
+        // the catalog this turn reads is genuinely empty. The message says so.
+        let model = profile.public_agent_model(public_agent_id).await.ok_or_else(|| {
+            ChannelError::CompanionNotReady(
+                "本机尚未启用任何对话模型，对外伙伴无法作答。请在桌面端「模型管理」中启用一个模型服务商后再试——对外伙伴会自动使用默认模型；也可在「对外服务」→ 选择该伙伴 →「身份 & 话术」→「对话模型」中为它单独指定。".into(),
+            )
+        })?;
 
         let extra = Self::build_public_agent_extra(platform, public_agent_id);
         let name = channel_conversation_name(platform, "nomi", None, session.chat_id.as_deref());

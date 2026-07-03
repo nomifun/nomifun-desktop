@@ -458,6 +458,10 @@ struct CompanionMasterAgentProfile {
     companion_service: Arc<nomifun_companion::CompanionService>,
     channel_settings: Arc<nomifun_channel::channel_settings::ChannelSettingsService>,
     public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
+    /// Provider catalog, used to resolve the app's DEFAULT model when a public
+    /// agent has no model of its own — so it answers as soon as ANY provider is
+    /// configured (no per-agent model setup required).
+    provider_repo: Arc<dyn IProviderRepository>,
 }
 
 #[async_trait::async_trait]
@@ -535,16 +539,28 @@ impl nomifun_channel::message_service::MasterAgentProfile for CompanionMasterAge
     }
 
     async fn public_agent_model(&self, id: &str) -> Option<nomifun_common::ProviderWithModel> {
-        let cfg = self.public_agent_service.get(id).await.ok()?;
-        if !cfg.model.is_configured() {
-            return None;
+        // The agent's OWN configured model wins.
+        if let Ok(cfg) = self.public_agent_service.get(id).await {
+            if cfg.model.is_configured() {
+                return Some(nomifun_common::ProviderWithModel {
+                    provider_id: cfg.model.provider_id.clone(),
+                    model: cfg.model.model.clone(),
+                    // Prefer the explicit concrete model id; fall back to the label so a
+                    // usable id always reaches the provider.
+                    use_model: cfg.model.use_model.clone().or_else(|| Some(cfg.model.model.clone())),
+                });
+            }
         }
+        // Otherwise fall back to the app's DEFAULT model (first enabled provider +
+        // model). This is what makes a public agent "just work" the moment any
+        // provider (e.g. StepFun) is configured, without per-agent model setup —
+        // the owner can still pin a specific model in the console. `None` only
+        // when the machine has NO enabled provider/model at all.
+        let (provider_id, model) = nomifun_ai_agent::resolve_default_model(&self.provider_repo).await?;
         Some(nomifun_common::ProviderWithModel {
-            provider_id: cfg.model.provider_id.clone(),
-            model: cfg.model.model.clone(),
-            // Prefer the explicit concrete model id; fall back to the label so a
-            // usable id always reaches the provider.
-            use_model: cfg.model.use_model.clone().or_else(|| Some(cfg.model.model.clone())),
+            provider_id,
+            model: model.clone(),
+            use_model: Some(model),
         })
     }
 
@@ -679,6 +695,7 @@ pub async fn build_channel_state(
             companion_service: services.companion_service.clone(),
             channel_settings: Arc::clone(&channel_settings),
             public_agent_service: services.public_agent_service.clone(),
+            provider_repo: services.provider_repo.clone(),
         });
 
     let message_service = Arc::new(
