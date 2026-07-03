@@ -5,6 +5,9 @@ export type SendKeyMode = 'enter' | 'mod-enter';
 type ComposingState = { composing: boolean; justComposed: boolean };
 type ImeKeyLike = { key?: string; keyCode?: number; nativeEvent?: { isComposing?: boolean } };
 type SubmitKeyLike = { key: string; shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean };
+type TextEditingShortcutLike = { key: string; shiftKey?: boolean; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean };
+
+const SYSTEM_TEXT_EDITING_KEYS = new Set(['a', 'c', 'v', 'x', 'y', 'z']);
 
 /**
  * 纯函数：判断这次 keydown 是否处于输入法合成中（绝不能触发发送）。
@@ -27,6 +30,23 @@ export function isSubmitGesture(e: SubmitKeyLike, mode: SendKeyMode): boolean {
   if (e.key !== 'Enter' || e.shiftKey) return false;
   if (mode === 'mod-enter') return Boolean(e.metaKey || e.ctrlKey);
   return true;
+}
+
+/**
+ * 纯函数：判断这次 keydown 是否应交还给 textarea 的原生编辑行为。
+ * 复制/粘贴/剪切/全选/撤销/重做必须优先于浮层导航和发送拦截，否则终端会话
+ * 底部输入框等 SendBox 复用场景会吞掉用户熟悉的系统快捷键。
+ */
+export function isSystemTextEditingShortcut(e: TextEditingShortcutLike): boolean {
+  if (e.key === 'Insert') {
+    return !e.metaKey && !e.altKey && ((Boolean(e.ctrlKey) && !e.shiftKey) || (Boolean(e.shiftKey) && !e.ctrlKey));
+  }
+
+  if (e.altKey || (!e.metaKey && !e.ctrlKey)) {
+    return false;
+  }
+
+  return SYSTEM_TEXT_EDITING_KEYS.has(e.key.toLowerCase());
 }
 
 /**
@@ -68,6 +88,7 @@ export const useCompositionInput = () => {
   ) => {
     return (e: React.KeyboardEvent) => {
       if (isImeActive(e)) return;
+      if (isSystemTextEditingShortcut(e)) return;
       if (onKeyDownIntercept?.(e)) return;
       if (isSubmitGesture(e, sendKey)) {
         e.preventDefault();
