@@ -521,24 +521,13 @@ impl nomifun_channel::message_service::MasterAgentProfile for CompanionMasterAge
         }
     }
 
-    async fn master_public_agent_id(&self, platform: &str) -> Option<String> {
-        // The platform's bound public agent, but ONLY when it is a live, ENABLED
-        // agent. A stale binding (deleted agent) or a disabled/paused agent
-        // resolves to None so the channel layer refuses the turn rather than
-        // serving a dead agent. Mutual exclusivity (a bot serves EITHER a
-        // companion OR a public agent) is enforced at write time in the settings
-        // service, so this per-platform key is authoritative.
-        let plugin = nomifun_channel::types::PluginType::from_str_opt(platform)?;
-        let bound = self
-            .channel_settings
-            .get_master_agent_public_agent_id(plugin)
-            .await
-            .ok()
-            .flatten()?;
-        match self.public_agent_service.get(&bound).await {
-            Ok(cfg) if cfg.enabled => Some(bound),
-            _ => None,
-        }
+    async fn public_agent_servable(&self, id: &str) -> bool {
+        // Servable = the public agent exists AND is enabled. A deleted agent or a
+        // disabled/paused one is NOT servable, so the channel layer refuses the
+        // turn rather than serving a dead agent. The bot→agent binding itself is
+        // per-bot (the channel row's `public_agent_id`); this is a pure by-id
+        // liveness check.
+        matches!(self.public_agent_service.get(id).await, Ok(cfg) if cfg.enabled)
     }
 
     async fn public_agent_exists(&self, id: &str) -> bool {

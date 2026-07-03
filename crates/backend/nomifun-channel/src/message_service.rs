@@ -50,13 +50,14 @@ pub trait MasterAgentProfile: Send + Sync {
     // ── 对外伙伴 / public agent (a platform bot serves EITHER a companion OR a
     //    public agent, never both) ──────────────────────────────────────────
 
-    /// The 对外伙伴 (public agent) bound to `platform`, but only when it is a LIVE,
-    /// ENABLED agent. A stale binding (deleted agent) or a disabled/paused agent
-    /// resolves to `None` so the channel layer refuses the turn with a notice
-    /// rather than serving a dead agent. Default `None` keeps companion-only /
-    /// test impls unaffected (they never expose a public agent).
-    async fn master_public_agent_id(&self, _platform: &str) -> Option<String> {
-        None
+    /// Whether public agent `id` is SERVABLE right now: it names a LIVE, ENABLED
+    /// agent. A stale binding (deleted agent) or a disabled/paused agent resolves
+    /// to `false` so the channel layer refuses the turn with a notice rather than
+    /// serving a dead agent. The bot→agent binding itself is per-bot (the channel
+    /// row's `public_agent_id`), so this is a pure by-id liveness check. Default
+    /// `false` keeps companion-only / test impls unaffected.
+    async fn public_agent_servable(&self, _id: &str) -> bool {
+        false
     }
 
     /// Whether `id` names a live public agent (regardless of enabled/model
@@ -208,12 +209,16 @@ impl ChannelMessageService {
         platform: PluginType,
     ) -> Result<SendResult, ChannelError> {
         // 对外伙伴 (public agent) binding takes precedence over EVERYTHING. A
-        // platform bound to a public agent serves strangers via an isolated
-        // per-chat, PublicService-clamped nomi session — never a companion, and
-        // never the desktop gateway. Resolved FIRST (from the platform's own
-        // binding pref) so the companion path below never runs for a public-agent
-        // platform: better data isolation, and the hard clamp is the boundary.
-        if let Some(pa_id) = self.settings.get_master_agent_public_agent_id(platform).await? {
+        // bot bound to a public agent serves strangers via an isolated per-chat,
+        // PublicService-clamped nomi session — never a companion, and never the
+        // desktop gateway. Resolved FIRST and PER-BOT (from the channel row's own
+        // `public_agent_id`, via session.channel_id) so a companion-bound bot on
+        // the same platform is unaffected: precedence is per-bot, and the hard
+        // clamp is the boundary.
+        if let Some(channel_id) = session.channel_id.as_deref()
+            && let Some(row) = self.repo.get_plugin(channel_id).await?
+            && let Some(pa_id) = row.public_agent_id.filter(|s| !s.trim().is_empty())
+        {
             return self.send_to_public_agent(session, text, platform, &pa_id).await;
         }
 
@@ -285,8 +290,9 @@ impl ChannelMessageService {
 
         // Servable = bound + alive + enabled. A disabled/missing public agent
         // refuses the turn with a friendly notice; we do NOT fall through to a
-        // companion (the whole point of the binding is data isolation).
-        if profile.master_public_agent_id(&platform.to_string()).await.is_none() {
+        // companion (the whole point of the binding is data isolation). The bind
+        // is per-bot, so this is a pure by-id liveness check.
+        if !profile.public_agent_servable(public_agent_id).await {
             return Err(ChannelError::CompanionNotReady(
                 "这个对外服务当前不可用，请稍后再试。".into(),
             ));
