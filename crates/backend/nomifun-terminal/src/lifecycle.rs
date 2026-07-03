@@ -93,10 +93,7 @@ impl TerminalLifecycleServer {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("bind terminal lifecycle listener: {e}"))?;
-        let http_port = listener
-            .local_addr()
-            .map_err(|e| e.to_string())?
-            .port();
+        let http_port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         let state = LifecycleState {
             auth_token: auth_token.clone(),
@@ -171,10 +168,22 @@ mod tests {
 
     #[test]
     fn kind_parses_from_wire_event_string() {
-        assert_eq!(LifecycleKind::from_wire("turn_end"), Some(LifecycleKind::TurnEnd));
-        assert_eq!(LifecycleKind::from_wire("tool_use"), Some(LifecycleKind::ToolUse));
-        assert_eq!(LifecycleKind::from_wire("notification"), Some(LifecycleKind::Notification));
-        assert_eq!(LifecycleKind::from_wire("session_start"), Some(LifecycleKind::SessionStart));
+        assert_eq!(
+            LifecycleKind::from_wire("turn_end"),
+            Some(LifecycleKind::TurnEnd)
+        );
+        assert_eq!(
+            LifecycleKind::from_wire("tool_use"),
+            Some(LifecycleKind::ToolUse)
+        );
+        assert_eq!(
+            LifecycleKind::from_wire("notification"),
+            Some(LifecycleKind::Notification)
+        );
+        assert_eq!(
+            LifecycleKind::from_wire("session_start"),
+            Some(LifecycleKind::SessionStart)
+        );
         assert_eq!(LifecycleKind::from_wire("bogus"), None);
     }
 
@@ -184,12 +193,24 @@ mod tests {
         let mut rx = srv.subscribe(42);
         let url = format!("http://127.0.0.1:{}/hook", srv.http_port());
         let body = serde_json::json!({"terminal_id":42,"kind":"turn_end","payload":{"last_assistant_message":"done"}});
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         // bad token → 401
-        let bad = client.post(&url).json(&body).bearer_auth("wrong").send().await.unwrap();
+        let bad = client
+            .post(&url)
+            .json(&body)
+            .bearer_auth("wrong")
+            .send()
+            .await
+            .unwrap();
         assert_eq!(bad.status(), 401);
         // good token → 200 + subscriber receives
-        let ok = client.post(&url).json(&body).bearer_auth(srv.auth_token()).send().await.unwrap();
+        let ok = client
+            .post(&url)
+            .json(&body)
+            .bearer_auth(srv.auth_token())
+            .send()
+            .await
+            .unwrap();
         assert_eq!(ok.status(), 200);
         let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await

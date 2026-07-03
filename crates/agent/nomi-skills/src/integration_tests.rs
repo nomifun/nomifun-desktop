@@ -5,6 +5,7 @@
 //
 // Test coverage: TC-E2E-1 through TC-E2E-12c (AC-4 through AC-15).
 
+use serial_test::serial;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -522,6 +523,7 @@ async fn tc_e2e_10_multi_dir_dedup_first_wins() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn tc_e2e_11_legacy_commands_loaded() {
     use crate::loader::load_all_skills;
 
