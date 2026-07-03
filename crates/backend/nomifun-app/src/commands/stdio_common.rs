@@ -9,10 +9,12 @@
 use std::time::Duration;
 
 /// Build the `reqwest::Client` the stdio bridges use to reach their in-process
-/// HTTP server: no idle-connection pooling (each bridge is short-lived and makes
-/// few requests), a short connect timeout, and a generous overall timeout.
+/// HTTP server: no environment proxy for loopback traffic, no idle-connection
+/// pooling (each bridge is short-lived and makes few requests), a short connect
+/// timeout, and a generous overall timeout.
 pub fn build_bridge_http_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .pool_max_idle_per_host(0)
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(60))

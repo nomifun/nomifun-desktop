@@ -35,8 +35,10 @@ use crate::types::{resolve_command, row_to_response};
 /// `xterm-256color` regardless of any inherited `TERM`, because the child talks
 /// to xterm.js, not to whatever terminal happened to launch the app.
 fn apply_emulator_env_defaults(env: &mut HashMap<String, String>) {
-    env.entry("TERM".to_owned()).or_insert_with(|| "xterm-256color".to_owned());
-    env.entry("COLORTERM".to_owned()).or_insert_with(|| "truecolor".to_owned());
+    env.entry("TERM".to_owned())
+        .or_insert_with(|| "xterm-256color".to_owned());
+    env.entry("COLORTERM".to_owned())
+        .or_insert_with(|| "truecolor".to_owned());
 }
 
 /// Interval between debounced scrollback persistence passes. Each pass writes
@@ -116,7 +118,8 @@ pub struct TerminalService {
     /// falls back to its own data-dir resolution or legacy env vars).
     mcp_endpoints_path: Arc<std::sync::RwLock<Option<String>>>,
     /// Late-wired terminal lifecycle server (Plan 2). Hooks call back here.
-    terminal_lifecycle: Arc<std::sync::RwLock<Option<Arc<crate::lifecycle::TerminalLifecycleServer>>>>,
+    terminal_lifecycle:
+        Arc<std::sync::RwLock<Option<Arc<crate::lifecycle::TerminalLifecycleServer>>>>,
     /// Absolute path to the backend binary, used in lifecycle hook commands.
     lifecycle_binary_path: Arc<std::sync::RwLock<Option<String>>>,
     /// Late-wired LLM completer for auto-titling agent (claude/codex) sessions
@@ -150,7 +153,9 @@ impl TerminalService {
             next_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             knowledge_mcp_config: Arc::new(std::sync::RwLock::new(None)),
             requirement_mcp_config: Arc::new(std::sync::RwLock::new(None)),
-            mcp_config_dir: Arc::new(std::sync::RwLock::new(std::env::temp_dir().join("nomi-terminal-mcp"))),
+            mcp_config_dir: Arc::new(std::sync::RwLock::new(
+                std::env::temp_dir().join("nomi-terminal-mcp"),
+            )),
             mcp_endpoints_path: Arc::new(std::sync::RwLock::new(None)),
             terminal_lifecycle: Arc::new(std::sync::RwLock::new(None)),
             lifecycle_binary_path: Arc::new(std::sync::RwLock::new(None)),
@@ -224,7 +229,10 @@ impl TerminalService {
     }
 
     fn knowledge_mcp_config(&self) -> Option<nomifun_api_types::KnowledgeMcpConfig> {
-        self.knowledge_mcp_config.read().ok().and_then(|g| g.clone())
+        self.knowledge_mcp_config
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// Late-wire the requirement MCP connection so terminal launches can inject
@@ -238,7 +246,10 @@ impl TerminalService {
     }
 
     fn requirement_mcp_config(&self) -> Option<nomifun_api_types::RequirementMcpConfig> {
-        self.requirement_mcp_config.read().ok().and_then(|g| g.clone())
+        self.requirement_mcp_config
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// Late-wire the terminal lifecycle server (Plan 2). Once wired, new PTY
@@ -283,9 +294,15 @@ impl TerminalService {
     /// server is wired (unconditional — scoped by terminal_id + owner_kind);
     /// lifecycle hooks when the lifecycle server is wired. Empty otherwise (honest
     /// no-op).
-    fn build_enhancement(&self, kb_ids: &[String], terminal_id: i64) -> crate::enhance::TerminalLaunchEnhancement {
+    fn build_enhancement(
+        &self,
+        kb_ids: &[String],
+        terminal_id: i64,
+    ) -> crate::enhance::TerminalLaunchEnhancement {
         let mut enh = crate::enhance::TerminalLaunchEnhancement::default();
-        if !kb_ids.is_empty() && let Some(cfg) = self.knowledge_mcp_config() {
+        if !kb_ids.is_empty()
+            && let Some(cfg) = self.knowledge_mcp_config()
+        {
             use nomifun_api_types::KnowledgeMcpConfig as K;
             // Only PORT and TOKEN are baked — kb_ids is NO LONGER injected into the
             // bridge env. The bridge discovers scope at runtime by reporting its cwd
@@ -329,7 +346,9 @@ impl TerminalService {
         // program is worse than launching without hooks).
         if let Ok(guard) = self.terminal_lifecycle.read() {
             if let Some(server) = guard.as_ref() {
-                let binary_path = self.lifecycle_binary_path.read()
+                let binary_path = self
+                    .lifecycle_binary_path
+                    .read()
                     .ok()
                     .and_then(|g| g.clone())
                     .unwrap_or_default();
@@ -348,7 +367,11 @@ impl TerminalService {
 
     /// Platform-private per-terminal config dir (NEVER the user cwd).
     fn session_mcp_dir(&self, id: i64) -> std::path::PathBuf {
-        let base = self.mcp_config_dir.read().map(|g| g.clone()).unwrap_or_else(|_| std::env::temp_dir());
+        let base = self
+            .mcp_config_dir
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| std::env::temp_dir());
         base.join(id.to_string())
     }
 
@@ -389,7 +412,11 @@ impl TerminalService {
         // create-time binding, mount the bound bases into the workspace and
         // materialize the README contract. Failures only warn; the PTY always
         // launches.
-        if let Some(kb_ids) = req.knowledge_base_ids.as_ref().filter(|ids| !ids.is_empty()) {
+        if let Some(kb_ids) = req
+            .knowledge_base_ids
+            .as_ref()
+            .filter(|ids| !ids.is_empty())
+        {
             self.bind_knowledge(id, &req.cwd, kb_ids).await;
         }
 
@@ -404,11 +431,16 @@ impl TerminalService {
             self.pending_spawn.insert(id, ());
             let resp = row_to_response(&row, None, &self.work_dir);
             self.emitter.emit_created(&resp);
-            info!(terminal_id = id, "terminal session created (spawn deferred to first resize)");
+            info!(
+                terminal_id = id,
+                "terminal session created (spawn deferred to first resize)"
+            );
             return Ok(resp);
         }
 
-        let kb_ids = self.sync_knowledge_workspace(id, &req.cwd, &req.command, &req.args).await;
+        let kb_ids = self
+            .sync_knowledge_workspace(id, &req.cwd, &req.command, &req.args)
+            .await;
 
         self.spawn_pty(
             id,
@@ -453,7 +485,13 @@ impl TerminalService {
                 (resolved_args, Vec::new())
             } else {
                 let session_dir = self.session_mcp_dir(id);
-                crate::enhance::apply_enhancement(&program, resolved_args, &enh, &session_dir, backend)
+                crate::enhance::apply_enhancement(
+                    &program,
+                    resolved_args,
+                    &enh,
+                    &session_dir,
+                    backend,
+                )
             }
         };
         let mut env: HashMap<String, String> = env.unwrap_or_default();
@@ -483,7 +521,9 @@ impl TerminalService {
         let live_exit = self.live.clone();
         // Mint this PTY's spawn generation; the handle stores it and the exit
         // callback below compares against it.
-        let epoch = self.next_epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let epoch = self
+            .next_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Capture the runtime handle now (we're on the async create path); the
         // exit callback runs on the PTY reader's OS thread, which has no
         // ambient Tokio runtime, so `tokio::spawn` there would panic.
@@ -497,7 +537,10 @@ impl TerminalService {
             // mark the session exited — turning "restart" into "close". The
             // epoch guard makes the stale callback a no-op (also covers delete:
             // the row/handle are already gone, so we skip a doomed status write).
-            if live_exit.remove_if(&id, |_, h| h.epoch() == epoch).is_none() {
+            if live_exit
+                .remove_if(&id, |_, h| h.epoch() == epoch)
+                .is_none()
+            {
                 return;
             }
             emitter_exit.emit_exit(id, code);
@@ -543,7 +586,8 @@ impl TerminalService {
                     match rx.recv().await {
                         Ok(ev) => {
                             info!(terminal_id = ev.terminal_id, kind = ?ev.kind, "terminal lifecycle event");
-                            if !titled_fired && ev.kind == crate::lifecycle::LifecycleKind::TurnEnd {
+                            if !titled_fired && ev.kind == crate::lifecycle::LifecycleKind::TurnEnd
+                            {
                                 titled_fired = true;
                                 let assistant = ev
                                     .payload
@@ -551,14 +595,19 @@ impl TerminalService {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("")
                                     .to_owned();
-                                let prompt = svc.first_input.get(&id).map(|v| v.clone()).unwrap_or_default();
-                                let content = if !assistant.trim().is_empty() && !prompt.trim().is_empty() {
-                                    format!("用户首条输入：{prompt}\n助手回复：{assistant}")
-                                } else if !assistant.trim().is_empty() {
-                                    assistant
-                                } else {
-                                    prompt
-                                };
+                                let prompt = svc
+                                    .first_input
+                                    .get(&id)
+                                    .map(|v| v.clone())
+                                    .unwrap_or_default();
+                                let content =
+                                    if !assistant.trim().is_empty() && !prompt.trim().is_empty() {
+                                        format!("用户首条输入：{prompt}\n助手回复：{assistant}")
+                                    } else if !assistant.trim().is_empty() {
+                                        assistant
+                                    } else {
+                                        prompt
+                                    };
                                 svc.maybe_autotitle(id, Some(content)).await;
                             }
                         }
@@ -589,12 +638,16 @@ impl TerminalService {
     /// and let any workpath row silently shadow the selection at mount time.
     async fn bind_knowledge(&self, id: i64, cwd: &str, kb_ids: &[String]) {
         let Some(ks) = self.knowledge_service() else {
-            warn!(terminal_id = id, "knowledge_base_ids given but no knowledge service is wired — skipping binding");
+            warn!(
+                terminal_id = id,
+                "knowledge_base_ids given but no knowledge service is wired — skipping binding"
+            );
             return;
         };
         // Use the SAME key derivation as `sync_knowledge_workspace` so the write
         // lands on exactly the row the mount + header read back.
-        let wp_key = nomifun_knowledge::session_workpath_key(std::path::Path::new(cwd), &self.work_dir);
+        let wp_key =
+            nomifun_knowledge::session_workpath_key(std::path::Path::new(cwd), &self.work_dir);
         // Read-modify-write: set the bases and enable the binding WITHOUT
         // clobbering any writeback ("回血") config already on this workpath
         // (e.g. configured from the homepage or the session header).
@@ -621,7 +674,13 @@ impl TerminalService {
     /// Claude/Codex (including wrappers like `stepcode claude`). Gemini gets
     /// the tool via one-click registration, not launch, so it's false here.
     /// Never blocks the launch — failures degrade to warnings.
-    async fn sync_knowledge_workspace(&self, id: i64, cwd: &str, command: &str, args: &[String]) -> Vec<String> {
+    async fn sync_knowledge_workspace(
+        &self,
+        id: i64,
+        cwd: &str,
+        command: &str,
+        args: &[String],
+    ) -> Vec<String> {
         let Some(ks) = self.knowledge_service() else {
             return Vec::new();
         };
@@ -691,7 +750,10 @@ impl TerminalService {
     /// List sessions for a user.
     pub async fn list(&self, user_id: &str) -> Result<Vec<TerminalSessionResponse>, TerminalError> {
         let rows = self.repo.list_by_user(user_id).await?;
-        Ok(rows.iter().map(|r| row_to_response(r, None, &self.work_dir)).collect())
+        Ok(rows
+            .iter()
+            .map(|r| row_to_response(r, None, &self.work_dir))
+            .collect())
     }
 
     /// Get one session, including a base64 scrollback snapshot. A live session
@@ -706,7 +768,11 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let scrollback = match self.live.get(&id) {
             Some(h) => Some(BASE64.encode(h.scrollback())),
-            None => self.repo.load_scrollback(id).await?.map(|b| BASE64.encode(b)),
+            None => self
+                .repo
+                .load_scrollback(id)
+                .await?
+                .map(|b| BASE64.encode(b)),
         };
         Ok(row_to_response(&row, scrollback, &self.work_dir))
     }
@@ -728,8 +794,12 @@ impl TerminalService {
             .repo
             .get_by_id(id)
             .await
-            .map_err(|e| nomifun_common::AppError::Internal(format!("Failed to load terminal session: {e}")))?
-            .ok_or_else(|| nomifun_common::AppError::NotFound(format!("Terminal session '{id}' not found")))?;
+            .map_err(|e| {
+                nomifun_common::AppError::Internal(format!("Failed to load terminal session: {e}"))
+            })?
+            .ok_or_else(|| {
+                nomifun_common::AppError::NotFound(format!("Terminal session '{id}' not found"))
+            })?;
         if row.cwd.trim().is_empty() {
             return Err(nomifun_common::AppError::BadRequest(
                 "Terminal session has no working directory".into(),
@@ -749,7 +819,10 @@ impl TerminalService {
     pub async fn reconcile_on_boot(&self) -> Result<u64, TerminalError> {
         let n = self.repo.mark_all_running_exited().await?;
         if n > 0 {
-            info!(reconciled = n, "terminal boot reconciliation: ghost 'running' sessions marked exited");
+            info!(
+                reconciled = n,
+                "terminal boot reconciliation: ghost 'running' sessions marked exited"
+            );
         }
         Ok(n)
     }
@@ -878,7 +951,11 @@ impl TerminalService {
         }
 
         let completer = self.title_completer.read().ok().and_then(|g| g.clone());
-        let first_input = self.first_input.get(&id).map(|v| v.clone()).unwrap_or_default();
+        let first_input = self
+            .first_input
+            .get(&id)
+            .map(|v| v.clone())
+            .unwrap_or_default();
 
         // Prefer the LLM summary; fall back to the first input line.
         let mut title = String::new();
@@ -887,7 +964,9 @@ impl TerminalService {
             if !src.trim().is_empty() {
                 match c.summarize(&src).await {
                     Ok(t) => title = crate::title::clamp_title(&t, crate::title::TITLE_MAX_CHARS),
-                    Err(e) => warn!(terminal_id = id, error = %e, "auto-title LLM failed; using fallback"),
+                    Err(e) => {
+                        warn!(terminal_id = id, error = %e, "auto-title LLM failed; using fallback")
+                    }
                 }
             }
         }
@@ -943,12 +1022,30 @@ impl TerminalService {
             .await?
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let args = crate::types::parse_args(&row.args);
-        let env: Option<HashMap<String, String>> = row.env.as_deref().and_then(|s| serde_json::from_str(s).ok());
-        let kb_ids = self.sync_knowledge_workspace(id, &row.cwd, &row.command, &args).await;
-        self.spawn_pty(id, &row.command, &args, &row.cwd, env, cols, rows, kb_ids, row.backend.as_deref())?;
+        let env: Option<HashMap<String, String>> = row
+            .env
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        let kb_ids = self
+            .sync_knowledge_workspace(id, &row.cwd, &row.command, &args)
+            .await;
+        self.spawn_pty(
+            id,
+            &row.command,
+            &args,
+            &row.cwd,
+            env,
+            cols,
+            rows,
+            kb_ids,
+            row.backend.as_deref(),
+        )?;
         self.repo.update_size(id, cols as i64, rows as i64).await?;
         self.arm_supervision(id);
-        info!(terminal_id = id, cols, rows, "deferred terminal spawned on first resize");
+        info!(
+            terminal_id = id,
+            cols, rows, "deferred terminal spawned on first resize"
+        );
         Ok(())
     }
 
@@ -979,8 +1076,11 @@ impl TerminalService {
         let _ = std::fs::remove_dir_all(self.session_mcp_dir(id));
         // Snapshot the hook list under the read lock, then drop the guard before
         // awaiting — `RwLockReadGuard` is not `Send` (mirrors ConversationService).
-        let hooks: Vec<Arc<dyn OnTerminalDelete>> =
-            self.delete_hooks.read().map(|guard| guard.clone()).unwrap_or_default();
+        let hooks: Vec<Arc<dyn OnTerminalDelete>> = self
+            .delete_hooks
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         for hook in hooks {
             hook.on_terminal_deleted(id).await;
         }
@@ -1010,11 +1110,16 @@ impl TerminalService {
         self.pending_spawn.remove(&id);
 
         let args = crate::types::parse_args(&row.args);
-        let env: Option<HashMap<String, String>> = row.env.as_deref().and_then(|s| serde_json::from_str(s).ok());
+        let env: Option<HashMap<String, String>> = row
+            .env
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         // Re-sync knowledge mounts + README on every relaunch: this is the
         // documented moment a binding change (via KnowledgeControl) takes
         // effect for a terminal session.
-        let kb_ids = self.sync_knowledge_workspace(id, &row.cwd, &row.command, &args).await;
+        let kb_ids = self
+            .sync_knowledge_workspace(id, &row.cwd, &row.command, &args)
+            .await;
         if let Err(e) = self.spawn_pty(
             id,
             &row.command,
@@ -1071,7 +1176,10 @@ impl TerminalService {
     /// without the dead-page/disabled-composer state. Structurally identical to
     /// [`relaunch`] (same id, fresh epoch, status→running, emit `terminal.updated`
     /// which re-enables the frontend composer) — only the launch target differs.
-    pub async fn relaunch_as_shell(&self, id: i64) -> Result<TerminalSessionResponse, TerminalError> {
+    pub async fn relaunch_as_shell(
+        &self,
+        id: i64,
+    ) -> Result<TerminalSessionResponse, TerminalError> {
         let row = self
             .repo
             .get_by_id(id)
@@ -1092,7 +1200,9 @@ impl TerminalService {
 
         // Re-sync knowledge mounts for the cwd (same contract as `relaunch`); a
         // shell never gets MCP/tool injection (apply_enhancement no-ops for it).
-        let kb_ids = self.sync_knowledge_workspace(id, &row.cwd, crate::types::SHELL_SENTINEL, &[]).await;
+        let kb_ids = self
+            .sync_knowledge_workspace(id, &row.cwd, crate::types::SHELL_SENTINEL, &[])
+            .await;
         if let Err(e) = self.spawn_pty(
             id,
             crate::types::SHELL_SENTINEL,
@@ -1122,7 +1232,10 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let resp = row_to_response(&updated, None, &self.work_dir);
         self.emitter.emit_updated(&resp);
-        info!(terminal_id = id, "terminal session fell back to a clean shell in place");
+        info!(
+            terminal_id = id,
+            "terminal session fell back to a clean shell in place"
+        );
         self.arm_supervision(id);
         Ok(resp)
     }
@@ -1165,7 +1278,10 @@ impl TerminalService {
         self.titled.clear();
         self.first_input.clear();
         let n = self.repo.delete_all().await?;
-        info!(deleted = n, "terminal shutdown cleanup: all sessions killed and removed");
+        info!(
+            deleted = n,
+            "terminal shutdown cleanup: all sessions killed and removed"
+        );
         Ok(n)
     }
 }
@@ -1348,7 +1464,10 @@ mod tests {
             p: &CreateTerminalParams,
         ) -> Result<nomifun_db::TerminalSessionRow, nomifun_db::DbError> {
             // SQLite mints the id; the mock allocates a monotonic i64.
-            let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
             let row = nomifun_db::TerminalSessionRow {
                 id,
                 name: p.name.clone(),
@@ -1373,7 +1492,10 @@ mod tests {
             self.rows.lock().unwrap().insert(id, row.clone());
             Ok(row)
         }
-        async fn get_by_id(&self, id: i64) -> Result<Option<nomifun_db::TerminalSessionRow>, nomifun_db::DbError> {
+        async fn get_by_id(
+            &self,
+            id: i64,
+        ) -> Result<Option<nomifun_db::TerminalSessionRow>, nomifun_db::DbError> {
             Ok(self.rows.lock().unwrap().get(&id).cloned())
         }
         async fn list_by_user(
@@ -1403,7 +1525,12 @@ mod tests {
             row.exit_code = exit_code;
             Ok(())
         }
-        async fn update_size(&self, id: i64, cols: i64, rows_: i64) -> Result<(), nomifun_db::DbError> {
+        async fn update_size(
+            &self,
+            id: i64,
+            cols: i64,
+            rows_: i64,
+        ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
                 .get_mut(&id)
@@ -1462,7 +1589,11 @@ mod tests {
             row.backend = backend.map(|s| s.to_owned());
             Ok(())
         }
-        async fn update_autowork(&self, id: i64, autowork: Option<&str>) -> Result<(), nomifun_db::DbError> {
+        async fn update_autowork(
+            &self,
+            id: i64,
+            autowork: Option<&str>,
+        ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
                 .get_mut(&id)
@@ -1470,7 +1601,11 @@ mod tests {
             row.autowork = autowork.map(|s| s.to_owned());
             Ok(())
         }
-        async fn update_idmm(&self, id: i64, idmm: Option<&str>) -> Result<(), nomifun_db::DbError> {
+        async fn update_idmm(
+            &self,
+            id: i64,
+            idmm: Option<&str>,
+        ) -> Result<(), nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
             let row = rows
                 .get_mut(&id)
@@ -1479,7 +1614,12 @@ mod tests {
             Ok(())
         }
         async fn get_idmm(&self, id: i64) -> Result<Option<String>, nomifun_db::DbError> {
-            Ok(self.rows.lock().unwrap().get(&id).and_then(|r| r.idmm.clone()))
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&id)
+                .and_then(|r| r.idmm.clone()))
         }
         async fn mark_all_running_exited(&self) -> Result<u64, nomifun_db::DbError> {
             let mut rows = self.rows.lock().unwrap();
@@ -1575,35 +1715,57 @@ mod tests {
         bases: Mutex<HashMap<String, nomifun_db::models::KnowledgeBaseRow>>,
         // Keyed by (target_kind, target_id) → (binding row, ordered kb_ids).
         // kb_ids live in the junction now, so the mock carries them alongside.
-        bindings: Mutex<HashMap<(String, String), (nomifun_db::models::KnowledgeBindingRow, Vec<String>)>>,
+        bindings: Mutex<
+            HashMap<(String, String), (nomifun_db::models::KnowledgeBindingRow, Vec<String>)>,
+        >,
         next_binding_id: std::sync::atomic::AtomicI64,
     }
 
     #[async_trait::async_trait]
     impl nomifun_db::IKnowledgeRepository for MemKbRepo {
-        async fn insert_base(&self, row: &nomifun_db::models::KnowledgeBaseRow) -> Result<(), nomifun_db::DbError> {
-            self.bases.lock().unwrap().insert(row.id.clone(), row.clone());
+        async fn insert_base(
+            &self,
+            row: &nomifun_db::models::KnowledgeBaseRow,
+        ) -> Result<(), nomifun_db::DbError> {
+            self.bases
+                .lock()
+                .unwrap()
+                .insert(row.id.clone(), row.clone());
             Ok(())
         }
-        async fn update_base(&self, row: &nomifun_db::models::KnowledgeBaseRow) -> Result<(), nomifun_db::DbError> {
-            self.bases.lock().unwrap().insert(row.id.clone(), row.clone());
+        async fn update_base(
+            &self,
+            row: &nomifun_db::models::KnowledgeBaseRow,
+        ) -> Result<(), nomifun_db::DbError> {
+            self.bases
+                .lock()
+                .unwrap()
+                .insert(row.id.clone(), row.clone());
             Ok(())
         }
         async fn delete_base(&self, id: &str) -> Result<(), nomifun_db::DbError> {
             self.bases.lock().unwrap().remove(id);
             Ok(())
         }
-        async fn get_base(&self, id: &str) -> Result<Option<nomifun_db::models::KnowledgeBaseRow>, nomifun_db::DbError> {
+        async fn get_base(
+            &self,
+            id: &str,
+        ) -> Result<Option<nomifun_db::models::KnowledgeBaseRow>, nomifun_db::DbError> {
             Ok(self.bases.lock().unwrap().get(id).cloned())
         }
-        async fn list_bases(&self) -> Result<Vec<nomifun_db::models::KnowledgeBaseRow>, nomifun_db::DbError> {
+        async fn list_bases(
+            &self,
+        ) -> Result<Vec<nomifun_db::models::KnowledgeBaseRow>, nomifun_db::DbError> {
             Ok(self.bases.lock().unwrap().values().cloned().collect())
         }
         async fn get_binding(
             &self,
             target_kind: &str,
             target_id: &str,
-        ) -> Result<Option<(nomifun_db::models::KnowledgeBindingRow, Vec<String>)>, nomifun_db::DbError> {
+        ) -> Result<
+            Option<(nomifun_db::models::KnowledgeBindingRow, Vec<String>)>,
+            nomifun_db::DbError,
+        > {
             Ok(self
                 .bindings
                 .lock()
@@ -1627,11 +1789,14 @@ mod tests {
             let key = (target_kind.to_owned(), target_id.to_owned());
             let mut bindings = self.bindings.lock().unwrap();
             // Preserve an existing binding_id on replace; allocate otherwise.
-            let binding_id = bindings.get(&key).map(|(row, _)| row.binding_id).unwrap_or_else(|| {
-                self.next_binding_id
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1
-            });
+            let binding_id = bindings
+                .get(&key)
+                .map(|(row, _)| row.binding_id)
+                .unwrap_or_else(|| {
+                    self.next_binding_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1
+                });
             let mut row = nomifun_db::models::KnowledgeBindingRow {
                 binding_id,
                 target_kind: target_kind.to_owned(),
@@ -1656,23 +1821,39 @@ mod tests {
             bindings.insert(key, (row, kb_ids.to_vec()));
             Ok(binding_id)
         }
-        async fn delete_binding(&self, target_kind: &str, target_id: &str) -> Result<(), nomifun_db::DbError> {
+        async fn delete_binding(
+            &self,
+            target_kind: &str,
+            target_id: &str,
+        ) -> Result<(), nomifun_db::DbError> {
             self.bindings
                 .lock()
                 .unwrap()
                 .remove(&(target_kind.to_owned(), target_id.to_owned()));
             Ok(())
         }
-        async fn list_bindings_using_kb(&self, _kb_id: &str) -> Result<Vec<nomifun_db::models::KnowledgeBindingRow>, nomifun_db::DbError> {
+        async fn list_bindings_using_kb(
+            &self,
+            _kb_id: &str,
+        ) -> Result<Vec<nomifun_db::models::KnowledgeBindingRow>, nomifun_db::DbError> {
             Ok(vec![])
         }
-        async fn list_knowledge_tags(&self) -> Result<Vec<nomifun_db::models::KnowledgeTagRow>, nomifun_db::DbError> {
+        async fn list_knowledge_tags(
+            &self,
+        ) -> Result<Vec<nomifun_db::models::KnowledgeTagRow>, nomifun_db::DbError> {
             Ok(vec![])
         }
-        async fn create_knowledge_tag(&self, _params: nomifun_db::models::CreateKnowledgeTagParams) -> Result<(), nomifun_db::DbError> {
+        async fn create_knowledge_tag(
+            &self,
+            _params: nomifun_db::models::CreateKnowledgeTagParams,
+        ) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
-        async fn update_knowledge_tag(&self, _key: &str, _params: nomifun_db::models::UpdateKnowledgeTagParams) -> Result<(), nomifun_db::DbError> {
+        async fn update_knowledge_tag(
+            &self,
+            _key: &str,
+            _params: nomifun_db::models::UpdateKnowledgeTagParams,
+        ) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
         async fn delete_knowledge_tag(&self, _key: &str) -> Result<(), nomifun_db::DbError> {
@@ -1683,7 +1864,9 @@ mod tests {
     /// A `KnowledgeService` over an in-memory repo with one registered base
     /// (`kb_test`) rooted at `kb_root`. The returned `TempDir` is the service
     /// data dir — keep it alive for the test's duration.
-    fn knowledge_fixture(kb_root: &std::path::Path) -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
+    fn knowledge_fixture(
+        kb_root: &std::path::Path,
+    ) -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
         let data_dir = tempfile::TempDir::new().unwrap();
         let repo = MemKbRepo::default();
         repo.bases.lock().unwrap().insert(
@@ -1700,7 +1883,9 @@ mod tests {
                 tags: None,
             },
         );
-        let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(Arc::new(CapturingBroadcaster::default()));
+        let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(Arc::new(
+            CapturingBroadcaster::default(),
+        ));
         (
             Arc::new(nomifun_knowledge::KnowledgeService::new(
                 Arc::new(repo),
@@ -1731,12 +1916,21 @@ mod tests {
         // cwd is under it, so this resolves to the default-workpath sentinel.)
         let wp_key = nomifun_knowledge::session_workpath_key(cwd.path(), &std::env::temp_dir());
         let binding = ks.get_binding("workpath", &wp_key).await.unwrap();
-        assert!(binding.enabled, "create-time kb_ids must enable the binding");
+        assert!(
+            binding.enabled,
+            "create-time kb_ids must enable the binding"
+        );
         assert_eq!(binding.kb_ids, vec!["kb_test".to_owned()]);
         // The legacy per-session key must NOT be written — that mismatch is the
         // bug this fix closes (header/mount read workpath, create wrote terminal).
-        let legacy = ks.get_binding("terminal", &resp.id.to_string()).await.unwrap();
-        assert!(!legacy.enabled && legacy.kb_ids.is_empty(), "legacy (terminal, id) key must stay unbound");
+        let legacy = ks
+            .get_binding("terminal", &resp.id.to_string())
+            .await
+            .unwrap();
+        assert!(
+            !legacy.enabled && legacy.kb_ids.is_empty(),
+            "legacy (terminal, id) key must stay unbound"
+        );
 
         // The README contract is materialized inside the mount dir.
         let readme = cwd.path().join(".nomi").join("knowledge").join("README.md");
@@ -1767,7 +1961,11 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let bc = CapturingBroadcaster::default();
         let emitter = TerminalEventEmitter::new(Arc::new(bc.clone()));
-        let svc = TerminalService::new(Arc::new(MemRepo::default()), emitter, work_dir.path().to_path_buf());
+        let svc = TerminalService::new(
+            Arc::new(MemRepo::default()),
+            emitter,
+            work_dir.path().to_path_buf(),
+        );
         svc.with_knowledge_service(ks.clone());
 
         let mut request = req("cat", &[]);
@@ -1776,13 +1974,23 @@ mod tests {
         let resp = svc.create("u", request).await.unwrap();
 
         let key = nomifun_knowledge::workpath_key(&cwd.path().to_string_lossy());
-        assert_ne!(key, "__default__", "a user-picked dir must get a dedicated workpath key");
+        assert_ne!(
+            key, "__default__",
+            "a user-picked dir must get a dedicated workpath key"
+        );
         let binding = ks.get_binding("workpath", &key).await.unwrap();
-        assert!(binding.enabled, "create-time kb_ids must enable the workpath binding");
+        assert!(
+            binding.enabled,
+            "create-time kb_ids must enable the workpath binding"
+        );
         assert_eq!(binding.kb_ids, vec!["kb_test".to_owned()]);
         // End-to-end: the README contract materializes from the workpath binding.
         assert!(
-            cwd.path().join(".nomi").join("knowledge").join("README.md").exists(),
+            cwd.path()
+                .join(".nomi")
+                .join("knowledge")
+                .join("README.md")
+                .exists(),
             "the workpath binding must drive the mount + README"
         );
 
@@ -1801,7 +2009,11 @@ mod tests {
         let cwd = tempfile::TempDir::new().unwrap();
         let bc = CapturingBroadcaster::default();
         let emitter = TerminalEventEmitter::new(Arc::new(bc.clone()));
-        let svc = TerminalService::new(Arc::new(MemRepo::default()), emitter, work_dir.path().to_path_buf());
+        let svc = TerminalService::new(
+            Arc::new(MemRepo::default()),
+            emitter,
+            work_dir.path().to_path_buf(),
+        );
         svc.with_knowledge_service(ks.clone());
 
         let key = nomifun_knowledge::workpath_key(&cwd.path().to_string_lossy());
@@ -1827,10 +2039,20 @@ mod tests {
         let resp = svc.create("u", request).await.unwrap();
 
         let binding = ks.get_binding("workpath", &key).await.unwrap();
-        assert_eq!(binding.kb_ids, vec!["kb_test".to_owned()], "create selection replaces the base list");
+        assert_eq!(
+            binding.kb_ids,
+            vec!["kb_test".to_owned()],
+            "create selection replaces the base list"
+        );
         assert!(binding.writeback, "writeback flag must be preserved");
-        assert_eq!(binding.writeback_mode, "direct", "writeback mode must be preserved");
-        assert_eq!(binding.writeback_eagerness, "aggressive", "writeback eagerness must be preserved");
+        assert_eq!(
+            binding.writeback_mode, "direct",
+            "writeback mode must be preserved"
+        );
+        assert_eq!(
+            binding.writeback_eagerness, "aggressive",
+            "writeback eagerness must be preserved"
+        );
 
         svc.kill(resp.id).await.ok();
     }
@@ -1867,7 +2089,10 @@ mod tests {
         .await
         .unwrap();
         svc.relaunch(resp.id).await.unwrap();
-        assert!(readme.exists(), "relaunch must re-sync mounts and write the README");
+        assert!(
+            readme.exists(),
+            "relaunch must re-sync mounts and write the README"
+        );
 
         // Unbind, relaunch again: the mount engine clears the whole mount dir
         // (README included), so stale knowledge guidance never lingers.
@@ -1896,8 +2121,17 @@ mod tests {
         request.knowledge_base_ids = Some(vec!["kb_zzz".into()]);
 
         let resp = svc.create("u", request).await.unwrap();
-        assert_eq!(resp.last_status, "running", "knowledge is best-effort, never blocks");
-        assert!(!cwd.path().join(".nomi").join("knowledge").join("README.md").exists());
+        assert_eq!(
+            resp.last_status, "running",
+            "knowledge is best-effort, never blocks"
+        );
+        assert!(
+            !cwd.path()
+                .join(".nomi")
+                .join("knowledge")
+                .join("README.md")
+                .exists()
+        );
         svc.kill(resp.id).await.ok();
     }
 
@@ -1937,7 +2171,13 @@ mod tests {
 
         // Exit event eventually fires and status is persisted.
         let exited = wait_for(
-            || bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.exit"),
+            || {
+                bc.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.name == "terminal.exit")
+            },
             4000,
         )
         .await;
@@ -2076,16 +2316,33 @@ mod tests {
     async fn get_replays_persisted_scrollback_after_process_exits() {
         let (svc, bc) = service();
         // Emits known output, then exits on its own.
-        let id = svc.create("u", req("printf", &["restore-me"])).await.unwrap().id;
+        let id = svc
+            .create("u", req("printf", &["restore-me"]))
+            .await
+            .unwrap()
+            .id;
 
         // Exit drops the live handle and persists the final scrollback.
-        assert!(wait_for(|| bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.exit"), 4000).await);
+        assert!(
+            wait_for(
+                || bc
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.name == "terminal.exit"),
+                4000
+            )
+            .await
+        );
         // `on_exit` persists on a spawned task — give it a beat to land.
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         // No live handle now → `get` must fall back to the persisted snapshot.
         let resp = svc.get(id).await.unwrap();
-        let b64 = resp.scrollback_b64.expect("persisted scrollback must be returned when not live");
+        let b64 = resp
+            .scrollback_b64
+            .expect("persisted scrollback must be returned when not live");
         let bytes = BASE64.decode(b64).unwrap();
         assert!(
             String::from_utf8_lossy(&bytes).contains("restore-me"),
@@ -2114,7 +2371,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(landed, "cat should echo the fed input into the live scrollback");
+        assert!(
+            landed,
+            "cat should echo the fed input into the live scrollback"
+        );
 
         svc.flush_dirty_scrollback().await;
 
@@ -2148,7 +2408,11 @@ mod tests {
         // Now live: input works and the persisted size is the resize size.
         svc.input(id, &BASE64.encode("hi\n")).await.unwrap();
         let got = svc.get(id).await.unwrap();
-        assert_eq!((got.cols, got.rows), (120, 40), "deferred spawn must adopt the first-resize size");
+        assert_eq!(
+            (got.cols, got.rows),
+            (120, 40),
+            "deferred spawn must adopt the first-resize size"
+        );
         svc.kill(id).await.unwrap();
     }
 
@@ -2172,15 +2436,27 @@ mod tests {
         bc.events.lock().unwrap().clear();
 
         let resp = svc.relaunch_as_shell(id).await.unwrap();
-        assert_eq!(resp.command, crate::types::SHELL_SENTINEL, "command rewritten to the shell sentinel");
+        assert_eq!(
+            resp.command,
+            crate::types::SHELL_SENTINEL,
+            "command rewritten to the shell sentinel"
+        );
         assert_eq!(resp.backend, None, "agent backend label cleared");
         assert_eq!(resp.last_status, "running", "fresh shell is running");
         // The row is persisted as a shell, so its mechanical name is now `Shell`.
         let row = svc.get(id).await.unwrap();
         assert_eq!(row.command, crate::types::SHELL_SENTINEL);
         // A terminal.updated event re-enables the frontend composer.
-        let emitted_updated = bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.updated");
-        assert!(emitted_updated, "relaunch_as_shell must emit terminal.updated");
+        let emitted_updated = bc
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "terminal.updated");
+        assert!(
+            emitted_updated,
+            "relaunch_as_shell must emit terminal.updated"
+        );
 
         svc.kill(id).await.ok();
     }
@@ -2203,12 +2479,20 @@ mod tests {
 
     async fn wait_for_name(svc: &TerminalService, id: i64, expected: &str, ms: u64) -> bool {
         for _ in 0..(ms / 20).max(1) {
-            if svc.get(id).await.map(|s| s.name == expected).unwrap_or(false) {
+            if svc
+                .get(id)
+                .await
+                .map(|s| s.name == expected)
+                .unwrap_or(false)
+            {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        svc.get(id).await.map(|s| s.name == expected).unwrap_or(false)
+        svc.get(id)
+            .await
+            .map(|s| s.name == expected)
+            .unwrap_or(false)
     }
 
     #[tokio::test]
@@ -2217,7 +2501,9 @@ mod tests {
         // command "cat", no backend → is_agent=false, mechanical name "cat".
         let id = svc.create("u", req("cat", &[])).await.unwrap().id;
         // First input line (ends with CR) → fallback title from that line.
-        svc.input(id, &BASE64.encode("echo hello world\r")).await.unwrap();
+        svc.input(id, &BASE64.encode("echo hello world\r"))
+            .await
+            .unwrap();
         assert!(
             wait_for_name(&svc, id, "echo hello world", 4000).await,
             "shell title should fall back to the first input line, got {:?}",
@@ -2271,8 +2557,13 @@ mod tests {
         r.backend = Some("claude".into());
         let id = svc.create("u", r).await.unwrap().id;
 
-        svc.maybe_autotitle(id, Some("user deployed prod; assistant confirmed".into())).await;
-        assert_eq!(svc.get(id).await.unwrap().name, "title-0", "LLM summary becomes the title");
+        svc.maybe_autotitle(id, Some("user deployed prod; assistant confirmed".into()))
+            .await;
+        assert_eq!(
+            svc.get(id).await.unwrap().name,
+            "title-0",
+            "LLM summary becomes the title"
+        );
         svc.kill(id).await.ok();
     }
 
@@ -2282,9 +2573,15 @@ mod tests {
         svc.with_title_completer(Arc::new(FakeTitler::new("auto-")));
         let id = svc.create("u", req("cat", &[])).await.unwrap().id;
         // A manual rename makes name != default_name → never overwritten.
-        svc.update_meta(id, Some("我的终端".into()), None).await.unwrap();
+        svc.update_meta(id, Some("我的终端".into()), None)
+            .await
+            .unwrap();
         svc.maybe_autotitle(id, Some("content".into())).await;
-        assert_eq!(svc.get(id).await.unwrap().name, "我的终端", "must not clobber a manual rename");
+        assert_eq!(
+            svc.get(id).await.unwrap().name,
+            "我的终端",
+            "must not clobber a manual rename"
+        );
         svc.kill(id).await.ok();
     }
 
@@ -2305,7 +2602,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_id_is_not_found() {
         let (svc, _bc) = service();
-        assert!(matches!(svc.get(999_999).await.unwrap_err(), TerminalError::NotFound(_)));
+        assert!(matches!(
+            svc.get(999_999).await.unwrap_err(),
+            TerminalError::NotFound(_)
+        ));
         assert!(matches!(
             svc.input(999_999, &BASE64.encode("x")).await.unwrap_err(),
             TerminalError::NotFound(_)
@@ -2331,7 +2631,9 @@ mod tests {
 
         let entries = svc.browse_workspace(resp.id, "", None).await.unwrap();
         assert!(
-            entries.iter().any(|e| e.name == "hello.txt" && e.entry_type == "file"),
+            entries
+                .iter()
+                .any(|e| e.name == "hello.txt" && e.entry_type == "file"),
             "expected hello.txt in {entries:?}"
         );
     }
@@ -2356,7 +2658,10 @@ mod tests {
         create.defer_spawn = true;
         let resp = svc.create("u", create).await.unwrap();
 
-        let err = svc.browse_workspace(resp.id, "../", None).await.unwrap_err();
+        let err = svc
+            .browse_workspace(resp.id, "../", None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, nomifun_common::AppError::BadRequest(_)),
             "`../` must map to BadRequest (400)"
@@ -2381,7 +2686,13 @@ mod tests {
             svc.get(resp.id).await.unwrap_err(),
             TerminalError::NotFound(_)
         ));
-        assert!(bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.removed"));
+        assert!(
+            bc.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "terminal.removed")
+        );
     }
 
     #[tokio::test]
@@ -2392,7 +2703,13 @@ mod tests {
         let id = resp.id.clone();
         // wait until it exits
         let exited = wait_for(
-            || bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.exit"),
+            || {
+                bc.events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.name == "terminal.exit")
+            },
             4000,
         )
         .await;
@@ -2402,7 +2719,11 @@ mod tests {
         assert_eq!(relaunched.id, id, "relaunch must reuse the same session id");
         assert_eq!(relaunched.last_status, "running");
         assert!(
-            bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.updated"),
+            bc.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "terminal.updated"),
             "relaunch should emit terminal.updated, not create a new session"
         );
         svc.delete(id).await.ok();
@@ -2419,7 +2740,10 @@ mod tests {
         // A long-lived child (cat blocks reading the PTY) → genuinely running.
         let resp = svc.create("u", req("cat", &[])).await.unwrap();
         let id = resp.id;
-        assert!(svc.live.contains_key(&id), "freshly created session must be live");
+        assert!(
+            svc.live.contains_key(&id),
+            "freshly created session must be live"
+        );
 
         svc.relaunch(id).await.unwrap();
 
@@ -2432,7 +2756,10 @@ mod tests {
             "the fresh PTY must remain live after the predecessor's stale exit callback"
         );
         let got = svc.get(id).await.unwrap();
-        assert_eq!(got.last_status, "running", "relaunch must not leave the session exited");
+        assert_eq!(
+            got.last_status, "running",
+            "relaunch must not leave the session exited"
+        );
 
         svc.delete(id).await.ok();
     }
@@ -2470,20 +2797,34 @@ mod tests {
 
         // Case 1: empty kb_ids → always empty regardless of config.
         svc.with_knowledge_mcp_config(
-            K { port: 51123, token: "tok".into(), binary_path: "nomicore".into() },
+            K {
+                port: 51123,
+                token: "tok".into(),
+                binary_path: "nomicore".into(),
+            },
             std::env::temp_dir(),
         );
         let enh = svc.build_enhancement(&[], 1);
-        assert!(enh.mcp_servers.is_empty(), "empty kb_ids must yield no MCP servers");
+        assert!(
+            enh.mcp_servers.is_empty(),
+            "empty kb_ids must yield no MCP servers"
+        );
 
         // Case 2: kb_ids present but NO knowledge_mcp_config wired → empty.
         let (svc2, _bc2) = service(); // fresh service, config NOT wired
         let enh = svc2.build_enhancement(&["kb_1".into()], 1);
-        assert!(enh.mcp_servers.is_empty(), "no config wired must yield no MCP servers");
+        assert!(
+            enh.mcp_servers.is_empty(),
+            "no config wired must yield no MCP servers"
+        );
 
         // Case 3: kb_ids present AND config wired → one McpServerSpec.
         let enh = svc.build_enhancement(&["kb_1".into(), "kb_2".into()], 1);
-        assert_eq!(enh.mcp_servers.len(), 1, "expected exactly one MCP server spec");
+        assert_eq!(
+            enh.mcp_servers.len(),
+            1,
+            "expected exactly one MCP server spec"
+        );
         let spec = &enh.mcp_servers[0];
         assert_eq!(spec.name, K::SERVER_NAME);
         assert_eq!(spec.args, vec!["mcp-knowledge-stdio".to_owned()]);
@@ -2506,16 +2847,25 @@ mod tests {
             .unwrap();
         assert_eq!(updated.name, "Renamed");
         assert!(updated.pinned);
-        assert!(bc.events.lock().unwrap().iter().any(|e| e.name == "terminal.updated"));
+        assert!(
+            bc.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "terminal.updated")
+        );
         // blank name is ignored (keeps prior)
-        let again = svc.update_meta(resp.id, Some("   ".into()), None).await.unwrap();
+        let again = svc
+            .update_meta(resp.id, Some("   ".into()), None)
+            .await
+            .unwrap();
         assert_eq!(again.name, "Renamed");
         svc.delete(resp.id).await.ok();
     }
 
     #[tokio::test]
     async fn spawn_injects_knowledge_mcp_for_claude_when_kb_ids_present() {
-        use crate::enhance::{apply_enhancement, McpServerSpec, TerminalLaunchEnhancement};
+        use crate::enhance::{McpServerSpec, TerminalLaunchEnhancement, apply_enhancement};
         use std::collections::HashMap;
         // Pure unit-level verification of the injector contract: construct an
         // enhancement → claude argv contains --mcp-config.
@@ -2531,8 +2881,14 @@ mod tests {
                 command: cfg.binary_path.clone(),
                 args: vec!["mcp-knowledge-stdio".into()],
                 env: HashMap::from([
-                    (nomifun_api_types::KnowledgeMcpConfig::ENV_PORT.into(), "9".into()),
-                    (nomifun_api_types::KnowledgeMcpConfig::ENV_TOKEN.into(), "t".into()),
+                    (
+                        nomifun_api_types::KnowledgeMcpConfig::ENV_PORT.into(),
+                        "9".into(),
+                    ),
+                    (
+                        nomifun_api_types::KnowledgeMcpConfig::ENV_TOKEN.into(),
+                        "t".into(),
+                    ),
                 ]),
             }],
             lifecycle: None,
@@ -2551,15 +2907,21 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_lifecycle_some_and_receives_event() {
-        use crate::lifecycle::{TerminalLifecycleServer, LifecycleKind};
+        use crate::lifecycle::{LifecycleKind, TerminalLifecycleServer};
 
         let (svc, _bc) = service();
-        let srv = Arc::new(TerminalLifecycleServer::start().await.expect("start lifecycle server"));
+        let srv = Arc::new(
+            TerminalLifecycleServer::start()
+                .await
+                .expect("start lifecycle server"),
+        );
         svc.with_terminal_lifecycle(srv.clone(), "nomicore".into());
 
         // Via the trait object, subscribe_lifecycle should now return Some.
         let driver: &dyn TerminalDriver = &svc;
-        let mut rx = driver.subscribe_lifecycle(42).expect("must be Some when lifecycle is wired");
+        let mut rx = driver
+            .subscribe_lifecycle(42)
+            .expect("must be Some when lifecycle is wired");
 
         // Broadcast an event through the lifecycle server.
         let url = format!("http://127.0.0.1:{}/hook", srv.http_port());
@@ -2568,7 +2930,7 @@ mod tests {
             "kind": "turn_end",
             "payload": {"last_assistant_message": "hello"}
         });
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let resp = client
             .post(&url)
             .json(&body)
@@ -2596,7 +2958,9 @@ mod tests {
             binary_path: "/opt/nomi/nomicore".into(),
         };
         svc.with_requirement_mcp_config(cfg.clone());
-        let stored = svc.requirement_mcp_config().expect("must be Some after wiring");
+        let stored = svc
+            .requirement_mcp_config()
+            .expect("must be Some after wiring");
         assert_eq!(stored.port, 52222);
         assert_eq!(stored.token, "req-tok");
     }
@@ -2615,7 +2979,10 @@ mod tests {
 
         // No kb_ids, terminal_id = 42
         let enh = svc.build_enhancement(&[], 42);
-        assert!(!enh.is_empty(), "requirement MCP alone must produce a non-empty enhancement");
+        assert!(
+            !enh.is_empty(),
+            "requirement MCP alone must produce a non-empty enhancement"
+        );
         assert_eq!(enh.mcp_servers.len(), 1);
         let spec = &enh.mcp_servers[0];
         assert_eq!(spec.name, R::SERVER_NAME);
@@ -2642,7 +3009,11 @@ mod tests {
         use nomifun_api_types::{KnowledgeMcpConfig as K, RequirementMcpConfig as R};
         let (svc, _bc) = service();
         svc.with_knowledge_mcp_config(
-            K { port: 111, token: "ktok".into(), binary_path: "nomicore".into() },
+            K {
+                port: 111,
+                token: "ktok".into(),
+                binary_path: "nomicore".into(),
+            },
             std::env::temp_dir(),
         );
         svc.with_requirement_mcp_config(R {
@@ -2652,7 +3023,11 @@ mod tests {
         });
 
         let enh = svc.build_enhancement(&["kb_x".into()], 7);
-        assert_eq!(enh.mcp_servers.len(), 2, "both knowledge + requirement MCP servers");
+        assert_eq!(
+            enh.mcp_servers.len(),
+            2,
+            "both knowledge + requirement MCP servers"
+        );
         let names: Vec<&str> = enh.mcp_servers.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&K::SERVER_NAME));
         assert!(names.contains(&R::SERVER_NAME));
@@ -2662,7 +3037,7 @@ mod tests {
     /// but does NOT render it for `/bin/bash` (unknown CLI → honest no-op).
     #[tokio::test]
     async fn apply_enhancement_requirement_renders_for_claude_not_shell() {
-        use crate::enhance::{apply_enhancement, McpServerSpec, TerminalLaunchEnhancement};
+        use crate::enhance::{McpServerSpec, TerminalLaunchEnhancement, apply_enhancement};
         use nomifun_api_types::RequirementMcpConfig as R;
         use std::collections::HashMap;
 
@@ -2684,12 +3059,26 @@ mod tests {
 
         // claude → --mcp-config present (renders MCP)
         let (argv, _env) = apply_enhancement("claude", vec![], &enh, dir.path(), None);
-        assert!(argv.iter().any(|a| a == "--mcp-config"), "claude must get --mcp-config");
+        assert!(
+            argv.iter().any(|a| a == "--mcp-config"),
+            "claude must get --mcp-config"
+        );
         // Verify the mcp.json contains the requirement server
-        let mcp_path = argv.iter().position(|a| a == "--mcp-config").map(|i| &argv[i + 1]).unwrap();
-        let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
-        assert!(doc["mcpServers"][R::SERVER_NAME].is_object(), "mcp.json must contain the requirement server");
-        assert_eq!(doc["mcpServers"][R::SERVER_NAME]["env"][R::ENV_OWNER_KIND], "terminal");
+        let mcp_path = argv
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .map(|i| &argv[i + 1])
+            .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
+        assert!(
+            doc["mcpServers"][R::SERVER_NAME].is_object(),
+            "mcp.json must contain the requirement server"
+        );
+        assert_eq!(
+            doc["mcpServers"][R::SERVER_NAME]["env"][R::ENV_OWNER_KIND],
+            "terminal"
+        );
 
         // codex → renders via -c overrides
         let (argv, _env) = apply_enhancement("codex", vec![], &enh, dir.path(), None);
@@ -2697,7 +3086,12 @@ mod tests {
         assert!(joined.contains(&format!("mcp_servers.{}.command=", R::SERVER_NAME)));
 
         // unknown CLI (bash) → no injection (honest)
-        let (argv, _env) = apply_enhancement("/bin/bash", vec!["-l".into()], &enh, dir.path(), None);
-        assert_eq!(argv, vec!["-l".to_owned()], "/bin/bash must get NO MCP injection");
+        let (argv, _env) =
+            apply_enhancement("/bin/bash", vec!["-l".into()], &enh, dir.path(), None);
+        assert_eq!(
+            argv,
+            vec!["-l".to_owned()],
+            "/bin/bash must get NO MCP injection"
+        );
     }
 }
