@@ -1,6 +1,9 @@
 use std::net::TcpListener;
+use std::time::Duration;
 
 use crate::error::OfficeError;
+
+const CONNECT_TIMEOUT_MS: u64 = 100;
 
 pub fn allocate_port() -> Result<u16, OfficeError> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -9,7 +12,15 @@ pub fn allocate_port() -> Result<u16, OfficeError> {
 }
 
 pub async fn is_port_listening(port: u16) -> bool {
-    tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok()
+    match tokio::time::timeout(
+        Duration::from_millis(CONNECT_TIMEOUT_MS),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(result) => result.is_ok(),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
