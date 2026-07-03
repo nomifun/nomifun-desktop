@@ -107,7 +107,10 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
   const handleAutoEnable = async () => {
     try {
       const config = { credentials: { token: discordToken.trim() } };
-      await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'discord', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'discord', config });
+      const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'discord', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'discord', config });
+      if (!result.success) {
+        throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+      }
       Message.success(t('settings.discord.pluginEnabled', 'Discord bot enabled'));
       const plugins = await channel.getPluginStatus.invoke();
       if (plugins) {
@@ -116,6 +119,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
       }
     } catch (error: unknown) {
       console.error('[ChannelSettings] Auto-enable failed:', error);
+      Message.error(error instanceof Error ? error.message : String(error));
     }
   };
 

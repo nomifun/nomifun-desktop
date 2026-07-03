@@ -75,7 +75,10 @@ const MattermostConfigForm: React.FC<MattermostConfigFormProps> = ({ pluginStatu
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: token.trim(), server_url: serverUrl.trim() } };
-    await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'mattermost', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'mattermost', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'mattermost', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'mattermost', config });
+    if (!result.success) {
+      throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+    }
     Message.success(t('settings.mattermost.pluginEnabled', 'Mattermost bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {

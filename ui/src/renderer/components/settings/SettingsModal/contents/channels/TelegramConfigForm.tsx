@@ -186,12 +186,14 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   const handleAutoEnable = async () => {
     try {
       const config = { credentials: { token: telegramToken.trim() } };
-      // enablePlugin returns void; success if no throw
-      await channel.enablePlugin.invoke(
+      const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'telegram', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
           : { plugin_id: 'telegram', config }
       );
+      if (!result.success) {
+        throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+      }
 
       Message.success(t('settings.assistant.pluginEnabled', 'Telegram bot enabled'));
       const plugins = await channel.getPluginStatus.invoke();
@@ -207,6 +209,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       }
     } catch (error: unknown) {
       console.error('[ChannelSettings] Auto-enable failed:', error);
+      Message.error(error instanceof Error ? error.message : String(error));
     }
   };
 

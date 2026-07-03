@@ -34,6 +34,7 @@ import WeixinConfigForm from '@/renderer/components/settings/SettingsModal/conte
 import { Message, Switch } from '@arco-design/web-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { findEnabledChannelStatus } from './channelStatusSelection';
 
 /**
  * Shared channel-config machinery for the multi-bot flows. Both the desktop
@@ -130,6 +131,8 @@ export const PlatformConfigBody: React.FC<{
   const [toggleLoading, setToggleLoading] = useState(false);
   // Telegram lets the user enable with a token typed in the form but not yet saved.
   const telegramTokenRef = useRef('');
+  // QQ Bot needs two fields; the shared enable switch lives outside the form.
+  const qqbotCredentialsRef = useRef({ appId: '', clientSecret: '' });
   // WeCom's form surfaces callback URLs derived from the WebUI status (best-effort).
   const [webuiStatus, setWebuiStatus] = useState<IWebUIStatus | null>(null);
 
@@ -154,12 +157,28 @@ export const PlatformConfigBody: React.FC<{
     try {
       if (enabled) {
         const pendingToken = platform === 'telegram' || platform === 'discord' ? telegramTokenRef.current.trim() : '';
-        if (!status?.hasToken && !pendingToken) {
+        const pendingQqbotCredentials =
+          platform === 'qqbot'
+            ? {
+                appId: qqbotCredentialsRef.current.appId.trim(),
+                clientSecret: qqbotCredentialsRef.current.clientSecret.trim(),
+              }
+            : null;
+        const pendingQqbotConfig =
+          pendingQqbotCredentials?.appId && pendingQqbotCredentials.clientSecret
+            ? {
+                credentials: {
+                  client_id: pendingQqbotCredentials.appId,
+                  client_secret: pendingQqbotCredentials.clientSecret,
+                },
+              }
+            : null;
+        if (!status?.hasToken && !pendingToken && !pendingQqbotConfig) {
           Message.warning(t(CREDENTIALS_REQUIRED_KEY[platform]));
           return;
         }
-        const config = pendingToken ? { credentials: { token: pendingToken } } : {};
-        await channel.enablePlugin.invoke(
+        const config = pendingQqbotConfig ?? (pendingToken ? { credentials: { token: pendingToken } } : {});
+        const result = await channel.enablePlugin.invoke(
           channelTarget
             ? {
                 plugin_id: channelTarget.channelId,
@@ -171,6 +190,25 @@ export const PlatformConfigBody: React.FC<{
               }
             : { plugin_id: platform, config }
         );
+        if (!result.success) {
+          throw new Error(
+            result.error ||
+              result.message ||
+              t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' })
+          );
+        }
+        const latestStatuses = await channel.getPluginStatus.invoke();
+        const enabledStatus = latestStatuses
+          ? findEnabledChannelStatus(latestStatuses, {
+              platform,
+              enabledPluginId: result.message,
+              companionId: channelTarget?.companionId,
+              publicAgentId: channelTarget?.publicAgentId,
+            })
+          : null;
+        if (enabledStatus) {
+          onStatusChange(enabledStatus);
+        }
         Message.success(t(PLUGIN_ENABLED_KEY[platform]));
       } else {
         await channel.disablePlugin.invoke({ plugin_id: channelTarget?.channelId ?? platform });
@@ -233,7 +271,16 @@ export const PlatformConfigBody: React.FC<{
       {platform === 'mattermost' && <MattermostConfigForm pluginStatus={status} channelTarget={channelTarget} onStatusChange={onStatusChange} />}
       {platform === 'twitch' && <TwitchConfigForm pluginStatus={status} channelTarget={channelTarget} onStatusChange={onStatusChange} />}
       {platform === 'nostr' && <NostrConfigForm pluginStatus={status} channelTarget={channelTarget} onStatusChange={onStatusChange} />}
-      {platform === 'qqbot' && <QQBotConfigForm pluginStatus={status} channelTarget={channelTarget} onStatusChange={onStatusChange} />}
+      {platform === 'qqbot' && (
+        <QQBotConfigForm
+          pluginStatus={status}
+          channelTarget={channelTarget}
+          onStatusChange={onStatusChange}
+          onCredentialsChange={(credentials) => {
+            qqbotCredentialsRef.current = credentials;
+          }}
+        />
+      )}
       {platform === 'lark' && (
         <LarkConfigForm pluginStatus={status} channelTarget={channelTarget} onStatusChange={onStatusChange} />
       )}
