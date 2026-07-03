@@ -10,6 +10,7 @@ import { Button, Input } from '@arco-design/web-react';
 import { Message, SpeakerOne, User } from '@icon-park/react';
 import type { IPublicAgent, IPublicAgentModel, IPublicAgentPatch } from '@/common/adapter/ipcBridge';
 import type { ArcoMessageInstance } from '@renderer/utils/ui/useArcoMessage';
+import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import { SectionCard, FieldRow } from '../components';
 import PublicAgentModelPicker from '../PublicAgentModelPicker';
 
@@ -22,6 +23,7 @@ interface Props {
 /** 身份 & 话术 —— 名称、开场白、语气规范、对话模型。改动累积到草稿，统一保存。 */
 const IdentitySection: React.FC<Props> = ({ agent, patch, message }) => {
   const { t } = useTranslation();
+  const { providers, getAvailableModels } = useModelProviderList();
 
   const [name, setName] = useState(agent.name);
   const [greeting, setGreeting] = useState(agent.greeting);
@@ -36,6 +38,18 @@ const IdentitySection: React.FC<Props> = ({ agent, patch, message }) => {
     setTone(agent.tone);
     setModel(agent.model);
   }, [agent.id, agent.name, agent.greeting, agent.tone, agent.model]);
+
+  // If the agent has NO model configured yet, pre-select the machine's default
+  // (first provider + its first model) so the owner can enable it in one click
+  // (Save). Nothing is persisted until Save; the dropdown remains fully editable.
+  // This is the console counterpart to the create-time model seed — it recovers
+  // agents created before a model existed / before seeding.
+  useEffect(() => {
+    if (agent.model.provider_id || model.provider_id) return;
+    const provider = providers[0];
+    const first = provider ? (getAvailableModels(provider)[0] ?? '') : '';
+    if (provider && first) setModel({ provider_id: provider.id, model: first });
+  }, [providers, getAvailableModels, agent.model.provider_id, model.provider_id]);
 
   const dirty = useMemo(
     () =>
