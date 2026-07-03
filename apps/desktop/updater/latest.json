@@ -1,7 +1,7 @@
 {
   "version": "0.2.1",
-  "notes": "- Reworked local file-access authority and workspace binding flows.\n- Fixed reusable bot binding recovery for channel connections.\n- Fixed Windows agent shell execution and updater metadata coverage.\n- Polished conversation error handling, sendbox editing shortcuts, and public companion localization.",
-  "pub_date": "2026-07-03T16:44:14.170Z",
+  "notes": "- Improved orchestration reliability and control: DAG node pre-configuration,\n  per-node model selection, explicit in-conversation approval before execution,\n  and fixes for broken DAG lines, orphaned running nodes, one-node planning, and\n  blank pending states.\n- Added graceful handling for providers/models that do not support image input:\n  image capability tracking, proactive image removal, retry without interrupting\n  the conversation, and a visible in-conversation notice.\n- Expanded browser-use controls with silent mode defaults, managed/system\n  browser source selection, persistent encrypted browser login, a one-click\n  browser login action, and screenshot context for silent approvals.\n- Fixed WebUI credential persistence across restarts and added per-model context\n  window configuration.\n- Polished updater error handling, local update test clients, README screenshots,\n  provider quick links, and contact assets.\n- Packaging note: this Mac-side release publishes macOS installer and updater\n  assets. Windows and Linux packages must be added later from their native build\n  machines.",
+  "pub_date": "2026-07-03T17:06:03.305Z",
   "platforms": {
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdnUlcwbFp4elJLUmxIRmt0ZXArcERXZ212RlI2Q21pelNUa3JBSTZnT0E1eFNuejBtMTMydGVwLzU5bENPZ0NVYWM4SGFpUmFYOEpWRCtlRjNiblFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDk2OTE5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Clp6bzB1WGxEd2taRWw2bGE3QzlaNWtQTzRXR3Mza0dlRHlIZVlzUU5RVmZmZWhTdUZldE5pd2JRODZ1eVZqdUg2aEpRMVpWTitRd245d1B3WTRId0FRPT0K",
@@ -10,6 +10,10 @@
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdnUlcwbFp4elJLUmxIRmt0ZXArcERXZ212RlI2Q21pelNUa3JBSTZnT0E1eFNuejBtMTMydGVwLzU5bENPZ0NVYWM4SGFpUmFYOEpWRCtlRjNiblFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDk2OTE5CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Clp6bzB1WGxEd2taRWw2bGE3QzlaNWtQTzRXR3Mza0dlRHlIZVlzUU5RVmZmZWhTdUZldE5pd2JRODZ1eVZqdUg2aEpRMVpWTitRd245d1B3WTRId0FRPT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.1/NomiFun.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRkS2s0QXVWV0xUbEFtNW5DSDdGZC92Umt4aUNRbHh3bm1QRVozN08rU29jYjhuQ0tmYnhHL0FGcDZoWE9VRVhCTlM4WTMrZzRoWSthSlRmTVZqekE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDk4MzYxCWZpbGU6Tm9taUZ1bl8wLjIuMV94NjQtc2V0dXAuZXhlCk1Qelg4SCtYeDAwalVQL1JoTzR0WVk4OGxjOXdVRmVrLzRaK0I3OVNSZ0JVSUpUdm5JUTN0K2h4SUxlUEFTQUFDc1VvZDhyaHV3Qm1SS1laY2hNMkR3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.1/NomiFun_0.2.1_x64-setup.exe"
     }
   }
 }
