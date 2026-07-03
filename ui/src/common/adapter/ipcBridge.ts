@@ -2124,6 +2124,7 @@ function toPluginStatus(raw: RawPluginStatus): IChannelPluginStatus {
     botUsername: raw.bot_username as string | undefined,
     hasToken: (raw.has_token ?? false) as boolean,
     companionId: raw.companion_id as string | undefined,
+    publicAgentId: raw.public_agent_id as string | null | undefined,
     botKey: raw.bot_key as string | undefined,
     isExtension: raw.is_extension as boolean | undefined,
     extensionMeta: raw.extension_meta as IChannelPluginStatus['extensionMeta'],
@@ -2176,11 +2177,12 @@ export const channel = {
    * 启用/更新机器人渠道。寻址契约（对应后端 EnableChannelSpec）：
    * - `plugin_id` 指向已有渠道行（legacy 调用传平台名）→ 更新该行；
    * - 省略 `plugin_id` 并给 `plugin_type` → 新建一行（每宠多机器人路径）；
-   * - `companion_id` 把机器人绑到伙伴；同一机器人(bot_key)已绑他宠时后端 409。
+   * - `companion_id` 把机器人绑到桌面伙伴，`public_agent_id` 把它绑到对外伙伴
+   *   （二者互斥）；同一机器人(bot_key)已绑其他对象时后端 409。
    */
   enablePlugin: httpPost<
     void,
-    { plugin_id?: string; plugin_type?: string; companion_id?: string; config: Record<string, unknown> }
+    { plugin_id?: string; plugin_type?: string; companion_id?: string; public_agent_id?: string; config: Record<string, unknown> }
   >('/api/channel/plugins/enable'),
   disablePlugin: httpPost<void, { plugin_id: string }>('/api/channel/plugins/disable'),
   /** 删除渠道行：停实例 + 清该渠道会话 + 删行（会话所产生的对话保留）。 */
@@ -2210,6 +2212,16 @@ export const channel = {
    */
   setMasterAgentCompanion: httpPost<void, { platform?: string; plugin_id?: string; companion_id?: string | null }>(
     '/api/channel/settings/companion'
+  ),
+  /**
+   * Bind one public agent (对外伙伴) as the master-agent greeter for a channel row.
+   * Symmetric to {@link setMasterAgentCompanion} but for public agents — a channel
+   * bot serves EITHER a companion OR a public agent (mutually exclusive). Atomic on
+   * the backend: persists the binding AND resets only this channel row's sessions.
+   * A `null` `public_agent_id` clears the binding.
+   */
+  setMasterAgentPublicAgent: httpPost<void, { plugin_id: string; public_agent_id: string | null }>(
+    '/api/channel/settings/public-agent'
   ),
   /**
    * 启动微信扫码登录流程。后端立即返回，二维码生命周期事件经 WebSocket 的
@@ -3741,22 +3753,6 @@ export const publicAgent = {
   /** Purge audit entries older than N days. Returns how many days were cleared. */
   clearAudit: httpDelete<{ deleted_days: number }, { id: string; older_than_days: number }>(
     (p) => `/api/public-agents/${p.id}/audit?older_than_days=${p.older_than_days}`
-  ),
-  /** The public agent bound to a channel platform (`null` when unbound / bound to a companion). */
-  getChannelBinding: httpGet<{ public_agent_id: string | null }, { platform: string }>(
-    (p) => `/api/channels/${p.platform}/public-agent`
-  ),
-  /**
-   * Bind (or unbind with `null`) a channel platform to a public agent. A non-null
-   * id also clears that platform's companion binding server-side (a platform bot
-   * serves EITHER a companion OR a public agent).
-   */
-  setChannelBinding: httpPut<
-    { public_agent_id: string | null },
-    { platform: string; public_agent_id: string | null }
-  >(
-    (p) => `/api/channels/${p.platform}/public-agent`,
-    (p) => ({ public_agent_id: p.public_agent_id })
   ),
 };
 
