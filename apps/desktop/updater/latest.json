@@ -1,11 +1,19 @@
 {
   "version": "0.2.0",
   "notes": "- Public Companion (对外伙伴): a new outward-facing companion domain with its own\n  console, separate from your personal companions. Give an outward companion its\n  own persona, policy, grounding, and knowledge base, and pick the model it answers\n  with — front-loaded right in the overview.\n- Channel deployment: bind a Public Companion to IM platforms per bot, route inbound\n  messages to it, and let it automatically serve strangers. Channel setup is now a\n  real in-console flow (reusing the remote-connect experience).\n- Safe by default: outbound turns run with a clamped, safe tool allowlist, and the\n  answering model is resolved through a single authority (the companion's own model,\n  falling back to the app default).\n- Orchestration supervision and reliability: subagent runs now close the loop with\n  delivery receipts and a stuck-run safety net; failed tasks persist their reason\n  (last_error) with capped backoff; and a supervisor can read richer diagnostics and\n  re-adjust MCP tooling mid-run.\n- Fixed occasional subagent-dispatch hangs with providers that emit tool calls as\n  inline <tool_call> text (now recovered by a fallback parser).\n- Fixes: first-turn reply language follows the OS locale; the channel-config dialog\n  no longer opens behind the drawer; channel auto-serve no longer trips the session\n  foreign-key constraint; completed en-US strings for the Public Companion cards.\n- Packaging note: this release publishes the native Windows x64 installer and updater\n  assets. macOS and Linux packages are added from their own native build machines.",
-  "pub_date": "2026-07-03T05:26:34.008Z",
+  "pub_date": "2026-07-03T05:50:08.547Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHlqeUdFQitROTh1YVdoaENUOVBtTzVVM2NXMGZVOVRBUCt6R2RCSWFJT1F2T3VWT2ZvQmhITEFObERmMWt5MXZHQkVnMzNrUGZnWENHR1ZpUjhYM2djPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDU2MzkyCWZpbGU6Tm9taUZ1bl8wLjIuMF94NjQtc2V0dXAuZXhlCldBNkFqZzdWSEFEVm5EUmVLdzlxTDVaT1B6emVFSlNySnd3UzF1TFBMVjErVDlVMElvZTJtZWw2UzRCeEg1UDg4VDlSQ1h3b0JEbktjOHhmbE5CQ0R3PT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.0/NomiFun_0.2.0_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMyd1dFU1EzeHo4dk5ET3hWWS9UQVgvNk1naFFzdUJMTmVwOGlTSmtEYVFQZzlsQ3lXdzBhVFRqWk1iY0ZJTER0WkI2TUtKSHJZOWt4cytHQ2hRMHdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDU3NDQyCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkFaY3I4bmhPVW9Ja1dkd09xNTlmYWpPeGpLVzV4ZkYxRENNNzhoRjlvbGpuc1hHY0hxMWFjN1Zpei9rVGRxR2RiZWttdldWTURNamlyaVdUMXlSbUJRPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.0/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMyd1dFU1EzeHo4dk5ET3hWWS9UQVgvNk1naFFzdUJMTmVwOGlTSmtEYVFQZzlsQ3lXdzBhVFRqWk1iY0ZJTER0WkI2TUtKSHJZOWt4cytHQ2hRMHdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMDU3NDQyCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkFaY3I4bmhPVW9Ja1dkd09xNTlmYWpPeGpLVzV4ZkYxRENNNzhoRjlvbGpuc1hHY0hxMWFjN1Zpei9rVGRxR2RiZWttdldWTURNamlyaVdUMXlSbUJRPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.0/NomiFun.app.tar.gz"
     }
   }
 }
