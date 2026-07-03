@@ -63,6 +63,12 @@
     "metricModel": "Chat model",
     "modelOk": "Configured",
     "modelUnset": "Not set",
+    "modelTitle": "Chat model",
+    "modelDesc": "The model this companion answers strangers with — the prerequisite for every reply. Pick it here; changes take effect immediately.",
+    "modelReady": "Configured",
+    "modelDefault": "Using default",
+    "modelDefaultHint": "With no model of its own, it answers using the system default model; pin a specific model here for consistent, reliable replies.",
+    "modelSaved": "Chat model updated",
     "dangerTitle": "Delete public companion",
     "dangerDesc": "Permanently delete this public companion and its audit records. This cannot be undone.",
     "deleteTitle": "Delete public companion?",
@@ -148,7 +154,7 @@
     "unbindConfirm": "Once unbound, this bot is no longer served by this public companion and the channel's active sessions are reset.",
     "bindSuccess": "Now served by \"{{name}}\" — sessions on this channel were reset",
     "otherBots": "{{num}} bot(s) bound to other objects",
-    "modelFollowsAgent": "This bot uses the public companion's chat model — configure it on the Identity & Voice tab",
+    "modelFollowsAgent": "This bot uses the public companion's chat model — configure it on the Overview tab",
     "footerHint": "After you connect and bind a bot for a platform, strangers on that channel will be served by this public companion. The bot uses this companion's chat model."
   }
 }
