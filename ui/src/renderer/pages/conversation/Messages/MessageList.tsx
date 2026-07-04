@@ -44,6 +44,7 @@ import {
 } from './components/toolGroupSummaryModel';
 import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
+import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
@@ -202,26 +203,39 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
   return compacted || fallback;
 };
 
-const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): string => {
-  if ((part.state === 'failed' || part.state === 'canceled') && part.target) {
+const getToolReceiptDisplayTarget = (part: ToolReceiptSummaryPart, workspaceRoots: string[]): string | undefined => {
+  if (!part.target) return undefined;
+  if (part.action !== 'read_files' && part.action !== 'edit_files') return part.target;
+  const targets = splitToolReceiptTargets(part.target);
+  return targets.length ? formatFileTargetPreview(targets, { workspaceRoots }) : part.target;
+};
+
+const formatToolReceiptPart = (
+  part: ToolReceiptSummaryPart,
+  t: TranslationFn,
+  workspaceRoots: string[]
+): string => {
+  const displayTarget = getToolReceiptDisplayTarget(part, workspaceRoots);
+
+  if ((part.state === 'failed' || part.state === 'canceled') && displayTarget) {
     return t(`messages.toolSummary.${part.state}`, {
-      target: part.target,
+      target: displayTarget,
       defaultValue: defaultToolSummaryByState[part.state],
     });
   }
 
   switch (part.action) {
     case 'read_files':
-      if (part.target) {
+      if (displayTarget) {
         return part.state === 'running'
           ? t('messages.processReceipt.readingTargets', {
               count: part.count,
-              target: part.target,
+              target: displayTarget,
               defaultValue: 'Reading {{count}} files: {{target}}',
             })
           : t('messages.processReceipt.readTargets', {
               count: part.count,
-              target: part.target,
+              target: displayTarget,
               defaultValue: 'Read {{count}} files: {{target}}',
             });
       }
@@ -235,16 +249,16 @@ const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): 
             defaultValue: 'Read {{count}} files',
           });
     case 'edit_files':
-      if (part.target) {
+      if (displayTarget) {
         return part.state === 'running'
           ? t('messages.processReceipt.editingFileTargets', {
               count: part.count,
-              target: part.target,
+              target: displayTarget,
               defaultValue: 'Editing {{count}} files: {{target}}',
             })
           : t('messages.processReceipt.fileEditTargets', {
               count: part.count,
-              target: part.target,
+              target: displayTarget,
               defaultValue: 'Edited {{count}} files: {{target}}',
             });
       }
@@ -293,9 +307,9 @@ const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): 
           });
     case 'generic':
     default:
-      if (part.target) {
+      if (displayTarget) {
         return t(`messages.toolSummary.${part.state}`, {
-          target: part.target,
+          target: displayTarget,
           defaultValue: defaultToolSummaryByState[part.state],
         });
       }
@@ -336,14 +350,15 @@ const getToolReceiptIcon = (
 const buildProcessReceiptSummary = (
   item: IRenderableItem,
   state: TurnDisclosureProcessState,
-  t: TranslationFn
+  t: TranslationFn,
+  workspaceRoots: string[] = []
 ): { label: string; icon: TurnProcessReceiptIcon; defaultExpanded: boolean } => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
     const receiptParts = buildToolReceiptSummaryParts(tools, state);
     const descriptor = buildToolSummaryDescriptor(tools, state);
     const label = receiptParts.length
-      ? receiptParts.map((part) => formatToolReceiptPart(part, t)).join(' ')
+      ? receiptParts.map((part) => formatToolReceiptPart(part, t, workspaceRoots)).join(' ')
       : descriptor
         ? t(`messages.toolSummary.${state}`, {
             target: descriptor.target,
@@ -462,7 +477,8 @@ const buildProcessReceiptSummary = (
           created_at: item.created_at ?? 0,
         },
         state,
-        t
+        t,
+        workspaceRoots
       );
     default:
       return {
@@ -490,8 +506,12 @@ const TOP_LOAD_THRESHOLD_PX = 96;
 // Image preview context
 export const ImagePreviewContext = createContext<{ inPreviewGroup: boolean }>({ inPreviewGroup: false });
 
-const renderProcessTraceItem = (item: IRenderableItem, variant: 'list' | 'receipt' = 'list') => (
-  <ProcessTraceItem item={item} variant={variant} />
+const renderProcessTraceItem = (
+  item: IRenderableItem,
+  variant: 'list' | 'receipt' = 'list',
+  workspaceRoots: string[] = []
+) => (
+  <ProcessTraceItem item={item} variant={variant} workspaceRoots={workspaceRoots} />
 );
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean }> = React.memo(
@@ -572,6 +592,10 @@ const MessageList: React.FC<{
   const artifacts = useConversationArtifacts();
   const conversationContext = useConversationContextSafe();
   useAutoPreviewOfficeFiles(conversationContext);
+  const workspaceRoots = useMemo(
+    () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
+    [conversationContext?.workspace]
+  );
   const { t } = useTranslation();
   const location = useLocation();
   const locationState = (location.state || {}) as ConversationLocationState;
@@ -735,7 +759,7 @@ const MessageList: React.FC<{
           const item = itemById.get(entry.itemId);
           if (!item) return undefined;
           const state = getProcessItemState(item);
-          const summary = buildProcessReceiptSummary(item, state, t);
+          const summary = buildProcessReceiptSummary(item, state, t, workspaceRoots);
           return {
             type: 'process_receipt',
             id: entry.id,
@@ -768,7 +792,7 @@ const MessageList: React.FC<{
         };
       })
       .filter((item): item is IProcessedItem => Boolean(item));
-  }, [conversationContext?.isProcessing, processedList, t]);
+  }, [conversationContext?.isProcessing, processedList, t, workspaceRoots]);
 
   // Use auto-scroll hook
   const {
@@ -924,7 +948,7 @@ const MessageList: React.FC<{
     <TurnProcessDisclosure
       item={item}
       highlighted={highlighted}
-      renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}
+      renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'list', workspaceRoots)}
       getProcessItemKey={getProcessedItemAnchorId}
       getProcessItemState={getProcessItemState}
     />
@@ -934,7 +958,7 @@ const MessageList: React.FC<{
     <TurnProcessReceipt
       receipt={item}
       highlighted={highlighted}
-      renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'receipt')}
+      renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'receipt', workspaceRoots)}
     />
   );
 
@@ -992,7 +1016,7 @@ const MessageList: React.FC<{
           className={'min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto ' + item.type}
           style={highlighted ? highlightStyle : undefined}
         >
-          {renderProcessTraceItem(item)}
+          {renderProcessTraceItem(item, 'list', workspaceRoots)}
         </div>
       );
     }
