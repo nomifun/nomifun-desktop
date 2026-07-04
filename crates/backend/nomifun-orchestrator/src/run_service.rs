@@ -482,6 +482,7 @@ impl RunService {
                     goal: None,
                     autonomy: None,
                     fleet_snapshot: None,
+                    work_dir: None,
                 },
             )
             .await
@@ -614,6 +615,7 @@ impl RunService {
                     goal: None,
                     autonomy: None,
                     fleet_snapshot: None,
+                    work_dir: None,
                 },
             )
             .await
@@ -851,6 +853,7 @@ impl RunService {
                         goal: None,
                         autonomy: None,
                         fleet_snapshot: None,
+                        work_dir: None,
                     },
                 )
                 .await
@@ -985,6 +988,7 @@ impl RunService {
                         goal: None,
                         autonomy: None,
                         fleet_snapshot: None,
+                        work_dir: None,
                     },
                 )
                 .await
@@ -1216,6 +1220,7 @@ impl RunService {
                     goal: None,
                     autonomy: None,
                     fleet_snapshot: None,
+                    work_dir: None,
                 },
             )
             .await
@@ -1266,6 +1271,7 @@ impl RunService {
                     goal: Some(goal.to_string()),
                     autonomy: None,
                     fleet_snapshot: None,
+                    work_dir: None,
                 },
             )
             .await
@@ -1337,6 +1343,7 @@ impl RunService {
                         goal,
                         autonomy,
                         fleet_snapshot,
+                        work_dir: None,
                     },
                 )
                 .await
@@ -1741,6 +1748,7 @@ impl RunService {
                         goal: None,
                         autonomy: None,
                         fleet_snapshot: None,
+                        work_dir: None,
                     },
                 )
                 .await
