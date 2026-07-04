@@ -15,6 +15,9 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("type: 'turn_process_disclosure'")).toBe(true);
     expect(source.includes('renderTurnDisclosure')).toBe(true);
     expect(source.includes('components/TurnProcessDisclosure')).toBe(true);
+    expect(source.includes("type: 'process_receipt'")).toBe(true);
+    expect(source.includes('renderProcessReceipt')).toBe(true);
+    expect(source.includes('components/TurnProcessReceipt')).toBe(true);
     expect(source.includes('getProcessItemState')).toBe(true);
     expect(source.includes('highlighted={highlighted}')).toBe(true);
   });

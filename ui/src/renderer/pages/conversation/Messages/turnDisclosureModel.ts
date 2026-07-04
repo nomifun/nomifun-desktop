@@ -19,6 +19,7 @@ export interface TurnDisclosureInputItem {
 
 export type TurnDisclosureOutputItem =
   | { type: 'item'; id: string }
+  | { type: 'process_receipt'; id: string; itemId: string }
   | {
       type: 'turn_disclosure';
       id: string;
@@ -65,11 +66,15 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[]): TurnDisclosureO
   }
 
   const state = resolveDisclosureState(processItems);
-  if (finalAssistantIndex === -1 && (state === 'running' || state === 'waiting')) {
-    return segment.map((entry) => ({ type: 'item', id: entry.id }));
+  if (state === 'running' || state === 'waiting') {
+    return segment.map((entry) => {
+      if (entry.role === 'process') {
+        return { type: 'process_receipt', id: `receipt-${entry.id}`, itemId: entry.id };
+      }
+      return { type: 'item', id: entry.id };
+    });
   }
 
-  const shouldStayOpen = state === 'running' || state === 'waiting';
   const finalOrProcessItems =
     finalAssistantIndex === -1 ? processItems : [...processItems, segment[finalAssistantIndex]].filter(Boolean);
   const disclosure: TurnDisclosureOutputItem = {
@@ -81,8 +86,8 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[]): TurnDisclosureO
     startAt: Math.min(...processItems.map((entry) => entry.createdAt)),
     endAt: Math.max(...finalOrProcessItems.map((entry) => entry.createdAt)),
     state,
-    running: shouldStayOpen,
-    defaultCollapsed: !shouldStayOpen,
+    running: false,
+    defaultCollapsed: true,
   };
 
   const output: TurnDisclosureOutputItem[] = [];

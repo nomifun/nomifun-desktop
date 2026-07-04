@@ -444,8 +444,104 @@
   margin-bottom: 0;
 }
 
+.turn-process-receipt {
+  width: 100%;
+  color: var(--color-text-3, #86909c);
+}
+
+.turn-process-receipt--failed,
+.turn-process-receipt--canceled {
+  color: var(--color-danger-6, #f53f3f);
+}
+
+.turn-process-receipt__header {
+  box-sizing: border-box;
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 26px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  padding: 0 2px;
+  text-align: left;
+  user-select: none;
+}
+
+.turn-process-receipt__header:hover {
+  color: var(--color-text-2, #4e5969);
+}
+
+.turn-process-receipt__header:focus-visible {
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--color-primary-light-3, #bedaff);
+  outline: none;
+}
+
+.turn-process-receipt__icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.turn-process-receipt__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-process-receipt__arrow {
+  flex: none;
+  opacity: 0.72;
+  transition: transform 0.16s ease;
+}
+
+.turn-process-receipt__arrow--open {
+  transform: rotate(90deg);
+}
+
+.turn-process-receipt__body {
+  min-width: 0;
+  margin-left: 24px;
+  margin-top: 8px;
+  color: var(--color-text-2, #4e5969);
+}
+
+.turn-process-receipt__body .tool-group-summary {
+  margin: 0;
+}
+
+.turn-process-receipt__body .tool-group-summary__header {
+  display: none;
+}
+
+.turn-process-receipt__body .tool-group-summary__body {
+  margin: 0;
+  padding: 2px 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+.turn-process-receipt__body .message-error-note,
+.turn-process-receipt__body [data-testid='message-permission-card'],
+.turn-process-receipt__body [data-testid='message-acp-permission-card'] {
+  margin-bottom: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .turn-process-disclosure__arrow {
+  .turn-process-disclosure__arrow,
+  .turn-process-receipt__arrow {
     transition: none;
   }
 }

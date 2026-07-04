@@ -63,7 +63,7 @@ describe('buildTurnDisclosureItems', () => {
     ]);
   });
 
-  test('does not collapse an unfinished running turn before the final assistant answer exists', () => {
+  test('renders unfinished running process steps as inline receipts before the final answer exists', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('thinking', 'process', { createdAt: 2000, processState: 'running' }),
@@ -72,38 +72,39 @@ describe('buildTurnDisclosureItems', () => {
 
     expect(result).toEqual([
       { type: 'item', id: 'user' },
-      { type: 'item', id: 'thinking' },
-      { type: 'item', id: 'tool' },
+      { type: 'process_receipt', id: 'receipt-thinking', itemId: 'thinking' },
+      { type: 'process_receipt', id: 'receipt-tool', itemId: 'tool' },
     ]);
   });
 
-  test('defaults a disclosure open while the turn still has a running step', () => {
+  test('keeps running assistant text visible and renders process steps as receipts', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
+      item('progress-note', 'assistant', { createdAt: 1500 }),
       item('thinking', 'process', { createdAt: 2000, processState: 'running' }),
       item('partial-answer', 'assistant', { createdAt: 3000 }),
     ]);
 
-    const disclosure = result[1];
-    expect(disclosure.type).toBe('turn_disclosure');
-    if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(false);
-    expect(disclosure.state).toBe('running');
-    expect(disclosure.processItemIds).toEqual(['thinking']);
+    expect(result).toEqual([
+      { type: 'item', id: 'user' },
+      { type: 'item', id: 'progress-note' },
+      { type: 'process_receipt', id: 'receipt-thinking', itemId: 'thinking' },
+      { type: 'item', id: 'partial-answer' },
+    ]);
   });
 
-  test('keeps a waiting confirmation disclosure open and labels it as waiting', () => {
+  test('keeps waiting confirmation steps visible as inline receipts', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('permission', 'process', { createdAt: 2000, processState: 'waiting' }),
       item('partial-answer', 'assistant', { createdAt: 3000 }),
     ]);
 
-    const disclosure = result[1];
-    expect(disclosure.type).toBe('turn_disclosure');
-    if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(false);
-    expect(disclosure.state).toBe('waiting');
+    expect(result).toEqual([
+      { type: 'item', id: 'user' },
+      { type: 'process_receipt', id: 'receipt-permission', itemId: 'permission' },
+      { type: 'item', id: 'partial-answer' },
+    ]);
   });
 
   test('surfaces failed process state on a completed disclosure', () => {
