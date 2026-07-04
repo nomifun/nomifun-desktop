@@ -11,6 +11,16 @@
     "failed": "Failed {{target}}",
     "canceled": "Canceled {{target}}"
   },
+  "processReceipt": {
+    "tools": "{{count}} tools",
+    "fileEdits": "Edited {{count}} files",
+    "thinkingRunning": "Thinking",
+    "thinkingCompleted": "Thought",
+    "waitingPermission": "Waiting to confirm {{target}}",
+    "agentConnecting": "Connecting {{target}}",
+    "agentFailed": "{{target}} failed",
+    "status": "{{target}}"
+  },
   "turnProcessed": "Processed {{duration}}",
   "turnProcessing": "Processing {{duration}}",
   "turnWaiting": "Waiting for confirmation {{duration}}",
