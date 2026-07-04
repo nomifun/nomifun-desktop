@@ -179,6 +179,7 @@ pub(super) async fn build(
     // 不改审批模式）。伙伴走各自 smart_orchestration；渠道/远程会话不注入（网关拒 Remote）；
     // 对外服务（PublicService）不注入（网关被钳制关闭，spawn 工具不可达，且不得让陌生人扇出）。
     let inject_subagent_hint = should_inject_subagent_hint(
+        overrides.desktop_gateway,
         overrides.companion,
         overrides.channel_platform.is_some(),
         matches!(
@@ -749,13 +750,18 @@ fn append_knowledge_context(
 /// 「智能编排」lead 提示（不再需要 autoOrchestration 开关或 orchestrator_role 角色）。
 pub(crate) const SUBAGENT_STANDARD_HINT: &str = "遇到可并行的独立子任务，或需要成体系拆解的复杂多步任务时，可用 `nomi_spawn(tasks)` 立即并行派发子 agent（每个子任务在右侧编排画布实时可见状态与转录），或用 `nomi_run_create(goal)` 让规划器把目标拆成有依赖关系的任务 DAG（可用模型范围与工作目录自动取用、随即开跑）。派发后拿到 run_id，直接告诉用户已在后台执行、进度可在右侧编排画布查看，然后结束本轮——不要自己轮询等待，也不要重复创建：子任务全部完成或失败时系统会自动把结果回执给你，届时再向用户汇总。简单或单步问题直接作答，无需派发。";
 
-/// 是否给本会话追加常驻 subagent 提示（纯策略，可单测）。伙伴与渠道/远程会话除外。
+/// 是否给本会话追加常驻 subagent 提示（纯策略，可单测）。提示点名的 `nomi_spawn` /
+/// `nomi_run_create` 工具只随桌面网关标配（`desktop_gateway`=true 的本地可信会话），
+/// 故必须 `has_gateway` 才注入——否则会话拿不到这些工具，提示就成了空头支票（远程
+/// WebUI 未授信、对外服务被钳制关网关等）。伙伴走各自 smart_orchestration、渠道/远程
+/// 网关拒 Remote、对外服务恒不注入，故一并排除。
 pub(crate) fn should_inject_subagent_hint(
+    has_gateway: bool,
     is_companion: bool,
     is_channel: bool,
     is_public: bool,
 ) -> bool {
-    !is_companion && !is_channel && !is_public
+    has_gateway && !is_companion && !is_channel && !is_public
 }
 
 /// 把 subagent 提示组合到已有的附加系统提示之后（组合而非替换，保留 preset/人格/知识
@@ -1967,8 +1973,8 @@ mod tests {
 
     #[test]
     fn subagent_hint_injects_for_plain_desktop_session() {
-        // 普通桌面会话（非伙伴、非渠道、非对外）→ 追加 subagent 提示
-        assert!(super::should_inject_subagent_hint(false, false, false));
+        // 普通桌面会话（有网关、非伙伴、非渠道、非对外）→ 追加 subagent 提示
+        assert!(super::should_inject_subagent_hint(true, false, false, false));
         let out = super::compose_subagent_hint(Some("基础提示".to_string()), true);
         let s = out.unwrap();
         assert!(s.starts_with("基础提示"));
@@ -1977,11 +1983,19 @@ mod tests {
     }
 
     #[test]
+    fn subagent_hint_skips_when_gateway_absent() {
+        // 无桌面网关（如远程 WebUI 未授信）→ 不注入：提示点名的 nomi_spawn /
+        // nomi_run_create 工具此时不可达，注入只会成为空头支票。
+        assert!(!super::should_inject_subagent_hint(false, false, false, false));
+    }
+
+    #[test]
     fn subagent_hint_skips_companion_and_channel() {
         // 伙伴有自己的 smart_orchestration；渠道/远程网关拒 Remote，注入是死路；对外服务恒不注入
-        assert!(!super::should_inject_subagent_hint(true, false, false)); // companion
-        assert!(!super::should_inject_subagent_hint(false, true, false)); // channel/remote
-        assert!(!super::should_inject_subagent_hint(false, false, true)); // public service
+        // （下述三例均带网关 true，隔离出各排除维度）
+        assert!(!super::should_inject_subagent_hint(true, true, false, false)); // companion
+        assert!(!super::should_inject_subagent_hint(true, false, true, false)); // channel/remote
+        assert!(!super::should_inject_subagent_hint(true, false, false, true)); // public service
         // inject=false 时原样返回，不追加
         let base = Some("仅基础".to_string());
         assert_eq!(super::compose_subagent_hint(base.clone(), false), base);

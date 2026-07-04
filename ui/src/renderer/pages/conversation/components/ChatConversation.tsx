@@ -172,10 +172,17 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
       });
       const orchestrator_model_range: TModelRange = { mode: 'range', models };
       // extra 顶层浅合并(后端保留同级 extra 键),只覆盖 orchestrator_model_range。
-      await ipcBridge.conversation.update.invoke({
-        id: conversation.id,
-        updates: { extra: { orchestrator_model_range } as TChatConversation['extra'] },
-      });
+      // 内部吞掉失败并 console.error:未持久化的模型范围是低危状态(下次选择即重试),
+      // 不值得打断用户;此处兜底也让两处 `void persistModelRange(...)` 调用点不会产生
+      // 未处理的 promise rejection。
+      try {
+        await ipcBridge.conversation.update.invoke({
+          id: conversation.id,
+          updates: { extra: { orchestrator_model_range } as TChatConversation['extra'] },
+        });
+      } catch (err) {
+        console.error('[ChatConversation] persist orchestrator_model_range failed', err);
+      }
     },
     [conversation.id]
   );
