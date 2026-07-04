@@ -80,7 +80,10 @@ const MatrixConfigForm: React.FC<MatrixConfigFormProps> = ({ pluginStatus, chann
 
   const handleAutoEnable = async () => {
     const config = { credentials: { access_token: accessToken.trim(), homeserver_url: homeserver.trim(), user_id: userId.trim() } };
-    await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'matrix', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'matrix', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'matrix', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'matrix', config });
+    if (!result.success) {
+      throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+    }
     Message.success(t('settings.matrix.pluginEnabled', 'Matrix bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {

@@ -16,6 +16,7 @@ import {
   PLUGIN_ENABLED_KEY,
   PlatformConfigBody,
 } from '@/renderer/components/channels/PlatformConfigBody';
+import { retargetConfigAfterStatus, statusOwnedBy, statusIsUnbound } from '@/renderer/components/channels/channelStatusSelection';
 import { Button, Message, Modal, Switch, Tag } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -105,8 +106,10 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
   // switch and the form address the new row instead of creating another one.
   useEffect(() => {
     if (!configTarget || configTarget.channelId) return;
-    const created = Object.values(statuses).find((s) => s.type === configTarget.platform && s.companionId === companionId);
-    if (created) setConfigTarget({ platform: configTarget.platform, channelId: created.id });
+    const created = Object.values(statuses).find(
+      (s) => s.type === configTarget.platform && statusOwnedBy(s, { companionId })
+    );
+    if (created) setConfigTarget((prev) => retargetConfigAfterStatus(prev, created));
   }, [statuses, configTarget, companionId]);
 
   const companionNameOf = useCallback((id: string | null | undefined) => companions.find((p) => p.id === id)?.name, [companions]);
@@ -123,7 +126,14 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
             Message.warning(t(CREDENTIALS_REQUIRED_KEY[platform]));
             return;
           }
-          await channel.enablePlugin.invoke({ plugin_id: row.id, config: {} });
+          const result = await channel.enablePlugin.invoke({ plugin_id: row.id, config: {} });
+          if (!result.success) {
+            throw new Error(
+              result.error ||
+                result.message ||
+                t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' })
+            );
+          }
           Message.success(t(PLUGIN_ENABLED_KEY[platform]));
         } else {
           await channel.disablePlugin.invoke({ plugin_id: row.id });
@@ -186,6 +196,22 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
       });
     },
     [applyRowBinding, companionName, t]
+  );
+
+  // Move (rebind) a bot that currently belongs to ANOTHER owner onto this
+  // companion. A bot serves exactly one owner at a time, but moving is free —
+  // this reuses the same setMasterAgentCompanion rebind as bind (clears the
+  // channel's old sessions server-side).
+  const confirmMove = useCallback(
+    (row: IChannelPluginStatus) => {
+      const fromName = companionNameOf(row.companionId) ?? row.companionId ?? row.publicAgentId ?? '';
+      Modal.confirm({
+        title: t('nomi.settings.remoteMoveHere'),
+        content: t('nomi.settings.remoteMoveConfirm', { from: fromName, to: companionName }),
+        onOk: () => applyRowBinding(row.id, true),
+      });
+    },
+    [applyRowBinding, companionNameOf, companionName, t]
   );
 
   const confirmDelete = useCallback(
@@ -263,9 +289,9 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
         // (hasToken=true) — without this filter an empty platform would be
         // misread as "an unbound bot exists" and offer a binding that 404s.
         const rows = allRows.filter((s) => s.type === id && s.hasToken);
-        const myRow = rows.find((r) => r.companionId === companionId);
-        const unboundRows = rows.filter((r) => !r.companionId);
-        const otherRows = rows.filter((r) => r.companionId && r.companionId !== companionId);
+        const myRow = rows.find((r) => statusOwnedBy(r, { companionId }));
+        const unboundRows = rows.filter((r) => statusIsUnbound(r));
+        const otherRows = rows.filter((r) => !statusIsUnbound(r) && !statusOwnedBy(r, { companionId }));
         // The row this card talks about: this companion's bot, else a bindable one.
         const focusRow = myRow ?? unboundRows[0] ?? null;
         // Pending-pairing badge is per channel row (keyed by channelId), so a
@@ -313,14 +339,20 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
             </>
           );
         } else if (otherRows.length > 0) {
+          const movable = otherRows[0];
           subtitle = t('nomi.settings.remoteOtherBots', {
             num: otherRows.length,
             companions: otherRows.map((r) => companionNameOf(r.companionId) ?? r.companionId).join(', '),
           });
           actions = (
-            <Button size='small' onClick={() => setConfigTarget({ platform: id })}>
-              {t('nomi.settings.remoteCreateBot')}
-            </Button>
+            <>
+              <Button size='small' type='primary' loading={busyRowId === movable.id} onClick={() => confirmMove(movable)}>
+                {t('nomi.settings.remoteMoveHere')}
+              </Button>
+              <Button size='small' onClick={() => setConfigTarget({ platform: id })}>
+                {t('nomi.settings.remoteCreateBot')}
+              </Button>
+            </>
           );
         } else {
           actions = (
@@ -381,6 +413,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
               // snapshot reconcile (create mode discovers the new row there).
               if (status) {
                 setStatuses((prev) => ({ ...prev, [status.id]: status }));
+                setConfigTarget((prev) => retargetConfigAfterStatus(prev, status));
               }
               void refreshStatuses();
             }}

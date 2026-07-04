@@ -17,7 +17,7 @@ use nomifun_extension::{ExtensionRegistry, ResolvedChannelPlugin};
 use serde::{Deserialize, Serialize};
 
 use crate::channel_settings::ChannelSettingsService;
-use crate::error::ChannelError;
+use crate::error::{ChannelError, ChannelOwner};
 use crate::manager::{ChannelManager, EnableChannelSpec, PluginFactory};
 use crate::message_service::MasterAgentProfile;
 use crate::pairing::PairingService;
@@ -109,7 +109,7 @@ async fn get_plugin_status(
         .map(|plugin| (plugin.id.clone(), plugin))
         .collect();
 
-    let builtin_names: [(&str, &str); 9] = [
+    let builtin_names: [(&str, &str); 12] = [
         ("telegram", "Telegram"),
         ("lark", "Lark"),
         ("dingtalk", "DingTalk"),
@@ -119,6 +119,9 @@ async fn get_plugin_status(
         ("mattermost", "Mattermost"),
         ("weixin", "WeChat"),
         ("wecom", "WeCom"),
+        ("qqbot", "QQ Bot"),
+        ("twitch", "Twitch"),
+        ("nostr", "Nostr"),
     ];
     let builtin_types: std::collections::HashSet<&str> = builtin_names.iter().map(|(id, _)| *id).collect();
 
@@ -369,12 +372,47 @@ async fn enable_plugin(
         }))),
         Err(e) => {
             warn!(plugin_id = ?req.plugin_id, plugin_type = ?req.plugin_type, error = %e, "enable plugin failed");
+            // Resolve the owner NAME for the "already bound" conflict — the manager
+            // only knows the id, but the router holds the roster.
+            let error = match &e {
+                ChannelError::BotAlreadyBound(owner) => already_bound_message(&state, owner).await,
+                _ => e.to_string(),
+            };
             Ok(Json(ApiResponse::ok(BridgeResponse {
                 success: false,
                 message: None,
-                error: Some(e.to_string()),
+                error: Some(error),
             })))
         }
+    }
+}
+
+/// Builds the user-facing "already bound" message, resolving the owner's display
+/// NAME from the roster (the manager only knows the id). Falls back to the id
+/// when the name can't be resolved (deleted owner, or no profile wired), so the
+/// message is always actionable.
+async fn already_bound_message(state: &ChannelRouterState, owner: &ChannelOwner) -> String {
+    let profile = state.master_profile.as_deref();
+    match owner {
+        ChannelOwner::Companion(id) => {
+            let who = match profile {
+                Some(p) => p.companion_name(id).await,
+                None => None,
+            }
+            .map(|name| format!("伙伴「{name}」"))
+            .unwrap_or_else(|| format!("伙伴「{id}」"));
+            format!("此机器人已绑定{who}，请先在该伙伴处解绑或删除后再在此使用。")
+        }
+        ChannelOwner::PublicAgent(id) => {
+            let who = match profile {
+                Some(p) => p.public_agent_name(id).await,
+                None => None,
+            }
+            .map(|name| format!("对外伙伴「{name}」"))
+            .unwrap_or_else(|| format!("对外伙伴「{id}」"));
+            format!("此机器人已绑定{who}，请先在该对外伙伴处解绑或删除后再在此使用。")
+        }
+        ChannelOwner::Channel(id) => format!("此机器人已被渠道「{id}」占用。"),
     }
 }
 

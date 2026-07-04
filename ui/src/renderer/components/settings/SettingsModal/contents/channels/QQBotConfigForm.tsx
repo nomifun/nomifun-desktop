@@ -6,6 +6,7 @@
 
 import type { IChannelPairingRequest, IChannelPluginStatus, IChannelUser } from '@/common/types/channel/channel';
 import { channel } from '@/common/adapter/ipcBridge';
+import { findEnabledChannelStatus } from '@/renderer/components/channels/channelStatusSelection';
 import { Button, Empty, Input, Message, Spin, Tooltip } from '@arco-design/web-react';
 import { CheckOne, CloseOne, Delete, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
@@ -16,10 +17,16 @@ interface QQBotConfigFormProps {
   pluginStatus: IChannelPluginStatus | null;
   channelTarget?: ChannelTarget;
   onStatusChange: (status: IChannelPluginStatus | null) => void;
+  onCredentialsChange?: (credentials: { appId: string; clientSecret: string }) => void;
 }
 
 /** QQ Bot config: AppID + ClientSecret (OAuth2 client-credentials). */
-const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({ pluginStatus, channelTarget, onStatusChange }) => {
+const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
+  pluginStatus,
+  channelTarget,
+  onStatusChange,
+  onCredentialsChange,
+}) => {
   const { t } = useTranslation();
   const [appId, setAppId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -54,6 +61,13 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({ pluginStatus, channel
     void loadAuthorizedUsers();
   }, [loadPendingPairings, loadAuthorizedUsers]);
 
+  // Single source of truth: mirror the typed credentials up to the parent
+  // (PlatformConfigBody's qqbotCredentialsRef) whenever they change, so the
+  // shared 「启用渠道」 switch can enable with as-yet-unsaved credentials.
+  useEffect(() => {
+    onCredentialsChange?.({ appId, clientSecret });
+  }, [appId, clientSecret, onCredentialsChange]);
+
   useEffect(() => {
     const unsub = channel.pairingRequested.on((request) => {
       if (request.platformType !== 'qqbot') return;
@@ -75,12 +89,40 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({ pluginStatus, channel
 
   const handleAutoEnable = async () => {
     const config = { credentials: { client_id: appId.trim(), client_secret: clientSecret.trim() } };
-    await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'qqbot', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'qqbot', config });
+    const result = await channel.enablePlugin.invoke(
+      channelTarget
+        ? {
+            plugin_id: channelTarget.channelId,
+            plugin_type: 'qqbot',
+            ...(channelTarget.publicAgentId
+              ? { public_agent_id: channelTarget.publicAgentId }
+              : { companion_id: channelTarget.companionId }),
+            config,
+          }
+        : { plugin_id: 'qqbot', config }
+    );
+    if (!result.success) {
+      throw new Error(
+        result.error ||
+          result.message ||
+          t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' })
+      );
+    }
     Message.success(t('settings.qqbot.pluginEnabled', 'QQ bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
-      const row = channelTarget ? (channelTarget.channelId ? plugins.find((p) => p.id === channelTarget.channelId) : plugins.find((p) => p.type === 'qqbot' && p.companionId === channelTarget.companionId)) : plugins.find((p) => p.type === 'qqbot');
-      onStatusChange(row || null);
+      // Prefer the row id the backend just returned (result.message) — this
+      // survives create-mode row creation AND identity-reuse where the adopted
+      // row id differs from what we targeted — then fall back to the owner match.
+      const row = findEnabledChannelStatus(plugins, {
+        platform: 'qqbot',
+        enabledPluginId: result.message,
+        companionId: channelTarget?.companionId,
+        publicAgentId: channelTarget?.publicAgentId,
+      });
+      // Only report a resolved row — feeding the parent `null` would skip its
+      // optimistic merge + retarget (the adopt effect + next refresh still heal).
+      if (row) onStatusChange(row);
     }
   };
 
