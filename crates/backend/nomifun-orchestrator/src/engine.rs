@@ -1713,6 +1713,15 @@ async fn settle_failed_or_retry(
     // Run-level total-retry budget: bound wide fan-outs so many independently
     // backing-off nodes cannot storm the provider. Stateless: sum of persisted
     // attempts across the run vs tasks.len() * max_worker_retries.
+    //
+    // NOTE on coupling: the cap is expressed in `max_worker_retries`, and each
+    // node's own budget already caps its attempts, so this run gate only binds
+    // AFTER nodes have exhausted their per-node budgets (inert under defaults
+    // 3/2). Two consequences to keep in mind: (a) `max_worker_retries == 0`
+    // makes `cap == 0` → this gate blocks ALL retries incl. NoMarker timeouts,
+    // regardless of `max_timeout_retries`; (b) a caller setting
+    // `max_timeout_retries > max_worker_retries` would have timeout retries
+    // throttled by this run cap. Both are as-designed (per spec) but non-obvious.
     let within_run_budget = match deps.run_repo.list_tasks(run_id).await {
         Ok(tasks) => {
             let used: i64 = tasks.iter().map(|t| t.attempt).sum();
