@@ -69,7 +69,7 @@ impl IChannelRepository for SqliteChannelRepository {
         .map_err(|e| {
             if is_unique_violation(&e) {
                 DbError::Conflict(format!(
-                    "Bot '{}' on platform '{}' is already connected",
+                    "Bot '{}' on platform '{}' is already configured",
                     row.bot_key.as_deref().unwrap_or("?"),
                     row.r#type
                 ))
@@ -176,7 +176,7 @@ impl IChannelRepository for SqliteChannelRepository {
             .await
             .map_err(|e| {
                 if is_unique_violation(&e) {
-                    DbError::Conflict(format!("Bot '{bot_key}' is already connected"))
+                    DbError::Conflict(format!("Bot '{bot_key}' is already configured"))
                 } else {
                     DbError::Query(e)
                 }

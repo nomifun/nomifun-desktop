@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::constants::{
     WATCHDOG_BACKOFF_BASE, WATCHDOG_MAX_RESTARTS_PER_WINDOW, WATCHDOG_RESTART_WINDOW, WATCHDOG_SWEEP_INTERVAL,
 };
-use crate::error::ChannelError;
+use crate::error::{ChannelError, ChannelOwner};
 use crate::plugin::{ChannelPlugin, PluginCallbacks};
 use crate::types::{ChannelIncoming, PluginConfig, PluginStatus, PluginType, UnifiedIncomingMessage, bot_key_for};
 
@@ -209,7 +209,7 @@ impl ChannelManager {
             Some(id) => self.repo.get_plugin(id).await?,
             None => None,
         };
-        let (row_id, plugin_type, created_at, prior_companion, prior_public_agent) =
+        let (mut row_id, plugin_type, mut created_at, mut prior_companion, mut prior_public_agent) =
             match (&existing, spec.plugin_id.as_deref()) {
                 (Some(row), _) => {
                     let pt = PluginType::from_str_opt(&row.r#type)
@@ -239,11 +239,12 @@ impl ChannelManager {
             };
 
         // Parse and validate config structure
-        let config: PluginConfig = serde_json::from_value(config_value.clone())
-            .map_err(|e| ChannelError::InvalidConfig(format!("Invalid config: {e}")))?;
+        let config = self.plugin_config_from_request(config_value, existing.as_ref())?;
 
-        // One bot, one companion: the same bot identity on another row would let a
-        // second companion answer for it. Reject before touching anything.
+        // One bot, one live binding: the same bot identity on another row would
+        // let a second companion/public agent answer for it. A row that failed
+        // before its first successful connection is only a stale draft; reuse it
+        // instead of reporting a false "already connected" conflict.
         let bot_key = bot_key_for(plugin_type, &config.credentials);
         if let Some(key) = bot_key.as_deref() {
             let clash = self
@@ -253,12 +254,23 @@ impl ChannelManager {
                 .into_iter()
                 .find(|r| r.id != row_id && r.r#type == plugin_type.to_string() && r.bot_key.as_deref() == Some(key));
             if let Some(other) = clash {
-                let bound_to = other
-                    .companion_id
-                    .filter(|p| !p.is_empty())
-                    .map(|p| format!("companion '{p}'"))
-                    .unwrap_or_else(|| format!("channel '{}'", other.id));
-                return Err(ChannelError::BotAlreadyBound(bound_to));
+                if existing.is_none()
+                    && spec.plugin_id.is_none()
+                    && self.can_reuse_identity_row_for_spec(&other, spec)
+                {
+                    info!(
+                        plugin_id = %other.id,
+                        plugin_type = %plugin_type,
+                        bot_key = %key,
+                        "reusing existing channel row for bot identity"
+                    );
+                    row_id = other.id.clone();
+                    created_at = other.created_at;
+                    prior_companion = other.companion_id;
+                    prior_public_agent = other.public_agent_id;
+                } else {
+                    return Err(ChannelError::BotAlreadyBound(Self::bound_owner(&other)));
+                }
             }
         }
 
@@ -507,6 +519,112 @@ impl ChannelManager {
         }
 
         info!(companion_id = %companion_id, channels = cleared, "cleared channel sessions for companion model change");
+    }
+
+    /// Clears any channel-row companion bindings that point at a deleted
+    /// companion, then clears those channels' sessions. This prevents ghost
+    /// `companion_id`s from reserving bot identities after the owner is gone.
+    pub async fn unbind_channels_for_deleted_companion(&self, companion_id: &str) {
+        let companion_id = companion_id.trim();
+        if companion_id.is_empty() {
+            return;
+        }
+
+        let rows = match self.repo.get_all_plugins().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(companion_id = %companion_id, error = %e, "unbind_channels_for_deleted_companion: failed to list plugins");
+                return;
+            }
+        };
+
+        let mut unbound = 0usize;
+        for row in rows
+            .into_iter()
+            .filter(|r| r.companion_id.as_deref().map(str::trim) == Some(companion_id))
+        {
+            if let Err(e) = self.repo.update_plugin_companion(&row.id, None).await {
+                warn!(
+                    plugin_id = %row.id,
+                    companion_id = %companion_id,
+                    error = %e,
+                    "unbind_channels_for_deleted_companion: failed to clear binding"
+                );
+                continue;
+            }
+            if let Err(e) = self.repo.delete_sessions_by_channel(&row.id).await {
+                warn!(
+                    plugin_id = %row.id,
+                    companion_id = %companion_id,
+                    error = %e,
+                    "unbind_channels_for_deleted_companion: failed to clear channel sessions"
+                );
+            }
+            self.broadcast_status_change(&row.id).await;
+            unbound += 1;
+        }
+
+        info!(companion_id = %companion_id, channels = unbound, "unbound channels for deleted companion");
+    }
+
+    /// Startup self-heal: unbinds any channel row whose owner (companion or
+    /// public agent) is no longer in the live roster, then clears that row's
+    /// sessions. A companion/public-agent deleted BEFORE the delete-hook existed
+    /// (or missed by it) leaves a ghost `companion_id`/`public_agent_id` that
+    /// keeps reserving the bot identity (UNIQUE(type,bot_key)), so re-enabling
+    /// the same bot under a live owner fails with `BotAlreadyBound` forever. An
+    /// unbound row is adoptable again on the next enable (the `can_reuse`
+    /// both-owners-empty branch), so this rescues rows orphaned in the past.
+    /// Best-effort: per-row failures are logged and skipped.
+    pub async fn reconcile_orphaned_owners(
+        &self,
+        live_companions: &HashSet<String>,
+        live_public_agents: &HashSet<String>,
+    ) {
+        let rows = match self.repo.get_all_plugins().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                warn!(error = %e, "reconcile_orphaned_owners: failed to list plugins");
+                return;
+            }
+        };
+
+        let mut healed = 0usize;
+        for row in rows {
+            let orphan_companion = matches!(
+                row.companion_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                Some(c) if !live_companions.contains(c)
+            );
+            let orphan_public_agent = matches!(
+                row.public_agent_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                Some(p) if !live_public_agents.contains(p)
+            );
+            if !orphan_companion && !orphan_public_agent {
+                continue;
+            }
+
+            if orphan_companion {
+                if let Err(e) = self.repo.update_plugin_companion(&row.id, None).await {
+                    warn!(plugin_id = %row.id, error = %e, "reconcile_orphaned_owners: failed to clear companion binding");
+                    continue;
+                }
+            }
+            if orphan_public_agent {
+                if let Err(e) = self.repo.update_plugin_public_agent(&row.id, None).await {
+                    warn!(plugin_id = %row.id, error = %e, "reconcile_orphaned_owners: failed to clear public-agent binding");
+                    continue;
+                }
+            }
+            if let Err(e) = self.repo.delete_sessions_by_channel(&row.id).await {
+                warn!(plugin_id = %row.id, error = %e, "reconcile_orphaned_owners: failed to clear channel sessions");
+            }
+            self.broadcast_status_change(&row.id).await;
+            healed += 1;
+        }
+
+        if healed > 0 {
+            info!(channels = healed, "reconcile_orphaned_owners: unbound channels whose owner no longer exists");
+        }
     }
 
     /// Tests plugin credentials without persisting.
@@ -765,6 +883,77 @@ impl ChannelManager {
     }
 
     // ── Private helpers ──────────────────────────────────────────────
+
+    /// Parses request config, or reuses the row's saved encrypted config when
+    /// callers re-enable an existing channel with an empty `{}` payload.
+    fn plugin_config_from_request(
+        &self,
+        config_value: &serde_json::Value,
+        existing: Option<&ChannelPluginRow>,
+    ) -> Result<PluginConfig, ChannelError> {
+        let empty_object = config_value.as_object().map(|m| m.is_empty()).unwrap_or(false);
+        if !empty_object {
+            return serde_json::from_value(config_value.clone())
+                .map_err(|e| ChannelError::InvalidConfig(format!("Invalid config: {e}")));
+        }
+
+        let row = existing.ok_or_else(|| ChannelError::InvalidConfig("credentials are required".into()))?;
+        let config_json = decrypt_string(&row.config, &self.encryption_key)
+            .map_err(|e| ChannelError::DecryptionFailed(e.to_string()))?;
+        serde_json::from_str(&config_json)
+            .map_err(|e| ChannelError::InvalidConfig(format!("Stored config is invalid: {e}")))
+    }
+
+    /// Decide whether a create-mode enable should adopt an existing row with
+    /// the same bot identity instead of trying to insert a duplicate.
+    ///
+    /// Reuse is correct when the row already belongs to the requested owner
+    /// (the UI simply lost the row id), when the row is unbound, or when it is
+    /// only a failed draft that never reached a successful connection.
+    fn can_reuse_identity_row_for_spec(&self, row: &ChannelPluginRow, spec: &EnableChannelSpec) -> bool {
+        let requested_companion = spec
+            .companion_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let requested_public_agent = spec
+            .public_agent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let row_companion = row.companion_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let row_public_agent = row.public_agent_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        if let Some(companion_id) = requested_companion
+            && row_companion == Some(companion_id)
+            && row_public_agent.is_none()
+        {
+            return true;
+        }
+        if let Some(public_agent_id) = requested_public_agent
+            && row_public_agent == Some(public_agent_id)
+            && row_companion.is_none()
+        {
+            return true;
+        }
+        if row_companion.is_none() && row_public_agent.is_none() {
+            return true;
+        }
+
+        !self.plugins.contains_key(&row.id)
+            && row.last_connected.is_none()
+            && row.status.as_deref() != Some("running")
+    }
+
+    fn bound_owner(row: &ChannelPluginRow) -> ChannelOwner {
+        if let Some(companion) = row.companion_id.as_deref().filter(|p| !p.is_empty()) {
+            ChannelOwner::Companion(companion.to_owned())
+        } else if let Some(public_agent) = row.public_agent_id.as_deref().filter(|p| !p.is_empty()) {
+            ChannelOwner::PublicAgent(public_agent.to_owned())
+        } else {
+            ChannelOwner::Channel(row.id.clone())
+        }
+    }
 
     /// Per-instance callbacks: a forwarder task stamps every message this
     /// plugin emits with its channel row id (plugins stay channel-agnostic).
@@ -1558,6 +1747,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enable_existing_plugin_with_empty_config_reuses_saved_config() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &make_test_config(), &factory)
+            .await
+            .unwrap();
+
+        mgr.enable_plugin(&EnableChannelSpec::legacy("telegram"), &serde_json::json!({}), &factory)
+            .await
+            .unwrap();
+
+        assert!(mgr.is_plugin_running("telegram"));
+        assert_eq!(mgr.active_plugin_count(), 1);
+        assert_eq!(repo.get_plugins()[0].bot_key.as_deref(), Some("bot"));
+    }
+
+    #[tokio::test]
     async fn enable_invalid_plugin_type_fails() {
         let (mgr, _repo, _bc) = make_manager();
         let factory = make_factory();
@@ -1987,6 +2194,21 @@ mod tests {
         })
     }
 
+    fn qqbot_spec(companion: &str) -> EnableChannelSpec {
+        EnableChannelSpec {
+            plugin_id: None,
+            plugin_type: Some("qqbot".into()),
+            companion_id: Some(companion.into()),
+            public_agent_id: None,
+        }
+    }
+
+    fn qqbot_config_with_app(app_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "credentials": { "client_id": app_id, "client_secret": "s3cret" }
+        })
+    }
+
     fn make_incoming(id: &str) -> UnifiedIncomingMessage {
         use crate::types::{MessageContentType, UnifiedMessageContent, UnifiedUser};
         UnifiedIncomingMessage {
@@ -2045,13 +2267,170 @@ mod tests {
             .unwrap_err();
         match err {
             ChannelError::BotAlreadyBound(ref bound_to) => {
-                assert!(bound_to.contains("companion_a"), "error should name the bound companion: {bound_to}");
+                assert!(
+                    bound_to.to_string().contains("companion_a"),
+                    "error should name the bound companion: {bound_to}"
+                );
             }
             other => panic!("expected BotAlreadyBound, got {other:?}"),
         }
         // The rejected attempt must not have touched persistence or runtime.
         assert_eq!(repo.get_plugins().len(), 1);
         assert_eq!(mgr.active_plugin_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn same_bot_for_same_companion_reuses_existing_row() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let first_id = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+        mgr.disable_plugin(&first_id).await.unwrap();
+        assert!(repo.get_plugins()[0].last_connected.is_some());
+
+        let reused_id = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+
+        assert_eq!(reused_id, first_id);
+        assert_eq!(repo.get_plugins().len(), 1);
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+        assert!(mgr.is_plugin_running(&first_id));
+    }
+
+    #[tokio::test]
+    async fn qqbot_same_appid_for_same_companion_reuses_error_row() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let companion_id = "companion_1kwgygw5ryvedy89";
+        let app_id = "1904991044";
+        let first_id = mgr
+            .enable_plugin(&qqbot_spec(companion_id), &qqbot_config_with_app(app_id), &factory)
+            .await
+            .unwrap();
+        mgr.disable_plugin(&first_id).await.unwrap();
+        {
+            let mut rows = repo.plugins.lock().unwrap();
+            rows[0].enabled = true;
+            rows[0].status = Some("error".into());
+        }
+
+        let reused_id = mgr
+            .enable_plugin(&qqbot_spec(companion_id), &qqbot_config_with_app(app_id), &factory)
+            .await
+            .unwrap();
+
+        assert_eq!(reused_id, first_id);
+        let rows = repo.get_plugins();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].companion_id.as_deref(), Some(companion_id));
+        assert_eq!(rows[0].bot_key.as_deref(), Some(app_id));
+        assert!(mgr.is_plugin_running(&first_id));
+    }
+
+    #[tokio::test]
+    async fn same_bot_for_same_public_agent_reuses_existing_row() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let first_id = mgr
+            .enable_plugin(&lark_public_agent_spec("pubagent_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+        mgr.disable_plugin(&first_id).await.unwrap();
+
+        let reused_id = mgr
+            .enable_plugin(&lark_public_agent_spec("pubagent_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+
+        assert_eq!(reused_id, first_id);
+        assert_eq!(repo.get_plugins().len(), 1);
+        assert_eq!(repo.get_plugins()[0].public_agent_id.as_deref(), Some("pubagent_a"));
+        assert!(mgr.is_plugin_running(&first_id));
+    }
+
+    #[tokio::test]
+    async fn same_bot_unbound_row_is_adopted_by_requested_companion() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let first_id = mgr
+            .enable_plugin(
+                &EnableChannelSpec {
+                    plugin_id: None,
+                    plugin_type: Some("lark".into()),
+                    companion_id: None,
+                    public_agent_id: None,
+                },
+                &lark_config_with_app("cli_app_1"),
+                &factory,
+            )
+            .await
+            .unwrap();
+
+        let reused_id = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+
+        assert_eq!(reused_id, first_id);
+        assert_eq!(repo.get_plugins().len(), 1);
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
+    }
+
+    #[tokio::test]
+    async fn never_connected_failed_bot_row_is_reused_instead_of_blocking() {
+        let (mgr, repo, _bc) = make_manager();
+        let failing_factory = make_failing_start_factory();
+        let factory = make_factory();
+
+        let err = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &failing_factory)
+            .await;
+        assert!(err.is_err());
+        let failed_id = repo.get_plugins()[0].id.clone();
+        assert_eq!(repo.get_plugins()[0].status.as_deref(), Some("error"));
+        assert!(repo.get_plugins()[0].last_connected.is_none());
+        assert_eq!(mgr.active_plugin_count(), 0);
+
+        let reused_id = mgr
+            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+
+        assert_eq!(reused_id, failed_id);
+        let plugins = repo.get_plugins();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].companion_id.as_deref(), Some("companion_b"));
+        assert_eq!(plugins[0].bot_key.as_deref(), Some("cli_app_1"));
+        assert!(mgr.is_plugin_running(&reused_id));
+    }
+
+    #[tokio::test]
+    async fn previously_connected_disabled_bot_still_blocks_second_companion() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let id = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap();
+        mgr.disable_plugin(&id).await.unwrap();
+        assert_eq!(mgr.active_plugin_count(), 0);
+        assert!(repo.get_plugins()[0].last_connected.is_some());
+
+        let err = mgr
+            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_1"), &factory)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::BotAlreadyBound(_)));
+        assert_eq!(repo.get_plugins()[0].companion_id.as_deref(), Some("companion_a"));
     }
 
     #[tokio::test]
@@ -2248,6 +2627,72 @@ mod tests {
         assert_eq!(cleared.len(), 2, "only companion_a's two channels cleared: {cleared:?}");
         assert!(cleared.contains(&id_a1));
         assert!(cleared.contains(&id_a2));
+    }
+
+    #[tokio::test]
+    async fn unbind_channels_for_deleted_companion_clears_bindings_and_sessions() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let id_a = mgr
+            .enable_plugin(&lark_spec("companion_a"), &lark_config_with_app("cli_app_a"), &factory)
+            .await
+            .unwrap();
+        let id_b = mgr
+            .enable_plugin(&lark_spec("companion_b"), &lark_config_with_app("cli_app_b"), &factory)
+            .await
+            .unwrap();
+
+        mgr.unbind_channels_for_deleted_companion("companion_a").await;
+
+        let rows = repo.get_plugins();
+        let row_a = rows.iter().find(|r| r.id == id_a).unwrap();
+        let row_b = rows.iter().find(|r| r.id == id_b).unwrap();
+        assert!(row_a.companion_id.is_none());
+        assert_eq!(row_b.companion_id.as_deref(), Some("companion_b"));
+        assert_eq!(repo.cleared_channels(), vec![id_a]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_orphaned_owners_unbinds_only_dead_owners() {
+        let (mgr, repo, _bc) = make_manager();
+        let factory = make_factory();
+
+        let live_id = mgr
+            .enable_plugin(&lark_spec("companion_live"), &lark_config_with_app("cli_live"), &factory)
+            .await
+            .unwrap();
+        let ghost_companion_id = mgr
+            .enable_plugin(&lark_spec("companion_ghost"), &lark_config_with_app("cli_ghost"), &factory)
+            .await
+            .unwrap();
+        let ghost_pa_id = mgr
+            .enable_plugin(
+                &lark_public_agent_spec("pubagent_ghost"),
+                &lark_config_with_app("cli_pa_ghost"),
+                &factory,
+            )
+            .await
+            .unwrap();
+
+        // Only `companion_live` still exists; both ghosts must be unbound.
+        let live_companions = std::collections::HashSet::from(["companion_live".to_string()]);
+        let live_public_agents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        mgr.reconcile_orphaned_owners(&live_companions, &live_public_agents).await;
+
+        let rows = repo.get_plugins();
+        let live = rows.iter().find(|r| r.id == live_id).unwrap();
+        let ghost_c = rows.iter().find(|r| r.id == ghost_companion_id).unwrap();
+        let ghost_p = rows.iter().find(|r| r.id == ghost_pa_id).unwrap();
+
+        assert_eq!(live.companion_id.as_deref(), Some("companion_live"), "live owner preserved");
+        assert!(ghost_c.companion_id.is_none(), "ghost companion unbound");
+        assert!(ghost_p.public_agent_id.is_none(), "ghost public agent unbound");
+
+        let cleared = repo.cleared_channels();
+        assert!(cleared.contains(&ghost_companion_id), "ghost companion sessions cleared");
+        assert!(cleared.contains(&ghost_pa_id), "ghost public-agent sessions cleared");
+        assert!(!cleared.contains(&live_id), "live row sessions untouched");
     }
 
     #[tokio::test]

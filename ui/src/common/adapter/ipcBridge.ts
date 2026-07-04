@@ -2111,6 +2111,12 @@ type RawPairing = Record<string, unknown>;
 type RawUser = Record<string, unknown>;
 type RawSession = Record<string, unknown>;
 
+interface IChannelBridgeResponse {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
 function toPluginStatus(raw: RawPluginStatus): IChannelPluginStatus {
   return {
     id: (raw.plugin_id ?? raw.id) as string,
@@ -2181,7 +2187,7 @@ export const channel = {
    *   （二者互斥）；同一机器人(bot_key)已绑其他对象时后端 409。
    */
   enablePlugin: httpPost<
-    void,
+    IChannelBridgeResponse,
     { plugin_id?: string; plugin_type?: string; companion_id?: string; public_agent_id?: string; config: Record<string, unknown> }
   >('/api/channel/plugins/enable'),
   disablePlugin: httpPost<void, { plugin_id: string }>('/api/channel/plugins/disable'),

@@ -38,6 +38,13 @@ pub trait MasterAgentProfile: Send + Sync {
     /// writes and to skip dead channel bindings.
     async fn companion_exists(&self, companion_id: &str) -> bool;
 
+    /// Display name of `companion_id`, `None` when it does not exist. Used only to
+    /// render a friendlier "already bound to companion …" error (name over raw id).
+    /// Default `None` keeps companion-only / test impls unaffected.
+    async fn companion_name(&self, _companion_id: &str) -> Option<String> {
+        None
+    }
+
     /// Idempotently resolve (create-or-get) the companion's ONE persistent
     /// session conversation id. This is what unifies a companion's IM-channel
     /// turns into the SAME session the desktop bubble and chat tab use, instead
@@ -66,6 +73,12 @@ pub trait MasterAgentProfile: Send + Sync {
     /// domain wired) — the binding route then rejects unknown ids.
     async fn public_agent_exists(&self, _id: &str) -> bool {
         false
+    }
+
+    /// Display name of public agent `id`, `None` when it does not exist. Used only
+    /// to render a friendlier "already bound to public agent …" error. Default `None`.
+    async fn public_agent_name(&self, _id: &str) -> Option<String> {
+        None
     }
 
     /// The configured answering model of public agent `id`, `None` when the agent

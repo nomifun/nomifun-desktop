@@ -499,6 +499,15 @@ impl nomifun_channel::message_service::MasterAgentProfile for CompanionMasterAge
         self.companion_service.get_companion(companion_id).await.is_ok()
     }
 
+    async fn companion_name(&self, companion_id: &str) -> Option<String> {
+        self.companion_service
+            .get_companion(companion_id)
+            .await
+            .ok()
+            .map(|c| c.name)
+            .filter(|n| !n.trim().is_empty())
+    }
+
     async fn ensure_companion_session(&self, companion_id: &str) -> Option<i64> {
         // Idempotent: returns the companion's existing single session or mints a
         // new one (requires the companion's chat model to be configured, else
@@ -536,6 +545,15 @@ impl nomifun_channel::message_service::MasterAgentProfile for CompanionMasterAge
 
     async fn public_agent_exists(&self, id: &str) -> bool {
         self.public_agent_service.exists(id).await
+    }
+
+    async fn public_agent_name(&self, id: &str) -> Option<String> {
+        self.public_agent_service
+            .get(id)
+            .await
+            .ok()
+            .map(|a| a.name)
+            .filter(|n| !n.trim().is_empty())
     }
 
     async fn public_agent_model(&self, id: &str) -> Option<nomifun_common::ProviderWithModel> {
@@ -1439,7 +1457,7 @@ struct CompanionChannelModelSync {
 #[async_trait::async_trait]
 impl nomifun_companion::service::CompanionCleanupHook for CompanionChannelModelSync {
     async fn on_companion_deleted(&self, companion_id: &str) {
-        self.manager.clear_sessions_for_companion(companion_id).await;
+        self.manager.unbind_channels_for_deleted_companion(companion_id).await;
     }
     async fn on_companion_model_changed(&self, companion_id: &str) {
         self.manager.clear_sessions_for_companion(companion_id).await;

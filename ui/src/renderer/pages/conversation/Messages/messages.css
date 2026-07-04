@@ -1,5 +1,326 @@
+.message-error-note {
+  --message-error-accent: var(--danger);
+  --message-error-accent-alt: var(--warning);
+
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 5px minmax(0, 1fr);
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-base);
+  border-color: color-mix(in srgb, var(--message-error-accent) 18%, var(--border-base));
+  border-radius: 8px;
+  background: var(--color-bg-1);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--message-error-accent) 4%, var(--color-bg-1)) 0%,
+    var(--color-bg-1) 52%,
+    color-mix(in srgb, var(--message-error-accent-alt) 3%, var(--color-bg-1)) 100%
+  );
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 10px 24px rgba(15, 23, 42, 0.035);
+}
+
+.message-error-note--user_llm_provider {
+  --message-error-accent: #2563eb;
+  --message-error-accent-alt: #13c1b8;
+}
+
+.message-error-note--user_agent {
+  --message-error-accent: var(--warning);
+  --message-error-accent-alt: #f59e0b;
+}
+
+.message-error-note--nomifun {
+  --message-error-accent: var(--danger);
+  --message-error-accent-alt: #e11d48;
+}
+
+.message-error-note--unknown_upstream {
+  --message-error-accent: #64748b;
+  --message-error-accent-alt: var(--danger);
+}
+
+[data-theme='dark'] .message-error-note {
+  box-shadow: none;
+}
+
+[data-theme='dark'] .message-error-note--user_llm_provider {
+  --message-error-accent: #78a9ff;
+  --message-error-accent-alt: #2dd4bf;
+}
+
+[data-theme='dark'] .message-error-note--unknown_upstream {
+  --message-error-accent: #94a3b8;
+}
+
+.message-error-note__rail {
+  min-width: 0;
+  background: linear-gradient(180deg, var(--message-error-accent), var(--message-error-accent-alt));
+}
+
+.message-error-note__content {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 12px;
+}
+
+.message-error-note__header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+}
+
+.message-error-note__status,
+.message-error-note__meta,
+.message-error-note__actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.message-error-note__status {
+  gap: 8px;
+}
+
+.message-error-note__icon {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--message-error-accent) 12%, transparent);
+  color: var(--message-error-accent);
+}
+
+.message-error-note__icon > * {
+  margin-top: 0 !important;
+}
+
+.message-error-note__owner {
+  min-width: 0;
+  color: var(--color-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.message-error-note__main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 32px;
+}
+
+.message-error-note__meta {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.message-error-note__tag {
+  margin: 0;
+}
+
+.message-error-note__code {
+  min-width: 0;
+  max-width: clamp(180px, 28vw, 320px);
+  overflow: hidden;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--message-error-accent) 8%, transparent);
+  color: var(--color-text-2);
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 11px;
+  line-height: 18px;
+  padding: 1px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-error-note__title {
+  color: var(--color-text-1);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
+.message-error-note__body {
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: break-spaces;
+  word-break: break-word;
+}
+
+.message-error-note__resolution {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--message-error-accent) 6%, transparent);
+  color: var(--color-text-2);
+  font-size: 13px;
+  line-height: 20px;
+  padding: 6px 8px;
+  word-break: break-word;
+}
+
+.message-error-note__resolution-label {
+  color: var(--color-text-1);
+  font-weight: 600;
+}
+
+.message-error-note__footer {
+  min-width: 0;
+  margin-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--message-error-accent) 12%, var(--border-base));
+  padding-top: 7px;
+}
+
+.message-error-note__footer-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 32px;
+  min-width: 0;
+  align-items: center;
+  column-gap: 12px;
+}
+
+.message-error-note__details {
+  min-width: 0;
+  flex: 1;
+  background: transparent;
+}
+
+.message-error-note__details.arco-collapse,
+.message-error-note__details .arco-collapse-item,
+.message-error-note__details .arco-collapse-item-header,
+.message-error-note__details .arco-collapse-item-content {
+  border: 0;
+  background: transparent;
+}
+
+.message-error-note__details .arco-collapse-item-header {
+  min-height: 22px;
+  padding: 0;
+  line-height: 22px;
+}
+
+.message-error-note__details .arco-collapse-item-icon-hover {
+  color: var(--color-text-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+}
+
+.message-error-note__details .arco-collapse-item-content-box {
+  padding: 6px 0 0;
+}
+
+.message-error-note__details-label {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.message-error-note__detail-body {
+  max-height: 150px;
+  overflow: auto;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-fill-1) 76%, var(--color-bg-1));
+  color: var(--color-text-3);
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 8px;
+  white-space: break-spaces;
+  word-break: break-word;
+}
+
+.message-error-note__actions {
+  height: 28px;
+  flex: none;
+  align-self: center;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.message-error-note__actions .message-error-note__feedback {
+  box-sizing: border-box;
+  height: 28px;
+  min-height: 28px;
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--message-error-accent) 12%, var(--border-base));
+  background: color-mix(in srgb, var(--color-bg-1) 86%, transparent);
+  color: var(--color-text-2);
+  line-height: 18px;
+  padding: 0 9px;
+}
+
+.message-error-note__actions .message-error-note__feedback .pt-4px,
+.message-error-note__actions .message-error-note__feedback svg {
+  padding-top: 0 !important;
+}
+
+.message-error-note__actions .message-error-note__feedback:hover {
+  background: color-mix(in srgb, var(--message-error-accent) 8%, var(--color-bg-1));
+  color: var(--color-text-1);
+}
+
 /* Mobile typography tuning: conversation readability */
 @media (max-width: 767px) {
+  .message-error-note {
+    grid-template-columns: 4px minmax(0, 1fr);
+  }
+
+  .message-error-note__content {
+    gap: 7px;
+    padding: 10px;
+  }
+
+  .message-error-note__header,
+  .message-error-note__footer-main {
+    align-items: stretch;
+  }
+
+  .message-error-note__footer-main {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 8px;
+  }
+
+  .message-error-note__main {
+    margin-left: 0;
+  }
+
+  .message-error-note__meta,
+  .message-error-note__actions {
+    justify-content: flex-start;
+  }
+
+  .message-error-note__code {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .message-error-note__resolution {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .message-error-note__detail-body {
+    max-height: 120px;
+  }
+
   /* Message body — keep body type compact so messages don't dominate the screen */
   .message-item .markdown-shadow {
     font-size: 14px !important;

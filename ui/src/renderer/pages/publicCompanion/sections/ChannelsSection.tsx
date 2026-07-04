@@ -21,6 +21,7 @@ import {
   PLUGIN_ENABLED_KEY,
   PlatformConfigBody,
 } from '@renderer/components/channels/PlatformConfigBody';
+import { retargetConfigAfterStatus, statusOwnedBy, statusIsUnbound } from '@renderer/components/channels/channelStatusSelection';
 import type { ArcoMessageInstance } from '@renderer/utils/ui/useArcoMessage';
 import { SectionCard } from '../components';
 
@@ -114,8 +115,10 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
   // switch and the form address the new row instead of creating another one.
   useEffect(() => {
     if (!configTarget || configTarget.channelId) return;
-    const created = Object.values(statuses).find((s) => s.type === configTarget.platform && s.publicAgentId === agent.id);
-    if (created) setConfigTarget({ platform: configTarget.platform, channelId: created.id });
+    const created = Object.values(statuses).find(
+      (s) => s.type === configTarget.platform && statusOwnedBy(s, { publicAgentId: agent.id })
+    );
+    if (created) setConfigTarget((prev) => retargetConfigAfterStatus(prev, created));
   }, [statuses, configTarget, agent.id]);
 
   // ── Row actions ──
@@ -129,7 +132,14 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
             message.warning(t(CREDENTIALS_REQUIRED_KEY[platform]));
             return;
           }
-          await channel.enablePlugin.invoke({ plugin_id: row.id, config: {} });
+          const result = await channel.enablePlugin.invoke({ plugin_id: row.id, config: {} });
+          if (!result.success) {
+            throw new Error(
+              result.error ||
+                result.message ||
+                t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' })
+            );
+          }
           message.success(t(PLUGIN_ENABLED_KEY[platform]));
         } else {
           await channel.disablePlugin.invoke({ plugin_id: row.id });
@@ -202,6 +212,22 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
       });
     },
     [applyRowBinding, t]
+  );
+
+  // Move (rebind) a bot that currently belongs to another object onto this
+  // public agent — one bot serves one owner at a time, but moving is free.
+  const confirmMove = useCallback(
+    (row: IChannelPluginStatus) => {
+      Modal.confirm({
+        title: t('nomi.settings.remoteMoveHere'),
+        content: t('nomi.settings.remoteMoveConfirm', {
+          from: t('publicCompanion.channels.otherOwner', { defaultValue: '其他对象' }),
+          to: agent.name,
+        }),
+        onOk: () => applyRowBinding(row.id, true),
+      });
+    },
+    [applyRowBinding, agent.name, t]
   );
 
   const confirmDelete = useCallback(
@@ -287,9 +313,9 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
             // placeholder entry (id == platform name, hasToken=false) when it has no
             // rows yet. Real rows always carry an encrypted config (hasToken=true).
             const rows = allRows.filter((s) => s.type === id && s.hasToken);
-            const myRow = rows.find((r) => r.publicAgentId === agent.id);
-            const unboundRows = rows.filter((r) => !r.companionId && !r.publicAgentId);
-            const otherRows = rows.filter((r) => r.companionId || (r.publicAgentId && r.publicAgentId !== agent.id));
+            const myRow = rows.find((r) => statusOwnedBy(r, { publicAgentId: agent.id }));
+            const unboundRows = rows.filter((r) => statusIsUnbound(r));
+            const otherRows = rows.filter((r) => !statusIsUnbound(r) && !statusOwnedBy(r, { publicAgentId: agent.id }));
             // The row this card talks about: this agent's bot, else a bindable one.
             const focusRow = myRow ?? unboundRows[0] ?? null;
             const pending = focusRow ? (pendingCounts[focusRow.id] ?? 0) : 0;
@@ -335,14 +361,20 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
                 </>
               );
             } else if (otherRows.length > 0) {
+              const movable = otherRows[0];
               subtitle = t('publicCompanion.channels.otherBots', {
                 defaultValue: '{{num}} 个机器人已绑定其他对象',
                 num: otherRows.length,
               });
               actions = (
-                <Button size='small' onClick={() => setConfigTarget({ platform: id })}>
-                  {t('publicCompanion.channels.createBot', { defaultValue: '连接机器人' })}
-                </Button>
+                <>
+                  <Button size='small' type='primary' loading={busyRowId === movable.id} onClick={() => confirmMove(movable)}>
+                    {t('nomi.settings.remoteMoveHere')}
+                  </Button>
+                  <Button size='small' onClick={() => setConfigTarget({ platform: id })}>
+                    {t('publicCompanion.channels.createBot', { defaultValue: '连接机器人' })}
+                  </Button>
+                </>
               );
             } else {
               actions = (
@@ -414,6 +446,7 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
               // snapshot reconcile (create mode discovers the new row there).
               if (status) {
                 setStatuses((prev) => ({ ...prev, [status.id]: status }));
+                setConfigTarget((prev) => retargetConfigAfterStatus(prev, status));
               }
               void refreshStatuses();
             }}
