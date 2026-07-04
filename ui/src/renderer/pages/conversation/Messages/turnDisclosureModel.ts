@@ -33,7 +33,34 @@ export type TurnDisclosureOutputItem =
       defaultCollapsed: boolean;
     };
 
+export interface BuildTurnDisclosureOptions {
+  tailClosed?: boolean;
+}
+
 const unique = (values: string[]): string[] => Array.from(new Set(values.filter(Boolean)));
+
+const toProcessReceipt = (entry: TurnDisclosureInputItem): TurnDisclosureOutputItem => ({
+  type: 'process_receipt',
+  id: `receipt-${entry.id}`,
+  itemId: entry.id,
+});
+
+export function assignTurnIdsFromUserRequests(items: TurnDisclosureInputItem[]): TurnDisclosureInputItem[] {
+  let currentTurnId: string | undefined;
+
+  return items.map((entry) => {
+    if (entry.role === 'user') {
+      currentTurnId = entry.turnId || entry.id;
+      return { ...entry, turnId: currentTurnId };
+    }
+
+    if (!currentTurnId) {
+      return { ...entry, turnId: undefined };
+    }
+
+    return { ...entry, turnId: currentTurnId };
+  });
+}
 
 const getProcessState = (entry: TurnDisclosureInputItem): TurnDisclosureProcessState => {
   if (entry.processState) return entry.processState;
@@ -50,7 +77,7 @@ const resolveDisclosureState = (processItems: TurnDisclosureInputItem[]): TurnDi
   return 'completed';
 };
 
-function buildSegmentOutput(segment: TurnDisclosureInputItem[]): TurnDisclosureOutputItem[] {
+function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolean): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
 
@@ -66,10 +93,10 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[]): TurnDisclosureO
   }
 
   const state = resolveDisclosureState(processItems);
-  if (state === 'running' || state === 'waiting') {
+  if (state === 'running' || state === 'waiting' || !isClosed) {
     return segment.map((entry) => {
       if (entry.role === 'process') {
-        return { type: 'process_receipt', id: `receipt-${entry.id}`, itemId: entry.id };
+        return toProcessReceipt(entry);
       }
       return { type: 'item', id: entry.id };
     });
@@ -113,31 +140,34 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[]): TurnDisclosureO
   return output;
 }
 
-export function buildTurnDisclosureItems(items: TurnDisclosureInputItem[]): TurnDisclosureOutputItem[] {
+export function buildTurnDisclosureItems(
+  items: TurnDisclosureInputItem[],
+  options: BuildTurnDisclosureOptions = {}
+): TurnDisclosureOutputItem[] {
   const output: TurnDisclosureOutputItem[] = [];
   let segment: TurnDisclosureInputItem[] = [];
 
-  const flush = () => {
+  const flush = (isClosed: boolean) => {
     if (!segment.length) return;
-    output.push(...buildSegmentOutput(segment));
+    output.push(...buildSegmentOutput(segment, isClosed));
     segment = [];
   };
 
   for (const item of items) {
     if (!item.turnId) {
-      flush();
+      flush(true);
       output.push({ type: 'item', id: item.id });
       continue;
     }
 
     const currentTurnId = segment[0]?.turnId;
     if (currentTurnId && currentTurnId !== item.turnId) {
-      flush();
+      flush(true);
     }
 
     segment.push(item);
   }
 
-  flush();
+  flush(options.tailClosed === true);
   return output;
 }

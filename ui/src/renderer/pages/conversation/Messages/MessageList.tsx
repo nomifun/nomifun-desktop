@@ -38,12 +38,17 @@ import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
 import TurnProcessDisclosure from './components/TurnProcessDisclosure';
 import TurnProcessReceipt, { type TurnProcessReceiptIcon } from './components/TurnProcessReceipt';
-import { buildToolSummaryDescriptor } from './components/toolGroupSummaryModel';
+import {
+  buildToolReceiptSummaryParts,
+  buildToolSummaryDescriptor,
+  type ToolReceiptSummaryPart,
+} from './components/toolGroupSummaryModel';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
 import SelectionReplyButton from './components/SelectionReplyButton';
 import {
+  assignTurnIdsFromUserRequests,
   buildTurnDisclosureItems,
   type TurnDisclosureProcessState,
   type TurnDisclosureInputItem,
@@ -195,6 +200,84 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
   return compacted || fallback;
 };
 
+const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): string => {
+  if ((part.state === 'failed' || part.state === 'canceled') && part.target) {
+    return t(`messages.toolSummary.${part.state}`, {
+      target: part.target,
+      defaultValue: defaultToolSummaryByState[part.state],
+    });
+  }
+
+  switch (part.action) {
+    case 'read_files':
+      return part.state === 'running'
+        ? t('messages.processReceipt.readingFiles', {
+            count: part.count,
+            defaultValue: 'Reading {{count}} files',
+          })
+        : t('messages.processReceipt.readFiles', {
+            count: part.count,
+            defaultValue: 'Read {{count}} files',
+          });
+    case 'edit_files':
+      return part.state === 'running'
+        ? t('messages.processReceipt.editingFiles', {
+            count: part.count,
+            defaultValue: 'Editing {{count}} files',
+          })
+        : t('messages.processReceipt.fileEdits', {
+            count: part.count,
+            defaultValue: 'Edited {{count}} files',
+          });
+    case 'run_commands':
+      if (part.count === 1 && part.target) {
+        return t(`messages.toolSummary.${part.state}`, {
+          target: part.target,
+          defaultValue: defaultToolSummaryByState[part.state],
+        });
+      }
+      return part.state === 'running'
+        ? t('messages.processReceipt.runningCommands', {
+            count: part.count,
+            defaultValue: 'Running {{count}} commands',
+          })
+        : t('messages.processReceipt.runCommands', {
+            count: part.count,
+            defaultValue: 'Ran {{count}} commands',
+          });
+    case 'search_code':
+      return part.state === 'running'
+        ? t('messages.processReceipt.searchingCode', { defaultValue: 'Searching code' })
+        : t('messages.processReceipt.searchedCode', { defaultValue: 'Searched code' });
+    case 'list_files':
+      return part.state === 'running'
+        ? t('messages.processReceipt.listingFiles', { defaultValue: 'Listing files' })
+        : t('messages.processReceipt.listedFiles', { defaultValue: 'Listed files' });
+    case 'load_tools':
+      return part.state === 'running'
+        ? t('messages.processReceipt.loadingTools', {
+            count: part.count,
+            defaultValue: 'Loading {{count}} tools',
+          })
+        : t('messages.processReceipt.loadedTools', {
+            count: part.count,
+            defaultValue: 'Loaded {{count}} tools',
+          });
+    case 'generic':
+    default:
+      if (part.target) {
+        return t(`messages.toolSummary.${part.state}`, {
+          target: part.target,
+          defaultValue: defaultToolSummaryByState[part.state],
+        });
+      }
+      return t('messages.processReceipt.tools', {
+        count: part.count,
+        defaultValue: '{{count}} tools',
+      });
+  }
+};
+
 const getToolReceiptIcon = (
   messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>
 ): TurnProcessReceiptIcon => {
@@ -229,19 +312,21 @@ const buildProcessReceiptSummary = (
 ): { label: string; icon: TurnProcessReceiptIcon; defaultExpanded: boolean } => {
   if ('type' in item && item.type === 'tool_summary') {
     const tools = normalizeToolMessages(item.messages);
+    const receiptParts = buildToolReceiptSummaryParts(tools, state);
     const descriptor = buildToolSummaryDescriptor(tools, state);
-    const label = descriptor
-      ? t(`messages.toolSummary.${state}`, {
-          target: descriptor.target,
-          defaultValue: defaultToolSummaryByState[state],
-        })
-      : t('messages.processReceipt.tools', {
-          count: item.messages.length,
-          defaultValue: '{{count}} tools',
-        });
-    const countSuffix = descriptor && descriptor.count > 1 ? ` · ${descriptor.count}` : '';
+    const label = receiptParts.length
+      ? receiptParts.map((part) => formatToolReceiptPart(part, t)).join(' ')
+      : descriptor
+        ? t(`messages.toolSummary.${state}`, {
+            target: descriptor.target,
+            defaultValue: defaultToolSummaryByState[state],
+          })
+        : t('messages.processReceipt.tools', {
+            count: item.messages.length,
+            defaultValue: '{{count}} tools',
+          });
     return {
-      label: `${label}${countSuffix}`,
+      label,
       icon: getToolReceiptIcon(item.messages),
       defaultExpanded: state === 'waiting',
     };
@@ -627,20 +712,22 @@ const MessageList: React.FC<{
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const itemById = new Map<string, IRenderableItem>();
-    const modelInput: TurnDisclosureInputItem[] = processedList.map((item) => {
+    const rawModelInput: TurnDisclosureInputItem[] = processedList.map((item) => {
       const id = getProcessedItemAnchorId(item);
+      const role = getProcessedItemRole(item);
       itemById.set(id, item);
       return {
         id,
-        turnId: getProcessedItemMsgId(item),
-        role: getProcessedItemRole(item),
+        turnId: role === 'user' ? getProcessedItemMsgId(item) : undefined,
+        role,
         createdAt: getProcessedItemCreatedAt(item),
         processState: getProcessItemState(item),
         sourceMessageIds: getProcessedItemSourceMessageIds(item),
       };
     });
+    const modelInput = assignTurnIdsFromUserRequests(rawModelInput);
 
-    return buildTurnDisclosureItems(modelInput)
+    return buildTurnDisclosureItems(modelInput, { tailClosed: conversationContext?.isProcessing !== true })
       .map<IProcessedItem | undefined>((entry: TurnDisclosureOutputItem) => {
         if (entry.type === 'item') {
           return itemById.get(entry.id);
@@ -683,7 +770,7 @@ const MessageList: React.FC<{
         };
       })
       .filter((item): item is IProcessedItem => Boolean(item));
-  }, [processedList, t]);
+  }, [conversationContext?.isProcessing, processedList, t]);
 
   // Use auto-scroll hook
   const {

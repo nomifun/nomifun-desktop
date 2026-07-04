@@ -12,6 +12,8 @@ const source = readFileSync(new URL('./MessageList.tsx', import.meta.url), 'utf8
 describe('MessageList turn completion disclosure structure', () => {
   test('routes message content through the turn disclosure model before rendering', () => {
     expect(source.includes('buildTurnDisclosureItems')).toBe(true);
+    expect(source.includes('assignTurnIdsFromUserRequests')).toBe(true);
+    expect(source.includes('tailClosed: conversationContext?.isProcessing !== true')).toBe(true);
     expect(source.includes("type: 'turn_process_disclosure'")).toBe(true);
     expect(source.includes('renderTurnDisclosure')).toBe(true);
     expect(source.includes('components/TurnProcessDisclosure')).toBe(true);
