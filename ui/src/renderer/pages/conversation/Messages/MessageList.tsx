@@ -212,6 +212,19 @@ const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): 
 
   switch (part.action) {
     case 'read_files':
+      if (part.target) {
+        return part.state === 'running'
+          ? t('messages.processReceipt.readingTargets', {
+              count: part.count,
+              target: part.target,
+              defaultValue: 'Reading {{count}} files: {{target}}',
+            })
+          : t('messages.processReceipt.readTargets', {
+              count: part.count,
+              target: part.target,
+              defaultValue: 'Read {{count}} files: {{target}}',
+            });
+      }
       return part.state === 'running'
         ? t('messages.processReceipt.readingFiles', {
             count: part.count,
@@ -222,6 +235,19 @@ const formatToolReceiptPart = (part: ToolReceiptSummaryPart, t: TranslationFn): 
             defaultValue: 'Read {{count}} files',
           });
     case 'edit_files':
+      if (part.target) {
+        return part.state === 'running'
+          ? t('messages.processReceipt.editingFileTargets', {
+              count: part.count,
+              target: part.target,
+              defaultValue: 'Editing {{count}} files: {{target}}',
+            })
+          : t('messages.processReceipt.fileEditTargets', {
+              count: part.count,
+              target: part.target,
+              defaultValue: 'Edited {{count}} files: {{target}}',
+            });
+      }
       return part.state === 'running'
         ? t('messages.processReceipt.editingFiles', {
             count: part.count,

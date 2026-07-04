@@ -31,7 +31,12 @@ describe('buildToolReceiptSummaryParts', () => {
     );
 
     expect(parts).toEqual([
-      { action: 'read_files', count: 4, state: 'completed' },
+      {
+        action: 'read_files',
+        count: 4,
+        state: 'completed',
+        target: 'MessageList.tsx, messages.css, turnDisclosureModel.ts, toolGroupSummaryModel.ts',
+      },
       {
         action: 'run_commands',
         count: 1,
@@ -88,7 +93,7 @@ describe('buildToolReceiptSummaryParts', () => {
     );
 
     expect(parts).toEqual([
-      { action: 'read_files', count: 1, state: 'completed' },
+      { action: 'read_files', count: 1, state: 'completed', target: 'MessageList.tsx' },
       { action: 'run_commands', count: 1, state: 'running', target: 'bun test MessageList' },
     ]);
   });
@@ -204,6 +209,27 @@ describe('buildToolReceiptDetailRows', () => {
         input: 'python snake.py',
         output: 'pygame 2.6.1\\nGame started',
         truncated: true,
+      },
+    ]);
+  });
+
+  test('extracts read targets from structured input for expandable file lists', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({
+        key: 'read-input',
+        name: 'Read',
+        input: '{"file_path":"ui/src/renderer/pages/conversation/Messages/MessageList.tsx"}',
+      }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'read-input',
+        action: 'read_files',
+        state: 'completed',
+        title: 'Read',
+        target: 'ui/src/renderer/pages/conversation/Messages/MessageList.tsx',
+        input: '{"file_path":"ui/src/renderer/pages/conversation/Messages/MessageList.tsx"}',
       },
     ]);
   });

@@ -123,8 +123,46 @@ const formatFileChangeStats = (file: FileChangeInfo): string =>
     file.deletions > 0 ? `-${file.deletions}` : undefined,
   ]);
 
+const formatTargetPreview = (targets: string[]): string => targets.join(', ');
+
+const isFileDetailRow = (row: ToolReceiptDetailRow): boolean =>
+  (row.action === 'read_files' || row.action === 'edit_files') && Boolean(row.target);
+
 const hasToolRowDetail = (row: ToolReceiptDetailRow): boolean =>
-  row.action === 'run_commands' || Boolean(row.input || row.output || row.truncated);
+  row.action === 'run_commands' || isFileDetailRow(row) || Boolean(row.input || row.output || row.truncated);
+
+const ToolFileListDetail: React.FC<{ rows: ToolReceiptDetailRow[] }> = ({ rows }) => {
+  const { t } = useTranslation();
+  const targets = rows.map((row) => row.target).filter((target): target is string => Boolean(target));
+  if (!targets.length) return null;
+
+  const firstAction = rows[0]?.action;
+  const label =
+    firstAction === 'edit_files'
+      ? t('messages.processReceipt.fileEditTargets', {
+          count: targets.length,
+          target: formatTargetPreview(targets),
+          defaultValue: 'Edited {{count}} files: {{target}}',
+        })
+      : t('messages.processReceipt.readTargets', {
+          count: targets.length,
+          target: formatTargetPreview(targets),
+          defaultValue: 'Read {{count}} files: {{target}}',
+        });
+
+  return (
+    <div className='turn-process-trace-detail'>
+      <div className='turn-process-trace-detail__label'>{label}</div>
+      <ul className='turn-process-trace-file-list'>
+        {targets.map((target) => (
+          <li key={target} className='turn-process-trace-file-list__item' title={target}>
+            {target}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
 
 const ToolTraceDetailSection: React.FC<{ label: string; value?: string }> = ({ label, value }) => {
   if (!value) return null;
@@ -138,6 +176,8 @@ const ToolTraceDetailSection: React.FC<{ label: string; value?: string }> = ({ l
 
 const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow }> = ({ row }) => {
   const { t } = useTranslation();
+  if (isFileDetailRow(row)) return <ToolFileListDetail rows={[row]} />;
+
   const command = row.action === 'run_commands' ? row.target : undefined;
   const input = row.input && row.input !== command ? row.input : undefined;
 
@@ -252,6 +292,20 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; variant?:
       })),
     [t, tools]
   );
+
+  const fileRows = rows.filter(({ row }) => isFileDetailRow(row)).map(({ row }) => row);
+  const nonFileRows = rows.filter(({ row }) => !isFileDetailRow(row));
+
+  if (fileRows.length > 1) {
+    return (
+      <div className='turn-process-trace'>
+        <ToolFileListDetail rows={fileRows} />
+        {nonFileRows.map(({ row, label }) => (
+          <ToolTraceRow key={row.key} row={row} label={label} />
+        ))}
+      </div>
+    );
+  }
 
   if (variant === 'receipt' && rows.length === 1 && hasToolRowDetail(rows[0].row)) {
     return <ToolTraceDetail row={rows[0].row} />;
