@@ -1039,12 +1039,13 @@ fn compose_lead_receipt(
         let head = format!(
             "[自主编排回执] 你正在自主推进这个 run（run {run_id}）。{phase}。\n\
              【目标】{goal}\n【本轮各节点产出】\n{brief}\n\
-             【预算余量】剩余可追加轮次 {rounds_left}，剩余 token 约 {tokens_left}。\n"
+             【预算余量】剩余可追加任务数 {rounds_left}，剩余 token 约 {tokens_left}。\n"
         );
         if exhausted {
             return format!(
                 "{head}\
-                 预算已耗尽或已连续多轮无实质进展：请**不要再追加任务、也不要新建 run**。\
+                 预算已达上限或已连续多轮无实质进展：请**不要再用 nomi_run_add_tasks / \
+                 nomi_run_adjust / nomi_task_rerun 继续推进本 run，也不要 nomi_run_create 新建 run**。\
                  用一段自然的话向用户汇总目前已完成的部分、说明尚未达成的目标，并把后续决定交给用户。"
             );
         }
@@ -1052,7 +1053,7 @@ fn compose_lead_receipt(
             "{head}\
              请先自评是否已达成上述【目标】，再据下列规则行动：\n\
              - 已达成 → 用一段自然的话向用户汇总最终结论，本轮结束，**不要再追加**。\n\
-             - 未达成且仍有预算（剩余可追加轮次 {rounds_left}）→ 用 `nomi_run_add_tasks` 向\
+             - 未达成且仍有预算（剩余可追加任务数 {rounds_left}）→ 用 `nomi_run_add_tasks` 向\
              **同一个 run（run {run_id}）** 追加下一批任务继续推进，然后结束本轮（勿轮询、勿新建 run）。\n\
              - 预算即将耗尽或已连续多轮无进展 → 汇总当前进展、说明未竟部分并交给用户，**不要再追加**。"
         );
@@ -1149,7 +1150,18 @@ impl LeadReporter for OrchestratorLeadReporter {
                     } else {
                         entry.1 = entry.1.saturating_add(1);
                     }
-                    entry.1 >= nomifun_orchestrator::NO_PROGRESS_LIMIT
+                    let np = entry.1 >= nomifun_orchestrator::NO_PROGRESS_LIMIT;
+                    // Evict when the autonomous loop is ENDING — a terminal outcome that is
+                    // budget/round/progress-exhausted (the gateway backstop will refuse any
+                    // further re-arm) — so the map does not grow one entry per run forever.
+                    let ending = matches!(outcome, RunOutcome::Completed | RunOutcome::Failed)
+                        && (np
+                            || task_count >= nomifun_orchestrator::AUTONOMOUS_MAX_TASKS
+                            || total_tokens >= nomifun_orchestrator::AUTONOMOUS_TOKEN_BUDGET);
+                    if ending {
+                        map.remove(run_id);
+                    }
+                    np
                 }
                 Err(_) => false,
             }

@@ -1159,6 +1159,14 @@ async fn run_adjust(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunA
     if p.intent.trim().is_empty() {
         return json!({ "error": "intent must not be empty" });
     }
+    // Phase 3b runaway backstop (deterministic, not cooperative): `nomi_run_adjust`
+    // re-activates a terminal run + adds tasks, so an autonomous master refused by the
+    // append seams could otherwise re-arm the exhausted run here. Refuse an AUTONOMOUS
+    // run over its hard budget — no adjust, no re-arm — so the emergent loop halts.
+    // Non-autonomous runs are never BudgetExhausted, so manual adjust is unaffected.
+    if let Appendability::BudgetExhausted = run_appendability(&deps, &p.run_id).await {
+        return json!({ "error": AUTONOMOUS_BUDGET_EXHAUSTED_ERROR });
+    }
     match deps
         .orchestrator_run_engine
         .adjust(&deps.orchestrator_run_service, &user, &p.run_id, &p.intent)
@@ -1268,6 +1276,12 @@ async fn task_rerun(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: Task
         Ok(u) => u.to_owned(),
         Err(e) => return e,
     };
+    // Phase 3b runaway backstop: `nomi_task_rerun` re-arms a terminal run (re-running
+    // nodes burns tokens). Refuse an AUTONOMOUS run over its hard budget so it can't be
+    // used to bypass the append-seam guard. Non-autonomous runs are never gated.
+    if let Appendability::BudgetExhausted = run_appendability(&deps, &p.run_id).await {
+        return json!({ "error": AUTONOMOUS_BUDGET_EXHAUSTED_ERROR });
+    }
     match deps
         .orchestrator_run_engine
         .rerun_task(&deps.orchestrator_run_service, &user, &p.run_id, &p.task_id)
