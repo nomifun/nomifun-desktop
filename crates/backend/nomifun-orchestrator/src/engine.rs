@@ -987,6 +987,15 @@ async fn run_loop(
         None => None,
     };
 
+    // Seed a human-readable RUN_NOTES.md in the shared dir (best-effort, idempotent
+    // — only if absent, to preserve node-appended content across restart/rerun). The
+    // plan is already persisted at this point (the choreography plans BEFORE
+    // `engine.start`), so `list_tasks` here returns the planned nodes' titles. A
+    // workspace-bound run also benefits (its shared dir gets the notes seed).
+    if let Some(ref dir) = workspace_dir {
+        seed_run_notes(&deps, run_id, dir).await;
+    }
+
     // In-flight worker futures, each resolving to (task_id, outcome). The set's
     // length is the live concurrency; we never exceed `cap`.
     let mut inflight: FuturesUnordered<WorkerFuture> = FuturesUnordered::new();
@@ -1539,6 +1548,39 @@ async fn cancel_in_flight_conversations(deps: &Arc<RunEngineDeps>, run_id: &str)
 type WorkerFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = (String, Result<WorkerOutcome, AppError>)> + Send>,
 >;
+
+/// Seed a human-readable shared notes file (`RUN_NOTES.md`) in the run's shared
+/// dir. Best-effort and idempotent — writes ONLY if the file is absent, so a
+/// restart/rerun never clobbers content nodes appended (their appends survive).
+/// Carries the run goal + plan (task titles) + a「共享笔记」append region nodes
+/// add findings to via built-in file tools (their cwd is this shared dir). A
+/// read/write failure only `warn!`s and NEVER fails the run.
+async fn seed_run_notes(deps: &Arc<RunEngineDeps>, run_id: &str, dir: &str) {
+    let path = std::path::Path::new(dir).join("RUN_NOTES.md");
+    // Idempotent: preserve any node-appended content across restart/rerun.
+    if path.exists() {
+        return;
+    }
+    let goal = deps
+        .run_repo
+        .get_run(run_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.goal)
+        .unwrap_or_default();
+    let tasks = deps.run_repo.list_tasks(run_id).await.unwrap_or_default();
+    let mut body = String::from("# RUN_NOTES\n\n## 目标 (GOAL)\n");
+    body.push_str(&goal);
+    body.push_str("\n\n## 计划 (PLAN)\n");
+    for t in &tasks {
+        body.push_str(&format!("- {}\n", t.title));
+    }
+    body.push_str("\n## 共享笔记（各节点可追加发现/结论，供其它节点参考）\n");
+    if let Err(e) = std::fs::write(&path, body) {
+        warn!(run_id, error = %e, "failed to seed RUN_NOTES.md (continuing)");
+    }
+}
 
 /// Prepare a task for dispatch: resolve its member from the run's fleet snapshot,
 /// mark it `running` + emit, compose the brief, and build the worker future
@@ -5696,6 +5738,32 @@ mod tests {
                 "every node shares the one run dir"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn run_start_seeds_run_notes_md() {
+        // run 启动时在共享目录 seed 一个人类可读的 RUN_NOTES.md:含 run 目标 +
+        // 计划(各节点 title)+ 「共享笔记」追加区,供节点经 cwd 内置文件工具读/追加。
+        let worker = Arc::new(ConcurrencyMockWorkerRunner::new(Duration::from_millis(10)));
+        let (svc, engine, run_id, data_dir) = adhoc_no_dir_harness(worker.clone()).await;
+        engine.start(run_id.clone());
+        let _ = drive_to_completion(&svc, &run_id).await;
+        let notes = data_dir
+            .join("orchestrator")
+            .join("runs")
+            .join(&run_id)
+            .join("RUN_NOTES.md");
+        assert!(notes.is_file(), "RUN_NOTES.md seeded in the shared dir");
+        let body = std::fs::read_to_string(&notes).unwrap();
+        assert!(
+            body.contains("目标") || body.contains("GOAL"),
+            "notes carry the run goal"
+        );
+        // 计划摘要含节点标题(harness 的 plan 至少含一个已知 title)
+        assert!(
+            body.contains("共享笔记"),
+            "has an append region for node findings"
+        );
     }
 
     // -------------------------------------------------------------------------
