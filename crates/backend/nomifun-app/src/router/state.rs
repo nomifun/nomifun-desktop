@@ -1016,6 +1016,12 @@ fn compose_lead_receipt(run_id: &str, outcome: RunOutcome, brief: &str) -> Strin
             "[编排回执] 编排（run {run_id}）计划已拟好，正等待用户批准后执行。\
              请转达用户在编排面板点「批准执行」或直接回复批准。"
         ),
+        RunOutcome::NodeFailed => format!(
+            "[编排回执·中途] 你派发的编排（run {run_id}）中有一个节点永久失败，run 仍在进行：\n{brief}\n\
+             你可以现在就介入：给该节点换更合适的模型后重跑、调整编排（保留已完成部分）、\
+             采纳该节点当前产出，或放弃。若暂不处理，run 会按其它独立分支继续，终态时再给你完整回执。\
+             不要重复创建相同编排。"
+        ),
     }
 }
 
