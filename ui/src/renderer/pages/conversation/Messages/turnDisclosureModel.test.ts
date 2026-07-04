@@ -204,6 +204,20 @@ describe('buildTurnDisclosureItems', () => {
     ]);
     expect(result.filter((entry) => entry.type === 'turn_disclosure')).toHaveLength(2);
   });
+
+  test('renders process steps without a visible user request as inline receipts', () => {
+    const result = buildTurnDisclosureItems([
+      item('thinking', 'process', { turnId: undefined, createdAt: 1000, processState: 'completed' }),
+      item('tool', 'process', { turnId: undefined, createdAt: 1500, processState: 'completed' }),
+      item('assistant-text', 'assistant', { turnId: undefined, createdAt: 2000 }),
+    ]);
+
+    expect(result).toEqual([
+      { type: 'process_receipt', id: 'receipt-thinking', itemId: 'thinking' },
+      { type: 'process_receipt', id: 'receipt-tool', itemId: 'tool' },
+      { type: 'item', id: 'assistant-text' },
+    ]);
+  });
 });
 
 describe('assignTurnIdsFromUserRequests', () => {

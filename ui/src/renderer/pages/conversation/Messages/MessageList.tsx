@@ -23,14 +23,13 @@ import { uuid } from '@renderer/utils/common';
 import './messages.css';
 import HOC from '@renderer/utils/ui/HOC';
 import type { FileChangeInfo } from './MessageFileChanges';
-import MessageFileChanges, { parseDiff } from './MessageFileChanges';
+import { parseDiff } from './MessageFileChanges';
 import { useConversationArtifacts } from './artifacts';
 import { useMessageList, useMessageListLoading } from './hooks';
 import MessageAgentStatus from './components/MessageAgentStatus';
 import MessageTips from './components/MessageTips';
 import MessageToolCall from './components/MessageToolCall';
 import MessageToolGroup from './components/MessageToolGroup';
-import MessageToolGroupSummary from './components/MessageToolGroupSummary';
 import MessageCronTrigger from './components/MessageCronTrigger';
 import MessageSkillSuggest from './components/MessageSkillSuggest';
 import MessageText from './components/MessageText';
@@ -43,6 +42,7 @@ import {
   buildToolSummaryDescriptor,
   type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
+import ProcessTraceItem, { formatProcessDuration } from './components/ProcessTraceItem';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
@@ -354,7 +354,8 @@ const buildProcessReceiptSummary = (
   }
 
   switch (item.type) {
-    case 'thinking':
+    case 'thinking': {
+      const thinkingDuration = item.content.duration ?? (item.content as { duration_ms?: number }).duration_ms;
       return {
         label:
           state === 'running'
@@ -362,10 +363,16 @@ const buildProcessReceiptSummary = (
                 item.content.subject,
                 t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' })
               )
-            : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
+            : typeof thinkingDuration === 'number'
+              ? t('messages.processReceipt.thinkingCompletedWithDuration', {
+                  duration: formatProcessDuration(thinkingDuration, t),
+                  defaultValue: 'Thought complete · {{duration}}',
+                })
+              : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
         icon: 'thinking',
         defaultExpanded: false,
       };
+    }
     case 'permission':
       return {
         label: t('messages.processReceipt.waitingPermission', {
@@ -454,48 +461,7 @@ const TOP_LOAD_THRESHOLD_PX = 96;
 // Image preview context
 export const ImagePreviewContext = createContext<{ inPreviewGroup: boolean }>({ inPreviewGroup: false });
 
-const DisclosureProcessItem: React.FC<{ item: IRenderableItem }> = ({ item }) => {
-  const { t } = useTranslation();
-
-  if ('type' in item && item.type === 'artifact') {
-    if (item.artifact.kind === 'cron_trigger') return <MessageCronTrigger artifact={item.artifact} />;
-    return <MessageSkillSuggest artifact={item.artifact} />;
-  }
-
-  if ('type' in item && item.type === 'file_summary') {
-    return <MessageFileChanges diffsChanges={item.diffs} />;
-  }
-
-  if ('type' in item && item.type === 'tool_summary') {
-    return <MessageToolGroupSummary messages={item.messages} defaultExpanded={true} />;
-  }
-
-  switch (item.type) {
-    case 'text':
-      return <MessageText message={item} />;
-    case 'tips':
-      return <MessageTips message={item} />;
-    case 'tool_call':
-      return <MessageToolCall message={item} />;
-    case 'tool_group':
-      return <MessageToolGroup message={item} />;
-    case 'agent_status':
-      return <MessageAgentStatus message={item} />;
-    case 'permission':
-      return <MessagePermission message={item} />;
-    case 'acp_permission':
-      return <MessageAcpPermission message={item} />;
-    case 'acp_tool_call':
-      return <MessageAcpToolCall message={item} />;
-    case 'thinking':
-      return <MessageThinking message={item} />;
-    case 'plan':
-    case 'available_commands':
-      return null;
-    default:
-      return <div>{t('messages.unknownMessageType', { type: getUnhandledMessageType(item) })}</div>;
-  }
-};
+const renderProcessTraceItem = (item: IRenderableItem) => <ProcessTraceItem item={item} />;
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean }> = React.memo(
   HOC((props) => {
@@ -926,7 +892,7 @@ const MessageList: React.FC<{
     <TurnProcessDisclosure
       item={item}
       highlighted={highlighted}
-      renderProcessItem={(processItem) => <DisclosureProcessItem item={processItem} />}
+      renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}
       getProcessItemKey={getProcessedItemAnchorId}
       getProcessItemState={getProcessItemState}
     />
@@ -936,7 +902,7 @@ const MessageList: React.FC<{
     <TurnProcessReceipt
       receipt={item}
       highlighted={highlighted}
-      renderProcessItem={(processItem) => <DisclosureProcessItem item={processItem} />}
+      renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}
     />
   );
 
@@ -994,8 +960,7 @@ const MessageList: React.FC<{
           className={'min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto ' + item.type}
           style={highlighted ? highlightStyle : undefined}
         >
-          {item.type === 'file_summary' && <MessageFileChanges diffsChanges={item.diffs} />}
-          {item.type === 'tool_summary' && <MessageToolGroupSummary messages={item.messages}></MessageToolGroupSummary>}
+          {renderProcessTraceItem(item)}
         </div>
       );
     }
