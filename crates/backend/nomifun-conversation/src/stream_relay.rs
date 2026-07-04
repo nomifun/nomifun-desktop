@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nomifun_ai_agent::{
     AgentSendError, AgentStreamEvent,
     protocol::events::{
-        ThinkingEventData,
+        PlanEventData, ThinkingEventData,
         tool_call::{AcpToolCallSessionUpdateKind, AcpToolCallStatus, ToolCallStatus},
     },
 };
@@ -514,6 +514,19 @@ impl StreamRelay {
                                 self.persist_agent_status(data).await;
                             }
                         }
+                        AgentStreamEvent::Plan(data) => {
+                            emitted_response = true;
+                            self.complete_active_thinking(&mut active_thinking).await;
+                            self.close_active_text_segment(
+                                &mut active_text,
+                                &mut text_segments,
+                                "finish",
+                            )
+                            .await;
+                            let plan_id = self.plan_message_id(data);
+                            self.forward_to_websocket_with_msg_id(&plan_id, &event);
+                            self.persist_plan(data).await;
+                        }
                         AgentStreamEvent::TurnCompleted(metrics) => {
                             // Accumulate this turn's token usage into the
                             // conversation's running total (only when this relay was
@@ -912,6 +925,70 @@ impl StreamRelay {
                 error = %ErrorChain(&e),
                 "Failed to persist agent_status message"
             );
+        }
+    }
+
+    fn plan_session_id(&self, data: &PlanEventData) -> String {
+        data.session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .unwrap_or(&self.msg_id)
+            .to_owned()
+    }
+
+    fn plan_message_id(&self, data: &PlanEventData) -> String {
+        format!("{}:plan:{}", self.msg_id, self.plan_session_id(data))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn persist_plan(&self, data: &PlanEventData) {
+        let plan_id = self.plan_message_id(data);
+        let session_id = self.plan_session_id(data);
+        let status = if data.entries.iter().all(|entry| {
+            entry.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+        }) {
+            "finish"
+        } else {
+            "work"
+        };
+        let content = json!({
+            "session_id": session_id,
+            "entries": data.entries,
+        })
+        .to_string();
+
+        let existing = self
+            .repo
+            .get_message_by_msg_id(self.conv_id(), &plan_id, "plan")
+            .await
+            .unwrap_or(None);
+
+        if existing.is_some() {
+            let update = nomifun_db::MessageRowUpdate {
+                content: Some(content),
+                status: Some(Some(status.to_owned())),
+                hidden: Some(false),
+            };
+            if let Err(e) = self.repo.update_message(&plan_id, &update).await {
+                error!(error = %ErrorChain(&e), "Failed to update plan message");
+            }
+            return;
+        }
+
+        let row = MessageRow {
+            id: plan_id.clone(),
+            conversation_id: self.conv_id(),
+            msg_id: Some(plan_id),
+            r#type: "plan".into(),
+            content,
+            position: Some("left".into()),
+            status: Some(status.to_owned()),
+            hidden: false,
+            created_at: now_ms(),
+        };
+        if let Err(e) = self.repo.insert_message(&row).await {
+            error!(error = %ErrorChain(&e), "Failed to persist plan message");
         }
     }
 
@@ -1318,7 +1395,9 @@ impl ICronService for SharedCronService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_ai_agent::protocol::events::{ErrorEventData, FinishEventData, TextEventData, ThinkingEventData};
+    use nomifun_ai_agent::protocol::events::{
+        ErrorEventData, FinishEventData, PlanEventData, TextEventData, ThinkingEventData,
+    };
     use nomifun_db::DbError;
     use std::sync::Mutex;
 
@@ -1434,6 +1513,47 @@ mod tests {
 
         // The relay was never given this runtime state, so it cannot have written.
         assert_eq!(observer.take_turn_tokens("42"), None);
+    }
+
+    #[tokio::test]
+    async fn run_plan_event_persists_message_for_history_reload() {
+        let repo = Arc::new(RecordingRepo::new());
+        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let (tx, _) = broadcast::channel(64);
+
+        let relay = StreamRelay::new(
+            "1".into(),
+            "asst-1".into(),
+            "user-1".into(),
+            repo.clone(),
+            bus.clone(),
+            None,
+        );
+        let rx = tx.subscribe();
+
+        tx.send(AgentStreamEvent::Plan(PlanEventData {
+            session_id: Some("session-1".into()),
+            entries: vec![
+                json!({ "content": "Inspect current renderer path", "status": "completed" }),
+                json!({ "content": "Persist plan rows", "status": "in_progress" }),
+            ],
+        }))
+        .unwrap();
+        tx.send(AgentStreamEvent::Finish(FinishEventData::default())).unwrap();
+
+        let outcome = relay.consume(rx).await;
+
+        let inserts = repo.take_inserts();
+        let plan_msg = inserts.iter().find(|m| m.r#type == "plan").expect("plan message must be persisted");
+        assert_eq!(plan_msg.id, "asst-1:plan:session-1");
+        assert_eq!(plan_msg.msg_id.as_deref(), Some("asst-1:plan:session-1"));
+        assert_eq!(plan_msg.status.as_deref(), Some("work"));
+
+        let content: serde_json::Value = serde_json::from_str(&plan_msg.content).unwrap();
+        assert_eq!(content["session_id"], "session-1");
+        assert_eq!(content["entries"].as_array().unwrap().len(), 2);
+        assert_eq!(content["entries"][1]["status"], "in_progress");
+        assert!(outcome.emitted_response);
     }
 
     #[tokio::test]
