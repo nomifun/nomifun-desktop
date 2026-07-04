@@ -1211,6 +1211,11 @@ pub fn build_orchestrator_state(
     engine_deps.cancel_conversation = cancel_conversation;
     engine_deps.steer_conversation = steer_conversation;
     engine_deps.lead_reporter = lead_reporter;
+    // Phase 1b: an ad-hoc/conversation-native run (no workspace, no work_dir) gets a
+    // per-run SHARED working directory auto-allocated under
+    // `{work_dir}/orchestrator/runs/{run_id}`, so all its nodes share one cwd (files
+    // + a shared workpath KB binding). `services.work_dir` is the app data root.
+    engine_deps.data_dir = services.work_dir.clone();
     // B2: the engine summarizes a COMPLETED run with the SAME LlmPlanProducer the
     // RunService plans with — a one-shot lead summary. Shared `Arc`, so the lead is
     // resolved the same way (off the run's fleet snapshot). Fail-soft in the engine:

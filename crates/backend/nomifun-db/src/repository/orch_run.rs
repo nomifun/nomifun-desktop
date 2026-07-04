@@ -23,6 +23,7 @@ pub struct CreateRunParams {
 /// For the nullable columns, the nesting distinguishes "skip" from "set NULL":
 /// `None` = skip, `Some(None)` = set NULL, `Some(Some(v))` = set `v`.
 /// `status` is a plain non-null column: `None` = skip, `Some(v)` = set `v`.
+#[derive(Default)]
 pub struct UpdateRunParams {
     pub status: Option<String>,
     pub summary: Option<Option<String>>,
@@ -37,6 +38,12 @@ pub struct UpdateRunParams {
     /// Fleet snapshot JSON (replan rebuilds it from a new model range). `NOT NULL`
     /// column → single-`Option` skip/set encoding.
     pub fleet_snapshot: Option<String>,
+    /// Working directory (nullable column → double-`Option` skip/NULL/set). Used by
+    /// the engine to persist an AUTO-ALLOCATED shared working directory for an
+    /// ad-hoc/conversation-native run that had neither a `work_dir` nor a workspace
+    /// (`Some(Some(dir))` sets it, stable across restarts + browsable; `Some(None)`
+    /// clears; `None` skips).
+    pub work_dir: Option<Option<String>>,
 }
 
 /// Parameters for creating a task within a run. `id` is minted

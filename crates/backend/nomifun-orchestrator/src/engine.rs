@@ -382,6 +382,13 @@ pub struct RunEngineDeps {
     /// Base backoff before the first auto-retry, doubled per retry
     /// (see [`DEFAULT_RETRY_BACKOFF_BASE`]). [`Duration::ZERO`] retries instantly.
     pub retry_backoff_base: Duration,
+    /// Base data dir under which a workspace-less (ad-hoc / conversation-native)
+    /// run gets an auto-allocated SHARED working directory
+    /// (`<data_dir>/orchestrator/runs/{run_id}`), so all its nodes share one cwd
+    /// (files + a shared workpath KB binding). See `run_loop`'s workspace_dir
+    /// resolution. Defaults to `.` (tests override; the app injects the real
+    /// data dir via `services.work_dir`).
+    pub data_dir: std::path::PathBuf,
 }
 
 impl RunEngineDeps {
@@ -411,6 +418,7 @@ impl RunEngineDeps {
             max_worker_retries: DEFAULT_MAX_WORKER_RETRIES,
             max_timeout_retries: DEFAULT_MAX_TIMEOUT_RETRIES,
             retry_backoff_base: DEFAULT_RETRY_BACKOFF_BASE,
+            data_dir: std::path::PathBuf::from("."),
         }
     }
 }
@@ -931,6 +939,47 @@ async fn run_loop(
             .and_then(|w| w.workspace_dir)
     } else {
         None
+    };
+
+    // Ad-hoc/conversation-native run with no dir: auto-allocate a per-run SHARED
+    // directory so all nodes share one cwd (files + a shared workpath KB binding).
+    // Deterministic path (`<data_dir>/orchestrator/runs/{run_id}`, stable across
+    // restarts); persisted to `run.work_dir` so browse + boot-resume resolve it
+    // (and the resolution above reads it back on a later loop). Best-effort — a
+    // create/persist failure logs and falls back to per-node temp dirs (never
+    // fails the run). Runs once per loop, before the fill loop.
+    let workspace_dir: Option<String> = match workspace_dir {
+        Some(d) => Some(d),
+        None => {
+            let dir = deps
+                .data_dir
+                .join("orchestrator")
+                .join("runs")
+                .join(run_id);
+            match std::fs::create_dir_all(&dir) {
+                Ok(()) => {
+                    let dir_str = dir.to_string_lossy().to_string();
+                    if let Err(e) = deps
+                        .run_repo
+                        .update_run(
+                            run_id,
+                            UpdateRunParams {
+                                work_dir: Some(Some(dir_str.clone())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                    {
+                        warn!(run_id, error = %e, "failed to persist auto shared work_dir (continuing)");
+                    }
+                    Some(dir_str)
+                }
+                Err(e) => {
+                    warn!(run_id, error = %e, "failed to create shared run dir (nodes use temp dirs)");
+                    None
+                }
+            }
+        }
     };
 
     // In-flight worker futures, each resolving to (task_id, outcome). The set's
@@ -3627,6 +3676,7 @@ async fn finish_run(
                 goal: None,
                 autonomy: None,
                 fleet_snapshot: None,
+                work_dir: None,
             },
         )
         .await
@@ -5533,6 +5583,117 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Phase 1b Task 1: an ad-hoc/conversation-native run with NO work_dir and NO
+    // workspace gets a per-run SHARED working directory auto-allocated under
+    // `<data_dir>/orchestrator/runs/{run_id}`, persisted to `run.work_dir`, and
+    // handed to EVERY node (so files + a shared workpath KB are shared). All-mock:
+    // the diamond planner + a temp `data_dir` on `RunEngineDeps`.
+    // -------------------------------------------------------------------------
+
+    /// Process-unique suffix so parallel/repeat runs never collide on the temp
+    /// `data_dir` base (the run subdir is already run-id-unique, this belts it).
+    static ADHOC_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// Build an ad-hoc (workspace-less) run with NO work_dir + the diamond planner,
+    /// wired to a fresh temp `data_dir` on `RunEngineDeps` so the engine can
+    /// auto-allocate a per-run shared workspace directory. Autonomous (no approval
+    /// gate) so `engine.start` drives it straight to completion. Returns
+    /// `(svc, engine, run_id, data_dir)`.
+    async fn adhoc_no_dir_harness(
+        worker: Arc<ConcurrencyMockWorkerRunner>,
+    ) -> (RunService, RunEngine, String, std::path::PathBuf) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster);
+        let planner: Arc<dyn PlanProducer> = Arc::new(DiamondPlanProducer);
+
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo,
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        // Unique temp data_dir so the auto-allocated run dir is real + isolated.
+        let data_dir = std::env::temp_dir().join(format!(
+            "nomifun-test-adhoc-{}-{}",
+            now_ms(),
+            ADHOC_TEST_DIR_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+
+        let worker_dyn: Arc<dyn WorkerRunner> = worker;
+        let mut engine_deps =
+            RunEngineDeps::new(run_repo.clone(), worker_dyn, emitter, ws_repo);
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.data_dir = data_dir.clone();
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        // Ad-hoc run: workspace-less, NO work_dir, autonomous (no approval gate).
+        // `create_adhoc` synthesizes the fleet from the model range → member 0
+        // exists for the diamond's `member_index: Some(0)` tasks.
+        let run = run_service
+            .create_adhoc(
+                "u1",
+                CreateAdhocRunRequest {
+                    goal: "share one dir".to_string(),
+                    work_dir: None,
+                    model_range: ModelRange::Single {
+                        model: ModelRef {
+                            provider_id: "prov_x".to_string(),
+                            model: "claude-opus-4-8".to_string(),
+                        },
+                    },
+                    pinned_roles: vec![],
+                    role_members: vec![],
+                    autonomy: Some("autonomous".to_string()),
+                    max_parallel: Some(2),
+                    lead_conv_id: None,
+                    lead_model: None,
+                },
+            )
+            .await
+            .expect("create_adhoc");
+        assert!(run.workspace_id.is_none(), "ad-hoc run has no workspace");
+        assert!(run.work_dir.is_none(), "ad-hoc run starts with no work_dir");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, run.id, data_dir)
+    }
+
+    #[tokio::test]
+    async fn adhoc_run_auto_allocates_shared_workspace_dir() {
+        // 一个无 work_dir / 无 workspace 的 ad-hoc run:引擎应自动分配一个
+        // <data_dir>/orchestrator/runs/{run_id} 共享目录,持久化到 run.work_dir,
+        // 并把它作为 workspace_dir 传给每个节点(此前每节点各自临时目录、无法共享)。
+        let worker = Arc::new(ConcurrencyMockWorkerRunner::new(Duration::from_millis(10)));
+        let (svc, engine, run_id, data_dir) = adhoc_no_dir_harness(worker.clone()).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        // 持久化了 work_dir
+        let expected = data_dir.join("orchestrator").join("runs").join(&run_id);
+        assert_eq!(
+            detail.run.work_dir.as_deref(),
+            Some(expected.to_str().unwrap()),
+            "auto-allocated shared dir must be persisted to run.work_dir"
+        );
+        assert!(expected.is_dir(), "shared dir must be created on disk");
+        // 每个节点都拿到同一个共享目录
+        let dirs = worker.seen_workspace_dir.lock().unwrap().clone();
+        assert!(!dirs.is_empty());
+        for d in &dirs {
+            assert_eq!(
+                d.as_deref(),
+                expected.to_str(),
+                "every node shares the one run dir"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // 迁移 024: transient-error AUTO-RETRY. A single-task plan + a worker mock
     // that fails a configurable number of dispatches (classified retryable or
     // not) before succeeding. Proves a retryable failure (rate limit / timeout)
@@ -5928,6 +6089,7 @@ mod tests {
                     goal: None,
                     autonomy: None,
                     fleet_snapshot: None,
+                    work_dir: None,
                 },
             )
             .await

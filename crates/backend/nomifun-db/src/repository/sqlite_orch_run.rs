@@ -131,6 +131,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.fleet_snapshot.is_some() {
             sets.push("fleet_snapshot = ?");
         }
+        if p.work_dir.is_some() {
+            sets.push("work_dir = ?");
+        }
         if sets.is_empty() {
             return Ok(());
         }
@@ -158,6 +161,11 @@ impl IRunRepository for SqliteRunRepository {
         }
         if let Some(fleet_snapshot) = &p.fleet_snapshot {
             q = q.bind(fleet_snapshot);
+        }
+        if let Some(work_dir) = &p.work_dir {
+            // `work_dir: &Option<String>` — sqlx binds `None` as NULL, `Some(v)` as v
+            // (skip/NULL/set, matching the `summary` column above).
+            q = q.bind(work_dir);
         }
         q = q.bind(now_ms());
         q = q.bind(id);
@@ -965,6 +973,7 @@ mod tests {
                 goal: None,
                 autonomy: None,
                 fleet_snapshot: None,
+                work_dir: None,
             },
         )
         .await
@@ -1294,6 +1303,7 @@ mod tests {
                 goal: Some("new goal".into()),
                 autonomy: None,
                 fleet_snapshot: None,
+                work_dir: None,
             },
         )
         .await
