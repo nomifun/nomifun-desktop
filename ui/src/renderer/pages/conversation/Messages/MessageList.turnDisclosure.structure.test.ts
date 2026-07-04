@@ -32,6 +32,11 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
 
+  test('keeps internal thinking messages out of the visible execution stream', () => {
+    expect(source.includes("if (message.type === 'thinking') continue;")).toBe(true);
+    expect(source.includes('thinkingCompletedWithDuration')).toBe(false);
+  });
+
   test('keeps the implementation scoped to the message content area', () => {
     expect(source.includes('PreviewPanel')).toBe(false);
     expect(source.includes('OrchestrationTopPanel')).toBe(false);

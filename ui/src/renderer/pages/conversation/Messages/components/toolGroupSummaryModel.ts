@@ -35,6 +35,9 @@ export interface ToolReceiptDetailRow {
   state: TurnDisclosureProcessState;
   title: string;
   target?: string;
+  input?: string;
+  output?: string;
+  truncated?: boolean;
 }
 
 const stateMatchesTool = (state: TurnDisclosureProcessState, tool: NormalizedToolCall): boolean => {
@@ -129,6 +132,9 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
       state: getToolProcessState(tool),
       title,
       ...(target ? { target } : {}),
+      ...(tool.input ? { input: tool.input } : {}),
+      ...(tool.output ? { output: tool.output } : {}),
+      ...(tool.truncated ? { truncated: tool.truncated } : {}),
     };
   });
 

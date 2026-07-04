@@ -1621,7 +1621,6 @@ export type I18nKey =
   | 'messages.processReceipt.searchingCode'
   | 'messages.processReceipt.status'
   | 'messages.processReceipt.thinkingCompleted'
-  | 'messages.processReceipt.thinkingCompletedWithDuration'
   | 'messages.processReceipt.thinkingRunning'
   | 'messages.processReceipt.tools'
   | 'messages.processReceipt.waitingPermission'
