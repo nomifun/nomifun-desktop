@@ -139,7 +139,7 @@ export const getConversationRuntimeWorkspaceErrorMessage = (error: unknown, t: T
   const payload = getWorkspacePathErrorPayload(error);
   const providerKey = payload?.code ? providerErrorI18nKey(payload.code) : undefined;
   if (providerKey) {
-    return t(providerKey, { defaultValue: t('conversation.agentError.codes.PROVIDER_UNAVAILABLE.body') });
+    return t(providerKey);
   }
   const normalizedCode = normalizeConversationRuntimeWorkspaceErrorCode(error);
   const workspacePath = getWorkspacePathFromErrorDetails(error);

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { featureRoute, groupUsagesByFeature, type ProviderUsage } from './providerInUse';
+import { featureRoute, groupUsagesByFeature, parseProviderInUseDetails, type ProviderUsage } from './providerInUse';
 
 describe('providerInUse helpers', () => {
   test('featureRoute maps each feature', () => {
@@ -25,5 +25,14 @@ describe('providerInUse helpers', () => {
     const groups = groupUsagesByFeature(usages);
     expect(groups.find((g) => g.feature === 'desktopCompanion')?.labels).toEqual(['甲', '乙']);
     expect(groups.find((g) => g.feature === 'orchestrator')?.targetId).toBe('f1');
+  });
+
+  test('parseProviderInUseDetails extracts usages and tolerates junk', () => {
+    expect(
+      parseProviderInUseDetails({ usages: [{ feature: 'orchestrator', label: '舰队', targetId: 'f1' }] })
+    ).toHaveLength(1);
+    expect(parseProviderInUseDetails(undefined)).toEqual([]);
+    expect(parseProviderInUseDetails({ nope: 1 })).toEqual([]);
+    expect(parseProviderInUseDetails('string')).toEqual([]);
   });
 });

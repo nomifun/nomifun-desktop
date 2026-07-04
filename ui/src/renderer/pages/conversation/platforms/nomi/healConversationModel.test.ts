@@ -30,4 +30,14 @@ describe('resolveHealModel', () => {
   test('returns null when there are no providers at all', () => {
     expect(resolveHealModel({ id: 'prov_dead', use_model: 'x' } as any, [], getAvailable, undefined)).toBeNull();
   });
+  test('returns null when the conversation has no bound provider', () => {
+    expect(resolveHealModel({ id: '', use_model: '' } as any, provs, getAvailable, undefined)).toBeNull();
+    expect(resolveHealModel(undefined, provs, getAvailable, undefined)).toBeNull();
+  });
+  test('falls back to first available when saved default model is unavailable', () => {
+    // saved default provider exists but its stored model is no longer offered
+    const r = resolveHealModel({ id: 'prov_dead', use_model: 'x' } as any, provs, getAvailable, { id: 'prov_a', use_model: 'zzz' });
+    expect(r?.provider.id).toBe('prov_a');
+    expect(r?.use_model).toBe('m1');
+  });
 });
