@@ -1,11 +1,19 @@
 {
   "version": "0.2.2",
-  "notes": "## Highlights\n\n- Improved conversation progress visibility with live thinking, command receipts, expandable process rows, and persisted plan events.\n- Added provider in-use protection, friendlier provider unavailable errors, stale model self-healing, and send-time fallback to the first enabled model.\n- Added WeCom channel support and fixed outbound WeCom replies through `aibot_send_msg`.\n- Improved browser and knowledge reliability with per-instance browser profiles and bounded external-root knowledge scans.\n- Fixed several settings unbind routes and refreshed generated i18n keys.\n\n## Verification\n\n- `bun run check`\n- `cargo test` on Windows with Git Bash `sh.exe` added to PATH for shell-dependent tests",
-  "pub_date": "2026-07-04T16:44:22.104Z",
+  "notes": "- Improved orchestration reliability and control: DAG node pre-configuration,\n  per-node model selection, explicit in-conversation approval before execution,\n  and fixes for broken DAG lines, orphaned running nodes, one-node planning, and\n  blank pending states.\n- Added graceful handling for providers/models that do not support image input:\n  image capability tracking, proactive image removal, retry without interrupting\n  the conversation, and a visible in-conversation notice.\n- Expanded browser-use controls with silent mode defaults, managed/system\n  browser source selection, persistent encrypted browser login, a one-click\n  browser login action, and screenshot context for silent approvals.\n- Fixed WebUI credential persistence across restarts and added per-model context\n  window configuration.\n- Polished updater error handling, local update test clients, README screenshots,\n  provider quick links, and contact assets.\n- Packaging note: this Mac-side release publishes macOS installer and updater\n  assets. Windows and Linux packages must be added later from their native build\n  machines.",
+  "pub_date": "2026-07-04T17:09:04.949Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOC9sYlJSbzRrbE85NVVQaXEvRTRlajd4WjEydjNIMmJ5Mk1UZVNkVGpkSWtCLzAvbWU3d00zZnAxemFsUk11K25BaFhlUkFXWFg1U2IrMjVLdzJqdXdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMTgzNDYwCWZpbGU6Tm9taUZ1bl8wLjIuMl94NjQtc2V0dXAuZXhlCm9adXlRMG04a1dlbVBtWmFzQXRXTkRpWjF3ZDh3SitHa1RoSlZvOStqdzNnME12N2JhT3Y1ZEw4RXVUUHBRbzVPM1NjY0RFbGVrVTBMWnFOUkJOQ0N3PT0K",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.2/NomiFun_0.2.2_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZOcWRBcU5ySjVlNkNTTFpKT0FhYk5JWnNNZXJaZktLRnZOb0ZVSitDRFVUMENDeUhhNExmM3dPaGIwcDhPeVJsMTRMVDZmUHluaTBEc1RUR0QzTHdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMTg0ODI3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkpaYXJ1blBJZVEvbDRzS2FNY0tNSmoxdzBkY0EvYS91TDlqNUk3NC82VzZ2MlpuenAvTEo1aEdLRDBuaEZ2VFFWKzJPMHhEOW41bDFPbXNBRzdLMUFBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.2/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODZOcWRBcU5ySjVlNkNTTFpKT0FhYk5JWnNNZXJaZktLRnZOb0ZVSitDRFVUMENDeUhhNExmM3dPaGIwcDhPeVJsMTRMVDZmUHluaTBEc1RUR0QzTHdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzMTg0ODI3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CkpaYXJ1blBJZVEvbDRzS2FNY0tNSmoxdzBkY0EvYS91TDlqNUk3NC82VzZ2MlpuenAvTEo1aEdLRDBuaEZ2VFFWKzJPMHhEOW41bDFPbXNBRzdLMUFBPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.2/NomiFun.app.tar.gz"
     }
   }
 }
