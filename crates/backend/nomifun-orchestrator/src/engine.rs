@@ -229,6 +229,11 @@ pub const DEFAULT_MAX_PARALLEL: usize = 4;
 /// per [`RunEngineDeps`] (tests set it small).
 pub const DEFAULT_MAX_WORKER_RETRIES: usize = 3;
 
+/// Independent, smaller budget for NO-MARKER failures (timeout / empty reply):
+/// a worker that returns `ok:false` with no persisted error marker. Bounded
+/// separately from provider-marker retries so a genuinely stuck node cannot loop.
+pub const DEFAULT_MAX_TIMEOUT_RETRIES: usize = 2;
+
 /// Base backoff before the FIRST auto-retry; doubles each subsequent retry
 /// (`base · 2^attempt`). 5s comfortably clears a per-minute RPM cap within the
 /// retry budget while staying snappy for a one-off blip. Overridable per
@@ -364,6 +369,9 @@ pub struct RunEngineDeps {
     /// (see [`DEFAULT_MAX_WORKER_RETRIES`]). 0 disables auto-retry (every failure is
     /// terminal — the pre-retry behaviour).
     pub max_worker_retries: usize,
+    /// Max auto-retries for a NO-MARKER failure (timeout / empty reply). See
+    /// [`DEFAULT_MAX_TIMEOUT_RETRIES`]. 0 disables timeout auto-retry.
+    pub max_timeout_retries: usize,
     /// Base backoff before the first auto-retry, doubled per retry
     /// (see [`DEFAULT_RETRY_BACKOFF_BASE`]). [`Duration::ZERO`] retries instantly.
     pub retry_backoff_base: Duration,
@@ -394,6 +402,7 @@ impl RunEngineDeps {
             run_locks: Arc::new(RunLocks::new()),
             summarizer: Arc::new(NoopSummaryProducer),
             max_worker_retries: DEFAULT_MAX_WORKER_RETRIES,
+            max_timeout_retries: DEFAULT_MAX_TIMEOUT_RETRIES,
             retry_backoff_base: DEFAULT_RETRY_BACKOFF_BASE,
         }
     }
@@ -1618,17 +1627,28 @@ fn retry_backoff_ms(base: Duration, attempt: i64) -> i64 {
     base_ms.saturating_mul(factor).min(MAX_RETRY_BACKOFF_MS)
 }
 
-/// Decide a failed worker turn's fate: AUTO-RETRY a transient/retryable provider
-/// error while the retry budget remains, else mark the task permanently `failed`.
+/// Decide a failed worker turn's fate via a THREE-WAY classification against the
+/// worker conversation, honouring TWO independent per-node budgets plus a run-level
+/// total-retry budget:
 ///
-/// Retryable is classified by [`WorkerRunner::last_error_retryable`] reading the
-/// worker conversation's latest error marker (`error.retryable` — the same flag the
-/// UI shows as 「可重试」). On a retry we keep the run `running` and put the node back
-/// to `pending` with `attempt+1` and a `next_retry_at = now + backoff` gate;
-/// `list_ready_tasks` holds the node out until the backoff elapses, then the loop
-/// re-dispatches it (a fresh worker turn). After `max_worker_retries` retries — or
-/// for a non-retryable error (auth / billing / bad request → `retryable:false`) — we
-/// fall back to [`mark_task_failed`] exactly as before.
+///   - **Retryable**  — a provider marker with `retryable=true` (e.g. a rate limit):
+///     retried under [`RunEngineDeps::max_worker_retries`], the same as before.
+///   - **NoMarker**   — `ok:false` with NO error marker (a timeout / empty reply):
+///     retried under the SEPARATE, smaller [`RunEngineDeps::max_timeout_retries`]
+///     budget so a genuinely stuck node self-heals on a transient blip yet cannot
+///     loop forever. This is the Task 1 addition (previously NoMarker → fail fast).
+///   - **NonRetryable** — a provider marker with `retryable=false` (auth / billing /
+///     bad request), or an `Err` outcome with no conversation to classify: fail
+///     immediately, exactly as before.
+///
+/// On a retry we keep the run `running` and put the node back to `pending` with
+/// `attempt+1` and a `next_retry_at = now + backoff` gate; `list_ready_tasks` holds
+/// it out until the backoff elapses, then the loop re-dispatches it (a fresh worker
+/// turn). The **run-level total-retry budget** additionally bounds a wide fan-out:
+/// stateless — the sum of persisted `attempt`s across the run vs
+/// `tasks.len() * max_worker_retries` — so many independently backing-off nodes
+/// cannot storm the provider. When neither budget permits a retry we fall back to
+/// [`mark_task_failed`] exactly as before.
 async fn settle_failed_or_retry(
     deps: &Arc<RunEngineDeps>,
     run_id: &str,
@@ -1636,26 +1656,43 @@ async fn settle_failed_or_retry(
     conv_from_outcome: Option<i64>,
     tokens: Option<i64>,
 ) {
-    // Read the task once for its current attempt count + its conversation id (the
-    // worker conv to classify the error against — prefer the outcome's, else the
-    // stamped one, since an `Err` outcome carries none).
     let task = deps.run_repo.get_task(task_id).await.ok().flatten();
     let attempt = task.as_ref().map(|t| t.attempt).unwrap_or(0);
     let conv = conv_from_outcome.or_else(|| task.as_ref().and_then(|t| t.conversation_id));
 
-    let retryable = match conv {
-        Some(c) => deps.worker.last_error_retryable(&c.to_string()).await,
-        None => false,
+    // Three-way classification against the worker conversation:
+    //   Retryable  = provider marker with retryable=true (e.g. rate limit)
+    //   NoMarker   = ok:false with no error marker (timeout / empty reply)
+    //   Otherwise  = NonRetryable (auth/billing/bad-request marker, or Err w/ no conv)
+    let (retryable_marker, has_marker) = match conv {
+        Some(c) => {
+            let s = c.to_string();
+            (deps.worker.last_error_retryable(&s).await, deps.worker.last_error_present(&s).await)
+        }
+        None => (false, true), // Err outcome (no conversation) → treat as NonRetryable
+    };
+    let (should_retry, budget) = if retryable_marker {
+        (true, deps.max_worker_retries)
+    } else if !has_marker && conv.is_some() {
+        (true, deps.max_timeout_retries) // NoMarker: timeout / empty reply
+    } else {
+        (false, 0) // NonRetryable marker
     };
 
-    if retryable && (attempt as usize) < deps.max_worker_retries {
+    // Run-level total-retry budget: bound wide fan-outs so many independently
+    // backing-off nodes cannot storm the provider. Stateless: sum of persisted
+    // attempts across the run vs tasks.len() * max_worker_retries.
+    let within_run_budget = match deps.run_repo.list_tasks(run_id).await {
+        Ok(tasks) => {
+            let used: i64 = tasks.iter().map(|t| t.attempt).sum();
+            let cap = (tasks.len().max(1) as i64) * (deps.max_worker_retries as i64);
+            used < cap
+        }
+        Err(_) => true, // fail-open on a transient read error; per-node budget still bounds it
+    };
+
+    if should_retry && (attempt as usize) < budget && within_run_budget {
         let next = now_ms() + retry_backoff_ms(deps.retry_backoff_base, attempt);
-        // Back to `pending`, attempt+1, gated by `next_retry_at`. The run stays
-        // `running` (we never write a terminal status here), so it self-heals — and
-        // survives a restart (boot-resume re-arms the still-`running` run, the loop
-        // respects the persisted gate). Keep the conversation_id (the failed turn
-        // stays inspectable); a re-dispatch creates a fresh worker conversation and
-        // re-stamps it. Record any tokens accrued by the failed attempt.
         let _ = deps
             .run_repo
             .update_task(
@@ -1669,19 +1706,17 @@ async fn settle_failed_or_retry(
                 },
             )
             .await;
-        // Emit `pending` so the canvas reflects the node leaving its failed/running
-        // state back to a queued-retry state (the ×N attempt badge shows the count).
         deps.emitter.emit_task_status(run_id, task_id, "pending");
         info!(
             run_id,
             task_id,
             attempt = attempt + 1,
-            backoff_ms = retry_backoff_ms(deps.retry_backoff_base, attempt),
-            "Run loop: worker hit a retryable error — scheduling bounded auto-retry"
+            no_marker = !has_marker,
+            "Run loop: scheduling bounded auto-retry"
         );
     } else {
-        // Non-retryable, or retry budget exhausted → permanent failure (the run
-        // loop's terminal check then fails the run, exactly as before).
+        // Non-retryable, retry budget exhausted, or run-level budget hit → permanent
+        // failure (the run loop's terminal check then fails the run, as before).
         mark_task_failed(deps, run_id, task_id, conv_from_outcome, tokens).await;
     }
 }
@@ -3908,6 +3943,14 @@ mod tests {
                 tokens: None,
             })
         }
+        // Represents a DEFINITE failure (a marked provider error): a marker IS
+        // present but `last_error_retryable` defaults false → NonRetryable, so the
+        // node fails immediately (attempt stays 0) — NOT retried under the NoMarker
+        // timeout budget. Preserves the pre-Task-1 dispatch counts / assertions for
+        // `failed_run_reports_once_to_lead` and `failed_task_persists_last_error`.
+        async fn last_error_present(&self, _conversation_id: &str) -> bool {
+            true
+        }
     }
 
     /// Build an engine over a shared in-memory DB wired with a RecordingLeadReporter
@@ -5410,6 +5453,14 @@ mod tests {
         async fn last_error_retryable(&self, _conversation_id: &str) -> bool {
             self.retryable
         }
+        // Simulates a MARKED provider error (rate-limit / auth / etc.): a marker IS
+        // present, so the three-way classification uses `retryable` above —
+        // `retryable=true` → Retryable path, `retryable=false` → NonRetryable
+        // (immediate fail). This keeps the marker-retry semantics distinct from the
+        // NoMarker timeout budget (which `TimeoutMockWorkerRunner` covers).
+        async fn last_error_present(&self, _conversation_id: &str) -> bool {
+            true
+        }
     }
 
     /// Single-task harness with the retry mock + ZERO backoff (instant retries in
@@ -5550,6 +5601,137 @@ mod tests {
             worker.dispatches.load(Ordering::SeqCst),
             1,
             "dispatched exactly once"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Task 1 (P1a): NO-MARKER (timeout / empty reply) BOUNDED auto-retry. A worker
+    // that returns `ok:false, text:None` with NO error marker is now retried under
+    // the SEPARATE `max_timeout_retries` budget (distinct from the provider-marker
+    // `max_worker_retries` path), so a transient timeout self-heals but a genuinely
+    // stuck node still fails after a bounded number of retries.
+    // -------------------------------------------------------------------------
+
+    /// Single-task harness parameterized by an arbitrary worker + ZERO backoff
+    /// (instant retries in tests). Mirrors [`retry_harness`]'s construction
+    /// (`SingleTaskPlanProducer`, one-member fleet) but leaves the retry/timeout
+    /// budgets at their [`RunEngineDeps::new`] defaults. Returns (svc, engine, run id).
+    async fn single_task_harness(worker: Arc<dyn WorkerRunner>) -> (RunService, RunEngine, String) {
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster);
+        let planner: Arc<dyn PlanProducer> = Arc::new(SingleTaskPlanProducer);
+        let run_service =
+            RunService::new(run_repo.clone(), fleet_repo.clone(), ws_repo.clone(), planner, emitter.clone());
+
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.retry_backoff_base = Duration::ZERO; // instant retries — no wall-clock wait in tests
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "timeout fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "timeout ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "timeout test".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(1),
+                },
+            )
+            .await
+            .expect("run create");
+        run_service.plan(&run.id).await.expect("plan");
+        (run_service, engine, run.id)
+    }
+
+    /// Simulates a worker that TIMES OUT / returns no final text with NO error
+    /// marker for the first `fail_times` dispatches, then succeeds. Mirrors the
+    /// production timeout/empty shape: `ok:false, text:None`, and (by NOT
+    /// overriding `last_error_present`) reports no error marker → NoMarker class.
+    struct TimeoutMockWorkerRunner {
+        fail_times: usize,
+        dispatches: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl WorkerRunner for TimeoutMockWorkerRunner {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            _task_id: &str,
+            _brief: &str,
+            _task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            on_started(900);
+            let n = self.dispatches.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                Ok(WorkerOutcome { conversation_id: 900, text: None, ok: false, tokens: None })
+            } else {
+                Ok(WorkerOutcome { conversation_id: 900, text: Some("ok".into()), ok: true, tokens: None })
+            }
+        }
+        // last_error_present defaults false, last_error_retryable defaults false → NoMarker.
+    }
+
+    #[tokio::test]
+    async fn timeout_without_marker_retries_bounded_then_succeeds() {
+        // Times out once (no error marker) then succeeds → self-heals via the
+        // NoMarker timeout budget (NOT the marker-retryable path).
+        let worker: Arc<dyn WorkerRunner> =
+            Arc::new(TimeoutMockWorkerRunner { fail_times: 1, dispatches: Default::default() });
+        let (svc, engine, run_id) = single_task_harness(worker.clone()).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed", "a no-marker timeout must retry to completion");
+        assert_eq!(detail.tasks[0].status, "done");
+        assert_eq!(detail.tasks[0].attempt, 1, "one timeout retry bumps attempt 0 → 1");
+    }
+
+    #[tokio::test]
+    async fn timeout_without_marker_exhausts_timeout_budget_then_fails() {
+        // Times out more than DEFAULT_MAX_TIMEOUT_RETRIES → permanent failure.
+        let worker: Arc<dyn WorkerRunner> =
+            Arc::new(TimeoutMockWorkerRunner { fail_times: 99, dispatches: Default::default() });
+        let (svc, engine, run_id) = single_task_harness(worker.clone()).await;
+        engine.start(run_id.clone());
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "failed", "timeout budget exhausted → run fails");
+        assert_eq!(detail.tasks[0].status, "failed");
+        assert!(
+            detail.tasks[0].attempt as usize >= super::DEFAULT_MAX_TIMEOUT_RETRIES,
+            "attempt should reach the timeout budget"
         );
     }
 
@@ -7879,6 +8061,15 @@ mod tests {
                 })
             }
         }
+        // A failing loop body is a DEFINITE failure (a marked error), NOT a transient
+        // timeout: report a marker present so `settle_failed_or_retry` classifies it
+        // NonRetryable → fail immediately. This keeps
+        // `loop_failing_body_stops_loop_and_gates_downstream_no_infinite_iterate`'s
+        // "body ran exactly twice / loop stops failed" semantics under the new
+        // NoMarker timeout budget.
+        async fn last_error_present(&self, _conversation_id: &str) -> bool {
+            true
+        }
     }
 
     /// Plan: BODY(0, agent) → Loop(1, loop, depends_on [0], pattern_config) →
@@ -9305,6 +9496,14 @@ mod tests {
                         tokens: None,
                     })
                 }
+            }
+            // The first-call failure is a DEFINITE failure (marked error), NOT a
+            // transient timeout: report a marker present so it fails immediately
+            // (NonRetryable) rather than self-healing under the NoMarker timeout
+            // budget — the test relies on the FIRST run landing `failed` before the
+            // rerun re-executes it.
+            async fn last_error_present(&self, _conversation_id: &str) -> bool {
+                true
             }
         }
         let worker: Arc<dyn WorkerRunner> = Arc::new(FlakyWorker {

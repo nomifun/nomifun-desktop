@@ -114,6 +114,19 @@ pub trait WorkerRunner: Send + Sync {
         false
     }
 
+    /// Whether the worker conversation carries ANY `content.type == "error"` marker.
+    /// Distinguishes a NonRetryable provider error (marker present, `retryable=false`)
+    /// from a NoMarker timeout / empty reply (no marker at all — a turn that returned
+    /// `ok:false` without ever persisting a provider-error message). The engine's
+    /// three-way classification retries a NoMarker failure under the SEPARATE
+    /// `max_timeout_retries` budget, while a marked non-retryable error still fails
+    /// fast. Default `false` (no marker) so test/mock runners with no live
+    /// conversation store report NoMarker unless they explicitly override; the
+    /// production [`ConversationWorkerRunner`] overrides it to read the marker.
+    async fn last_error_present(&self, _conversation_id: &str) -> bool {
+        false
+    }
+
     /// A short human-readable failure reason (`<code>: <message>`) from the
     /// conversation's latest error marker, PERSISTED onto a permanently-failed task
     /// so the lead-report / escalation / diagnostic tools can show WHY it failed
@@ -179,6 +192,15 @@ impl WorkerRunner for ConversationWorkerRunner {
     /// marker and return its `error.retryable` flag (false when none / absent).
     async fn last_error_retryable(&self, conversation_id: &str) -> bool {
         self.read_latest_error_retryable(conversation_id).await
+    }
+
+    /// Production override of [`WorkerRunner::last_error_present`]: scan the worker
+    /// conversation's most recent messages for ANY provider-error marker
+    /// (`content.type == "error"`) and report whether one exists (regardless of its
+    /// `retryable` flag). Lets the engine tell a marked failure (present) apart from
+    /// a plain timeout / empty reply (absent).
+    async fn last_error_present(&self, conversation_id: &str) -> bool {
+        self.read_latest_error_present(conversation_id).await
     }
 
     async fn last_error_summary(&self, conversation_id: &str) -> Option<String> {
@@ -388,6 +410,35 @@ impl ConversationWorkerRunner {
         }
     }
 
+    /// Read whether the worker conversation's recent window carries ANY provider-
+    /// error marker (`content.type == "error"`). Lists the same recent (desc) window
+    /// as [`read_latest_error_retryable`](Self::read_latest_error_retryable) and
+    /// mirrors its fetch path, but only tests for the marker's PRESENCE (not its
+    /// `retryable` flag); `false` on any list error / no error marker.
+    async fn read_latest_error_present(&self, conv_id: &str) -> bool {
+        let Ok(messages) = self
+            .conv
+            .list_messages(
+                &self.user_id,
+                conv_id,
+                ListMessagesQuery {
+                    page: Some(1),
+                    page_size: Some(10),
+                    order: Some("desc".to_owned()),
+                    content_mode: None,
+                    cursor: None,
+                },
+            )
+            .await
+        else {
+            return false;
+        };
+        match serde_json::to_value(&messages) {
+            Ok(v) => latest_error_present(&v),
+            Err(_) => false,
+        }
+    }
+
     /// Read the conversation's latest error marker as a `<code>: <message>` string
     /// (best-effort → `None` on any read/parse failure or when no error marker
     /// exists). Mirrors [`Self::read_latest_error_retryable`]'s message-fetch path.
@@ -537,6 +588,27 @@ fn error_retryable_flag(v: &Value) -> Option<bool> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     )
+}
+
+/// Whether a serialized message list (array or single) carries ANY provider-error
+/// marker (`content.type == "error"`). Mirrors [`latest_error_retryable`]'s
+/// array/single walk but tests only for PRESENCE — used to tell a marked failure
+/// (present) apart from a plain timeout / empty reply (absent).
+fn latest_error_present(v: &Value) -> bool {
+    match v {
+        Value::Array(arr) => arr.iter().any(error_marker_present),
+        _ => error_marker_present(v),
+    }
+}
+
+/// True iff this single serialized message is a provider-error marker
+/// (`content.type == "error"`).
+fn error_marker_present(v: &Value) -> bool {
+    v.as_object()
+        .and_then(|o| o.get("content"))
+        .and_then(|c| c.get("type"))
+        .and_then(Value::as_str)
+        == Some("error")
 }
 
 /// The latest error marker rendered as a short `<code>: <message>` reason (or one
