@@ -31,6 +31,7 @@
     "loadedTools": "Loaded {{count}} tools",
     "loadingTools": "Loading {{count}} tools",
     "loadedTarget": "Loaded {{target}}",
+    "fileRead": "Read {{target}}",
     "fileChanged": "Edited {{target}} {{stats}}",
     "thinkingRunning": "Thinking",
     "thinkingCompleted": "Thought",
