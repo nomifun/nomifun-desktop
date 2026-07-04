@@ -4,6 +4,18 @@
   "toolDetailOutput": "输出",
   "toolDetailLoading": "加载中...",
   "toolDetailLoadFailed": "加载完整输出失败",
+  "toolSummary": {
+    "running": "正在运行 {{target}}",
+    "waiting": "等待确认 {{target}}",
+    "completed": "已运行 {{target}}",
+    "failed": "运行失败 {{target}}",
+    "canceled": "已取消 {{target}}"
+  },
+  "turnProcessed": "已处理 {{duration}}",
+  "turnProcessing": "处理中 {{duration}}",
+  "turnWaiting": "等待确认 {{duration}}",
+  "turnFailed": "处理失败 {{duration}}",
+  "turnCanceled": "已取消 {{duration}}",
   "planTodoList": "待办列表",
   "planProgress": "已完成 {{done}}/{{total}}",
   "fileChanges": "文件变更",

@@ -347,3 +347,105 @@
     line-height: 1.4 !important;
   }
 }
+
+.turn-process-disclosure {
+  width: 100%;
+  color: var(--color-text-3, #86909c);
+}
+
+.turn-process-disclosure--running {
+  color: var(--color-primary-6, #165dff);
+}
+
+.turn-process-disclosure--waiting {
+  color: var(--color-warning-6, #ff7d00);
+}
+
+.turn-process-disclosure--failed {
+  color: var(--color-danger-6, #f53f3f);
+}
+
+.turn-process-disclosure--canceled {
+  color: var(--color-text-4, #c9cdd4);
+}
+
+.turn-process-disclosure__header {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 1px solid var(--color-border-2, #e5e6eb);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  padding: 4px 2px 8px;
+  text-align: left;
+}
+
+.turn-process-disclosure__header:hover {
+  color: var(--color-text-2, #4e5969);
+}
+
+.turn-process-disclosure__header:focus-visible {
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--color-primary-light-3, #bedaff);
+  outline: none;
+}
+
+.turn-process-disclosure__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-process-disclosure__arrow {
+  flex: none;
+  transition: transform 0.16s ease;
+}
+
+.turn-process-disclosure__arrow--open {
+  transform: rotate(180deg);
+}
+
+.turn-process-disclosure__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 2px;
+}
+
+.turn-process-disclosure__item {
+  min-width: 0;
+  color: var(--color-text-2, #4e5969);
+  opacity: 0.84;
+}
+
+.turn-process-disclosure__item--current,
+.turn-process-disclosure__item--failed,
+.turn-process-disclosure__item--waiting {
+  opacity: 1;
+}
+
+.turn-process-disclosure__item .tool-group-summary {
+  margin-top: 0;
+}
+
+.turn-process-disclosure__item .message-error-note,
+.turn-process-disclosure__item [data-testid='message-permission-card'],
+.turn-process-disclosure__item [data-testid='message-acp-permission-card'] {
+  margin-bottom: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-process-disclosure__arrow {
+    transition: none;
+  }
+}

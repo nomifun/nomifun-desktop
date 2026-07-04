@@ -4,6 +4,18 @@
   "toolDetailOutput": "Output",
   "toolDetailLoading": "Loading...",
   "toolDetailLoadFailed": "Failed to load full output",
+  "toolSummary": {
+    "running": "Running {{target}}",
+    "waiting": "Waiting to confirm {{target}}",
+    "completed": "Ran {{target}}",
+    "failed": "Failed {{target}}",
+    "canceled": "Canceled {{target}}"
+  },
+  "turnProcessed": "Processed {{duration}}",
+  "turnProcessing": "Processing {{duration}}",
+  "turnWaiting": "Waiting for confirmation {{duration}}",
+  "turnFailed": "Failed {{duration}}",
+  "turnCanceled": "Canceled {{duration}}",
   "planTodoList": "To do list",
   "planProgress": "{{done}}/{{total}} done",
   "fileChanges": "File Changes",
