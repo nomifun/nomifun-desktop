@@ -135,6 +135,13 @@ pub enum RunOutcome {
     /// adopt, or abandon) instead of waiting for the whole run to end. Distinct from
     /// [`RunOutcome::Failed`], which is the run's terminal receipt.
     NodeFailed,
+    /// A THROTTLED mid-run heartbeat: after a batch of nodes finished `done` the
+    /// engine re-engages the lead so the master agent can OBSERVE progress and, if
+    /// warranted, append more work (`nomi_run_add_tasks`) to the SAME run — without
+    /// waiting for the terminal receipt. Rate-limited by node-count + time (see
+    /// [`BATCH_REPORT_MIN_NODES`] / [`BATCH_REPORT_INTERVAL`]) so a fast fan-out
+    /// cannot spam the lead. Non-terminal; the run keeps running.
+    BatchProgress,
 }
 
 impl RunOutcome {
@@ -146,6 +153,7 @@ impl RunOutcome {
             RunOutcome::Stalled => "stalled",
             RunOutcome::AwaitingApproval => "awaiting_approval",
             RunOutcome::NodeFailed => "node_failed",
+            RunOutcome::BatchProgress => "batch_progress",
         }
     }
 }
@@ -235,6 +243,18 @@ pub const DEFAULT_MAX_PARALLEL: usize = 4;
 /// non-retryable error (auth / billing / bad request) never retries. Overridable
 /// per [`RunEngineDeps`] (tests set it small).
 pub const DEFAULT_MAX_WORKER_RETRIES: usize = 3;
+
+/// Mid-run batch-progress throttle (Phase 3a Task 3): the settle branch fires a
+/// best-effort [`RunOutcome::BatchProgress`] lead report only after AT LEAST this
+/// many nodes have completed `done` since the last report. Coupled with
+/// [`BATCH_REPORT_INTERVAL`] (BOTH must clear) so a fast fan-out cannot spam the
+/// lead conversation. Non-terminal — the run keeps driving.
+const BATCH_REPORT_MIN_NODES: usize = 3;
+
+/// Minimum wall-clock between two consecutive mid-run batch-progress lead reports
+/// (see [`BATCH_REPORT_MIN_NODES`]). The FIRST eligible batch fires immediately
+/// (no prior report); subsequent ones wait out this interval.
+const BATCH_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Independent, smaller budget for NO-MARKER failures (timeout / empty reply):
 /// a worker that returns `ok:false` with no persisted error marker. Bounded
@@ -1042,6 +1062,13 @@ async fn run_loop(
     // error) leaves it None → the run-level watchdog reports those.
     let mut terminal_report: Option<(RunOutcome, String)> = None;
 
+    // Mid-run batch-progress throttle state (Phase 3a Task 3). `done_since_report`
+    // counts nodes that finished `done` since the last batch report; `last_batch_report`
+    // gates the wall-clock interval (None = never reported → first eligible batch
+    // fires immediately). See BATCH_REPORT_MIN_NODES / BATCH_REPORT_INTERVAL.
+    let mut last_batch_report: Option<std::time::Instant> = None;
+    let mut done_since_report: usize = 0;
+
     loop {
         // (a) Cancelled → stop scheduling. Task 3 adds in-flight cancel
         // propagation; here we simply stop dispatching and let the loop unwind
@@ -1512,7 +1539,42 @@ async fn run_loop(
         // completion may unblock downstream tasks, so the loop re-fills.
         if let Some((task_id, outcome)) = inflight.next().await {
             in_progress.remove(&task_id);
+            // Capture whether this settle is a node COMPLETION before `outcome` is
+            // moved into `settle_task_outcome` (it takes the value): `Ok(o) if o.ok`
+            // mirrors settle's own `done` arm. Retries / failures do not count.
+            let did_complete = matches!(&outcome, Ok(o) if o.ok);
             settle_task_outcome(&deps, run_id, &task_id, outcome).await;
+
+            // Mid-run batch-progress heartbeat (Phase 3a Task 3). This branch is
+            // reached ONLY while `inflight` is non-empty, so it is structurally
+            // DISJOINT from the `inflight.is_empty()` terminal decision above — we
+            // never hold a RunLocks terminal guard here. Best-effort: a report
+            // failure only warns and never affects the run. Throttled by BOTH a
+            // node-count floor and a wall-clock interval so a fast fan-out cannot
+            // spam the lead. A run with no lead conversation short-circuits (None).
+            if did_complete {
+                done_since_report += 1;
+            }
+            if let Some(lead_conv_id) = run.lead_conv_id {
+                let interval_due = last_batch_report
+                    .map(|t| t.elapsed() >= BATCH_REPORT_INTERVAL)
+                    .unwrap_or(true);
+                if done_since_report >= BATCH_REPORT_MIN_NODES && interval_due {
+                    let digest = match deps.run_repo.list_tasks(run_id).await {
+                        Ok(tasks) if !tasks.is_empty() => build_summary_digest(&tasks),
+                        _ => "（run 进行中，暂无可汇总的节点产出）".to_string(),
+                    };
+                    if let Err(e) = deps
+                        .lead_reporter
+                        .report(lead_conv_id, run_id, RunOutcome::BatchProgress, &digest)
+                        .await
+                    {
+                        warn!(run_id, error = %e, "batch-progress lead report failed");
+                    }
+                    last_batch_report = Some(std::time::Instant::now());
+                    done_since_report = 0;
+                }
+            }
         }
         // Loop again — re-evaluate the ready set (newly unblocked) and the
         // terminal condition.
@@ -4433,7 +4495,10 @@ mod tests {
         }
     }
 
-    /// A COMPLETED run reports exactly once, with `Completed`, to its lead conv.
+    /// A COMPLETED run reports its TERMINAL `Completed` receipt exactly once to its
+    /// lead conv. (Task 3 adds a mid-run `batch_progress` receipt BEFORE the terminal
+    /// one when ≥3 nodes complete — the 3-node chain does — so this asserts on the
+    /// count of `completed` receipts, not the total report count.)
     #[tokio::test]
     async fn completed_run_reports_once_to_lead() {
         let worker: Arc<dyn WorkerRunner> =
@@ -4445,15 +4510,38 @@ mod tests {
             wait_run_status(&run_service, &run_id, "completed").await,
             "run must complete"
         );
-        await_first_report(&reporter).await;
+        // The terminal `completed` receipt fires AFTER the loop exits, so it can lag
+        // the persisted status the poll above observed (and any mid-run
+        // `batch_progress` receipt) — wait for it specifically rather than for the
+        // first report.
+        let mut saw_completed = false;
+        for _ in 0..40 {
+            if reporter
+                .reports
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, _, o)| o == "completed")
+            {
+                saw_completed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         let reports = reporter.reports.lock().unwrap().clone();
-        assert_eq!(
-            reports.len(),
-            1,
-            "exactly one lead report on completion, got {reports:?}"
+        assert!(
+            saw_completed,
+            "terminal completed receipt must fire, got {reports:?}"
         );
-        assert_eq!(reports[0].0, 909, "reported to the lead conversation");
-        assert_eq!(reports[0].2, "completed", "outcome is completed");
+        // Exactly ONE terminal `completed` receipt (a mid-run `batch_progress` is
+        // correct additional behaviour, not a duplicate terminal report).
+        let completed: Vec<_> = reports.iter().filter(|(_, _, o)| o == "completed").collect();
+        assert_eq!(
+            completed.len(),
+            1,
+            "exactly one terminal `completed` lead report, got {reports:?}"
+        );
+        assert_eq!(completed[0].0, 909, "reported to the lead conversation");
     }
 
     /// A FAILED run reports its TERMINAL `Failed` receipt exactly once to its lead
@@ -4549,6 +4637,64 @@ mod tests {
             node_failed.0, 55,
             "mid-run node_failed reported to the lead conversation"
         );
+    }
+
+    /// A run that completes ≥3 nodes re-engages the lead with a THROTTLED, best-effort
+    /// `batch_progress` receipt BEFORE the terminal receipt, so the master agent can
+    /// OBSERVE progress and append more work (`nomi_run_add_tasks`) to the SAME run.
+    /// The 3-node chain (A→B→C) all completes `done`; on the 3rd completion the
+    /// node-count floor (BATCH_REPORT_MIN_NODES = 3) is met and the FIRST interval
+    /// gate is open (no prior report) → exactly one `batch_progress` fires mid-run,
+    /// ordered before the terminal `completed` receipt.
+    #[tokio::test]
+    async fn batch_progress_reports_to_lead_midrun() {
+        let worker: Arc<dyn WorkerRunner> =
+            Arc::new(MockWorkerRunner::with_text(777, "task output"));
+        let (run_service, engine, reporter) = reporter_stack(worker, 3).await;
+        let run_id = adhoc_lead_run(&run_service, 321).await;
+        engine.start(run_id.clone());
+        assert!(
+            wait_run_status(&run_service, &run_id, "completed").await,
+            "run must complete"
+        );
+        // The mid-run batch_progress receipt is pushed during settle (before the
+        // terminal completed report), but poll a bounded moment to stay robust.
+        await_first_report(&reporter).await;
+        let mut saw_batch = false;
+        for _ in 0..40 {
+            if reporter
+                .reports
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, _, o)| o == "batch_progress")
+            {
+                saw_batch = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let reports = reporter.reports.lock().unwrap().clone();
+        assert!(
+            saw_batch,
+            "≥3 node completions must produce a mid-run batch_progress lead report, got {reports:?}"
+        );
+        // The mid-run batch_progress targets the lead conversation and PRECEDES the
+        // terminal `completed` receipt.
+        let batch_pos = reports
+            .iter()
+            .position(|(_, _, o)| o == "batch_progress")
+            .expect("batch_progress report present");
+        assert_eq!(
+            reports[batch_pos].0, 321,
+            "mid-run batch_progress reported to the lead conversation"
+        );
+        if let Some(done_pos) = reports.iter().position(|(_, _, o)| o == "completed") {
+            assert!(
+                batch_pos < done_pos,
+                "batch_progress must precede the terminal completed receipt, got {reports:?}"
+            );
+        }
     }
 
     /// A permanently-failed task PERSISTS a `last_error` reason, surfaced on the DTO
