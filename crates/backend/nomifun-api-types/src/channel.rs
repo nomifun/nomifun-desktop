@@ -23,6 +23,10 @@ pub struct EnablePluginRequest {
     pub plugin_type: Option<String>,
     #[serde(default, alias = "companionId")]
     pub companion_id: Option<String>,
+    /// 对外伙伴 (public agent) to bind this bot to. Mutually exclusive with
+    /// `companion_id` — a bot serves EITHER a companion OR a public agent.
+    #[serde(default, alias = "publicAgentId")]
+    pub public_agent_id: Option<String>,
 }
 
 /// Request body for `POST /api/channel/plugins/disable`.
@@ -132,6 +136,10 @@ pub struct PluginStatusResponse {
     /// Companion bound to this bot channel (one bot ↔ at most one companion).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub companion_id: Option<String>,
+    /// 对外伙伴 (public agent) bound to this bot channel. Row-level mutually
+    /// exclusive with `companion_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_agent_id: Option<String>,
     /// Platform-level bot identity (lark app_id, telegram bot id, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bot_key: Option<String>,
@@ -466,6 +474,7 @@ mod tests {
             status: Some("running".into()),
             last_connected: Some(1700000000000),
             companion_id: Some("companion_1".into()),
+            public_agent_id: None,
             bot_key: Some("123456".into()),
             created_at: 1699000000000,
             updated_at: 1700000000000,
@@ -501,6 +510,7 @@ mod tests {
             status: None,
             last_connected: None,
             companion_id: None,
+            public_agent_id: None,
             bot_key: None,
             created_at: 1699000000000,
             updated_at: 1699000000000,
@@ -760,6 +770,7 @@ mod tests {
                 status: Some("running".into()),
                 last_connected: Some(1700000000000),
                 companion_id: None,
+                public_agent_id: None,
                 bot_key: None,
                 created_at: 1699000000000,
                 updated_at: 1700000000000,
@@ -819,6 +830,7 @@ mod tests {
             status: Some("ready".into()),
             last_connected: None,
             companion_id: Some("companion_2".into()),
+            public_agent_id: None,
             bot_key: Some("cli_app".into()),
             created_at: 1699000000000,
             updated_at: 1699000000000,

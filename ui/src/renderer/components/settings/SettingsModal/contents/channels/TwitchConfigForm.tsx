@@ -75,7 +75,10 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: token.trim(), twitch_channel: twitchChannel.trim() } };
-    await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'twitch', companion_id: channelTarget.companionId, config } : { plugin_id: 'twitch', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'twitch', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'twitch', config });
+    if (!result.success) {
+      throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+    }
     Message.success(t('settings.twitch.pluginEnabled', 'Twitch bot enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
@@ -132,7 +135,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
     }
   };
 
-  const getRemainingTime = (expiresAt: number) => `${Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000 / 60))} min`;
+  const getRemainingTime = (expiresAt: number) => `${Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000 / 60))} ${t('common.unit.minute_short')}`;
   const credentialsLocked = !!pluginStatus?.connected;
 
   return (
@@ -165,7 +168,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
               {pendingPairings.map((pairing) => (
                 <div key={pairing.code} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
                   <div className='flex-1'>
-                    <div className='text-14px font-500 text-t-primary'>{pairing.display_name || 'Unknown User'}</div>
+                    <div className='text-14px font-500 text-t-primary'>{pairing.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>{t('settings.assistant.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code> · {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}</div>
                   </div>
                   <div className='flex items-center gap-8px'>
@@ -188,7 +191,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
           <div className='flex flex-col gap-12px'>
             {authorizedUsers.map((user) => (
               <div key={user.id} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
-                <div className='text-14px font-500 text-t-primary'>{user.display_name || 'Unknown User'}</div>
+                <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                 <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
                   <Button type='text' status='danger' size='small' icon={<Delete size={16} />} onClick={() => handleRevokeUser(user.id)} />
                 </Tooltip>

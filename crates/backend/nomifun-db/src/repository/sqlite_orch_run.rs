@@ -224,6 +224,7 @@ impl IRunRepository for SqliteRunRepository {
             override_provider_id: None,
             override_model: None,
             preset_prompt: None,
+            last_error: None,
             created_at: now,
             updated_at: now,
         })
@@ -284,6 +285,9 @@ impl IRunRepository for SqliteRunRepository {
         if p.next_retry_at.is_some() {
             sets.push("next_retry_at = ?");
         }
+        if p.last_error.is_some() {
+            sets.push("last_error = ?");
+        }
         if sets.is_empty() {
             return Ok(());
         }
@@ -323,6 +327,9 @@ impl IRunRepository for SqliteRunRepository {
         }
         if let Some(next_retry_at) = &p.next_retry_at {
             q = q.bind(next_retry_at);
+        }
+        if let Some(last_error) = &p.last_error {
+            q = q.bind(last_error);
         }
         q = q.bind(now_ms());
         q = q.bind(id);
@@ -745,6 +752,7 @@ mod tests {
         repo.update_task(
             task_id,
             UpdateTaskParams {
+                last_error: None,
                 status: Some("done".into()),
                 spec: None,
                 conversation_id: None,

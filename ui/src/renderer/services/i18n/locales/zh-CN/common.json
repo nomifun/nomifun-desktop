@@ -1,6 +1,7 @@
 {
   "siderSection": {
     "common": "常用",
+    "publicService": "对外服务",
     "data": "数据空间",
     "automation": "自动化",
     "tools": "增强工具",
@@ -50,6 +51,7 @@
   "saveSuccess": "保存成功",
   "saveFailed": "保存失败",
   "unknownError": "未知错误",
+  "unknownUser": "未知用户",
   "confirmDelete": "确认删除",
   "deleteSuccess": "删除成功",
   "deleteFailed": "删除失败",

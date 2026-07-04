@@ -172,7 +172,7 @@ async fn tc_4_2_stdout_captured() {
 async fn tc_4_3_stderr_captured_and_formatted() {
     // stderr-only output — cross-platform: write to stderr via redirection
     let content = if cfg!(windows) {
-        "!`echo stderr_msg 1>&2`"
+        "!`[Console]::Error.WriteLine('stderr_msg')`"
     } else {
         "!`echo stderr_msg >&2`"
     };
@@ -201,7 +201,7 @@ async fn tc_4_4_command_fail_no_output_returns_err() {
 async fn tc_4_4b_command_fail_with_output_returns_ok() {
     // exits non-zero but still has stdout
     let content = if cfg!(windows) {
-        "!`echo output & exit 1`"
+        "!`Write-Output output; exit 1`"
     } else {
         "!`echo output; exit 1`"
     };
@@ -218,8 +218,11 @@ async fn tc_4_4b_command_fail_with_output_returns_ok() {
 #[tokio::test]
 async fn tc_4_5_cwd_used() {
     let tmp = std::env::temp_dir();
-    // Use cross-platform command: `cd` on Windows, `pwd` on Unix
-    let content = if cfg!(windows) { "!`cd`" } else { "!`pwd`" };
+    let content = if cfg!(windows) {
+        "!`(Get-Location).Path`"
+    } else {
+        "!`pwd`"
+    };
     let result = execute_shell_commands(content, LoadedFrom::Skills, tmp.to_str().unwrap())
         .await
         .unwrap();
@@ -244,21 +247,14 @@ async fn tc_4_6_empty_output() {
 #[tokio::test]
 async fn tc_4_7_nonexistent_command_returns_err() {
     let content = "!`not_a_real_command_xyz_12345`";
-    let result = run(content).await;
-    // bash writes "command not found" to stderr and exits non-zero with empty stdout.
-    // Per D-3: if stderr is non-empty, the command returns Ok with [stderr] content.
-    // On Windows cmd, a nonexistent command returns exit code 1 with empty stdout/stderr → Err.
-    match &result {
-        Err(ShellExecutionError::CommandFailed { .. }) => {} // expected on Windows/cmd
-        Ok(s) => {
-            // bash returns Ok with [stderr] content since stderr is non-empty
-            assert!(
-                s.contains("[stderr]") || s.contains("not found"),
-                "unexpected Ok result: {s}"
-            );
-        }
-        other => panic!("unexpected result: {:?}", other),
-    }
+    let result = run(content).await.unwrap();
+    // Nonexistent commands write a diagnostic to stderr. Per D-3, non-empty
+    // stderr is returned as Ok content even when the shell exits non-zero.
+    assert!(result.contains("[stderr]"), "got: {result}");
+    assert!(
+        result.contains("not_a_real_command_xyz_12345"),
+        "got: {result}"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -421,7 +417,6 @@ async fn tc_15_3_command_with_special_chars() {
 
 // TC-15.4: 命令含换行符（多行 block）
 #[tokio::test]
-#[cfg(not(windows))] // Windows cmd does not support newline-separated commands in blocks
 async fn tc_15_4_multiline_block_executed_as_script() {
     let content = "```!\necho line1\necho line2\n```";
     let result = run(content).await.unwrap();
@@ -439,7 +434,6 @@ async fn tc_15_6_same_command_repeated() {
         !result.contains("!`"),
         "both occurrences should be replaced: {result}"
     );
-    // Should contain "x" — at least once from each replacement
-    // On Windows cmd, echo may include trailing space; just verify no backtick syntax remains
+    // Should contain "x" at least once from each replacement.
     assert!(result.contains('x'), "expected 'x' in result: {result}");
 }

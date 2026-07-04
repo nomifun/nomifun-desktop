@@ -33,5 +33,6 @@ junction = "1"
 [dev-dependencies]
 async-trait.workspace = true
 http-body-util.workspace = true
+serial_test.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

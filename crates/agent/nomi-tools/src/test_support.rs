@@ -56,37 +56,20 @@ pub(crate) fn pty_test_helper_program() -> String {
 }
 
 /// A shell command line that runs the helper with `subcommand` through the
-/// platform shell (`cmd /C` / `sh -c`), for the `exec_command` / `write_stdin`
-/// tools, which always wrap their `cmd` in the login shell.
+/// platform shell (PowerShell / `sh -c`), for the `exec_command` / `write_stdin`
+/// tools.
 ///
-/// Quoting differs by platform because of how `portable-pty` builds the child
-/// command line on each OS:
+/// Quoting differs by platform:
 ///
 /// - **Unix (`sh -c`)**: the helper path is double-quoted so spaces survive the
 ///   shell word-split. `sh` parses quotes correctly.
 ///
-/// - **Windows (`cmd /C`)**: the path is emitted **unquoted**. `portable-pty`'s
-///   `CommandBuilder` argv-quotes each arg using MSVCRT rules — any arg
-///   containing a quote gets its `"` rewritten to `\"`. But `cmd /C` does NOT
-///   understand argv `\"` escaping; it would treat `\"C:\path\helper.exe\"` as a
-///   literal (quotes-in-name) program and fail with "is not recognized as an
-///   internal or external command". With no embedded quotes, `portable-pty`
-///   wraps the whole single arg in one outer quote pair (no inner escapes) and
-///   `cmd /C` strips that pair cleanly, yielding a parseable command line.
-///   This relies on the helper path containing **no spaces** — true for this
-///   repo's controlled build layout (`target` / `build.noindex` under the
-///   workspace root). A spaced path cannot be expressed correctly through the
-///   `cmd /C` + `portable-pty` argv-escaping combination from a single command
-///   string, so we accept that constraint here rather than mangle the quotes.
+/// - **Windows (PowerShell)**: the helper path is single-quoted and invoked
+///   through the call operator (`&`) so paths with spaces survive shell parsing.
 pub(crate) fn pty_test_helper_shell_cmd(subcommand: &str) -> String {
     let prog = pty_test_helper_program();
     if cfg!(windows) {
-        debug_assert!(
-            !prog.contains(' '),
-            "Windows shell-wrapped helper path must be space-free (cmd /C + \
-             portable-pty cannot carry a quoted path); got: {prog}"
-        );
-        format!("{prog} {subcommand}")
+        format!("& '{}' {subcommand}", prog.replace('\'', "''"))
     } else {
         format!("\"{prog}\" {subcommand}")
     }

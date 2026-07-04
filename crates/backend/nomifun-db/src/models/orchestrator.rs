@@ -113,6 +113,14 @@ pub struct OrchRunTaskRow {
     /// = no extra requirement.
     #[serde(default)]
     pub preset_prompt: Option<String>,
+    /// Persisted failure reason for a permanently-failed task (迁移 027, nullable):
+    /// an `<error_code>: <message>` summary lifted from the worker conversation's
+    /// error marker, or a generic reason (timeout / no reply). `None` = never
+    /// permanently failed, or failed before this column existed. Lets the
+    /// lead-report / escalation / diagnostic tools show WHY a node failed without
+    /// re-reading the worker conversation.
+    #[serde(default)]
+    pub last_error: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

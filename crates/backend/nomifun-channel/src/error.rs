@@ -1,5 +1,26 @@
 use nomifun_common::AppError;
 
+/// Current owner of a bot identity, carried by [`ChannelError::BotAlreadyBound`]
+/// so the HTTP layer can resolve a friendly owner NAME (it holds the roster;
+/// the manager does not). `Display` is the id-based fallback used everywhere the
+/// name can't be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelOwner {
+    Companion(String),
+    PublicAgent(String),
+    Channel(String),
+}
+
+impl std::fmt::Display for ChannelOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChannelOwner::Companion(id) => write!(f, "companion '{id}'"),
+            ChannelOwner::PublicAgent(id) => write!(f, "public agent '{id}'"),
+            ChannelOwner::Channel(id) => write!(f, "channel '{id}'"),
+        }
+    }
+}
+
 /// Channel crate-level errors.
 ///
 /// Uses `thiserror` (library crate convention).
@@ -15,8 +36,8 @@ pub enum ChannelError {
     #[error("Plugin already running: {0}")]
     PluginAlreadyRunning(String),
 
-    #[error("This bot is already connected and bound to {0}")]
-    BotAlreadyBound(String),
+    #[error("This bot is already bound to {0}")]
+    BotAlreadyBound(ChannelOwner),
 
     #[error("Invalid plugin configuration: {0}")]
     InvalidConfig(String),

@@ -19,6 +19,7 @@ use nomifun_auth::{
 };
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
+use nomifun_public_agent::public_agent_routes;
 use nomifun_conversation::{conversation_ops_routes, conversation_routes};
 use nomifun_cron::cron_routes;
 use nomifun_extension::{extension_routes, hub_routes, skill_routes};
@@ -182,7 +183,41 @@ pub async fn create_router(services: &AppServices) -> Router {
     {
         let mgr = chan_mgr.clone();
         let factory = chan_factory.clone();
+        let companion_service = services.companion_service.clone();
+        let public_agent_service = services.public_agent_service.clone();
         tokio::spawn(async move {
+            // Self-heal ghost owner bindings BEFORE restoring: a channel row
+            // bound to a 伙伴 / 对外伙伴 that was deleted before the delete-hook
+            // existed (or missed by it) keeps reserving its bot identity
+            // (UNIQUE(type,bot_key)), so re-enabling that bot under a live owner
+            // fails with "already bound" forever. Unbind rows whose owner is no
+            // longer in the roster so they become adoptable again. Both rosters
+            // are scanned into memory at service construction, so an empty list
+            // here means the owner really is gone.
+            let live_companions: std::collections::HashSet<String> = companion_service
+                .list_companions()
+                .await
+                .into_iter()
+                .map(|c| c.id)
+                .filter(|id| !id.is_empty())
+                .collect();
+            let live_public_agents: std::collections::HashSet<String> = public_agent_service
+                .list()
+                .await
+                .into_iter()
+                .map(|a| a.id)
+                .filter(|id| !id.is_empty())
+                .collect();
+            // Safety valve: never mass-unbind on an ambiguous "no owners at all"
+            // signal (e.g. a roster that failed to load). If the user genuinely
+            // has zero companions AND zero public agents, there is nothing to
+            // reconcile against — skip rather than risk unbinding every row.
+            if live_companions.is_empty() && live_public_agents.is_empty() {
+                tracing::info!("reconcile_orphaned_owners: empty roster, skipping to avoid mass-unbind");
+            } else {
+                mgr.reconcile_orphaned_owners(&live_companions, &live_public_agents).await;
+            }
+
             if let Err(e) = mgr.restore_plugins(&factory).await {
                 tracing::warn!(error = %e, "failed to restore channel plugins");
             }
@@ -369,6 +404,11 @@ pub fn create_router_with_all_state(
     let companion_authenticated = companion_routes(states.companion.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // 对外伙伴 (public companion) enterprise-service domain — its OWN routes,
+    // separate from the desktop companion. Protected by auth middleware.
+    let public_agent_authenticated = public_agent_routes(states.public_agent.clone())
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // Knowledge Base platform routes protected by auth middleware
     let knowledge_authenticated = knowledge_routes(states.knowledge)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -523,6 +563,7 @@ pub fn create_router_with_all_state(
         .merge(requirement_authenticated)
         .merge(idmm_authenticated)
         .merge(companion_authenticated)
+        .merge(public_agent_authenticated)
         .merge(knowledge_authenticated)
         .merge(webhook_authenticated)
         .merge(orchestrator_authenticated)
