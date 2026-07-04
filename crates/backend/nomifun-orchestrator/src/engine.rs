@@ -950,7 +950,11 @@ async fn run_loop(
     // fails the run). Runs once per loop, before the fill loop.
     let workspace_dir: Option<String> = match workspace_dir {
         Some(d) => Some(d),
-        None => {
+        // Only a TRULY ad-hoc run (no workspace binding) gets an auto-allocated
+        // shared dir. A workspace-bound run whose workspace dir couldn't be
+        // resolved (e.g. a transient ws read error) is left as-is — never rebind
+        // it to an ad-hoc dir (the persist would stick and permanently rebind it).
+        None if run.workspace_id.is_none() => {
             let dir = deps
                 .data_dir
                 .join("orchestrator")
@@ -980,6 +984,7 @@ async fn run_loop(
                 }
             }
         }
+        None => None,
     };
 
     // In-flight worker futures, each resolving to (task_id, outcome). The set's
