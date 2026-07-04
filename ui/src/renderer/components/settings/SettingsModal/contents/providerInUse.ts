@@ -1,0 +1,51 @@
+/**
+ * @license
+ * Copyright 2025-2026 NomiFun (nomifun.com)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+export type ProviderUsageFeature = 'desktopCompanion' | 'publicCompanion' | 'smartDecision' | 'orchestrator';
+
+export interface ProviderUsage {
+  feature: ProviderUsageFeature;
+  label: string;
+  targetId?: string;
+}
+
+/** Deep-link route for a feature's unbind location. Verify against Router.tsx. */
+export function featureRoute(feature: ProviderUsageFeature, targetId?: string): string {
+  switch (feature) {
+    case 'desktopCompanion':
+      return '/companion';
+    case 'publicCompanion':
+      return targetId ? `/public-companions/${targetId}` : '/public-companions';
+    case 'smartDecision':
+      return '/nomi';
+    case 'orchestrator':
+      return '/guid';
+  }
+}
+
+export interface ProviderUsageGroup {
+  feature: ProviderUsageFeature;
+  labels: string[];
+  targetId?: string;
+}
+
+export function groupUsagesByFeature(usages: ProviderUsage[]): ProviderUsageGroup[] {
+  const map = new Map<ProviderUsageFeature, ProviderUsageGroup>();
+  for (const u of usages) {
+    const g = map.get(u.feature) ?? { feature: u.feature, labels: [], targetId: u.targetId };
+    g.labels.push(u.label);
+    map.set(u.feature, g);
+  }
+  return [...map.values()];
+}
+
+/** Extract usages from a BackendHttpError.details payload. */
+export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
+  if (details && typeof details === 'object' && Array.isArray((details as { usages?: unknown }).usages)) {
+    return (details as { usages: ProviderUsage[] }).usages;
+  }
+  return [];
+}
