@@ -2,18 +2,24 @@
 //!
 //! Connects out to [`WECOM_WS_URL`], authenticates with an `aibot_subscribe`
 //! frame carrying `bot_id` + `secret`, then relays `aibot_msg_callback` frames
-//! as [`UnifiedIncomingMessage`]s. Replies go back over the *same* socket via
-//! `aibot_respond_msg` (addressed by the inbound `req_id`), so the facade owns
-//! an mpsc sender into the background loop.
+//! as [`UnifiedIncomingMessage`]s.
+//!
+//! Replies go back over the *same* socket via `aibot_send_msg` (active push):
+//! its `chatid` is the sender `userid` (single) or group `chatid` (group) —
+//! exactly the `chat_id` the manager hands to [`ChannelPlugin::send_message`] —
+//! so no request correlation is needed, and (unlike an `aibot_respond_msg`
+//! stream) it is not bound to the 5-second passive-reply window. The facade
+//! therefore only needs an mpsc sender into the background loop.
 //!
 //! Mirrors the Lark long-connection plugin's reconnect/heartbeat/TLS skeleton;
 //! the wire format is plain-text JSON (not Lark's protobuf frames).
 //!
-//! v1 scope: text messages (single + group), subscribe, text reply, 30s ping,
-//! backoff reconnect, msgid dedup. Media download (per-URL AES decrypt), group
+//! v1 scope: text in, markdown reply out (single + group), subscribe, 30s ping,
+//! backoff reconnect, msgid dedup. Media (per-URL AES decrypt), group
 //! @-mention stripping, and streaming replies are deferred to v2.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -27,7 +33,7 @@ use crate::types::{BotInfo, PluginConfig, PluginStatus, PluginType, UnifiedIncom
 
 use super::types::{
     CMD_EVENT_CALLBACK, CMD_MSG_CALLBACK, CMD_SUBSCRIBE, EVENT_DISCONNECTED, WECOM_PING_INTERVAL_SECS, WECOM_WS_URL,
-    build_ping_frame, build_subscribe_frame, build_text_respond_frame, decode_event_type, decode_msg_callback,
+    build_ping_frame, build_send_msg_frame, build_subscribe_frame, decode_event_type, decode_msg_callback,
     parse_envelope,
 };
 
@@ -43,17 +49,6 @@ const DEDUP_TTL: Duration = Duration::from_secs(600);
 /// Bounded buffer for replies queued toward the socket loop.
 const OUTGOING_BUFFER: usize = 64;
 
-/// Per-conversation reply context captured from the latest inbound message.
-#[derive(Debug, Clone)]
-struct ChatContext {
-    /// `headers.req_id` of the most recent inbound message in this chat — the
-    /// address for an `aibot_respond_msg` reply.
-    req_id: String,
-    /// Raw `chattype` ("single" | "group"), retained for future active pushes.
-    #[allow(dead_code)]
-    chattype: String,
-}
-
 /// WeCom intelligent-bot long-connection plugin.
 pub struct WecomPlugin {
     /// Shared with the socket loop so a dead loop can flip it to `Error`.
@@ -65,10 +60,10 @@ pub struct WecomPlugin {
     callbacks: Option<PluginCallbacks>,
     /// Reply channel into the socket loop (set in `start`).
     outgoing_tx: Option<mpsc::Sender<String>>,
-    /// chat_id → latest reply context; shared with the loop.
-    context: Arc<DashMap<String, ChatContext>>,
     /// msgid → first-seen instant; shared dedup cache.
     dedup: Arc<DashMap<String, Instant>>,
+    /// Monotonic counter for generated reply `req_id`s.
+    req_seq: AtomicU64,
     ws_handle: Option<JoinHandle<()>>,
     shutdown_tx: Option<watch::Sender<bool>>,
 }
@@ -83,8 +78,8 @@ impl Default for WecomPlugin {
             secret: None,
             callbacks: None,
             outgoing_tx: None,
-            context: Arc::new(DashMap::new()),
             dedup: Arc::new(DashMap::new()),
+            req_seq: AtomicU64::new(0),
             ws_handle: None,
             shutdown_tx: None,
         }
@@ -170,7 +165,6 @@ impl ChannelPlugin for WecomPlugin {
             bot_id,
             secret,
             callbacks.message_tx,
-            self.context.clone(),
             self.dedup.clone(),
             self.status.clone(),
             outgoing_rx,
@@ -203,25 +197,20 @@ impl ChannelPlugin for WecomPlugin {
             .as_ref()
             .ok_or_else(|| ChannelError::PlatformApi("WeCom socket not running".into()))?;
 
-        let req_id = self
-            .context
-            .get(chat_id)
-            .map(|c| c.req_id.clone())
-            .ok_or_else(|| {
-                ChannelError::MessageSendFailed(format!(
-                    "No pending WeCom request for chat {chat_id}; a reply must follow an inbound message"
-                ))
-            })?;
-
         let text = message.text.unwrap_or_default();
-        let frame = build_text_respond_frame(&req_id, &text);
+        let seq = self.req_seq.fetch_add(1, Ordering::Relaxed);
+        let req_id = format!("send-{seq}");
+        let frame = build_send_msg_frame(chat_id, &text, &req_id);
+
+        info!(chat_id, text_len = text.len(), req_id = %req_id, "WeCom queueing reply (aibot_send_msg)");
+
         outgoing
             .send(frame)
             .await
             .map_err(|_| ChannelError::MessageSendFailed("WeCom socket loop is gone".into()))?;
 
-        // The passive-reply ack arrives asynchronously over the socket; use the
-        // request id as the logical message id (WeCom returns no id here).
+        // The push ack arrives asynchronously over the socket; use the generated
+        // request id as the logical message id (WeCom returns no id inline).
         Ok(req_id)
     }
 
@@ -260,12 +249,10 @@ impl ChannelPlugin for WecomPlugin {
 // WebSocket connection loop
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 async fn ws_loop(
     bot_id: String,
     secret: String,
     message_tx: mpsc::Sender<UnifiedIncomingMessage>,
-    context: Arc<DashMap<String, ChatContext>>,
     dedup: Arc<DashMap<String, Instant>>,
     status: SharedPluginStatus,
     mut outgoing_rx: mpsc::Receiver<String>,
@@ -284,7 +271,6 @@ async fn ws_loop(
             &bot_id,
             &secret,
             &message_tx,
-            &context,
             &dedup,
             &mut req_counter,
             &mut outgoing_rx,
@@ -322,7 +308,6 @@ async fn connect_and_listen(
     bot_id: &str,
     secret: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    context: &Arc<DashMap<String, ChatContext>>,
     dedup: &Arc<DashMap<String, Instant>>,
     req_counter: &mut u64,
     outgoing_rx: &mut mpsc::Receiver<String>,
@@ -356,7 +341,7 @@ async fn connect_and_listen(
             msg = read.next() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        match handle_inbound_text(&text, message_tx, context, dedup).await {
+                        match handle_inbound_text(&text, message_tx, dedup).await {
                             InboundOutcome::Continue => {}
                             InboundOutcome::Displaced => {
                                 warn!("WeCom connection displaced by another subscriber; not reconnecting");
@@ -370,7 +355,7 @@ async fn connect_and_listen(
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         // WeCom frames are JSON text; tolerate a binary wrapper.
                         if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            match handle_inbound_text(&text, message_tx, context, dedup).await {
+                            match handle_inbound_text(&text, message_tx, dedup).await {
                                 InboundOutcome::Continue => {}
                                 InboundOutcome::Displaced => return Ok(()),
                                 InboundOutcome::SubscribeFailed => return Ok(()),
@@ -396,9 +381,11 @@ async fn connect_and_listen(
             outgoing = outgoing_rx.recv() => {
                 match outgoing {
                     Some(frame) => {
+                        debug!(frame = %frame, "WeCom writing reply frame");
                         if let Err(e) = write.send(WsMessage::Text(frame.into())).await {
                             return Err(ChannelError::ConnectionFailed(format!("WeCom reply send failed: {e}")));
                         }
+                        info!("WeCom reply frame written to socket");
                     }
                     None => {
                         // Sender dropped (plugin stopping).
@@ -434,11 +421,10 @@ enum InboundOutcome {
 }
 
 /// Decode one inbound JSON frame and dispatch it. Pure enough to unit-test:
-/// only touches the passed channels/caches.
+/// only touches the passed channel/cache.
 async fn handle_inbound_text(
     text: &str,
     message_tx: &mpsc::Sender<UnifiedIncomingMessage>,
-    context: &Arc<DashMap<String, ChatContext>>,
     dedup: &Arc<DashMap<String, Instant>>,
 ) -> InboundOutcome {
     let Some(env) = parse_envelope(text) else {
@@ -456,10 +442,7 @@ async fn handle_inbound_text(
                 debug!(msgid = %decoded.msgid, "WeCom duplicate message, skipping");
                 return InboundOutcome::Continue;
             }
-            context.insert(
-                decoded.unified.chat_id.clone(),
-                ChatContext { req_id: decoded.req_id, chattype: decoded.chattype },
-            );
+            info!(chat_id = %decoded.unified.chat_id, "WeCom inbound message received");
             let _ = message_tx.send(decoded.unified).await;
             InboundOutcome::Continue
         }
@@ -556,8 +539,8 @@ fn build_ws_tls_connector() -> Result<tokio_tungstenite::Connector, ChannelError
 mod tests {
     use super::*;
 
-    fn caches() -> (Arc<DashMap<String, ChatContext>>, Arc<DashMap<String, Instant>>) {
-        (Arc::new(DashMap::new()), Arc::new(DashMap::new()))
+    fn dedup_cache() -> Arc<DashMap<String, Instant>> {
+        Arc::new(DashMap::new())
     }
 
     #[test]
@@ -579,42 +562,39 @@ mod tests {
 
     #[test]
     fn dedup_tracks_first_seen() {
-        let cache = Arc::new(DashMap::new());
+        let cache = dedup_cache();
         assert!(!is_duplicate(&cache, "m1"));
         assert!(is_duplicate(&cache, "m1"));
         assert!(!is_duplicate(&cache, "m2"));
     }
 
     #[tokio::test]
-    async fn inbound_message_dispatched_and_context_stored() {
+    async fn inbound_message_dispatched() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_msg_callback","headers":{"req_id":"req-7"},
             "body":{"msgid":"m1","chattype":"single","from":{"userid":"zhang"},
                     "msgtype":"text","text":{"content":"hi bot"}}}"#;
 
-        let outcome = handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        let outcome = handle_inbound_text(frame, &message_tx, &dedup).await;
         assert_eq!(outcome, InboundOutcome::Continue);
 
         let msg = message_rx.try_recv().unwrap();
         assert_eq!(msg.chat_id, "zhang");
         assert_eq!(msg.content.text, "hi bot");
         assert_eq!(msg.platform, PluginType::Wecom);
-
-        // Context now maps chat_id → the inbound req_id (used for the reply).
-        assert_eq!(ctx.get("zhang").unwrap().req_id, "req-7");
     }
 
     #[tokio::test]
     async fn inbound_message_deduplicated_by_msgid() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_msg_callback","headers":{"req_id":"r"},
             "body":{"msgid":"dup","chattype":"single","from":{"userid":"u"},
                     "msgtype":"text","text":{"content":"x"}}}"#;
 
-        handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
-        handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        handle_inbound_text(frame, &message_tx, &dedup).await;
+        handle_inbound_text(frame, &message_tx, &dedup).await;
 
         assert!(message_rx.try_recv().is_ok());
         assert!(message_rx.try_recv().is_err(), "duplicate msgid dropped");
@@ -623,33 +603,33 @@ mod tests {
     #[tokio::test]
     async fn non_text_message_not_dispatched() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_msg_callback","headers":{"req_id":"r"},
             "body":{"msgid":"m","chattype":"single","from":{"userid":"u"},
                     "msgtype":"image","image":{"url":"http://x"}}}"#;
 
-        handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        handle_inbound_text(frame, &message_tx, &dedup).await;
         assert!(message_rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn disconnected_event_signals_displaced() {
         let (message_tx, _rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_event_callback","headers":{"req_id":"r"},
             "body":{"msgtype":"event","event":{"eventtype":"disconnected_event"}}}"#;
 
-        let outcome = handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        let outcome = handle_inbound_text(frame, &message_tx, &dedup).await;
         assert_eq!(outcome, InboundOutcome::Displaced);
     }
 
     #[tokio::test]
     async fn subscribe_ack_is_tolerated() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_subscribe","headers":{"req_id":"sub-1"},"body":{"errcode":0}}"#;
 
-        let outcome = handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        let outcome = handle_inbound_text(frame, &message_tx, &dedup).await;
         assert_eq!(outcome, InboundOutcome::Continue);
         assert!(message_rx.try_recv().is_err());
     }
@@ -657,20 +637,71 @@ mod tests {
     #[tokio::test]
     async fn subscribe_failure_signals_subscribe_failed() {
         let (message_tx, _rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
+        let dedup = dedup_cache();
         let frame = r#"{"cmd":"aibot_subscribe","headers":{"req_id":"sub-1"},
             "body":{"errcode":40001,"errmsg":"invalid secret"}}"#;
 
-        let outcome = handle_inbound_text(frame, &message_tx, &ctx, &dedup).await;
+        let outcome = handle_inbound_text(frame, &message_tx, &dedup).await;
         assert_eq!(outcome, InboundOutcome::SubscribeFailed);
     }
 
     #[tokio::test]
     async fn malformed_frame_is_ignored() {
         let (message_tx, mut message_rx) = mpsc::channel(16);
-        let (ctx, dedup) = caches();
-        let outcome = handle_inbound_text("not json", &message_tx, &ctx, &dedup).await;
+        let dedup = dedup_cache();
+        let outcome = handle_inbound_text("not json", &message_tx, &dedup).await;
         assert_eq!(outcome, InboundOutcome::Continue);
         assert!(message_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_message_queues_aibot_send_msg_frame() {
+        // With outgoing wired, send_message must enqueue an aibot_send_msg frame
+        // addressed by chat_id (no prior context/req_id needed).
+        let mut plugin = WecomPlugin::new();
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        plugin.outgoing_tx = Some(tx);
+
+        let msg = UnifiedOutgoingMessage {
+            message_type: crate::types::OutgoingMessageType::Text,
+            text: Some("你好世界".into()),
+            parse_mode: None,
+            buttons: None,
+            keyboard: None,
+            image_url: None,
+            file_url: None,
+            file_name: None,
+            media_actions: None,
+            reply_to_message_id: None,
+            silent: None,
+        };
+        let id = plugin.send_message("zhang", msg).await.unwrap();
+        assert!(id.starts_with("send-"));
+
+        let frame = rx.try_recv().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(v["cmd"], "aibot_send_msg");
+        assert_eq!(v["body"]["chatid"], "zhang");
+        assert_eq!(v["body"]["msgtype"], "markdown");
+        assert_eq!(v["body"]["markdown"]["content"], "你好世界");
+    }
+
+    #[tokio::test]
+    async fn send_message_without_socket_errors() {
+        let plugin = WecomPlugin::new();
+        let msg = UnifiedOutgoingMessage {
+            message_type: crate::types::OutgoingMessageType::Text,
+            text: Some("hi".into()),
+            parse_mode: None,
+            buttons: None,
+            keyboard: None,
+            image_url: None,
+            file_url: None,
+            file_name: None,
+            media_actions: None,
+            reply_to_message_id: None,
+            silent: None,
+        };
+        assert!(plugin.send_message("zhang", msg).await.is_err());
     }
 }

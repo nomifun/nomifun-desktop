@@ -10,6 +10,12 @@
 //! authentication happens by sending an `aibot_subscribe` command carrying
 //! `bot_id` + `secret` right after the socket opens.
 //!
+//! Replies are sent with `aibot_send_msg` (active push): `chatid` is the sender
+//! `userid` for single chats or the group `chatid` for groups, needs no
+//! `chat_type` and no passthrough `req_id`, and is valid for 24h — so it is not
+//! bound to the 5-second passive-reply window that `aibot_respond_msg` streams
+//! are. Frame shapes verified against the official `@wecom/aibot-node-sdk`.
+//!
 //! Everything here is transport-agnostic and unit-tested; the socket loop lives
 //! in [`super::plugin`].
 
@@ -95,7 +101,7 @@ pub struct WecomEvent {
 pub const CMD_MSG_CALLBACK: &str = "aibot_msg_callback";
 pub const CMD_EVENT_CALLBACK: &str = "aibot_event_callback";
 pub const CMD_SUBSCRIBE: &str = "aibot_subscribe";
-pub const CMD_RESPOND_MSG: &str = "aibot_respond_msg";
+pub const CMD_SEND_MSG: &str = "aibot_send_msg";
 pub const CMD_PING: &str = "ping";
 
 /// Event type that means another connection displaced ours — do NOT reconnect.
@@ -112,7 +118,7 @@ pub fn parse_envelope(text: &str) -> Option<WecomEnvelope> {
 }
 
 /// The stable per-conversation key: `chatid` for groups, else the sender
-/// `userid`. This is what [`ChannelPlugin::send_message`] later addresses.
+/// `userid`. This doubles as the `aibot_send_msg` `chatid` at reply time.
 pub fn chat_id_for(chattype: &str, chatid: &str, userid: &str) -> String {
     if chattype == "group" && !chatid.is_empty() {
         chatid.to_owned()
@@ -126,10 +132,6 @@ pub struct DecodedMessage {
     pub unified: UnifiedIncomingMessage,
     /// Deduplication key (`msgid`); empty when the platform omitted it.
     pub msgid: String,
-    /// `headers.req_id` — needed to address the passive reply.
-    pub req_id: String,
-    /// Raw `chattype` ("single" | "group"), stored for future active pushes.
-    pub chattype: String,
 }
 
 /// Decode an `aibot_msg_callback` envelope into a unified message.
@@ -184,12 +186,7 @@ pub fn decode_msg_callback(env: &WecomEnvelope, now: i64) -> Option<DecodedMessa
         raw: None,
     };
 
-    Some(DecodedMessage {
-        unified,
-        msgid: body.msgid,
-        req_id: env.headers.req_id.clone(),
-        chattype: body.chattype,
-    })
+    Some(DecodedMessage { unified, msgid: body.msgid })
 }
 
 /// Extract the event type from an `aibot_event_callback` envelope.
@@ -222,15 +219,20 @@ pub fn build_ping_frame(req_id: &str) -> String {
     .to_string()
 }
 
-/// `aibot_respond_msg` (text) — a passive reply addressed by the inbound
-/// message's `req_id`.
-pub fn build_text_respond_frame(req_id: &str, content: &str) -> String {
+/// `aibot_send_msg` (active push, markdown) — the reply path.
+///
+/// `chatid` is the sender `userid` for single chats or the group `chatid` for
+/// groups (i.e. exactly [`chat_id_for`]'s output). `req_id` is freshly
+/// generated (not a passthrough). WeCom's active push has no `text` msgtype, so
+/// plain text is delivered as markdown (which renders it verbatim).
+pub fn build_send_msg_frame(chatid: &str, content: &str, req_id: &str) -> String {
     json!({
-        "cmd": CMD_RESPOND_MSG,
+        "cmd": CMD_SEND_MSG,
         "headers": { "req_id": req_id },
         "body": {
-            "msgtype": "text",
-            "text": { "content": content }
+            "chatid": chatid,
+            "msgtype": "markdown",
+            "markdown": { "content": content }
         }
     })
     .to_string()
@@ -292,8 +294,6 @@ mod tests {
         assert_eq!(decoded.unified.platform, PluginType::Wecom);
         assert_eq!(decoded.unified.content.content_type, MessageContentType::Text);
         assert_eq!(decoded.msgid, "m1");
-        assert_eq!(decoded.req_id, "req-9");
-        assert_eq!(decoded.chattype, "single");
     }
 
     #[test]
@@ -386,11 +386,14 @@ mod tests {
     }
 
     #[test]
-    fn build_text_respond_frame_shape() {
-        let v: serde_json::Value = serde_json::from_str(&build_text_respond_frame("req-9", "你好")).unwrap();
-        assert_eq!(v["cmd"], CMD_RESPOND_MSG);
-        assert_eq!(v["headers"]["req_id"], "req-9");
-        assert_eq!(v["body"]["msgtype"], "text");
-        assert_eq!(v["body"]["text"]["content"], "你好");
+    fn build_send_msg_frame_shape() {
+        let v: serde_json::Value = serde_json::from_str(&build_send_msg_frame("zhang", "你好", "send-1")).unwrap();
+        assert_eq!(v["cmd"], CMD_SEND_MSG);
+        assert_eq!(v["headers"]["req_id"], "send-1");
+        assert_eq!(v["body"]["chatid"], "zhang");
+        assert_eq!(v["body"]["msgtype"], "markdown");
+        assert_eq!(v["body"]["markdown"]["content"], "你好");
+        // WeCom active push carries no chat_type field.
+        assert!(v["body"].get("chat_type").is_none());
     }
 }
