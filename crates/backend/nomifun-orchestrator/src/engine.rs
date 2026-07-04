@@ -871,6 +871,38 @@ impl RunEngine {
         drop(guard);
         run
     }
+
+    /// **Phase 3a — runtime task APPEND under the per-run lock.** The engine-side
+    /// entry the master agent (route/gateway) calls instead of
+    /// [`RunService::add_tasks`](crate::run_service::RunService::add_tasks)
+    /// directly, so the service's insert + terminal-run re-arm run UNDER the per-run
+    /// lock — the SAME [`RunLocks`] registry the [`run_loop`]'s terminal-check-and-
+    /// finish holds. This closes the append-vs-finish race: without the lock the loop
+    /// could read `all_settled == true`, this append could insert a `pending` task in
+    /// the gap, then the loop `finish_run`s `completed` AND deregisters its handle →
+    /// a terminal run with an un-run pending task and no live driver (boot-resume only
+    /// re-lists `running`, so it would never recover). Holding the lock makes the
+    /// insert + re-arm atomic w.r.t. the loop's terminal decision.
+    ///
+    /// Unlike [`adjust`](Self::adjust) there is NO LLM await here — the whole call is
+    /// pure DB — so the entire method runs under the lock (mirrors
+    /// [`rerun_task`](Self::rerun_task) / [`adopt_task_result`](Self::adopt_task_result)).
+    /// Returns the (possibly re-armed) run DTO; the CALLER (route) makes the
+    /// engine-lifecycle decision (`run.status == "running" && !is_running →
+    /// engine.start`) OUTSIDE this lock, keeping `start` (which `stop`s first) off the
+    /// locked path so the no-deadlock invariant stays trivially obvious.
+    pub async fn add_tasks(
+        &self,
+        run_service: &crate::run_service::RunService,
+        run_id: &str,
+        tasks: Vec<nomifun_api_types::PlannedTask>,
+    ) -> Result<nomifun_api_types::Run, AppError> {
+        let lock = self.deps.run_locks.for_run(run_id);
+        let _guard = lock.lock().await;
+        run_service.add_tasks(run_id, tasks).await
+        // Lock drops here — the insert + re-arm were atomic w.r.t. the run_loop's
+        // terminal-check-and-finish (no strand, no orphaned terminal run).
+    }
 }
 
 /// The bounded-parallel run loop: dispatch up to `cap` ready tasks concurrently,
@@ -9867,6 +9899,82 @@ mod tests {
                 .any(|d| d.blocker_task_id == kept_id && d.blocked_task_id == new_task.id),
             "kept→new dep wired: {:?}",
             second.deps
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3a Task 1 — `add_tasks` runtime APPEND primitive (RunService +
+    // RunEngine lock wrapper). A conversation's ONE persistent run can have NEW
+    // nodes APPENDED at runtime (Claude-Code-style dispatch-while-running); the
+    // append inserts pending tasks + deps in one transaction (empty delete list)
+    // and re-arms a terminal run so the loop drives the new work — no strand.
+    // -------------------------------------------------------------------------
+
+    /// Minimal `PlannedTask` for the append tests — `agent` kind, no deps, no
+    /// pre-assignment (the harness's single-member fleet routes it via the pure
+    /// `resolve_assignment_pick` fallback).
+    fn planned_task(title: &str, spec: &str) -> PlannedTask {
+        PlannedTask {
+            title: title.to_string(),
+            spec: spec.to_string(),
+            task_profile: None,
+            depends_on: vec![],
+            member_index: None,
+            rationale: None,
+            role: None,
+            kind: "agent".to_string(),
+            pattern_config: None,
+        }
+    }
+
+    /// A run driven to a TERMINAL state gets a NEW node APPENDED via
+    /// `engine.add_tasks`; the append re-arms the terminal run to `running`, and
+    /// the re-started loop drives the appended node to `done` (the run settles
+    /// `completed` again) — the appended pending task is never stranded.
+    #[tokio::test]
+    async fn add_tasks_appends_to_running_run_and_new_node_runs() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(1, "x"));
+        let (svc, engine, run_id) = single_task_harness(worker).await;
+        engine.start(run_id.clone());
+        let first = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(first.run.status, "completed", "initial run completes");
+
+        // Append one new node (no deps) onto the now-terminal run.
+        let new = vec![planned_task("追加节点", "do the extra work")];
+        let rearmed = engine
+            .add_tasks(&svc, &run_id, new)
+            .await
+            .expect("add_tasks");
+        assert_eq!(
+            rearmed.status, "running",
+            "terminal run re-armed to running by the append"
+        );
+
+        // The route (re)starts the loop for the re-armed run if it isn't live.
+        if !engine.is_running(&run_id) {
+            engine.start(run_id.clone());
+        }
+        let detail = drive_to_completion(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed");
+        assert!(
+            detail
+                .tasks
+                .iter()
+                .any(|t| t.title.contains("追加节点") && t.status == "done"),
+            "appended node must run to done: {:?}",
+            detail.tasks
+        );
+    }
+
+    /// An empty append batch is a clean `BadRequest` — a no-op append would only
+    /// churn the re-arm, so a caller bug surfaces loudly (mirrors `plan_flat`).
+    #[tokio::test]
+    async fn add_tasks_empty_is_rejected() {
+        let worker: Arc<dyn WorkerRunner> = Arc::new(MockWorkerRunner::with_text(1, "x"));
+        let (svc, engine, run_id) = single_task_harness(worker).await;
+        assert!(
+            engine.add_tasks(&svc, &run_id, vec![]).await.is_err(),
+            "an empty add_tasks batch must be rejected"
         );
     }
 

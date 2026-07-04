@@ -1765,6 +1765,221 @@ impl RunService {
         Ok(run_row_to_dto(row))
     }
 
+    /// **Phase 3a — runtime task APPEND primitive.** Insert one or more NEW
+    /// `pending` tasks (+ their intra-batch deps + auto-assignments) into an
+    /// EXISTING run WITHOUT deleting or rewiring any current node, then re-arm a
+    /// terminal run so the engine loop drives the appended work. This is the
+    /// Claude-Code-style "dispatch while running" append: the master agent grows
+    /// the DAG at runtime and [`run_loop`](crate::engine) picks the new pending
+    /// tasks up on its next fill pass (a `list_ready_tasks` re-query).
+    ///
+    /// **This is NOT `adjust`.** [`adjust`](Self::adjust) /
+    /// [`apply_adjusted_plan`](Self::apply_adjusted_plan) is the DESTRUCTIVE
+    /// reconcile (keep-vs-redo: it deletes/rewires non-kept nodes and REJECTS while
+    /// a task is `running`). A pure append never touches a running node — it only
+    /// ADDS pending tasks — so it reuses the SAME transactional
+    /// [`reconcile_run_plan`](nomifun_db::IRunRepository::reconcile_run_plan) with
+    /// an EMPTY `delete_task_ids` (nothing deleted, EVERY current task kept) and
+    /// deliberately does NOT go through the adjust path's running-guard. Those two
+    /// `status == "running"` rejects belong to destructive adjust and are left
+    /// UNCHANGED.
+    ///
+    /// **Atomicity / no-strand (the load-bearing invariant).** The engine caller
+    /// [`RunEngine::add_tasks`](crate::engine::RunEngine::add_tasks) holds the
+    /// per-run lock around this WHOLE method, so the insert + re-arm serialize with
+    /// the run loop's terminal-check-and-finish. Without the lock, the loop could
+    /// read `all_settled == true`, this append could insert a `pending` task in the
+    /// gap, then the loop writes `completed` AND deregisters its handle → a terminal
+    /// run with an un-run pending task and NO live driver (boot-resume only re-lists
+    /// `running`, so it would never recover). The lock closes that window; the
+    /// re-arm tail below is copied verbatim from `apply_adjusted_plan` so the
+    /// fresh-read TOCTOU handling is identical.
+    ///
+    /// **Dep mapping.** `PlannedTask::depends_on` are 0-based intra-batch indices →
+    /// [`ReconcileDepRef::NewIndex`] (range-checked against the batch; an
+    /// out-of-range index is logged + skipped, fail-soft like the initial-plan
+    /// path). `PlannedTask` carries no field for a dep onto an EXISTING run task, so
+    /// `Kept` refs cannot arise from this input type — the append only ever wires
+    /// new→new edges.
+    pub async fn add_tasks(
+        &self,
+        run_id: &str,
+        tasks: Vec<PlannedTask>,
+    ) -> Result<Run, AppError> {
+        // (1) An empty batch is a no-op that would only churn the re-arm — reject it
+        //     (mirrors `plan_flat`'s empty guard) so a caller bug surfaces loudly.
+        if tasks.is_empty() {
+            return Err(OrchestratorError::BadRequest(
+                "add_tasks requires at least one task".into(),
+            )
+            .into());
+        }
+
+        // (2) Load the run (clean 404). Its status seeds the re-arm tail's fallback.
+        let run = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+
+        // (3) Route the NEW tasks off the run's FROZEN fleet snapshot (same source
+        //     `apply_adjusted_plan` / `plan` use — we never re-read the live fleet).
+        let members: Vec<FleetMember> = decode_fleet_snapshot(run_id, &run.fleet_snapshot);
+
+        // (4) Build the NEW tasks for the transactional reconcile — EVERY incoming
+        //     PlannedTask becomes a NEW `pending` node. The routing DECISION is the
+        //     SAME pure `resolve_assignment_pick` `plan()` uses (via `assign_task`);
+        //     unlike `apply_adjusted_plan` (whose `AdjustedNewTask` carries NO hints,
+        //     so it passes `None, None, None`) a `PlannedTask` DOES carry
+        //     task_profile/member_index/rationale, so we pass them THROUGH — a master
+        //     agent's routing intent is honored, faithful to how
+        //     `persist_dag_and_activate` treats a PlannedTask. `source = "auto"`; the
+        //     repo overwrites the placeholder `task_id` with the freshly minted id.
+        //     A dep index resolves to a `NewIndex` ref among the batch (range-checked
+        //     against `batch_len`); an out-of-range index is logged + skipped.
+        let batch_len = tasks.len();
+        let mut new_tasks: Vec<ReconcileNewTask> = Vec::with_capacity(batch_len);
+        for (idx, planned) in tasks.iter().enumerate() {
+            let mut depends_on: Vec<ReconcileDepRef> = Vec::new();
+            for &dep_idx in &planned.depends_on {
+                if dep_idx < batch_len {
+                    depends_on.push(ReconcileDepRef::NewIndex(dep_idx));
+                } else {
+                    tracing::warn!(
+                        run_id,
+                        node_idx = idx,
+                        dep_idx,
+                        "add_tasks depends_on index out of range for the batch; skipping edge"
+                    );
+                }
+            }
+
+            let task_profile = planned
+                .task_profile
+                .as_ref()
+                .and_then(|p| serde_json::to_string(p).ok());
+
+            let assignment = resolve_assignment_pick(
+                &members,
+                planned.task_profile.as_ref(),
+                planned.member_index,
+                planned.rationale.as_deref(),
+            )
+            .map(|pick| CreateAssignmentParams {
+                // Placeholder; the repo overwrites task_id with the minted id.
+                task_id: String::new(),
+                member_id: pick.member_id,
+                score: pick.score,
+                rationale: pick.rationale,
+                source: "auto".to_string(),
+                locked: false,
+            });
+
+            new_tasks.push(ReconcileNewTask {
+                task: CreateTaskParams {
+                    run_id: run_id.to_string(),
+                    title: planned.title.clone(),
+                    spec: planned.spec.clone(),
+                    task_profile,
+                    status: "pending".to_string(),
+                    graph_x: None,
+                    graph_y: None,
+                    role: planned.role.clone(),
+                    kind: planned.kind.clone(),
+                    pattern_config: planned.pattern_config.clone(),
+                    // 迁移 029: appended nodes default to fail_run (like plan/adjust).
+                    on_fail: None,
+                },
+                assignment,
+                depends_on,
+            });
+        }
+
+        // (5) ACYCLICITY PRE-CHECK over the appended batch (symmetric with
+        //     `apply_adjusted_plan`'s Important-B, reusing the SAME pure
+        //     `reconcile_plan_has_cycle`). Every current task is KEPT (delete list
+        //     empty) and gains NO new outgoing edge, so the only edges this append
+        //     adds are new→new (`NewIndex` refs) — a cycle can therefore ONLY run
+        //     through the batch. A malformed self/mutually-referential batch would
+        //     persist a DAG the engine can never make ready (a soft-strand); reject
+        //     it here so the run stays UNCHANGED. `kept_ids` is empty because no
+        //     `Kept` refs exist to resolve (PlannedTask can't express one).
+        if reconcile_plan_has_cycle(&std::collections::HashSet::new(), &new_tasks) {
+            return Err(OrchestratorError::BadRequest(
+                "追加任务存在循环依赖，已拒绝(run 未改动)".into(),
+            )
+            .into());
+        }
+
+        // (6) APPLY the append ATOMICALLY — ONE transaction with an EMPTY delete
+        //     list (nothing removed, every current task + its output/deps/assignment
+        //     kept). Same all-or-nothing `reconcile_run_plan` `apply_adjusted_plan`
+        //     uses; a mid-way DB error rolls the whole insert back → run unchanged.
+        self.run_repo
+            .reconcile_run_plan(
+                run_id,
+                ReconcilePlan {
+                    delete_task_ids: vec![],
+                    new_tasks,
+                },
+            )
+            .await
+            .map_err(OrchestratorError::from)?;
+
+        // The FE's `useRunLive` refetches the whole RunDetail on `planUpdated`, so
+        // the appended nodes appear with no fake per-task status. Emitted AFTER the
+        // successful commit so a rolled-back reconcile never signals a phantom plan.
+        self.emitter.emit_run_plan_updated(run_id);
+
+        // (7) RE-ARM a terminal run so the engine loop has a live run to drive the
+        //     appended pending tasks. Re-read the status FRESH (NOT the top-of-method
+        //     `run` snapshot): under the per-run lock the loop's terminal-check-and-
+        //     finish is mutually exclusive with this append, but the loop may have
+        //     written a terminal status AFTER our `get_run` and BEFORE the lock was
+        //     acquired (mirrors `apply_adjusted_plan` / `rerun_task`'s fresh re-read).
+        //     This flips a now-terminal run back to `running`; a still-`running` (or
+        //     `paused` / `awaiting_plan_approval`) run is left as-is — NO autonomy
+        //     gate. [re-arm tail copied VERBATIM from apply_adjusted_plan.]
+        let current_status = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .map(|r| r.status)
+            .unwrap_or_else(|| run.status.clone());
+        if matches!(
+            current_status.as_str(),
+            "completed" | "failed" | "cancelled" | "completed_with_failures"
+        ) {
+            self.run_repo
+                .update_run(
+                    run_id,
+                    UpdateRunParams {
+                        status: Some("running".to_string()),
+                        summary: None,
+                        lead_conv_id: None,
+                        total_tokens: None,
+                        goal: None,
+                        autonomy: None,
+                        fleet_snapshot: None,
+                        work_dir: None,
+                    },
+                )
+                .await
+                .map_err(OrchestratorError::from)?;
+            self.emitter.emit_run_status(run_id, "running");
+        }
+
+        let row = self
+            .run_repo
+            .get_run(run_id)
+            .await
+            .map_err(OrchestratorError::from)?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("run {run_id}")))?;
+        Ok(run_row_to_dto(row))
+    }
+
     /// Load a run and enforce caller ownership: a missing run is a clean 404, a
     /// run owned by another user is a 403. Returns the row on success. Ownership
     /// reads `OrchRunRow.user_id` (deliberately NOT surfaced on the `Run` DTO),
