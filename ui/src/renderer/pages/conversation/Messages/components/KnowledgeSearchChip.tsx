@@ -10,6 +10,7 @@ import { IconDown, IconRight } from '@arco-design/web-react/icon';
 import { BookOne } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import './MessageToolDetails.css';
 
 /** Parse a hit count from the knowledge_search output text
  *  ("N result(s) for …" / "No matches …"). Count, 0 for explicit no-match,

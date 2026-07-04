@@ -14,17 +14,6 @@ import styles from './MessageThinking.module.css';
 const MessageThinking: React.FC<{ message: IMessageThinking }> = ({ message }) => {
   const { t } = useTranslation();
 
-  const formatDuration = (ms: number): string => {
-    const seconds = Math.floor(ms / 1000);
-    const sUnit = t('common.unit.second_short', { defaultValue: 's' });
-    const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
-
-    if (seconds < 60) return `${seconds}${sUnit}`;
-    const minutes = Math.floor(seconds / 60);
-    const remaining = seconds % 60;
-    return `${minutes}${mUnit} ${remaining}${sUnit}`;
-  };
-
   const formatElapsedTime = (seconds: number): string => {
     const sUnit = t('common.unit.second_short', { defaultValue: 's' });
     const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
@@ -36,7 +25,6 @@ const MessageThinking: React.FC<{ message: IMessageThinking }> = ({ message }) =
   };
 
   const { content: text, status, subject } = message.content;
-  const duration = message.content.duration ?? (message.content as { duration_ms?: number }).duration_ms;
   const isDone = status === 'done';
   const [expanded, setExpanded] = useState(!isDone);
   const [elapsedTime, setElapsedTime] = useState(() => {
@@ -74,7 +62,7 @@ const MessageThinking: React.FC<{ message: IMessageThinking }> = ({ message }) =
   }, [text, isDone, expanded]);
 
   const summaryText = isDone
-    ? `${t('conversation.thinking.complete', { defaultValue: 'Thought complete' })} · ${formatDuration(duration || 0)}`
+    ? t('conversation.thinking.complete', { defaultValue: 'Thought complete' })
     : `${subject || t('conversation.thinking.label', { defaultValue: 'Thinking...' })} · ${formatElapsedTime(elapsedTime)}`;
 
   return (
