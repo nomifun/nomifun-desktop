@@ -108,7 +108,12 @@ const NomiSendBox: React.FC<{
    * companion chat, which runs in a fixed yolo mode with a locked model.
    */
   hideModeSelector?: boolean;
-}> = ({ conversation_id, modelSelection, session_mode, agent_name, hideModeSelector }) => {
+  /**
+   * 会话内「协作模型」选择器节点，紧跟主模型选择器渲染。父组件构造并写回活跃会话的
+   * `extra.orchestrator_model_range`；锁定伙伴等表面（`hideModeSelector`）不传、不显示。
+   */
+  collaboratorSelectorNode?: React.ReactNode;
+}> = ({ conversation_id, modelSelection, session_mode, agent_name, hideModeSelector, collaboratorSelectorNode }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const [dynamicModes, setDynamicModes] = useState<AgentModeOption[]>([]);
   const [currentMode, setCurrentMode] = useState<string | undefined>(session_mode);
@@ -780,6 +785,7 @@ const NomiSendBox: React.FC<{
             <div className='flex items-center gap-2 min-w-0' data-testid='nomi-sendbox-config-group'>
               <ContextUsagePill used={tokenUsage?.context_tokens} max={tokenUsage?.context_window} />
               <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
+              {collaboratorSelectorNode}
               <AgentModeSelector
                 backend='nomi'
                 conversation_id={conversation_id}
