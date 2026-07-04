@@ -6,10 +6,27 @@
 
 import type { NormalizedToolCall } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
+import { mergeProcessStates } from '../turnProcessState';
 
 export interface ToolSummaryDescriptor {
   target: string;
   count: number;
+}
+
+export type ToolReceiptAction =
+  | 'read_files'
+  | 'edit_files'
+  | 'run_commands'
+  | 'search_code'
+  | 'list_files'
+  | 'load_tools'
+  | 'generic';
+
+export interface ToolReceiptSummaryPart {
+  action: ToolReceiptAction;
+  count: number;
+  state: TurnDisclosureProcessState;
+  target?: string;
 }
 
 const stateMatchesTool = (state: TurnDisclosureProcessState, tool: NormalizedToolCall): boolean => {
@@ -25,6 +42,62 @@ const formatToolTarget = (tool: NormalizedToolCall): string => {
   const description = tool.description?.trim();
   if (name && description && description !== name) return `${name} ${description}`;
   return name || description || tool.key;
+};
+
+const compactToolText = (value?: string): string => value?.replace(/\s+/g, ' ').trim() ?? '';
+
+const getToolSearchText = (tool: NormalizedToolCall): string =>
+  `${tool.name ?? ''} ${tool.description ?? ''} ${tool.key ?? ''}`.toLowerCase();
+
+const classifyToolForReceipt = (tool: NormalizedToolCall): ToolReceiptAction => {
+  const text = getToolSearchText(tool);
+
+  if (/\b(grep|rg|search|find)\b/.test(text)) return 'search_code';
+  if (/\b(glob|list|ls|directory|dir)\b/.test(text)) return 'list_files';
+  if (/\b(write|edit|patch|update|modify|replace)\b/.test(text)) return 'edit_files';
+  if (/\b(read|open|view|cat)\b/.test(text)) return 'read_files';
+  if (/\b(bash|shell|exec|execute|terminal|command|run)\b/.test(text)) return 'run_commands';
+  if (/\b(load|loaded)\b.*\btools?\b/.test(text)) return 'load_tools';
+  return 'generic';
+};
+
+const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+  if (action === 'run_commands') {
+    return compactToolText(tool.description) || compactToolText(tool.name) || tool.key;
+  }
+  if (action !== 'generic') return undefined;
+  return formatToolTarget(tool);
+};
+
+const getToolProcessState = (tool: NormalizedToolCall): TurnDisclosureProcessState => {
+  if (tool.status === 'running' || tool.status === 'pending') return 'running';
+  if (tool.status === 'error') return 'failed';
+  if (tool.status === 'canceled') return 'canceled';
+  return 'completed';
+};
+
+export const buildToolReceiptSummaryParts = (
+  tools: NormalizedToolCall[],
+  _state: TurnDisclosureProcessState
+): ToolReceiptSummaryPart[] => {
+  const grouped = new Map<ToolReceiptAction, { count: number; targets: string[]; states: TurnDisclosureProcessState[] }>();
+
+  tools.forEach((tool) => {
+    const action = classifyToolForReceipt(tool);
+    const target = getToolReceiptTarget(tool, action);
+    const current = grouped.get(action) ?? { count: 0, targets: [], states: [] };
+    current.count += 1;
+    current.states.push(getToolProcessState(tool));
+    if (target) current.targets.push(target);
+    grouped.set(action, current);
+  });
+
+  return Array.from(grouped.entries()).map(([action, value]) => ({
+    action,
+    count: value.count,
+    state: mergeProcessStates(value.states),
+    ...(value.count === 1 && value.targets[0] ? { target: value.targets[0] } : {}),
+  }));
 };
 
 export const buildToolSummaryDescriptor = (

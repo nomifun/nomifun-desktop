@@ -35,6 +35,7 @@ const NomiChat: React.FC<{
   loadedMcpServers?: string[];
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
+  isProcessing?: boolean;
   /** Hide the permission/agent-mode selector in the send box (locked surfaces). */
   hideModeSelector?: boolean;
 }> = ({
@@ -49,6 +50,7 @@ const NomiChat: React.FC<{
   loadedMcpServers,
   loadedMcpStatuses,
   agent_name,
+  isProcessing,
   hideModeSelector,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
@@ -68,11 +70,21 @@ const NomiChat: React.FC<{
       type: 'nomi',
       cron_job_id,
       hideSendBox,
+      isProcessing,
       loadedSkills,
       loadedMcpServers,
       loadedMcpStatuses,
     };
-  }, [conversation_id, workspace, cron_job_id, hideSendBox, loadedSkills, loadedMcpServers, loadedMcpStatuses]);
+  }, [
+    conversation_id,
+    workspace,
+    cron_job_id,
+    hideSendBox,
+    isProcessing,
+    loadedSkills,
+    loadedMcpServers,
+    loadedMcpStatuses,
+  ]);
 
   return (
     <ConversationProvider value={conversationValue}>
