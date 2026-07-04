@@ -78,6 +78,10 @@ impl PublicAgentService {
     /// (feeds the provider-deletion guard). Each hit is labelled by the agent
     /// name and deep-links via its id.
     pub async fn providers_in_use(&self, provider_id: &str) -> Vec<nomifun_common::ProviderUsage> {
+        // An empty provider_id is the "unconfigured" sentinel; never match it.
+        if provider_id.is_empty() {
+            return Vec::new();
+        }
         self.list()
             .await
             .into_iter()
