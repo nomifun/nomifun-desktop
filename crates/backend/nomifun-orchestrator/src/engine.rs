@@ -1610,9 +1610,12 @@ async fn dispatch_task(
     update_task_status(deps, &task.id, "running").await;
     deps.emitter.emit_task_status(run_id, &task.id, "running");
 
-    // Compose the brief: role hint + the task + completed upstream outputs.
+    // Compose the brief: role hint + the task + completed upstream outputs, plus
+    // cross-node context (run goal + plan shape + transitive-ancestor digest +
+    // shared-notes pointer) so a node deep in a chain retains earlier context.
     let upstream = collect_upstream_outputs(deps, run_id, &task.id).await;
-    let brief = compose_brief(member.role_hint.as_deref(), &task, &upstream);
+    let ctx = build_brief_context(deps, run_id, &task.id, workspace_dir.as_deref()).await;
+    let brief = compose_brief(member.role_hint.as_deref(), &task, &upstream, &ctx);
 
     // Clones captured by the worker future + the on_started closure. on_started is
     // a sync FnOnce(i64); the async task.conversation_id stamp is done in a
@@ -1970,6 +1973,103 @@ async fn collect_upstream_outputs(
         .collect()
 }
 
+/// Build the cross-node [`BriefContext`] for a task at dispatch time (Phase 1b
+/// Task 3): the run goal, a short plan summary (task titles in plan order), a
+/// transitive-ancestor digest, and a pointer to the shared `RUN_NOTES.md`.
+///
+/// **Transitive-ancestor digest.** A node's DIRECT upstream is injected separately
+/// (as UPSTREAM RESULTS via [`collect_upstream_outputs`]); this walks the dep graph
+/// UP FROM those direct blockers to gather the blockers-of-blockers (and beyond) —
+/// the earlier context a long chain would otherwise lose. It mirrors
+/// [`skip_downstream`]'s bounded, `seen`-guarded BFS but in the REVERSE direction
+/// (following `blocked → blocker` edges upward). Direct upstream and the task
+/// itself are pre-seeded into `seen` so they are EXCLUDED (never re-injected). Only
+/// ancestors that have produced an `output_summary` land in the digest, each passed
+/// through [`truncate_summary_output`] so a verbose upstream cannot blow the budget.
+async fn build_brief_context(
+    deps: &Arc<RunEngineDeps>,
+    run_id: &str,
+    task_id: &str,
+    workspace_dir: Option<&str>,
+) -> BriefContext {
+    let goal = deps
+        .run_repo
+        .get_run(run_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.goal)
+        .unwrap_or_default();
+
+    let tasks = deps.run_repo.list_tasks(run_id).await.unwrap_or_default();
+    // Short plan summary: the task titles in plan order, so a node sees the overall
+    // shape and its own position. Kept compact (titles only) to bound the prompt.
+    let plan_summary = tasks
+        .iter()
+        .map(|t| t.title.as_str())
+        .collect::<Vec<_>>()
+        .join(" → ");
+
+    let dep_edges = deps.run_repo.list_deps(run_id).await.unwrap_or_default();
+    // DIRECT upstream (blockers of this task): injected separately as UPSTREAM
+    // RESULTS, so it is the SEED of the upward walk but is EXCLUDED from the digest.
+    let direct: Vec<String> = dep_edges
+        .iter()
+        .filter(|d| d.blocked_task_id == task_id)
+        .map(|d| d.blocker_task_id.clone())
+        .collect();
+
+    // Index tasks by id for O(1) title/output lookups during the walk.
+    let by_id: std::collections::HashMap<&str, &OrchRunTaskRow> =
+        tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+
+    // Reverse BFS (blocked → blocker) from the direct upstream. `seen` is pre-seeded
+    // with the task itself + its direct upstream so neither is ever added to the
+    // digest; bounded because each id is visited once.
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(task_id.to_string());
+    let mut frontier: Vec<String> = Vec::new();
+    for d in &direct {
+        // Direct upstream: excluded from the digest but the roots of the walk.
+        seen.insert(d.clone());
+        frontier.push(d.clone());
+    }
+    let mut ancestor_digest: Vec<(String, String)> = Vec::new();
+    while let Some(current) = frontier.pop() {
+        // Enqueue `current`'s own blockers (one level further up the chain).
+        for d in dep_edges.iter().filter(|d| d.blocked_task_id == current) {
+            let ancestor = d.blocker_task_id.clone();
+            if !seen.insert(ancestor.clone()) {
+                continue;
+            }
+            // A transitive ancestor beyond the direct upstream: include only when it
+            // has an output_summary, truncated to bound the prompt.
+            if let Some(t) = by_id.get(ancestor.as_str())
+                && let Some(summary) = t.output_summary.as_deref()
+            {
+                ancestor_digest.push((t.title.clone(), truncate_summary_output(summary)));
+            }
+            frontier.push(ancestor);
+        }
+    }
+
+    // Shared-notes pointer: the run's RUN_NOTES.md (None for a dir-less run). Built
+    // with Path::join so the separator is platform-correct.
+    let notes_hint = workspace_dir.map(|d| {
+        std::path::Path::new(d)
+            .join("RUN_NOTES.md")
+            .to_string_lossy()
+            .into_owned()
+    });
+
+    BriefContext {
+        goal,
+        plan_summary,
+        ancestor_digest,
+        notes_hint,
+    }
+}
+
 /// The `pattern_config` JSON field a `loop` body carries to its NEXT re-run with
 /// the PRIOR round's output text (written by [`settle_loop_task`] on CONTINUE).
 /// Its presence is what gates the "上一轮产出" brief section — a task without it
@@ -1999,6 +2099,29 @@ fn loop_prior_output(pattern_config: Option<&str>) -> Option<String> {
     Some(prior.to_string())
 }
 
+/// Cross-node context injected into every worker brief (Phase 1b Task 3) so a
+/// node deep in a chain sees the whole run's goal, the plan shape, relevant
+/// transitive-ancestor outputs (not just its DIRECT deps, which long chains would
+/// otherwise lose), and where the shared notes live. Built by
+/// [`build_brief_context`] at dispatch time. Every field is optional-by-emptiness:
+/// each brief section renders ONLY when its input is non-empty, so a default/empty
+/// `BriefContext` produces the exact legacy brief (zero regression).
+pub(crate) struct BriefContext {
+    /// The run goal (`orch_runs.goal`); empty when unavailable.
+    pub goal: String,
+    /// A short plan summary — the task titles in plan order — so a node knows its
+    /// position in the overall shape. Empty when there are no tasks.
+    pub plan_summary: String,
+    /// `(title, truncated output_summary)` for transitive ancestors BEYOND the
+    /// direct upstream (which is injected separately as UPSTREAM RESULTS). Only
+    /// ancestors that have produced an `output_summary` are included; each is
+    /// passed through [`truncate_summary_output`].
+    pub ancestor_digest: Vec<(String, String)>,
+    /// Absolute path to the run's shared `RUN_NOTES.md` (None when the run has no
+    /// shared dir). A node can read it and append its findings for other nodes.
+    pub notes_hint: Option<String>,
+}
+
 /// Compose the worker's brief: role hint + task title/spec + completed upstream
 /// outputs (injected as context). Sent as the conversation `system_prompt`.
 ///
@@ -2008,15 +2131,22 @@ fn loop_prior_output(pattern_config: Option<&str>) -> Option<String> {
 /// kind (the default, and anything unknown) keeps the exact previous framing
 /// (zero regression). The upstream gathering is identical for both kinds; only
 /// the framing differs.
+///
+/// **Cross-node context (Phase 1b Task 3).** Every brief also carries a
+/// [`BriefContext`] — the run goal, the plan shape, a transitive-ancestor digest
+/// (blockers-of-blockers beyond the DIRECT upstream), and a pointer to the shared
+/// notes file. Each new section renders ONLY when its input is non-empty, so an
+/// EMPTY `BriefContext` yields the exact legacy brief (zero regression).
 fn compose_brief(
     role_hint: Option<&str>,
     task: &OrchRunTaskRow,
     upstream: &[(String, String)],
+    ctx: &BriefContext,
 ) -> String {
     let mut out = if task.kind == "synthesis" {
-        compose_synthesis_brief(role_hint, task, upstream)
+        compose_synthesis_brief(role_hint, task, upstream, ctx)
     } else {
-        compose_agent_brief(role_hint, task, upstream)
+        compose_agent_brief(role_hint, task, upstream, ctx)
     };
     // 迁移 026 — 用户预置要求(启动前配置台):作为独立一段追加到 worker brief,与
     // 规划器写的 spec 分离(不覆盖它),读作明确的用户要求。门控于字段非空 —— 没有
@@ -2051,6 +2181,7 @@ fn compose_agent_brief(
     role_hint: Option<&str>,
     task: &OrchRunTaskRow,
     upstream: &[(String, String)],
+    ctx: &BriefContext,
 ) -> String {
     let mut out = String::new();
     if let Some(role) = role_hint.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2066,15 +2197,46 @@ fn compose_agent_brief(
         out.push_str(&task.spec);
         out.push('\n');
     }
+    // Phase 1b Task 3: the run goal + plan shape, so a node deep in a chain knows
+    // WHAT the whole orchestration is for and where it sits. Each gated on non-empty
+    // so an empty BriefContext yields the exact legacy brief (byte-for-byte).
+    if !ctx.goal.trim().is_empty() {
+        out.push_str("\nRUN GOAL (整个编排的目标，你的产出要服务于它):\n");
+        out.push_str(ctx.goal.trim());
+        out.push('\n');
+    }
+    if !ctx.plan_summary.trim().is_empty() {
+        out.push_str("\nPLAN (全局计划概要):\n");
+        out.push_str(ctx.plan_summary.trim());
+        out.push('\n');
+    }
     if !upstream.is_empty() {
         out.push_str("\nUPSTREAM RESULTS (completed dependencies you can build on):\n");
         for (title, summary) in upstream {
             out.push_str("- ");
             out.push_str(title);
             out.push_str(": ");
+            out.push_str(&truncate_summary_output(summary));
+            out.push('\n');
+        }
+    }
+    // Phase 1b Task 3: transitive-ancestor digest (blockers-of-blockers beyond the
+    // DIRECT upstream) + a pointer to the shared notes file. Both gated on presence
+    // (already truncated in build_brief_context). Empty ctx → neither renders.
+    if !ctx.ancestor_digest.is_empty() {
+        out.push_str("\nEARLIER CONTEXT (更早的相关产出摘要):\n");
+        for (title, summary) in &ctx.ancestor_digest {
+            out.push_str("- ");
+            out.push_str(title);
+            out.push_str(": ");
             out.push_str(summary);
             out.push('\n');
         }
+    }
+    if let Some(notes) = &ctx.notes_hint {
+        out.push_str(&format!(
+            "\nSHARED NOTES: 你可读取并追加 {notes}（记录发现/结论供其它节点参考）。\n"
+        ));
     }
     // loop 迭代回看: APPEND the prior round's output when this body re-run carries
     // it (gated on the field — zero effect on any task without it).
@@ -2095,6 +2257,7 @@ fn compose_synthesis_brief(
     role_hint: Option<&str>,
     task: &OrchRunTaskRow,
     upstream: &[(String, String)],
+    ctx: &BriefContext,
 ) -> String {
     let mut out = String::new();
     if let Some(role) = role_hint.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2113,6 +2276,19 @@ fn compose_synthesis_brief(
         out.push_str(&task.spec);
         out.push('\n');
     }
+    // Phase 1b Task 3: the run goal + plan shape (transitive ancestors carry less
+    // signal for a synthesis node — its material IS the upstream — so they are
+    // omitted here). Gated on non-empty → empty ctx = legacy synthesis brief.
+    if !ctx.goal.trim().is_empty() {
+        out.push_str("\nRUN GOAL (整个编排的目标，你的产出要服务于它):\n");
+        out.push_str(ctx.goal.trim());
+        out.push('\n');
+    }
+    if !ctx.plan_summary.trim().is_empty() {
+        out.push_str("\nPLAN (全局计划概要):\n");
+        out.push_str(ctx.plan_summary.trim());
+        out.push('\n');
+    }
     if upstream.is_empty() {
         // Defensive: a synthesis task with no resolved upstream still runs (it just
         // has nothing to merge) — note it so the worker does not hallucinate inputs.
@@ -2123,9 +2299,15 @@ fn compose_synthesis_brief(
             out.push_str("- ");
             out.push_str(title);
             out.push_str(": ");
-            out.push_str(summary);
+            out.push_str(&truncate_summary_output(summary));
             out.push('\n');
         }
+    }
+    // Phase 1b Task 3: pointer to the shared notes file (gated on presence).
+    if let Some(notes) = &ctx.notes_hint {
+        out.push_str(&format!(
+            "\nSHARED NOTES: 你可读取并追加 {notes}（记录发现/结论供其它节点参考）。\n"
+        ));
     }
     out
 }
@@ -4686,11 +4868,76 @@ mod tests {
             updated_at: 0,
         };
         let upstream = vec![("Gather".to_string(), "found 12 sources".to_string())];
-        let brief = compose_brief(Some("writer"), &task, &upstream);
+        let brief = compose_brief(Some("writer"), &task, &upstream, &empty_brief_ctx());
         assert!(brief.contains("ROLE: writer"));
         assert!(brief.contains("TASK: Synthesize"));
         assert!(brief.contains("write the report"));
         assert!(brief.contains("Gather: found 12 sources"));
+    }
+
+    /// An empty [`BriefContext`] — no goal, no plan, no ancestors, no notes. With
+    /// it, every Phase 1b Task 3 section is gated off, so a brief is byte-for-byte
+    /// the legacy brief. Every pre-existing compose_brief test passes this.
+    fn empty_brief_ctx() -> BriefContext {
+        BriefContext {
+            goal: String::new(),
+            plan_summary: String::new(),
+            ancestor_digest: vec![],
+            notes_hint: None,
+        }
+    }
+
+    // Phase 1b Task 3: a NON-empty BriefContext injects the run goal, the plan
+    // summary, a transitive-ancestor digest, and a shared-notes pointer — all
+    // ALONGSIDE the (still present) direct upstream.
+    #[test]
+    fn compose_brief_includes_goal_plan_ancestors_and_notes_pointer() {
+        let task = task_row_with_kind("agent", "Write", "写最终报告");
+        let upstream = vec![("B".to_string(), "b out".to_string())];
+        let ctx = BriefContext {
+            goal: "构建报告".into(),
+            plan_summary: "A → B → Write".into(),
+            ancestor_digest: vec![("A".to_string(), "a findings".to_string())],
+            notes_hint: Some("/ws/run1/RUN_NOTES.md".into()),
+        };
+        let brief = compose_brief(Some("writer"), &task, &upstream, &ctx);
+        assert!(brief.contains("构建报告"), "run goal injected: {brief}");
+        assert!(
+            brief.contains("A → B → Write"),
+            "plan summary injected: {brief}"
+        );
+        assert!(
+            brief.contains("a findings"),
+            "transitive ancestor digest injected: {brief}"
+        );
+        assert!(brief.contains("b out"), "direct upstream still present: {brief}");
+        assert!(
+            brief.contains("RUN_NOTES.md"),
+            "shared-notes pointer injected: {brief}"
+        );
+    }
+
+    // Phase 1b Task 3: a long direct-upstream output is truncated (CJK-safe) so a
+    // verbose upstream cannot blow the worker's prompt budget — the full text is
+    // NOT carried, and the truncation ellipsis marks where it was cut.
+    #[test]
+    fn compose_brief_truncates_long_upstream() {
+        let long = "x".repeat(SUMMARY_TASK_OUTPUT_LEN + 500);
+        let upstream = vec![("B".to_string(), long.clone())];
+        let ctx = BriefContext {
+            goal: "g".into(),
+            plan_summary: "p".into(),
+            ancestor_digest: vec![],
+            notes_hint: None,
+        };
+        let brief = compose_brief(
+            Some("w"),
+            &task_row_with_kind("agent", "T", "s"),
+            &upstream,
+            &ctx,
+        );
+        assert!(!brief.contains(&long), "long upstream truncated: {brief}");
+        assert!(brief.contains('…'), "truncation marker present: {brief}");
     }
 
     /// Build an `OrchRunTaskRow` with the given `kind` (other fields fixed) — used
@@ -4736,7 +4983,7 @@ mod tests {
         ];
 
         let synth_task = task_row_with_kind("synthesis", "合并草稿", "写出最终稿");
-        let synth_brief = compose_brief(Some("写手"), &synth_task, &upstream);
+        let synth_brief = compose_brief(Some("写手"), &synth_task, &upstream, &empty_brief_ctx());
 
         // Synthesis-specific framing present.
         assert!(
@@ -4764,7 +5011,7 @@ mod tests {
         // instruction, the plain TASK/UPSTREAM RESULTS labels) — proving the
         // branches diverge and agent is unchanged.
         let agent_task = task_row_with_kind("agent", "合并草稿", "写出最终稿");
-        let agent_brief = compose_brief(Some("写手"), &agent_task, &upstream);
+        let agent_brief = compose_brief(Some("写手"), &agent_task, &upstream, &empty_brief_ctx());
         assert_ne!(
             synth_brief, agent_brief,
             "synthesis framing must differ from agent"
@@ -4790,7 +5037,7 @@ mod tests {
     fn compose_brief_agent_kind_is_unchanged_legacy_framing() {
         let task = task_row_with_kind("agent", "Synthesize", "write the report");
         let upstream = vec![("Gather".to_string(), "found 12 sources".to_string())];
-        let brief = compose_brief(Some("writer"), &task, &upstream);
+        let brief = compose_brief(Some("writer"), &task, &upstream, &empty_brief_ctx());
         let expected = "ROLE: writer\n\nTASK: Synthesize\nSPEC:\nwrite the report\n\nUPSTREAM RESULTS (completed dependencies you can build on):\n- Gather: found 12 sources\n";
         assert_eq!(
             brief, expected,
@@ -4805,10 +5052,10 @@ mod tests {
     fn compose_brief_appends_preset_requirement_gated_on_presence() {
         // agent: preset appended AFTER the unchanged base brief.
         let mut a = task_row_with_kind("agent", "Do X", "the spec");
-        let a_base = compose_brief(Some("writer"), &a, &[]);
+        let a_base = compose_brief(Some("writer"), &a, &[], &empty_brief_ctx());
         assert!(!a_base.contains("用户预置要求"), "no preset → no section");
         a.preset_prompt = Some("务必用中文，并附引用".to_string());
-        let a_with = compose_brief(Some("writer"), &a, &[]);
+        let a_with = compose_brief(Some("writer"), &a, &[], &empty_brief_ctx());
         assert!(
             a_with.starts_with(&a_base),
             "preset is appended, base brief unchanged"
@@ -4822,9 +5069,9 @@ mod tests {
         // synthesis: preset also appended (uniform in compose_brief).
         let mut s = task_row_with_kind("synthesis", "Merge", "synthesize");
         let up = vec![("A".to_string(), "a".to_string())];
-        let s_base = compose_brief(None, &s, &up);
+        let s_base = compose_brief(None, &s, &up, &empty_brief_ctx());
         s.preset_prompt = Some("只输出要点".to_string());
-        let s_with = compose_brief(None, &s, &up);
+        let s_with = compose_brief(None, &s, &up, &empty_brief_ctx());
         assert!(
             s_with.starts_with(&s_base),
             "synthesis preset appended after base"
@@ -4833,10 +5080,10 @@ mod tests {
 
         // blank preset (whitespace only) → byte-for-byte unchanged.
         let mut b = task_row_with_kind("agent", "Y", "s");
-        let b_base = compose_brief(None, &b, &[]);
+        let b_base = compose_brief(None, &b, &[], &empty_brief_ctx());
         b.preset_prompt = Some("   \n  ".to_string());
         assert_eq!(
-            compose_brief(None, &b, &[]),
+            compose_brief(None, &b, &[], &empty_brief_ctx()),
             b_base,
             "blank preset appends nothing"
         );
@@ -8516,7 +8763,7 @@ mod tests {
         // appended so it refines the prior round.
         let mut body = task_row_with_kind("agent", "Refine draft", "polish it");
         body.pattern_config = build_body_loop_carry(None, Some("草稿第一版"), 2);
-        let brief = compose_brief(Some("写手"), &body, &[]);
+        let brief = compose_brief(Some("写手"), &body, &[], &empty_brief_ctx());
         assert!(
             brief.contains("上一轮产出(请在此基础上改进/迭代):"),
             "iter>=1 body brief carries the prior-output section: {brief}"
@@ -8541,7 +8788,7 @@ mod tests {
             body.pattern_config, None,
             "first iteration body has no carry"
         );
-        let brief = compose_brief(Some("写手"), &body, &[]);
+        let brief = compose_brief(Some("写手"), &body, &[], &empty_brief_ctx());
         assert!(
             !brief.contains("上一轮产出"),
             "first iteration brief must NOT carry a prior-output section: {brief}"
@@ -8558,13 +8805,13 @@ mod tests {
         let upstream = vec![("Gather".to_string(), "found 12 sources".to_string())];
         let expected = "ROLE: writer\n\nTASK: Synthesize\nSPEC:\nwrite the report\n\nUPSTREAM RESULTS (completed dependencies you can build on):\n- Gather: found 12 sources\n";
         // No pattern_config at all.
-        assert_eq!(compose_brief(Some("writer"), &task, &upstream), expected);
+        assert_eq!(compose_brief(Some("writer"), &task, &upstream, &empty_brief_ctx()), expected);
         // A pattern_config that does NOT carry the loop key (e.g. a fan-out group)
         // is also a no-op for the brief — same bytes.
         let mut tagged = task.clone();
         tagged.pattern_config = Some(r#"{"group":"g"}"#.to_string());
         assert_eq!(
-            compose_brief(Some("writer"), &tagged, &upstream),
+            compose_brief(Some("writer"), &tagged, &upstream, &empty_brief_ctx()),
             expected,
             "a non-carry pattern_config must not perturb the brief"
         );
