@@ -42,7 +42,7 @@ import {
   buildToolSummaryDescriptor,
   type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
-import ProcessTraceItem, { formatProcessDuration } from './components/ProcessTraceItem';
+import ProcessTraceItem from './components/ProcessTraceItem';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
@@ -355,7 +355,6 @@ const buildProcessReceiptSummary = (
 
   switch (item.type) {
     case 'thinking': {
-      const thinkingDuration = item.content.duration ?? (item.content as { duration_ms?: number }).duration_ms;
       return {
         label:
           state === 'running'
@@ -363,12 +362,7 @@ const buildProcessReceiptSummary = (
                 item.content.subject,
                 t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' })
               )
-            : typeof thinkingDuration === 'number'
-              ? t('messages.processReceipt.thinkingCompletedWithDuration', {
-                  duration: formatProcessDuration(thinkingDuration, t),
-                  defaultValue: 'Thought complete · {{duration}}',
-                })
-              : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
+            : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
         icon: 'thinking',
         defaultExpanded: false,
       };
@@ -461,7 +455,9 @@ const TOP_LOAD_THRESHOLD_PX = 96;
 // Image preview context
 export const ImagePreviewContext = createContext<{ inPreviewGroup: boolean }>({ inPreviewGroup: false });
 
-const renderProcessTraceItem = (item: IRenderableItem) => <ProcessTraceItem item={item} />;
+const renderProcessTraceItem = (item: IRenderableItem, variant: 'list' | 'receipt' = 'list') => (
+  <ProcessTraceItem item={item} variant={variant} />
+);
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean }> = React.memo(
   HOC((props) => {
@@ -601,6 +597,7 @@ const MessageList: React.FC<{
       // Skip hidden and available_commands messages
       if (message.hidden) continue;
       if (message.type === 'available_commands') continue;
+      if (message.type === 'thinking') continue;
       // Plans are no longer rendered inline — they surface in the docked
       // PinnedPlan bar above the composer, which reads the raw list directly.
       if (message.type === 'plan') continue;
@@ -902,7 +899,7 @@ const MessageList: React.FC<{
     <TurnProcessReceipt
       receipt={item}
       highlighted={highlighted}
-      renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}
+      renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'receipt')}
     />
   );
 

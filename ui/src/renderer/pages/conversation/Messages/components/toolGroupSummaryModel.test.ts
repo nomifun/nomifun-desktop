@@ -170,4 +170,30 @@ describe('buildToolReceiptDetailRows', () => {
       },
     ]);
   });
+
+  test('keeps command input and output available for expandable detail panels', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({
+        key: 'test',
+        name: 'Bash',
+        description: 'python snake.py',
+        input: 'python snake.py',
+        output: 'pygame 2.6.1\\nGame started',
+        truncated: true,
+      }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'test',
+        action: 'run_commands',
+        state: 'completed',
+        title: 'Bash',
+        target: 'python snake.py',
+        input: 'python snake.py',
+        output: 'pygame 2.6.1\\nGame started',
+        truncated: true,
+      },
+    ]);
+  });
 });
