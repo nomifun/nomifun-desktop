@@ -1609,6 +1609,7 @@ export type I18nKey =
   | 'messages.processReceipt.fileChanged'
   | 'messages.processReceipt.fileEditTargets'
   | 'messages.processReceipt.fileEdits'
+  | 'messages.processReceipt.fileRead'
   | 'messages.processReceipt.listedFiles'
   | 'messages.processReceipt.listedTarget'
   | 'messages.processReceipt.listingFiles'

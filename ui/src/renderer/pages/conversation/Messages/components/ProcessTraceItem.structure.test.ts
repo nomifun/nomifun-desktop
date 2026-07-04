@@ -31,7 +31,9 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
 
   test('renders read and edit steps with expandable file lists', () => {
     expect(source.includes('ToolFileListDetail')).toBe(true);
-    expect(source.includes('isFileDetailRow')).toBe(true);
+    expect(source.includes('isFileReceiptRow')).toBe(true);
+    expect(source.includes('shouldShowFileListDetail')).toBe(true);
+    expect(source.includes('shouldShowToolRowDetail')).toBe(true);
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
     expect(source.includes('messages.processReceipt.readTargets')).toBe(true);
     expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
