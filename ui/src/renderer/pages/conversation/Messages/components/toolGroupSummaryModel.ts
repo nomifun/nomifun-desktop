@@ -60,6 +60,7 @@ const formatToolTarget = (tool: NormalizedToolCall): string => {
 };
 
 const commandFieldNames = ['command', 'cmd', 'script', 'shell', 'bash'];
+const fileFieldNames = ['file_path', 'filePath', 'path', 'file_name', 'fileName', 'relative_path', 'relativePath'];
 
 const pickCommandFromValue = (value: unknown): string | undefined => {
   if (!value || typeof value !== 'object') return undefined;
@@ -97,11 +98,54 @@ const extractCommandFromText = (value?: string): string | undefined => {
   return compacted;
 };
 
+const pickFileTargetFromValue = (value: unknown): string | undefined => {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+
+  for (const field of fileFieldNames) {
+    const fieldValue = record[field];
+    if (typeof fieldValue === 'string' && compactToolText(fieldValue)) return compactToolText(fieldValue);
+  }
+
+  for (const fieldValue of Object.values(record)) {
+    if (fieldValue && typeof fieldValue === 'object') {
+      const nested = pickFileTargetFromValue(fieldValue);
+      if (nested) return nested;
+    }
+  }
+
+  return undefined;
+};
+
+const extractFileTargetFromText = (value?: string): string | undefined => {
+  const compacted = compactToolText(value);
+  if (!compacted) return undefined;
+
+  try {
+    const parsed = JSON.parse(value ?? '');
+    const target = pickFileTargetFromValue(parsed);
+    if (target) return target;
+    if (typeof parsed === 'string') return compactToolText(parsed);
+    return undefined;
+  } catch {
+    // Plain read/edit descriptions are already useful file previews.
+  }
+
+  return compacted;
+};
+
 const getCommandTarget = (tool: NormalizedToolCall): string => {
   const description = compactToolText(tool.description);
   const name = compactToolText(tool.name);
   if (description && description !== name) return description;
   return extractCommandFromText(tool.input) || description || name || tool.key;
+};
+
+const getFileTarget = (tool: NormalizedToolCall): string | undefined => {
+  const description = compactToolText(tool.description);
+  const name = compactToolText(tool.name);
+  if (description && description !== name) return description;
+  return extractFileTargetFromText(tool.input);
 };
 
 const getToolSearchText = (tool: NormalizedToolCall): string =>
@@ -123,6 +167,9 @@ const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptActio
   if (action === 'run_commands') {
     return getCommandTarget(tool);
   }
+  if (action === 'read_files' || action === 'edit_files') {
+    return getFileTarget(tool);
+  }
   if (action !== 'generic') return undefined;
   return formatToolTarget(tool);
 };
@@ -132,6 +179,7 @@ const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceip
   const name = compactToolText(tool.name);
 
   if (action === 'generic') return formatToolTarget(tool);
+  if (action === 'read_files' || action === 'edit_files') return getFileTarget(tool);
   if (description && description !== name) return description;
   if (action === 'run_commands') return getCommandTarget(tool);
   return undefined;
@@ -164,7 +212,7 @@ export const buildToolReceiptSummaryParts = (
     action,
     count: value.count,
     state: mergeProcessStates(value.states),
-    ...(value.count === 1 && value.targets[0] ? { target: value.targets[0] } : {}),
+    ...(value.targets.length ? { target: Array.from(new Set(value.targets)).join(', ') } : {}),
   }));
 };
 

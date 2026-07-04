@@ -640,6 +640,25 @@ button.turn-process-trace__row:focus-visible {
   word-break: break-word;
 }
 
+.turn-process-trace-file-list {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.turn-process-trace-file-list__item {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-2, #4e5969);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .turn-process-disclosure__arrow,
   .turn-process-receipt__arrow,
