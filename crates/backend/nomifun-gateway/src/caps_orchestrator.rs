@@ -142,6 +142,16 @@ struct SpawnParams {
     synthesize: Option<bool>,
 }
 
+/// Append new task(s) to the CURRENT run of the calling conversation (single-run
+/// convergence). Reuses `nomi_spawn`'s task shape — the `run_id` is NOT a param; it
+/// is resolved from the conversation's linked run (`extra.orchestrator_run_id`).
+#[derive(Deserialize, JsonSchema)]
+struct AddTasksParams {
+    /// 1-8 new tasks to append to this conversation's current run. Same shape as
+    /// nomi_spawn's tasks: each becomes a visible worker on the orchestration canvas.
+    tasks: Vec<SpawnTaskParam>,
+}
+
 // ── re-adjust (supervision) param structs ─────────────────────────────────
 
 /// Incrementally re-strategize a run: a natural-language `intent` the lead LLM
@@ -435,6 +445,46 @@ async fn read_conversation_model_range(
             );
             None
         }
+    }
+}
+
+/// Read the run this conversation is CURRENTLY bound to
+/// (`extra.orchestrator_run_id`, written by
+/// [`ConversationService::link_orchestrator_run`]). This is the deterministic pointer
+/// from a conversation to its ONE persistent run — the single-run convergence lever
+/// (`nomi_spawn` / `nomi_run_add_tasks` append here instead of minting a new run per
+/// call). Mirrors [`read_conversation_model_range`]: returns `None` for every soft
+/// failure — no calling conversation, an unreadable conversation, or an absent /
+/// non-string key.
+async fn read_conversation_run_id(
+    deps: &Arc<GatewayDeps>,
+    user_id: &str,
+    conversation_id: &str,
+) -> Option<String> {
+    if conversation_id.is_empty() {
+        return None;
+    }
+    let conv = deps
+        .conversation_service
+        .get(user_id, conversation_id)
+        .await
+        .ok()?;
+    conv.extra
+        .get("orchestrator_run_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+}
+
+/// Whether a run can be APPENDED to via `add_tasks`: it exists AND is not
+/// `cancelled`. Terminal `completed` / `failed` / `completed_with_failures` runs ARE
+/// appendable — `add_tasks` re-arms them back to `running`. A user-`cancelled` run
+/// stays dead (a follow-up spawn must never silently resurrect it — start fresh
+/// instead). A missing run or a read error ⇒ not appendable (the caller falls through
+/// to creating a fresh run).
+async fn run_is_appendable(deps: &Arc<GatewayDeps>, run_id: &str) -> bool {
+    match deps.orchestrator_run_service.get_detail(run_id).await {
+        Ok(detail) => detail.run.status != "cancelled",
+        Err(_) => false,
     }
 }
 
@@ -766,6 +816,28 @@ async fn result(deps: Arc<GatewayDeps>, p: RunResultParams) -> Value {
 /// 超过应改用 nomi_run_create 让 planner 规划分批。
 const MAX_SPAWN_TASKS: usize = 8;
 
+/// Map the flat spawn-shaped tasks (`{name, prompt, role?}`) → `PlannedTask` nodes
+/// (kind `agent`, no deps). The SHARED mapping used by `nomi_spawn`, the single-run
+/// convergence append, and `nomi_run_add_tasks`, so a spawned node and an appended
+/// node are built identically. (`nomi_spawn`'s optional read-only synthesis node is
+/// layered on by `spawn` itself, since only it takes a `synthesize` flag.)
+fn spawn_tasks_to_planned(tasks: Vec<SpawnTaskParam>) -> Vec<PlannedTask> {
+    tasks
+        .into_iter()
+        .map(|t| PlannedTask {
+            title: t.name,
+            spec: t.prompt,
+            task_profile: None,
+            depends_on: vec![],
+            member_index: None,
+            rationale: None,
+            role: t.role,
+            kind: "agent".to_string(),
+            pattern_config: None,
+        })
+        .collect()
+}
+
 /// Flat fan-out (`nomi_spawn`): create a run, link it to the calling
 /// conversation, persist the caller's EXPLICIT task list via `plan_flat` (no
 /// planner LLM), and start the engine — all with `supervised` autonomy so it
@@ -784,6 +856,65 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         return json!({ "error": format!("too many tasks: {} (max {MAX_SPAWN_TASKS}); use nomi_run_create for larger goals", p.tasks.len()) });
     }
 
+    // 先装配这批任务（+ 可选只读综合节点），好在「已有 run 追加」与「新建 run」两条
+    // 路径复用同一份 Vec<PlannedTask>——保证 spawn 出来的节点与 append 上去的节点构造
+    // 完全一致。goal 借用 p.tasks（在 into_iter 消费前算好）。
+    let n = p.tasks.len();
+    let goal = format!(
+        "并行执行 {n} 个子任务：{}",
+        p.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("、")
+    );
+    let synthesize = p.synthesize.unwrap_or(false);
+    let mut tasks: Vec<PlannedTask> = spawn_tasks_to_planned(p.tasks);
+    if synthesize && n >= 2 {
+        tasks.push(PlannedTask {
+            title: "综合汇总".to_string(),
+            spec: "综合上游各子任务的产出为一份结论，显式标注子任务之间的冲突或分歧（无则写「无」）。"
+                .to_string(),
+            task_profile: None,
+            // 依赖新批次内的 n 个 agent 节点（intra-batch 索引 0..n）——append 路径同样
+            // 只连 new→new 边，语义一致。
+            depends_on: (0..n).collect(),
+            member_index: None,
+            rationale: None,
+            // 只读综合（对齐进程内 Spawn 的 reviewer 语义；worker 端收缩工具）。
+            role: Some("reviewer".to_string()),
+            kind: "synthesis".to_string(),
+            pattern_config: None,
+        });
+    }
+
+    // ── 单 run 收敛：本会话若已绑定一个可追加的 run，直接把这批任务 append 上去，
+    //    不新建 run、不重绑（extra.orchestrator_run_id 不变）——一个会话复用同一个持久
+    //    run。取消的 run 不复活（run_is_appendable 排除 cancelled）。engine.add_tasks
+    //    会把终态 run 重臂为 running；随后在锁外(re)start 引擎循环（若 running 且无活体
+    //    loop）——与 run_adjust 的重臂门一致。
+    if let Some(existing_run_id) = read_conversation_run_id(&deps, &user, &ctx.conversation_id).await {
+        if run_is_appendable(&deps, &existing_run_id).await {
+            return match deps
+                .orchestrator_run_engine
+                .add_tasks(&deps.orchestrator_run_service, &existing_run_id, tasks)
+                .await
+            {
+                Ok(run) => {
+                    if run.status == "running"
+                        && !deps.orchestrator_run_engine.is_running(&existing_run_id)
+                    {
+                        deps.orchestrator_run_engine.start(existing_run_id.clone());
+                    }
+                    ok(json!({
+                        "run_id": existing_run_id,
+                        "status": run.status,
+                        "task_count": n,
+                        "message": "子任务已追加到本会话当前的编排 run 并在画布并行执行（复用同一个 run，未新建）。请告诉用户已在后台并行执行、进度见右侧画布，然后结束本轮——你无需轮询等待：全部完成或失败时系统会自动把结果回执给你再汇总。不要重复创建编排；用户若中途询问进度，可用 nomi_run_status 查一次。",
+                    }))
+                }
+                Err(e) => json!({ "error": e.to_string() }),
+            };
+        }
+    }
+
+    // ── 否则新建 run（原 create+link 路径，行为不变）──
     // 模型解析：会话策展的「主模型+协作模型」优先，缺省 Auto 全量展开（与 create 一致）。
     let model_range = read_conversation_model_range(&deps, &user, &ctx.conversation_id)
         .await
@@ -807,11 +938,6 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
     };
 
     let lead_conv_id = parse_lead_conv_id(&ctx.conversation_id);
-    let n = p.tasks.len();
-    let goal = format!(
-        "并行执行 {n} 个子任务：{}",
-        p.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("、")
-    );
     // 扁平扇出恒 supervised：即时并行、无审批门。绝不显式传 interactive——
     // nomi_spawn 的任务是调用方显式给出的，park 在批准门会回归进程内 Spawn 的
     // 静默卡死体验（人工审批门只在编排 Tab 前门保留）。
@@ -844,39 +970,6 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
                 "failed to link flat fan-out run to calling conversation; run still created"
             );
         }
-    }
-
-    // 组装扁平任务（+ 可选只读综合节点，语义对齐进程内 Spawn 的 synthesize）。
-    let synthesize = p.synthesize.unwrap_or(false);
-    let mut tasks: Vec<PlannedTask> = p
-        .tasks
-        .into_iter()
-        .map(|t| PlannedTask {
-            title: t.name,
-            spec: t.prompt,
-            task_profile: None,
-            depends_on: vec![],
-            member_index: None,
-            rationale: None,
-            role: t.role,
-            kind: "agent".to_string(),
-            pattern_config: None,
-        })
-        .collect();
-    if synthesize && n >= 2 {
-        tasks.push(PlannedTask {
-            title: "综合汇总".to_string(),
-            spec: "综合上游各子任务的产出为一份结论，显式标注子任务之间的冲突或分歧（无则写「无」）。"
-                .to_string(),
-            task_profile: None,
-            depends_on: (0..n).collect(),
-            member_index: None,
-            rationale: None,
-            // 只读综合（对齐进程内 Spawn 的 reviewer 语义；worker 端收缩工具）。
-            role: Some("reviewer".to_string()),
-            kind: "synthesis".to_string(),
-            pattern_config: None,
-        });
     }
 
     // 后台 plan_flat → engine.start（fail-soft），工具立即返回 —— 画布经 WS 实时
@@ -921,6 +1014,58 @@ async fn run_adjust(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunA
                 "run_id": run.id,
                 "status": run.status,
                 "message": "已按你的意图增量调整编排（保留已完成节点、重做/新增其余）。调整后会继续执行，完成或失败时自动回执——无需轮询。",
+            }))
+        }
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// Append new task(s) to this conversation's CURRENT run — the single-run
+/// convergence primitive (`nomi_run_add_tasks`). The `run_id` is NOT a param: it is
+/// resolved from the calling conversation's linked run (`extra.orchestrator_run_id`).
+/// No conversation run, or a `cancelled` one ⇒ a clear error (start work with
+/// nomi_spawn / nomi_run_create first). The spawn-shaped tasks map to `PlannedTask`
+/// via the SAME `spawn_tasks_to_planned` helper `nomi_spawn` uses, then append via
+/// `engine.add_tasks` (which re-arms a terminal run to `running`); we then (re)start
+/// the loop OUTSIDE any lock when the run is running with no live loop — mirroring
+/// `run_adjust`.
+async fn run_add_tasks(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: AddTasksParams) -> Value {
+    let user = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    if p.tasks.is_empty() {
+        return json!({ "error": "nomi_run_add_tasks requires at least one task" });
+    }
+    if p.tasks.len() > MAX_SPAWN_TASKS {
+        return json!({ "error": format!("too many tasks: {} (max {MAX_SPAWN_TASKS}); use nomi_run_create for larger goals", p.tasks.len()) });
+    }
+
+    // Resolve the conversation's current run; no run / a cancelled run ⇒ nothing to
+    // append to (a clear error, not a silent new run).
+    let run_id = match read_conversation_run_id(&deps, &user, &ctx.conversation_id).await {
+        Some(id) if run_is_appendable(&deps, &id).await => id,
+        _ => {
+            return json!({
+                "error": "this conversation has no active run to append to; start work with nomi_spawn or nomi_run_create first"
+            });
+        }
+    };
+
+    let tasks = spawn_tasks_to_planned(p.tasks);
+    match deps
+        .orchestrator_run_engine
+        .add_tasks(&deps.orchestrator_run_service, &run_id, tasks)
+        .await
+    {
+        Ok(run) => {
+            if run.status == "running" && !deps.orchestrator_run_engine.is_running(&run_id) {
+                deps.orchestrator_run_engine.start(run_id.clone());
+            }
+            ok(json!({
+                "run_id": run_id,
+                "status": run.status,
+                "message": "已把新任务追加到本会话当前的编排 run（未新建 run、无需审批），每个任务都是画布上可见的子 agent。继续执行、完成/失败自动回执——无需轮询。",
             }))
         }
         Err(e) => json!({ "error": e.to_string() }),
@@ -1107,6 +1252,20 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         )
         .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, ctx, p| run_adjust(deps, ctx, p),
+    ));
+    // 4b. Single-run convergence (write, Desktop-only): APPEND task(s) to this
+    //     conversation's CURRENT run instead of minting a new run per call — the run
+    //     is resolved from `extra.orchestrator_run_id`, no planner, no approval, no
+    //     rebind. Same domain deny (Remote) as the rest.
+    out.push(Capability::new::<AddTasksParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_run_add_tasks",
+            "orchestrator",
+            "Append new task(s) to the CURRENT run of this conversation — no new run, no approval, no planner; each task is a visible canvas worker. Use to extend work already in flight. Params: tasks (1-8 of {name, prompt, role?}; role searcher/reviewer = read-only tools, verifier = read-only+Bash, omit = full tools). Errors if this conversation has no active run — start one with nomi_spawn / nomi_run_create first. Returns run_id and status.",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| run_add_tasks(deps, ctx, p),
     ));
     out.push(Capability::new::<TaskRerunParams, _, _>(
         CapabilityMeta::new(
@@ -1396,7 +1555,7 @@ mod tests {
     #[test]
     fn orchestrator_tools_registered_and_visible_on_desktop() {
         let reg = Registry::global();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
             assert!(
                 reg.contains(name),
                 "orchestrator tool {name} is not registered"
@@ -1427,7 +1586,7 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
             // Not advertised on the Remote surface.
             assert!(
                 !remote.contains(&name),
