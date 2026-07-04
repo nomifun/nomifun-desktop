@@ -29,6 +29,14 @@ export interface ToolReceiptSummaryPart {
   target?: string;
 }
 
+export interface ToolReceiptDetailRow {
+  key: string;
+  action: ToolReceiptAction;
+  state: TurnDisclosureProcessState;
+  title: string;
+  target?: string;
+}
+
 const stateMatchesTool = (state: TurnDisclosureProcessState, tool: NormalizedToolCall): boolean => {
   if (state === 'running') return tool.status === 'running' || tool.status === 'pending';
   if (state === 'failed') return tool.status === 'error';
@@ -69,6 +77,16 @@ const getToolReceiptTarget = (tool: NormalizedToolCall, action: ToolReceiptActio
   return formatToolTarget(tool);
 };
 
+const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceiptAction): string | undefined => {
+  const description = compactToolText(tool.description);
+  const name = compactToolText(tool.name);
+
+  if (action === 'generic') return formatToolTarget(tool);
+  if (description && description !== name) return description;
+  if (action === 'run_commands') return name || tool.key;
+  return undefined;
+};
+
 const getToolProcessState = (tool: NormalizedToolCall): TurnDisclosureProcessState => {
   if (tool.status === 'running' || tool.status === 'pending') return 'running';
   if (tool.status === 'error') return 'failed';
@@ -99,6 +117,20 @@ export const buildToolReceiptSummaryParts = (
     ...(value.count === 1 && value.targets[0] ? { target: value.targets[0] } : {}),
   }));
 };
+
+export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolReceiptDetailRow[] =>
+  tools.map((tool) => {
+    const action = classifyToolForReceipt(tool);
+    const title = compactToolText(tool.name) || tool.key;
+    const target = getToolReceiptDetailTarget(tool, action);
+    return {
+      key: tool.key,
+      action,
+      state: getToolProcessState(tool),
+      title,
+      ...(target ? { target } : {}),
+    };
+  });
 
 export const buildToolSummaryDescriptor = (
   tools: NormalizedToolCall[],

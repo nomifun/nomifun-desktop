@@ -6,7 +6,11 @@
 
 import type { NormalizedToolCall } from '@/common/chat/normalizeToolCall';
 import { describe, expect, test } from 'bun:test';
-import { buildToolReceiptSummaryParts, buildToolSummaryDescriptor } from './toolGroupSummaryModel';
+import {
+  buildToolReceiptDetailRows,
+  buildToolReceiptSummaryParts,
+  buildToolSummaryDescriptor,
+} from './toolGroupSummaryModel';
 
 const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key' | 'name'>): NormalizedToolCall => ({
   status: 'completed',
@@ -115,5 +119,55 @@ describe('buildToolSummaryDescriptor', () => {
     );
 
     expect(descriptor?.target).toBe('Edit MessageList.tsx');
+  });
+});
+
+describe('buildToolReceiptDetailRows', () => {
+  test('keeps individual read and command steps as compact receipt rows', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({ key: 'read-1', name: 'Read', description: 'turnDisclosureModel.ts' }),
+      tool({ key: 'read-2', name: 'Read', description: 'MessageList.tsx' }),
+      tool({ key: 'status', name: 'Bash', description: 'git status --short --branch' }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'read-1',
+        action: 'read_files',
+        state: 'completed',
+        title: 'Read',
+        target: 'turnDisclosureModel.ts',
+      },
+      {
+        key: 'read-2',
+        action: 'read_files',
+        state: 'completed',
+        title: 'Read',
+        target: 'MessageList.tsx',
+      },
+      {
+        key: 'status',
+        action: 'run_commands',
+        state: 'completed',
+        title: 'Bash',
+        target: 'git status --short --branch',
+      },
+    ]);
+  });
+
+  test('preserves running state for active tools in receipt details', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({ key: 'test', name: 'Bash', description: 'bun test MessageList', status: 'running' }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'test',
+        action: 'run_commands',
+        state: 'running',
+        title: 'Bash',
+        target: 'bun test MessageList',
+      },
+    ]);
   });
 });

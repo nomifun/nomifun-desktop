@@ -418,24 +418,13 @@
 .turn-process-disclosure__body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 0 2px;
+  gap: 6px;
+  padding: 8px 0 2px;
 }
 
 .turn-process-disclosure__item {
   min-width: 0;
-  color: var(--color-text-2, #4e5969);
-  opacity: 0.84;
-}
-
-.turn-process-disclosure__item--current,
-.turn-process-disclosure__item--failed,
-.turn-process-disclosure__item--waiting {
-  opacity: 1;
-}
-
-.turn-process-disclosure__item .tool-group-summary {
-  margin-top: 0;
+  color: var(--color-text-3, #86909c);
 }
 
 .turn-process-disclosure__item .message-error-note,
@@ -514,29 +503,84 @@
 .turn-process-receipt__body {
   min-width: 0;
   margin-left: 24px;
-  margin-top: 8px;
+  margin-top: 2px;
   color: var(--color-text-2, #4e5969);
-}
-
-.turn-process-receipt__body .tool-group-summary {
-  margin: 0;
-}
-
-.turn-process-receipt__body .tool-group-summary__header {
-  display: none;
-}
-
-.turn-process-receipt__body .tool-group-summary__body {
-  margin: 0;
-  padding: 2px 0;
-  background: transparent;
-  border-radius: 0;
 }
 
 .turn-process-receipt__body .message-error-note,
 .turn-process-receipt__body [data-testid='message-permission-card'],
 .turn-process-receipt__body [data-testid='message-acp-permission-card'] {
   margin-bottom: 0;
+}
+
+.turn-process-trace {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.turn-process-trace__row {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  min-height: 22px;
+  min-width: 0;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-3, #86909c);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
+  padding: 0;
+  text-align: left;
+}
+
+button.turn-process-trace__row {
+  cursor: pointer;
+}
+
+button.turn-process-trace__row:hover {
+  color: var(--color-text-2, #4e5969);
+}
+
+button.turn-process-trace__row:focus-visible {
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px var(--color-primary-light-3, #bedaff);
+  outline: none;
+}
+
+.turn-process-trace__row--running {
+  color: var(--color-primary-6, #165dff);
+}
+
+.turn-process-trace__row--waiting {
+  color: var(--color-warning-6, #ff7d00);
+}
+
+.turn-process-trace__row--failed {
+  color: var(--color-danger-6, #f53f3f);
+}
+
+.turn-process-trace__row--canceled {
+  color: var(--color-text-4, #c9cdd4);
+}
+
+.turn-process-trace__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-process-trace__paragraph {
+  color: var(--color-text-2, #4e5969);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -156,7 +156,7 @@ export function buildTurnDisclosureItems(
   for (const item of items) {
     if (!item.turnId) {
       flush(true);
-      output.push({ type: 'item', id: item.id });
+      output.push(item.role === 'process' ? toProcessReceipt(item) : { type: 'item', id: item.id });
       continue;
     }
 

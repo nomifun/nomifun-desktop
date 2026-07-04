@@ -20,8 +20,16 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("type: 'process_receipt'")).toBe(true);
     expect(source.includes('renderProcessReceipt')).toBe(true);
     expect(source.includes('components/TurnProcessReceipt')).toBe(true);
+    expect(source.includes('components/ProcessTraceItem')).toBe(true);
+    expect(source.includes('renderProcessTraceItem')).toBe(true);
     expect(source.includes('getProcessItemState')).toBe(true);
     expect(source.includes('highlighted={highlighted}')).toBe(true);
+  });
+
+  test('does not reuse legacy process cards inside receipt expansion', () => {
+    expect(source.includes('renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}')).toBe(true);
+    expect(source.includes('MessageToolGroupSummary')).toBe(false);
+    expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
 
   test('keeps the implementation scoped to the message content area', () => {
