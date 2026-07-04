@@ -35,23 +35,52 @@ import MessageSkillSuggest from './components/MessageSkillSuggest';
 import MessageText from './components/MessageText';
 import MessageThinking from './components/MessageThinking';
 import MessageListSkeleton from './components/MessageListSkeleton';
+import TurnProcessDisclosure from './components/TurnProcessDisclosure';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
 import SelectionReplyButton from './components/SelectionReplyButton';
+import {
+  buildTurnDisclosureItems,
+  type TurnDisclosureProcessState,
+  type TurnDisclosureInputItem,
+  type TurnDisclosureOutputItem,
+} from './turnDisclosureModel';
+import { getProcessItemState } from './turnProcessState';
 
 type IMessageVO =
   | TMessage
-  | { type: 'file_summary'; id: string; diffs: FileChangeInfo[]; sourceMessageIds: string[]; created_at: number }
+  | {
+      type: 'file_summary';
+      id: string;
+      msg_id?: string;
+      diffs: FileChangeInfo[];
+      sourceMessageIds: string[];
+      created_at: number;
+    }
   | {
       type: 'tool_summary';
       id: string;
+      msg_id?: string;
       messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>;
       sourceMessageIds: string[];
       created_at: number;
     };
 type IArtifactVO = { type: 'artifact'; id: string; artifact: IConversationArtifact; created_at: number };
-type IProcessedItem = IMessageVO | IArtifactVO;
+type IRenderableItem = IMessageVO | IArtifactVO;
+type ITurnProcessDisclosureVO = {
+  type: 'turn_process_disclosure';
+  id: string;
+  msg_id: string;
+  processItems: IRenderableItem[];
+  sourceMessageIds: string[];
+  created_at: number;
+  startAt: number;
+  endAt: number;
+  state: TurnDisclosureProcessState;
+  defaultCollapsed: boolean;
+};
+type IProcessedItem = IRenderableItem | ITurnProcessDisclosureVO;
 
 type ConversationLocationState = {
   targetMessageId?: string;
@@ -59,6 +88,9 @@ type ConversationLocationState = {
 };
 
 const getProcessedItemSourceMessageIds = (item: IProcessedItem): string[] => {
+  if ('type' in item && item.type === 'turn_process_disclosure') {
+    return item.sourceMessageIds;
+  }
   if ('type' in item && item.type === 'artifact') {
     return [item.id];
   }
@@ -84,13 +116,49 @@ const getProcessedItemAnchorId = (item: IProcessedItem): string => {
 };
 
 const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
-  if ('type' in item && ['file_summary', 'tool_summary', 'artifact'].includes(item.type)) {
+  if ('type' in item && ['file_summary', 'tool_summary', 'artifact', 'turn_process_disclosure'].includes(item.type)) {
     // `includes` doesn't narrow the union, so `created_at` is still typed
     // `number | undefined`; the synthetic VO types always carry a number, so
     // `?? 0` is a no-op fallback (mirrors the branch below).
     return item.created_at ?? 0;
   }
   return item.created_at ?? 0;
+};
+
+const getProcessedItemMsgId = (item: IRenderableItem): string | undefined => {
+  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
+    return item.msg_id;
+  }
+  if ('type' in item && item.type === 'artifact') {
+    return undefined;
+  }
+  return item.msg_id;
+};
+
+const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['role'] => {
+  if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
+    return 'process';
+  }
+  if ('type' in item && item.type === 'artifact') {
+    return 'other';
+  }
+
+  switch (item.type) {
+    case 'text':
+      return item.position === 'right' ? 'user' : 'assistant';
+    case 'tips':
+      return 'assistant';
+    case 'thinking':
+    case 'tool_call':
+    case 'tool_group':
+    case 'agent_status':
+    case 'permission':
+    case 'acp_permission':
+    case 'acp_tool_call':
+      return 'process';
+    default:
+      return 'other';
+  }
 };
 
 const highlightStyle: React.CSSProperties = {
@@ -106,6 +174,49 @@ const TOP_LOAD_THRESHOLD_PX = 96;
 
 // Image preview context
 export const ImagePreviewContext = createContext<{ inPreviewGroup: boolean }>({ inPreviewGroup: false });
+
+const DisclosureProcessItem: React.FC<{ item: IRenderableItem }> = ({ item }) => {
+  const { t } = useTranslation();
+
+  if ('type' in item && item.type === 'artifact') {
+    if (item.artifact.kind === 'cron_trigger') return <MessageCronTrigger artifact={item.artifact} />;
+    return <MessageSkillSuggest artifact={item.artifact} />;
+  }
+
+  if ('type' in item && item.type === 'file_summary') {
+    return <MessageFileChanges diffsChanges={item.diffs} />;
+  }
+
+  if ('type' in item && item.type === 'tool_summary') {
+    return <MessageToolGroupSummary messages={item.messages} defaultExpanded={true} />;
+  }
+
+  switch (item.type) {
+    case 'text':
+      return <MessageText message={item} />;
+    case 'tips':
+      return <MessageTips message={item} />;
+    case 'tool_call':
+      return <MessageToolCall message={item} />;
+    case 'tool_group':
+      return <MessageToolGroup message={item} />;
+    case 'agent_status':
+      return <MessageAgentStatus message={item} />;
+    case 'permission':
+      return <MessagePermission message={item} />;
+    case 'acp_permission':
+      return <MessageAcpPermission message={item} />;
+    case 'acp_tool_call':
+      return <MessageAcpToolCall message={item} />;
+    case 'thinking':
+      return <MessageThinking message={item} />;
+    case 'plan':
+    case 'available_commands':
+      return null;
+    default:
+      return <div>{t('messages.unknownMessageType', { type: getUnhandledMessageType(item) })}</div>;
+  }
+};
 
 const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean }> = React.memo(
   HOC((props) => {
@@ -200,12 +311,18 @@ const MessageList: React.FC<{
     let toolList: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall> = [];
     let toolSourceMessageIds: string[] = [];
 
-    const pushFileDffChanges = (changes: FileChangeInfo, sourceMessageId: string, created_at: number) => {
+    const pushFileDffChanges = (
+      changes: FileChangeInfo,
+      sourceMessageId: string,
+      created_at: number,
+      msg_id?: string
+    ) => {
       if (!diffsChanges.length) {
         diffsSourceMessageIds = [];
         result.push({
           type: 'file_summary',
           id: `summary-${sourceMessageId}`,
+          msg_id,
           diffs: diffsChanges,
           sourceMessageIds: diffsSourceMessageIds,
           created_at,
@@ -222,6 +339,7 @@ const MessageList: React.FC<{
         result.push({
           type: 'tool_summary',
           id: `tool-summary-${message.id}`,
+          msg_id: message.msg_id,
           messages: toolList,
           sourceMessageIds: toolSourceMessageIds,
           created_at: message.created_at ?? 0,
@@ -266,7 +384,8 @@ const MessageList: React.FC<{
             pushFileDffChanges(
               parseDiff(writeFileResults[0].file_diff, writeFileResults[0].file_name),
               message.id,
-              message.created_at ?? 0
+              message.created_at ?? 0,
+              message.msg_id
             );
             continue;
           }
@@ -312,6 +431,47 @@ const MessageList: React.FC<{
     );
   }, [artifacts, list]);
 
+  const displayList = useMemo<IProcessedItem[]>(() => {
+    const itemById = new Map<string, IRenderableItem>();
+    const modelInput: TurnDisclosureInputItem[] = processedList.map((item) => {
+      const id = getProcessedItemAnchorId(item);
+      itemById.set(id, item);
+      return {
+        id,
+        turnId: getProcessedItemMsgId(item),
+        role: getProcessedItemRole(item),
+        createdAt: getProcessedItemCreatedAt(item),
+        processState: getProcessItemState(item),
+        sourceMessageIds: getProcessedItemSourceMessageIds(item),
+      };
+    });
+
+    return buildTurnDisclosureItems(modelInput)
+      .map<IProcessedItem | undefined>((entry: TurnDisclosureOutputItem) => {
+        if (entry.type === 'item') {
+          return itemById.get(entry.id);
+        }
+
+        const processItems = entry.processItemIds
+          .map((id) => itemById.get(id))
+          .filter((item): item is IRenderableItem => Boolean(item));
+
+        return {
+          type: 'turn_process_disclosure',
+          id: entry.id,
+          msg_id: entry.turnId,
+          processItems,
+          sourceMessageIds: entry.sourceMessageIds,
+          created_at: entry.endAt,
+          startAt: entry.startAt,
+          endAt: entry.endAt,
+          state: entry.state,
+          defaultCollapsed: entry.defaultCollapsed,
+        };
+      })
+      .filter((item): item is IProcessedItem => Boolean(item));
+  }, [processedList]);
+
   // Use auto-scroll hook
   const {
     handleScrollerRef,
@@ -325,7 +485,7 @@ const MessageList: React.FC<{
     hideScrollButton,
   } = useAutoScroll({
     messages: list,
-    itemCount: processedList.length,
+    itemCount: displayList.length,
   });
 
   // ── Windowed history: load older messages on scroll-up with a scroll-anchor ──
@@ -381,7 +541,7 @@ const MessageList: React.FC<{
   }, [list.length]);
 
   useEffect(() => {
-    if (!targetMessageId || processedList.length === 0) {
+    if (!targetMessageId || displayList.length === 0) {
       return;
     }
 
@@ -390,7 +550,7 @@ const MessageList: React.FC<{
       return;
     }
 
-    const targetIndex = processedList.findIndex((item) => matchesTargetMessage(item, targetMessageId));
+    const targetIndex = displayList.findIndex((item) => matchesTargetMessage(item, targetMessageId));
     if (targetIndex === -1) {
       return;
     }
@@ -400,7 +560,7 @@ const MessageList: React.FC<{
     hideScrollButton();
 
     requestAnimationFrame(() => {
-      const targetElement = document.getElementById(`message-${getProcessedItemAnchorId(processedList[targetIndex])}`);
+      const targetElement = document.getElementById(`message-${getProcessedItemAnchorId(displayList[targetIndex])}`);
       scrollElementIntoView(targetElement, {
         behavior: 'smooth',
         block: 'center',
@@ -412,7 +572,7 @@ const MessageList: React.FC<{
     }, 2400);
 
     return () => window.clearTimeout(timer);
-  }, [hideScrollButton, location.key, processedList, scrollElementIntoView, targetMessageId]);
+  }, [displayList, hideScrollButton, location.key, scrollElementIntoView, targetMessageId]);
 
   useEffect(() => {
     const handleMessageJump = (event: Event) => {
@@ -423,7 +583,7 @@ const MessageList: React.FC<{
       if (!conversationContext?.conversation_id || Number(detail.conversation_id) !== conversationContext.conversation_id)
         return;
 
-      const targetIndex = processedList.findIndex((item) => {
+      const targetIndex = displayList.findIndex((item) => {
         if (
           (item as { type?: string }).type === 'file_summary' ||
           (item as { type?: string }).type === 'tool_summary' ||
@@ -441,7 +601,7 @@ const MessageList: React.FC<{
       hideScrollButton();
       requestAnimationFrame(() => {
         const targetElement = document.getElementById(
-          `message-${getProcessedItemAnchorId(processedList[targetIndex])}`
+          `message-${getProcessedItemAnchorId(displayList[targetIndex])}`
         );
         scrollElementIntoView(targetElement, {
           block: detail.align || 'start',
@@ -454,7 +614,7 @@ const MessageList: React.FC<{
     return () => {
       window.removeEventListener(CHAT_MESSAGE_JUMP_EVENT, handleMessageJump);
     };
-  }, [conversationContext?.conversation_id, hideScrollButton, processedList, scrollElementIntoView]);
+  }, [conversationContext?.conversation_id, displayList, hideScrollButton, scrollElementIntoView]);
 
   // Click scroll button
   const handleScrollButtonClick = () => {
@@ -462,8 +622,31 @@ const MessageList: React.FC<{
     scrollToBottom('smooth');
   };
 
-  const renderItem = (_index: number, item: (typeof processedList)[0]) => {
+  const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => (
+    <TurnProcessDisclosure
+      item={item}
+      highlighted={highlighted}
+      renderProcessItem={(processItem) => <DisclosureProcessItem item={processItem} />}
+      getProcessItemKey={getProcessedItemAnchorId}
+      getProcessItemState={getProcessItemState}
+    />
+  );
+
+  const renderItem = (_index: number, item: (typeof displayList)[0]) => {
     const highlighted = matchesTargetMessage(item, highlightedMessageId);
+    if ('type' in item && item.type === 'turn_process_disclosure') {
+      return (
+        <div
+          key={item.id}
+          id={`message-${getProcessedItemAnchorId(item)}`}
+          data-testid='turn-process-disclosure'
+          className='min-w-0 message-item px-8px m-t-10px max-w-full md:max-w-780px mx-auto turn_process_disclosure'
+          style={highlighted ? highlightStyle : undefined}
+        >
+          {renderTurnDisclosure(item, highlighted)}
+        </div>
+      );
+    }
     if ('type' in item && item.type === 'artifact') {
       return (
         <div
@@ -498,11 +681,11 @@ const MessageList: React.FC<{
     return <MessageItem message={item as TMessage} key={(item as TMessage).id} highlighted={highlighted}></MessageItem>;
   };
 
-  if (processedList.length === 0 && isMessageListLoading) {
+  if (displayList.length === 0 && isMessageListLoading) {
     return <MessageListSkeleton />;
   }
 
-  if (processedList.length === 0 && emptySlot) {
+  if (displayList.length === 0 && emptySlot) {
     return <div className='relative flex-1 h-full flex items-center justify-center'>{emptySlot}</div>;
   }
 
@@ -522,7 +705,7 @@ const MessageList: React.FC<{
           >
             <div ref={handleContentRef} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
-              {processedList.map((item, index) => (
+              {displayList.map((item, index) => (
                 <React.Fragment key={getProcessedItemAnchorId(item) || index}>{renderItem(index, item)}</React.Fragment>
               ))}
               <div className='h-20px' />

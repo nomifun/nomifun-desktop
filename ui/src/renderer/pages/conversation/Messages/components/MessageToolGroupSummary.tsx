@@ -7,6 +7,8 @@ import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { NormalizedToolCall, NormalizedToolStatus, ToolMessage } from '@/common/chat/normalizeToolCall';
 import { normalizeToolMessages, hasRunningToolMessages } from '@/common/chat/normalizeToolCall';
+import { getToolMessagesProcessState } from '../turnProcessState';
+import { buildToolSummaryDescriptor } from './toolGroupSummaryModel';
 import './MessageToolGroupSummary.css';
 
 const statusToBadge = (status: NormalizedToolStatus): BadgeProps['status'] => {
@@ -103,16 +105,31 @@ const ToolItemDetail: React.FC<{ item: NormalizedToolCall }> = ({ item }) => {
   );
 };
 
-const MessageToolGroupSummary: React.FC<{ messages: ToolMessage[] }> = ({ messages }) => {
+const MessageToolGroupSummary: React.FC<{ messages: ToolMessage[]; defaultExpanded?: boolean }> = ({
+  messages,
+  defaultExpanded,
+}) => {
   const { t } = useTranslation();
   const hasRunning = hasRunningToolMessages(messages);
-  const [showMore, setShowMore] = useState(hasRunning);
+  const [showMore, setShowMore] = useState(defaultExpanded ?? hasRunning);
 
   useEffect(() => {
     if (hasRunning) setShowMore(true);
   }, [hasRunning]);
 
   const tools = useMemo(() => normalizeToolMessages(messages), [messages]);
+  const processState = useMemo(() => getToolMessagesProcessState(messages), [messages]);
+  const summaryDescriptor = useMemo(
+    () => buildToolSummaryDescriptor(tools, processState),
+    [processState, tools]
+  );
+  const summaryLabel = summaryDescriptor
+    ? t(`messages.toolSummary.${processState}`, {
+        target: summaryDescriptor.target,
+        defaultValue: '{{target}}',
+      })
+    : t('messages.toolGroupViewSteps', { defaultValue: 'View Steps' });
+  const countSuffix = summaryDescriptor && summaryDescriptor.count > 1 ? ` · ${summaryDescriptor.count}` : '';
 
   return (
     <div className='tool-group-summary'>
@@ -120,7 +137,10 @@ const MessageToolGroupSummary: React.FC<{ messages: ToolMessage[] }> = ({ messag
         <span className='tool-group-summary__icon'>
           {hasRunning ? <Spin size={12} /> : <Checklist theme='outline' size='14' />}
         </span>
-        <span className='tool-group-summary__label'>{t('messages.toolGroupViewSteps', { defaultValue: 'View Steps' })} {tools.length > 0 ? `· ${tools.length}` : ''}</span>
+        <span className='tool-group-summary__label'>
+          {summaryLabel}
+          {countSuffix}
+        </span>
         <span className={`tool-group-summary__arrow${showMore ? ' tool-group-summary__arrow--open' : ''}`}>
           <Right theme='outline' size='12' />
         </span>
