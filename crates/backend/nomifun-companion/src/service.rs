@@ -341,6 +341,10 @@ impl CompanionService {
     /// Every desktop-companion reference to `provider_id`: per-companion chat
     /// model + the shared learn/evolve models. Empty ⇒ not used.
     pub async fn providers_in_use(&self, provider_id: &str) -> Vec<ProviderUsage> {
+        // An empty provider_id is the "unconfigured" sentinel; never match it.
+        if provider_id.is_empty() {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for p in self.list_companions().await {
             if p.model.provider_id == provider_id {
@@ -1347,6 +1351,28 @@ mod tests {
         svc.patch_config(serde_json::json!({"learn":{"model":{"provider_id":"prov_learn","model":"m"}}})).await.unwrap();
         let hits = svc.providers_in_use("prov_learn").await;
         assert!(hits.iter().any(|u| matches!(u.feature, nomifun_common::ProviderUsageFeature::DesktopCompanion)));
+    }
+
+    #[tokio::test]
+    async fn providers_in_use_detects_shared_evolve_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        svc.patch_config(serde_json::json!({"evolve":{"model":{"provider_id":"prov_evolve","model":"m"}}})).await.unwrap();
+        let hits = svc.providers_in_use("prov_evolve").await;
+        assert!(
+            hits.iter()
+                .any(|u| u.label == "共享进化模型" && u.target_id.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn providers_in_use_skips_empty_provider_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        // A default/unconfigured companion carries an empty provider_id; querying
+        // with "" must never false-match it.
+        svc.registry.create("空", "ink").await.unwrap();
+        assert!(svc.providers_in_use("").await.is_empty());
     }
 
     #[tokio::test]
