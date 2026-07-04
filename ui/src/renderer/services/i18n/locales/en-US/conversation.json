@@ -22,7 +22,6 @@
   },
   "orchestration": {
     "panelTitle": "Orchestration",
-    "startTitle": "Start orchestration",
     "planning": "Planning…",
     "collapseCanvas": "Collapse orchestration canvas",
     "expandCanvas": "Expand orchestration canvas",

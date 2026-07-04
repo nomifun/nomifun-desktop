@@ -22,7 +22,6 @@
   },
   "orchestration": {
     "panelTitle": "编排画布",
-    "startTitle": "发起智能编排",
     "planning": "规划中…",
     "collapseCanvas": "收起编排画布",
     "expandCanvas": "展开编排画布",
