@@ -374,6 +374,11 @@ impl RunService {
                     // so a normal single-agent task is unchanged (zero regression).
                     kind: planned.kind.clone(),
                     pattern_config: planned.pattern_config.clone(),
+                    // 迁移 029: the planner does not yet emit per-node failure
+                    // policy, so every persisted node is `None` = fail_run
+                    // (current hard-fail semantics, zero regression). A later
+                    // phase will let the planner set `skip_and_continue`.
+                    on_fail: None,
                 })
                 .await
                 .map_err(OrchestratorError::from)?;
@@ -831,7 +836,10 @@ impl RunService {
             .map_err(OrchestratorError::from)?
             .map(|r| r.status)
             .unwrap_or_else(|| run.status.clone());
-        if matches!(current_status.as_str(), "completed" | "failed" | "cancelled") {
+        if matches!(
+            current_status.as_str(),
+            "completed" | "failed" | "cancelled" | "completed_with_failures"
+        ) {
             self.run_repo
                 .update_run(
                     run_id,
@@ -962,7 +970,10 @@ impl RunService {
             .map_err(OrchestratorError::from)?
             .map(|r| r.status)
             .unwrap_or_else(|| run.status.clone());
-        if matches!(current_status.as_str(), "completed" | "failed" | "cancelled") {
+        if matches!(
+            current_status.as_str(),
+            "completed" | "failed" | "cancelled" | "completed_with_failures"
+        ) {
             self.run_repo
                 .update_run(
                     run_id,
@@ -1652,6 +1663,8 @@ impl RunService {
                     role: new_task.role.clone(),
                     kind: new_task.kind.clone(),
                     pattern_config: new_task.pattern_config.clone(),
+                    // 迁移 029: reconcile-added nodes default to fail_run.
+                    on_fail: None,
                 },
                 assignment,
                 depends_on,
@@ -1713,7 +1726,10 @@ impl RunService {
             .map_err(OrchestratorError::from)?
             .map(|r| r.status)
             .unwrap_or_else(|| run.status.clone());
-        if matches!(current_status.as_str(), "completed" | "failed" | "cancelled") {
+        if matches!(
+            current_status.as_str(),
+            "completed" | "failed" | "cancelled" | "completed_with_failures"
+        ) {
             self.run_repo
                 .update_run(
                     run_id,
@@ -5075,6 +5091,7 @@ mod tests {
                 role: None,
                 kind: "agent".into(),
                 pattern_config: None,
+                on_fail: None,
             },
             assignment: None,
             depends_on: deps,

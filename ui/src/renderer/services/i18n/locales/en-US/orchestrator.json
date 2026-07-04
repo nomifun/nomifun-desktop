@@ -137,6 +137,7 @@
       "planning": "Planning",
       "running": "Running",
       "completed": "Completed",
+      "completed_with_failures": "Completed with failures",
       "failed": "Failed",
       "cancelled": "Cancelled",
       "paused": "Paused",

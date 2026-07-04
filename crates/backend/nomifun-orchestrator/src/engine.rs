@@ -1190,10 +1190,13 @@ async fn run_loop(
                 /// failed conclusively in a way that warrants re-driving → re-loop.
                 ReLoop,
                 /// All terminal, completable → summarize (no lock) then re-verify.
-                /// Carries the tasks (for the digest) + token total.
+                /// Carries the tasks (for the digest) + token total. `with_failures`
+                /// = any node soft-failed (`on_fail=skip_and_continue`), so the run
+                /// settles `completed_with_failures` instead of `completed`.
                 Completed {
                     tasks: Vec<OrchRunTaskRow>,
                     total_tokens: Option<i64>,
+                    with_failures: bool,
                 },
                 /// A task failed → finished `failed` under this guard already;
                 /// carries the tasks so the after-loop lead report can build a
@@ -1227,27 +1230,38 @@ async fn run_loop(
                 } else {
                     match deps.run_repo.list_tasks(run_id).await {
                         Ok(tasks) => {
-                            let all_terminal = tasks
+                            // 迁移 029 终态分流。软失败 = 失败但策略 skip_and_continue
+                            // (其传递性下游已在 settle 时 skip);硬失败 = 失败且策略
+                            // fail_run(默认)。已 settled = 每个任务处于终态
+                            // (done/skipped)或软失败。硬失败优先并支配任何 done/软失败
+                            // 兄弟节点 → 整 run failed(现状,零回归)。
+                            let hard_failed = tasks
                                 .iter()
-                                .all(|t| t.status == "done" || t.status == "skipped");
-                            let any_failed = tasks.iter().any(|t| t.status == "failed");
-                            if !tasks.is_empty() && all_terminal {
-                                // Completable: capture inputs and DROP the guard at
-                                // the end of this scope — the LLM summarize runs
-                                // OUTSIDE the lock, then we re-acquire + re-verify.
-                                let total_tokens = sum_task_tokens(&tasks);
-                                TerminalDecision::Completed {
-                                    tasks,
-                                    total_tokens,
-                                }
-                            } else if any_failed {
-                                // No LLM on the failed path → finish + deregister
+                                .any(|t| t.status == "failed" && !is_soft_fail(t));
+                            let all_settled = tasks.iter().all(|t| {
+                                t.status == "done" || t.status == "skipped" || is_soft_fail(t)
+                            });
+                            let any_soft_fail = tasks.iter().any(is_soft_fail);
+                            if hard_failed {
+                                // No LLM on the hard-failed path → finish + deregister
                                 // under THIS held guard (atomic terminal-write +
                                 // deregister, as before).
                                 let total_tokens = sum_task_tokens(&tasks);
                                 finish_run(&deps, run_id, "failed", None, total_tokens).await;
                                 handles.remove_if(run_id, |_, h| h.generation == generation);
                                 TerminalDecision::FinishedFailed { tasks }
+                            } else if !tasks.is_empty() && all_settled {
+                                // Completable: capture inputs and DROP the guard at
+                                // the end of this scope — the LLM summarize runs
+                                // OUTSIDE the lock, then we re-acquire + re-verify.
+                                // `any_soft_fail` selects completed vs
+                                // completed_with_failures at the finish site (③).
+                                let total_tokens = sum_task_tokens(&tasks);
+                                TerminalDecision::Completed {
+                                    tasks,
+                                    total_tokens,
+                                    with_failures: any_soft_fail,
+                                }
                             } else {
                                 // Not terminal and nothing ready. Distinguish a
                                 // transient-error retry-in-backoff (a `pending` task
@@ -1307,6 +1321,7 @@ async fn run_loop(
                 TerminalDecision::Completed {
                     tasks,
                     total_tokens,
+                    with_failures,
                 } => {
                     // B2: synthesize a coherent run summary with a one-shot lead
                     // call — WITH NO LOCK HELD (the guard above was dropped). This is
@@ -1343,9 +1358,11 @@ async fn run_loop(
                     let still_terminal = match deps.run_repo.list_tasks(run_id).await {
                         Ok(now) => {
                             !now.is_empty()
-                                && now
-                                    .iter()
-                                    .all(|t| t.status == "done" || t.status == "skipped")
+                                && now.iter().all(|t| {
+                                    t.status == "done"
+                                        || t.status == "skipped"
+                                        || is_soft_fail(t)
+                                })
                         }
                         // A re-read error → do NOT finish on stale data; re-loop and
                         // re-decide on the next pass (fail toward not-committing).
@@ -1361,10 +1378,17 @@ async fn run_loop(
                         continue;
                     }
                     // Still terminal, no ready work → commit the completion.
+                    // 迁移 029:有软失败节点(skip_and_continue)时写
+                    // completed_with_failures,否则 completed。
+                    let terminal_status = if with_failures {
+                        "completed_with_failures"
+                    } else {
+                        "completed"
+                    };
                     finish_run(
                         &deps,
                         run_id,
-                        "completed",
+                        terminal_status,
                         Some(summary.clone()),
                         total_tokens,
                     )
@@ -1718,6 +1742,17 @@ async fn settle_failed_or_retry(
         // Non-retryable, retry budget exhausted, or run-level budget hit → permanent
         // failure (the run loop's terminal check then fails the run, as before).
         mark_task_failed(deps, run_id, task_id, conv_from_outcome, tokens).await;
+        // 迁移 029 部分交付:若该节点策略是 skip_and_continue,跳过它的传递性下游
+        // (标 skipped),让独立分支跑完、run 终态走 completed_with_failures。默认
+        // (None/fail_run) 不进这里 → 整 run 仍判 failed(零回归)。mark_task_failed
+        // 保持单一职责,策略分流只在此处。
+        if let Ok(Some(t)) = deps.run_repo.get_task(task_id).await {
+            if t.on_fail.as_deref() == Some("skip_and_continue") {
+                if let Ok(edges) = deps.run_repo.list_deps(run_id).await {
+                    skip_downstream(deps, run_id, task_id, &edges).await;
+                }
+            }
+        }
     }
 }
 
@@ -3515,6 +3550,15 @@ async fn mark_task_failed(
     deps.emitter.emit_task_status(run_id, task_id, "failed");
 }
 
+/// A *soft* failure: the task permanently `failed` but its per-node `on_fail`
+/// policy is `skip_and_continue` (迁移 029), so its transitive downstream was
+/// `skipped` and the RUN still settles — its terminal status becomes
+/// `completed_with_failures` rather than `failed`. `None`/`"fail_run"` is a HARD
+/// failure (default, current behaviour) → the whole run fails.
+fn is_soft_fail(t: &OrchRunTaskRow) -> bool {
+    t.status == "failed" && t.on_fail.as_deref() == Some("skip_and_continue")
+}
+
 /// Settle the run row to a terminal status (with an optional summary) and emit
 /// `run.completed`. Best-effort: a persistence error is logged, not propagated
 /// (the loop is exiting regardless).
@@ -4427,6 +4471,7 @@ mod tests {
             override_provider_id: None,
             override_model: None,
             preset_prompt: None,
+            on_fail: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -4463,6 +4508,7 @@ mod tests {
             override_provider_id: None,
             override_model: None,
             preset_prompt: None,
+            on_fail: None,
             created_at: 0,
             updated_at: 0,
         }
@@ -4610,6 +4656,7 @@ mod tests {
             override_provider_id: None,
             override_model: None,
             preset_prompt: None,
+            on_fail: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -5602,6 +5649,222 @@ mod tests {
             1,
             "dispatched exactly once"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // 迁移 029 (P1a Task 2): per-node `on_fail` policy + `completed_with_failures`
+    // terminal status. A two-INDEPENDENT-node DAG (A + B, no edge) seeded DIRECTLY
+    // via the `CreateTaskParams.on_fail` create path (the planner does not emit
+    // `on_fail` yet) proves: A's `skip_and_continue` soft-failure lets independent
+    // node B deliver and settles the run `completed_with_failures`; A's default
+    // `fail_run` policy fails the whole run (zero regression).
+    // -------------------------------------------------------------------------
+
+    /// A worker that FAILS any task whose spec contains `"FAIL"` (a MARKED,
+    /// non-retryable provider error → immediate permanent failure, attempt stays 0)
+    /// and SUCCEEDS every other task. A single instance drives a two-node DAG where
+    /// node A fails and independent node B still delivers.
+    struct SelectiveFailWorker;
+    #[async_trait]
+    impl WorkerRunner for SelectiveFailWorker {
+        async fn run(
+            &self,
+            _member: &FleetMember,
+            _workspace_dir: Option<&str>,
+            _run_id: &str,
+            task_id: &str,
+            _brief: &str,
+            task_spec: &str,
+            _timeout: Duration,
+            on_started: Box<dyn FnOnce(i64) + Send>,
+        ) -> Result<WorkerOutcome, AppError> {
+            on_started(778);
+            if task_spec.contains("FAIL") {
+                Ok(WorkerOutcome { conversation_id: 778, text: None, ok: false, tokens: None })
+            } else {
+                Ok(WorkerOutcome {
+                    conversation_id: 778,
+                    text: Some(format!("output of {task_id}")),
+                    ok: true,
+                    tokens: None,
+                })
+            }
+        }
+        // A MARKED provider error → the three-way classifier reads
+        // `last_error_retryable` (default false) → NonRetryable → the failing node
+        // fails immediately with no retry (attempt stays 0).
+        async fn last_error_present(&self, _conversation_id: &str) -> bool {
+            true
+        }
+    }
+
+    /// Two INDEPENDENT nodes A + B (no dep edge). Seeded DIRECTLY through the
+    /// `CreateTaskParams.on_fail` create path so node A carries an arbitrary
+    /// `on_fail` policy (the planner does not emit `on_fail` — 迁移 029). A's spec
+    /// contains `"FAIL"` so [`SelectiveFailWorker`] fails it permanently; B
+    /// succeeds. No assignments are created — `resolve_task_member` falls back to
+    /// member[0]. The run is flipped straight to `running` (the manual seed skips
+    /// `persist_dag_and_activate`). Returns (svc, engine, run id).
+    async fn two_independent_nodes_harness(a_on_fail: &str) -> (RunService, RunEngine, String) {
+        use nomifun_db::CreateTaskParams;
+        let db = init_database_memory().await.expect("db init");
+        let pool = db.pool().clone();
+        let run_repo = Arc::new(SqliteRunRepository::new(pool.clone()));
+        let fleet_repo = Arc::new(SqliteFleetRepository::new(pool.clone()));
+        let ws_repo = Arc::new(SqliteOrchWorkspaceRepository::new(pool.clone()));
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let emitter = OrchestratorRunEventEmitter::new(broadcaster);
+        // Planner is required by RunService::new but never invoked (tasks are seeded
+        // manually, `plan()` is not called).
+        let planner: Arc<dyn PlanProducer> = Arc::new(SingleTaskPlanProducer);
+        let run_service = RunService::new(
+            run_repo.clone(),
+            fleet_repo.clone(),
+            ws_repo.clone(),
+            planner,
+            emitter.clone(),
+        );
+
+        let worker: Arc<dyn WorkerRunner> = Arc::new(SelectiveFailWorker);
+        let mut engine_deps = RunEngineDeps::new(run_repo.clone(), worker, emitter, ws_repo.clone());
+        engine_deps.worker_timeout = Duration::from_secs(10);
+        engine_deps.retry_backoff_base = Duration::ZERO; // instant — no wall-clock wait
+        let engine = RunEngine::new(Arc::new(engine_deps));
+
+        let fleet = crate::service::FleetService::new(fleet_repo)
+            .create(
+                "u1",
+                CreateFleetRequest {
+                    name: "on_fail fleet".to_string(),
+                    description: None,
+                    max_parallel: None,
+                    members: vec![sample_member("agent_a")],
+                },
+            )
+            .await
+            .expect("fleet create");
+        let ws = crate::service::WorkspaceService::new(ws_repo)
+            .create(
+                "u1",
+                CreateWorkspaceRequest {
+                    name: "on_fail ws".to_string(),
+                    default_fleet_id: Some(fleet.id.clone()),
+                    workspace_dir: None,
+                },
+            )
+            .await
+            .expect("ws create");
+        let run = run_service
+            .create(
+                "u1",
+                CreateRunRequest {
+                    workspace_id: ws.id,
+                    goal: "on_fail policy test".to_string(),
+                    fleet_id: fleet.id,
+                    autonomy: None,
+                    max_parallel: Some(2),
+                },
+            )
+            .await
+            .expect("run create");
+
+        // Seed the two independent nodes DIRECTLY (bypassing the planner) so A
+        // carries the `on_fail` policy under test; B is a plain default node.
+        run_repo
+            .create_task(CreateTaskParams {
+                run_id: run.id.clone(),
+                title: "A".to_string(),
+                spec: "FAIL A".to_string(),
+                task_profile: None,
+                status: "pending".to_string(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".to_string(),
+                pattern_config: None,
+                on_fail: Some(a_on_fail.to_string()),
+            })
+            .await
+            .expect("create task A");
+        run_repo
+            .create_task(CreateTaskParams {
+                run_id: run.id.clone(),
+                title: "B".to_string(),
+                spec: "do B".to_string(),
+                task_profile: None,
+                status: "pending".to_string(),
+                graph_x: None,
+                graph_y: None,
+                role: None,
+                kind: "agent".to_string(),
+                pattern_config: None,
+                on_fail: None,
+            })
+            .await
+            .expect("create task B");
+
+        // Activate: flip the run to `running` so the engine picks it up.
+        run_repo
+            .update_run(
+                &run.id,
+                UpdateRunParams {
+                    status: Some("running".to_string()),
+                    summary: None,
+                    lead_conv_id: None,
+                    total_tokens: None,
+                    goal: None,
+                    autonomy: None,
+                    fleet_snapshot: None,
+                },
+            )
+            .await
+            .expect("activate run");
+
+        (run_service, engine, run.id)
+    }
+
+    /// Poll until the run reaches ANY terminal status (completed /
+    /// completed_with_failures / failed / cancelled).
+    async fn drive_to_terminal(
+        run_service: &RunService,
+        run_id: &str,
+    ) -> nomifun_api_types::RunDetail {
+        for _ in 0..100 {
+            let d = run_service.get_detail(run_id).await.expect("detail");
+            if matches!(
+                d.run.status.as_str(),
+                "completed" | "completed_with_failures" | "failed" | "cancelled"
+            ) {
+                return d;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("run did not reach a terminal status within the bounded poll");
+    }
+
+    #[tokio::test]
+    async fn skip_and_continue_failed_node_completes_with_failures() {
+        // Two independent nodes: A permanently fails (on_fail=skip_and_continue),
+        // B succeeds. A has no downstream to skip → the run is all-settled with a
+        // soft failure → completed_with_failures, and B's product still delivers.
+        let (svc, engine, run_id) = two_independent_nodes_harness("skip_and_continue").await;
+        engine.start(run_id.clone());
+        let detail = drive_to_terminal(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "completed_with_failures");
+        let a = detail.tasks.iter().find(|t| t.title == "A").expect("task A");
+        let b = detail.tasks.iter().find(|t| t.title == "B").expect("task B");
+        assert_eq!(a.status, "failed");
+        assert_eq!(b.status, "done", "independent branch still delivers");
+    }
+
+    #[tokio::test]
+    async fn fail_run_policy_fails_whole_run() {
+        // Default policy: A fails (on_fail="fail_run") → the whole run fails (the
+        // current hard-fail behaviour is preserved — zero regression).
+        let (svc, engine, run_id) = two_independent_nodes_harness("fail_run").await;
+        engine.start(run_id.clone());
+        let detail = drive_to_terminal(&svc, &run_id).await;
+        assert_eq!(detail.run.status, "failed");
     }
 
     // -------------------------------------------------------------------------
@@ -10807,6 +11070,7 @@ mod tests {
             override_provider_id: None,
             override_model: None,
             preset_prompt: None,
+            on_fail: None,
             created_at: 0,
             updated_at: 0,
         }
