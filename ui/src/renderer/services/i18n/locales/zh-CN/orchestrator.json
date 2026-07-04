@@ -137,6 +137,7 @@
       "planning": "规划中",
       "running": "执行中",
       "completed": "已完成",
+      "completed_with_failures": "部分完成",
       "failed": "已失败",
       "cancelled": "已取消",
       "paused": "已暂停",

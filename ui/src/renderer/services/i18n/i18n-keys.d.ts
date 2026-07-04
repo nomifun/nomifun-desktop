@@ -2232,6 +2232,7 @@ export type I18nKey =
   | 'orchestrator.run.status.awaiting_plan_approval'
   | 'orchestrator.run.status.cancelled'
   | 'orchestrator.run.status.completed'
+  | 'orchestrator.run.status.completed_with_failures'
   | 'orchestrator.run.status.failed'
   | 'orchestrator.run.status.paused'
   | 'orchestrator.run.status.planning'

@@ -59,6 +59,11 @@ pub struct CreateTaskParams {
     /// Optional per-kind config JSON (迁移 023, nullable), e.g. fan-out 分组
     /// `{"group":"<label>"}`。`None` when unused.
     pub pattern_config: Option<String>, // JSON
+    /// Per-node failure policy (迁移 029, nullable): `None`/`"fail_run"` = default
+    /// (a hard failure fails the whole run); `"skip_and_continue"` = soft failure
+    /// (skip downstream, run may settle `completed_with_failures`). Today the
+    /// planner persists `None`; a later phase sets it per node.
+    pub on_fail: Option<String>,
 }
 
 /// Parameters for a partial task update. `None` = leave the column unchanged.
