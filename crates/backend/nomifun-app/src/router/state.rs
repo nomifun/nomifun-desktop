@@ -1022,6 +1022,11 @@ fn compose_lead_receipt(run_id: &str, outcome: RunOutcome, brief: &str) -> Strin
              采纳该节点当前产出，或放弃。若暂不处理，run 会按其它独立分支继续，终态时再给你完整回执。\
              不要重复创建相同编排。"
         ),
+        RunOutcome::BatchProgress => format!(
+            "[编排回执·进展] 你派发的编排（run {run_id}）刚完成了一批节点，run 仍在进行：\n{brief}\n\
+             可据此判断是否需要追加工作：如有必要用 nomi_run_add_tasks 往同一个 run 追加任务；\
+             否则继续等待，终态时会给你完整回执。不要新建编排。"
+        ),
     }
 }
 
