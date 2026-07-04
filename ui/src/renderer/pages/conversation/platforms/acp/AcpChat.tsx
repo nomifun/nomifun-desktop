@@ -74,6 +74,7 @@ const AcpChat: React.FC<{
         type: 'acp',
         cron_job_id,
         hideSendBox,
+        isProcessing: messageState.running,
         loadedSkills,
         loadedMcpServers,
         loadedMcpStatuses,
