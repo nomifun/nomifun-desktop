@@ -27,7 +27,7 @@ describe('MessageList turn completion disclosure structure', () => {
   });
 
   test('does not reuse legacy process cards inside receipt expansion', () => {
-    expect(source.includes('renderProcessItem={(processItem) => renderProcessTraceItem(processItem)}')).toBe(true);
+    expect(source.includes("renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'list', workspaceRoots)}")).toBe(true);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });

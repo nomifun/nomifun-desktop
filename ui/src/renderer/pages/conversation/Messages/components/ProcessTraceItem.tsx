@@ -7,6 +7,7 @@
 import type { IConversationArtifact } from '@/common/adapter/ipcBridge';
 import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { usePreviewLauncher } from '@/renderer/hooks/file/usePreviewLauncher';
 import { extractContentFromDiff } from '@/renderer/utils/file/diffUtils';
 import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
@@ -17,6 +18,7 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { FileChangeInfo } from '../MessageFileChanges';
 import { isContextCompressionTip } from '../processTipModel';
+import { formatFileTargetPreview, formatWorkspaceFileTarget } from '../processFileTargetLabel';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { getProcessItemState } from '../turnProcessState';
 import MessagePermission from './MessagePermission';
@@ -49,6 +51,7 @@ type ProcessTraceVariant = 'list' | 'receipt';
 type ProcessTraceRow = {
   key: string;
   label: string;
+  title?: string;
   state: TurnDisclosureProcessState;
   onClick?: () => void;
 };
@@ -69,10 +72,22 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
 
 const joinCompactText = (parts: Array<string | undefined>): string => parts.filter(Boolean).join(' ');
 
-const formatToolReceiptDetailLabel = (row: ToolReceiptDetailRow, t: TranslationFn): string => {
-  if ((row.state === 'failed' || row.state === 'canceled') && row.target) {
+const getToolReceiptDetailDisplayTarget = (row: ToolReceiptDetailRow, workspaceRoots: string[]): string | undefined => {
+  if (!row.target) return undefined;
+  if (row.action !== 'read_files' && row.action !== 'edit_files') return row.target;
+  return formatWorkspaceFileTarget(row.target, { workspaceRoots }).label;
+};
+
+const formatToolReceiptDetailLabel = (
+  row: ToolReceiptDetailRow,
+  t: TranslationFn,
+  workspaceRoots: string[]
+): string => {
+  const displayTarget = getToolReceiptDetailDisplayTarget(row, workspaceRoots);
+
+  if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
     return t(`messages.toolSummary.${row.state}`, {
-      target: row.target,
+      target: displayTarget,
       defaultValue: defaultToolSummaryByState[row.state],
     });
   }
@@ -114,7 +129,7 @@ const formatToolReceiptDetailLabel = (row: ToolReceiptDetailRow, t: TranslationF
         });
   }
 
-  return joinCompactText([row.title, row.target]);
+  return joinCompactText([row.title, displayTarget]);
 };
 
 const formatFileChangeStats = (file: FileChangeInfo): string =>
@@ -123,7 +138,8 @@ const formatFileChangeStats = (file: FileChangeInfo): string =>
     file.deletions > 0 ? `-${file.deletions}` : undefined,
   ]);
 
-const formatTargetPreview = (targets: string[]): string => targets.join(', ');
+const formatTargetPreview = (targets: string[], workspaceRoots: string[]): string =>
+  formatFileTargetPreview(targets, { workspaceRoots });
 
 const isFileDetailRow = (row: ToolReceiptDetailRow): boolean =>
   (row.action === 'read_files' || row.action === 'edit_files') && Boolean(row.target);
@@ -131,7 +147,10 @@ const isFileDetailRow = (row: ToolReceiptDetailRow): boolean =>
 const hasToolRowDetail = (row: ToolReceiptDetailRow): boolean =>
   row.action === 'run_commands' || isFileDetailRow(row) || Boolean(row.input || row.output || row.truncated);
 
-const ToolFileListDetail: React.FC<{ rows: ToolReceiptDetailRow[] }> = ({ rows }) => {
+const ToolFileListDetail: React.FC<{ rows: ToolReceiptDetailRow[]; workspaceRoots: string[] }> = ({
+  rows,
+  workspaceRoots,
+}) => {
   const { t } = useTranslation();
   const targets = rows.map((row) => row.target).filter((target): target is string => Boolean(target));
   if (!targets.length) return null;
@@ -141,12 +160,12 @@ const ToolFileListDetail: React.FC<{ rows: ToolReceiptDetailRow[] }> = ({ rows }
     firstAction === 'edit_files'
       ? t('messages.processReceipt.fileEditTargets', {
           count: targets.length,
-          target: formatTargetPreview(targets),
+          target: formatTargetPreview(targets, workspaceRoots),
           defaultValue: 'Edited {{count}} files: {{target}}',
         })
       : t('messages.processReceipt.readTargets', {
           count: targets.length,
-          target: formatTargetPreview(targets),
+          target: formatTargetPreview(targets, workspaceRoots),
           defaultValue: 'Read {{count}} files: {{target}}',
         });
 
@@ -154,11 +173,14 @@ const ToolFileListDetail: React.FC<{ rows: ToolReceiptDetailRow[] }> = ({ rows }
     <div className='turn-process-trace-detail'>
       <div className='turn-process-trace-detail__label'>{label}</div>
       <ul className='turn-process-trace-file-list'>
-        {targets.map((target) => (
-          <li key={target} className='turn-process-trace-file-list__item' title={target}>
-            {target}
-          </li>
-        ))}
+        {targets.map((target) => {
+          const display = formatWorkspaceFileTarget(target, { workspaceRoots });
+          return (
+            <li key={target} className='turn-process-trace-file-list__item' title={display.title}>
+              {display.label}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -174,9 +196,9 @@ const ToolTraceDetailSection: React.FC<{ label: string; value?: string }> = ({ l
   );
 };
 
-const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow }> = ({ row }) => {
+const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: string[] }> = ({ row, workspaceRoots }) => {
   const { t } = useTranslation();
-  if (isFileDetailRow(row)) return <ToolFileListDetail rows={[row]} />;
+  if (isFileDetailRow(row)) return <ToolFileListDetail rows={[row]} workspaceRoots={workspaceRoots} />;
 
   const command = row.action === 'run_commands' ? row.target : undefined;
   const input = row.input && row.input !== command ? row.input : undefined;
@@ -204,7 +226,11 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow }> = ({ row }) => {
   );
 };
 
-const ToolTraceRow: React.FC<{ row: ToolReceiptDetailRow; label: string }> = ({ row, label }) => {
+const ToolTraceRow: React.FC<{ row: ToolReceiptDetailRow; label: string; workspaceRoots: string[] }> = ({
+  row,
+  label,
+  workspaceRoots,
+}) => {
   const [expanded, setExpanded] = useState(false);
   const hasDetail = hasToolRowDetail(row);
   const rowClassName = classNames(
@@ -242,7 +268,7 @@ const ToolTraceRow: React.FC<{ row: ToolReceiptDetailRow; label: string }> = ({ 
           className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')}
         />
       </button>
-      {expanded && <ToolTraceDetail row={row} />}
+      {expanded && <ToolTraceDetail row={row} workspaceRoots={workspaceRoots} />}
     </div>
   );
 };
@@ -255,7 +281,7 @@ const ProcessTraceRows: React.FC<{ rows: ProcessTraceRow[] }> = ({ rows }) => {
       {rows.map((row) => {
         const className = classNames('turn-process-trace__row', `turn-process-trace__row--${row.state}`);
         const text = (
-          <span className='turn-process-trace__text' title={row.label}>
+          <span className='turn-process-trace__text' title={row.title ?? row.label}>
             {row.label}
           </span>
         );
@@ -278,9 +304,14 @@ const ProcessTraceRows: React.FC<{ rows: ProcessTraceRow[] }> = ({ rows }) => {
   );
 };
 
-const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; variant?: ProcessTraceVariant }> = ({
+const ToolProcessTraceRows: React.FC<{
+  messages: ToolProcessMessage[];
+  variant?: ProcessTraceVariant;
+  workspaceRoots: string[];
+}> = ({
   messages,
   variant = 'list',
+  workspaceRoots,
 }) => {
   const { t } = useTranslation();
   const tools = useMemo(() => normalizeToolMessages(messages), [messages]);
@@ -288,9 +319,9 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; variant?:
     () =>
       buildToolReceiptDetailRows(tools).map((row) => ({
         row,
-        label: formatToolReceiptDetailLabel(row, t),
+        label: formatToolReceiptDetailLabel(row, t, workspaceRoots),
       })),
-    [t, tools]
+    [t, tools, workspaceRoots]
   );
 
   const fileRows = rows.filter(({ row }) => isFileDetailRow(row)).map(({ row }) => row);
@@ -299,28 +330,31 @@ const ToolProcessTraceRows: React.FC<{ messages: ToolProcessMessage[]; variant?:
   if (fileRows.length > 1) {
     return (
       <div className='turn-process-trace'>
-        <ToolFileListDetail rows={fileRows} />
+        <ToolFileListDetail rows={fileRows} workspaceRoots={workspaceRoots} />
         {nonFileRows.map(({ row, label }) => (
-          <ToolTraceRow key={row.key} row={row} label={label} />
+          <ToolTraceRow key={row.key} row={row} label={label} workspaceRoots={workspaceRoots} />
         ))}
       </div>
     );
   }
 
   if (variant === 'receipt' && rows.length === 1 && hasToolRowDetail(rows[0].row)) {
-    return <ToolTraceDetail row={rows[0].row} />;
+    return <ToolTraceDetail row={rows[0].row} workspaceRoots={workspaceRoots} />;
   }
 
   return (
     <div className='turn-process-trace'>
       {rows.map(({ row, label }) => (
-        <ToolTraceRow key={row.key} row={row} label={label} />
+        <ToolTraceRow key={row.key} row={row} label={label} workspaceRoots={workspaceRoots} />
       ))}
     </div>
   );
 };
 
-const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[] }> = ({ diffs }) => {
+const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[]; workspaceRoots: string[] }> = ({
+  diffs,
+  workspaceRoots,
+}) => {
   const { t } = useTranslation();
   const { launchPreview } = usePreviewLauncher();
   const files = useMemo(() => Array.from(new Map(diffs.map((file) => [file.fullPath, file])).values()), [diffs]);
@@ -345,21 +379,23 @@ const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[] }> = ({ diffs }) 
     () =>
       files.map((file) => {
         const stats = formatFileChangeStats(file);
+        const target = formatWorkspaceFileTarget(file.fullPath, { workspaceRoots });
         return {
           key: file.fullPath,
           state: 'completed',
+          title: file.fullPath,
           label: compactReceiptText(
             t('messages.processReceipt.fileChanged', {
-              target: file.fullPath,
+              target: target.label,
               stats,
               defaultValue: 'Edited {{target}} {{stats}}',
             }),
-            file.fullPath
+            target.label
           ),
           onClick: () => openFile(file),
         };
       }),
-    [files, openFile, t]
+    [files, openFile, t, workspaceRoots]
   );
 
   return <ProcessTraceRows rows={rows} />;
@@ -367,12 +403,27 @@ const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[] }> = ({ diffs }) 
 
 const getUnhandledMessageType = (_message: never): string => 'unknown';
 
-const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: ProcessTraceVariant }> = ({
+const ProcessTraceItem: React.FC<{
+  item: ProcessTraceRenderableItem;
+  variant?: ProcessTraceVariant;
+  workspaceRoots?: string[];
+}> = ({
   item,
   variant = 'list',
+  workspaceRoots,
 }) => {
   const { t } = useTranslation();
+  const conversationContext = useConversationContextSafe();
   const state = getProcessItemState(item);
+  const resolvedWorkspaceRoots = useMemo(
+    () =>
+      workspaceRoots && workspaceRoots.length
+        ? workspaceRoots
+        : conversationContext?.workspace
+          ? [conversationContext.workspace]
+          : [],
+    [conversationContext?.workspace, workspaceRoots]
+  );
 
   if ('type' in item && item.type === 'artifact') {
     const target =
@@ -391,11 +442,11 @@ const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: P
   }
 
   if ('type' in item && item.type === 'file_summary') {
-    return <FileProcessTraceRows diffs={item.diffs} />;
+    return <FileProcessTraceRows diffs={item.diffs} workspaceRoots={resolvedWorkspaceRoots} />;
   }
 
   if ('type' in item && item.type === 'tool_summary') {
-    return <ToolProcessTraceRows messages={item.messages} variant={variant} />;
+    return <ToolProcessTraceRows messages={item.messages} variant={variant} workspaceRoots={resolvedWorkspaceRoots} />;
   }
 
   switch (item.type) {
@@ -439,7 +490,7 @@ const ProcessTraceItem: React.FC<{ item: ProcessTraceRenderableItem; variant?: P
     case 'tool_call':
     case 'tool_group':
     case 'acp_tool_call':
-      return <ToolProcessTraceRows messages={[item]} variant={variant} />;
+      return <ToolProcessTraceRows messages={[item]} variant={variant} workspaceRoots={resolvedWorkspaceRoots} />;
     case 'agent_status':
       return (
         <ProcessTraceRows
