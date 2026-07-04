@@ -2299,7 +2299,11 @@ fn compose_synthesis_brief(
             out.push_str("- ");
             out.push_str(title);
             out.push_str(": ");
-            out.push_str(&truncate_summary_output(summary));
+            // A synthesis node's PURPOSE is merging these upstream outputs — they
+            // are its source material, not mere context — so inject them VERBATIM
+            // (do NOT truncate to SUMMARY_TASK_OUTPUT_LEN as agent-node context is).
+            // Truncating/flattening here would silently degrade the merge.
+            out.push_str(summary);
             out.push('\n');
         }
     }
