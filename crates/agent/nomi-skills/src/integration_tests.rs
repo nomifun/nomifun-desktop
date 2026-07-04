@@ -5,6 +5,7 @@
 //
 // Test coverage: TC-E2E-1 through TC-E2E-12c (AC-4 through AC-15).
 
+use serial_test::serial;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -522,6 +523,7 @@ async fn tc_e2e_10_multi_dir_dedup_first_wins() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[serial]
 async fn tc_e2e_11_legacy_commands_loaded() {
     use crate::loader::load_all_skills;
 
@@ -998,7 +1000,6 @@ async fn wb_5a_shell_empty_command_replaced_with_empty() {
 }
 
 #[tokio::test]
-#[cfg(not(windows))] // Windows cmd does not support newline-separated commands in blocks
 async fn wb_5b_shell_block_multiline_command() {
     use crate::shell::execute_shell_commands;
     let content = "```!\necho line1\necho line2\n```";

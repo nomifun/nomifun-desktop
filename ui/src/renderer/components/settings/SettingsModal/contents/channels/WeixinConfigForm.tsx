@@ -46,9 +46,9 @@ interface WeixinConfigFormProps {
   onStatusChange: (status: IChannelPluginStatus | null) => void;
 }
 
-const getRemainingTime = (expiresAt: number) => {
+const getRemainingTime = (expiresAt: number, minuteUnit: string) => {
   const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000 / 60));
-  return `${remaining} min`;
+  return `${remaining} ${minuteUnit}`;
 };
 
 const formatTime = (timestamp: number) => new Date(timestamp).toLocaleString();
@@ -202,12 +202,14 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
 
   const enableWeixinPlugin = async (accountId: string, botToken: string) => {
     const config = { credentials: { account_id: accountId, bot_token: botToken } };
-    // enablePlugin returns void; success if no throw
-    await channel.enablePlugin.invoke(
+    const result = await channel.enablePlugin.invoke(
       channelTarget
-        ? { plugin_id: channelTarget.channelId, plugin_type: 'weixin', companion_id: channelTarget.companionId, config }
+        ? { plugin_id: channelTarget.channelId, plugin_type: 'weixin', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
         : { plugin_id: 'weixin', config }
     );
+    if (!result.success) {
+      throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
+    }
     Message.success(t('settings.weixin.pluginEnabled', 'WeChat channel enabled'));
     const plugins = await channel.getPluginStatus.invoke();
     if (plugins) {
@@ -418,7 +420,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                   <div className='flex-1'>
                     <div className='flex items-center gap-8px'>
                       <span className='text-14px font-500 text-t-primary'>
-                        {pairing.display_name || 'Unknown User'}
+                        {pairing.display_name || t('common.unknownUser')}
                       </span>
                       <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
                         <Button
@@ -433,7 +435,8 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                       {t('settings.assistant.pairingCode', 'Code')}:{' '}
                       <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
+                      {t('settings.assistant.expiresIn', 'Expires in')}:{' '}
+                      {getRemainingTime(pairing.expiresAt, t('common.unit.minute_short'))}
                     </div>
                   </div>
                   <div className='flex items-center gap-8px'>
@@ -488,7 +491,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
               {authorizedUsers.map((user) => (
                 <div key={user.id} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
                   <div className='flex-1'>
-                    <div className='text-14px font-500 text-t-primary'>{user.display_name || 'Unknown User'}</div>
+                    <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
                       {t('settings.assistant.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
                     </div>

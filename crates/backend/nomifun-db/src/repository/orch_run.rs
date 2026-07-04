@@ -87,6 +87,10 @@ pub struct UpdateTaskParams {
     /// Set to `Some(Some(now + backoff))` to defer a re-`pending` task's re-dispatch;
     /// `Some(None)` clears it; `None` leaves the column unchanged.
     pub next_retry_at: Option<Option<i64>>,
+    /// Persisted failure reason (迁移 027, skip/NULL/set). `Some(Some(msg))` records
+    /// why a task permanently failed; `Some(None)` clears it (e.g. on rerun);
+    /// `None` leaves the column unchanged.
+    pub last_error: Option<Option<String>>,
 }
 
 /// Parameters for creating an assignment (member → task). `id` is minted

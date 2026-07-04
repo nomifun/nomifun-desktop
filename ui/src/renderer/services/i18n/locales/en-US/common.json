@@ -1,6 +1,7 @@
 {
   "siderSection": {
     "common": "Common",
+    "publicService": "Public Service",
     "data": "Data",
     "automation": "Automation",
     "tools": "Tools",
@@ -50,6 +51,7 @@
   "saveSuccess": "Saved successfully",
   "saveFailed": "Failed to save",
   "unknownError": "Unknown error",
+  "unknownUser": "Unknown user",
   "confirmDelete": "Confirm Delete",
   "deleteSuccess": "Deleted successfully",
   "deleteFailed": "Failed to delete",

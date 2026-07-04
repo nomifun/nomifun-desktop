@@ -141,6 +141,53 @@ struct SpawnParams {
     synthesize: Option<bool>,
 }
 
+// ── re-adjust (supervision) param structs ─────────────────────────────────
+
+/// Incrementally re-strategize a run: a natural-language `intent` the lead LLM
+/// reconciles as KEEP / DROP / NEW over the existing tasks (completed work is
+/// preserved). The primary re-strategy lever after a failure.
+#[derive(Deserialize, JsonSchema)]
+struct RunAdjustParams {
+    /// The run to adjust (from nomi_run_create / nomi_spawn).
+    run_id: String,
+    /// What to change, in natural language (e.g. "换一种方式重做失败的安全扫描节点，
+    /// 保留已完成的其它节点").
+    intent: String,
+}
+
+/// Re-run ONE node (and cascade-reset its already-settled downstream), e.g. to
+/// retry a failed node — optionally after changing its model/prompt via
+/// `nomi_task_config`.
+#[derive(Deserialize, JsonSchema)]
+struct TaskRerunParams {
+    run_id: String,
+    /// The task/node id (from nomi_run_status).
+    task_id: String,
+}
+
+/// Override a node's model and/or preset requirement before re-running it — e.g.
+/// route a failing node to a stronger/different model.
+#[derive(Deserialize, JsonSchema)]
+struct TaskConfigParams {
+    run_id: String,
+    task_id: String,
+    /// Provider id to route this node to (pair with `model`). Omit to keep current.
+    #[serde(default)]
+    provider_id: Option<String>,
+    /// Model name for this node (pair with `provider_id`). Omit to keep current.
+    #[serde(default)]
+    model: Option<String>,
+    /// A preset requirement appended to this node's brief (separate from its spec).
+    #[serde(default)]
+    preset_prompt: Option<String>,
+}
+
+/// Cancel a run and terminate its in-flight sub-agents.
+#[derive(Deserialize, JsonSchema)]
+struct RunCancelParams {
+    run_id: String,
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────
 
 async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreateParams) -> Value {
@@ -217,14 +264,18 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // same non-empty id.
     let lead_conv_id = parse_lead_conv_id(&ctx.conversation_id);
 
-    // Resolve the effective autonomy. A Path-A run (bound to a lead conversation =
-    // the desktop 智能编排 entry) defaults to `interactive` so the plan PARKS at
-    // `awaiting_plan_approval` for the user to review/adjust/approve before it runs
-    // — matching the in-conversation approval banner. An explicit caller value still
-    // wins; a pure MCP / no-session call (no lead conv) keeps the `supervised`
-    // default (it has no approval UI to park for). Fixes 会话6: the lead model
-    // omitted autonomy → supervised → the plan auto-executed with no approval.
-    let autonomy = default_autonomy(p.autonomy, lead_conv_id);
+    // Autonomy: pass the caller's explicit value straight through; when omitted,
+    // `create_adhoc` applies its own `supervised` default so the run AUTO-RUNS and
+    // the 主管 can follow it to completion IN-TURN (poll `nomi_run_status` /
+    // `nomi_run_result` and summarize) — the same engaged experience as `nomi_spawn`.
+    // A conversation-native run no longer forces `interactive`: the human
+    // plan-approval gate lives ONLY at the 编排 Tab front door
+    // (`routes.rs::create_adhoc_run`, which sets `interactive` explicitly on the
+    // request), so an in-chat fan-out never strands the 主管 at an unattended approval
+    // park (that was the「主 main 失联」bug). An explicit `autonomy: "interactive"`
+    // from the caller still parks — handled by the message branch below and the
+    // engine-start gate in `spawn_plan_and_start`.
+    let autonomy = p.autonomy;
 
     // Build the ad-hoc request from the EXPLICIT params: work_dir straight from the
     // arg, resolved autonomy, lead_conv_id = the parsed calling-conversation id.
@@ -267,10 +318,15 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // SYNCHRONOUS tool call blocked the lead turn so long the weak model kept
     // re-invoking `nomi_run_create` every ~60s → multiple orphaned `planning` runs +
     // a 200s+ "stuck" turn with no visible progress. Returning at once keeps the lead
-    // turn short and lets the canvas show planning live; an `interactive` run then
-    // parks for approval, and `spawn_plan_and_start` only starts the engine for
-    // non-interactive runs.
+    // turn short and lets the canvas show planning live. With the default `supervised`
+    // autonomy the run AUTO-STARTS once planned and the 主管 stays engaged — it follows
+    // the SAME run_id via `nomi_run_status`/`nomi_run_result` to completion and
+    // summarizes (no unattended approval park); `spawn_plan_and_start` starts the
+    // engine for it. An explicit `interactive` run still parks for approval, and the
+    // relay message then tells the 主管 to ask the user to approve first, THEN keep
+    // polling — so it is never「失联」either way.
     if lead_conv_id.is_some() {
+        let interactive = run.autonomy == "interactive";
         nomifun_orchestrator::spawn_plan_and_start(
             deps.orchestrator_run_service.clone(),
             deps.orchestrator_run_engine.as_ref().clone(),
@@ -280,7 +336,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
         return ok(json!({
             "run_id": run.id,
             "status": "planning",
-            "message": planning_started_message(),
+            "message": planning_started_message(interactive),
         }));
     }
 
@@ -418,20 +474,6 @@ fn build_adhoc_request(
     }
 }
 
-/// Resolve the effective autonomy for an ad-hoc run created via the caps front
-/// door. An explicit, non-blank caller value always wins. Otherwise a Path-A run
-/// (bound to a lead conversation = the desktop 智能编排 entry) defaults to
-/// `interactive` so the plan parks at `awaiting_plan_approval` for the user to
-/// review/approve before it runs; a pure MCP / no-session call (no lead conv)
-/// returns `None` so `create_adhoc` applies its `supervised` default (no approval
-/// UI to park for).
-fn default_autonomy(explicit: Option<String>, lead_conv_id: Option<i64>) -> Option<String> {
-    match explicit {
-        Some(a) if !a.trim().is_empty() => Some(a),
-        _ => lead_conv_id.map(|_| "interactive".to_string()),
-    }
-}
-
 /// Parse `ctx.conversation_id` (a `String`, empty when there is no calling
 /// conversation) into a lead conversation id. An empty id ⇒ `None` (MCP /
 /// no-session caller — regress to the no-lead behavior); a non-empty id is parsed
@@ -487,11 +529,18 @@ fn awaiting_plan_message(task_count: usize) -> String {
 }
 
 /// The 主管-facing relay message for a Path-A run whose planning was kicked off in
-/// the BACKGROUND (the calling conversation watches it live). The plan is not ready
-/// at return time, so instruct the lead to tell the user planning is underway in the
-/// canvas and to approve when it lands — do NOT keep calling the create tool.
-fn planning_started_message() -> String {
-    "编排已创建，正在后台拆解为任务图(可在右侧编排画布实时查看规划过程)。请告知用户:规划完成后会停在「待批准」,届时点「批准执行」或回复批准即可开始——现在无需再次创建编排,耐心等待规划完成即可。".to_string()
+/// the BACKGROUND (the calling conversation watches it live). Keeps the 主管 ENGAGED
+/// rather than stopping it: it must poll the SAME run_id to completion and summarize
+/// — mirroring the `nomi_spawn` follow-up contract, so the main chat never goes
+/// silent (the「主 main 失联」bug). It still guards against re-creating the run (会话9).
+/// `interactive` (explicit caller value only) prepends the approval-relay step, since
+/// such a run parks at `awaiting_plan_approval` before it can execute.
+fn planning_started_message(interactive: bool) -> String {
+    if interactive {
+        "编排已创建，正在后台拆解为任务图(可在右侧编排画布实时查看规划过程)。这是需人工批准的编排：规划完成后会停在「待批准」——请告知用户在编排面板点「批准执行」或直接回复批准，不要再次创建编排。批准后子任务会自动执行，全部完成或失败时系统会自动把结果回执给你，届时你再向用户汇总——你无需轮询等待。".to_string()
+    } else {
+        "编排已创建(run_id 见返回)，正在后台拆解为任务图并会自动开跑(可在右侧编排画布实时查看每个子 agent 的状态与产出)。请告诉用户已在后台并行执行、进度见画布，然后结束本轮——你无需轮询等待：全部完成或失败时系统会自动把结果回执给你，届时你再向用户汇总。不要再次创建编排；用户若中途询问进度，可用 nomi_run_status 查一次。".to_string()
+    }
 }
 
 // ── assistant → role member resolution (P4 Task 2) ─────────────────────────
@@ -739,9 +788,9 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         "并行执行 {n} 个子任务：{}",
         p.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("、")
     );
-    // 扁平扇出恒 supervised：即时并行、无审批门。绝不走 default_autonomy 的
-    // interactive 桌面默认（那是给 planner 拆的团队审批用的；nomi_spawn 的任务
-    // 是调用方显式给出的，park 在批准门会回归进程内 Spawn 的静默卡死体验）。
+    // 扁平扇出恒 supervised：即时并行、无审批门。绝不显式传 interactive——
+    // nomi_spawn 的任务是调用方显式给出的，park 在批准门会回归进程内 Spawn 的
+    // 静默卡死体验（人工审批门只在编排 Tab 前门保留）。
     let req = build_adhoc_request(
         goal,
         None,
@@ -818,13 +867,111 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         "run_id": run.id,
         "status": "running",
         "task_count": n,
-        "message": "子任务已在编排画布并行执行（用户能实时看到每个子 agent 的状态与产出）。用 nomi_run_status 跟进、nomi_run_result 取汇总，然后向用户总结。",
+        "message": "子任务已在编排画布并行执行，用户能实时看到每个子 agent 的状态与产出。请告诉用户已在后台并行执行、进度见右侧画布，然后结束本轮——你无需轮询等待：全部完成或失败时系统会自动把结果回执给你再汇总。不要重复创建编排；用户若中途询问进度，可用 nomi_run_status 查一次。",
     }))
+}
+
+// ── re-adjust (supervision) handlers ──────────────────────────────────────
+
+/// Incremental re-strategy (KEEP/DROP/NEW). Mirrors the Tab `adjust_run` route:
+/// engine.adjust → (re)start the loop if the reconciled run is running with no
+/// live loop. Completed work is preserved.
+async fn run_adjust(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunAdjustParams) -> Value {
+    let user = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    if p.intent.trim().is_empty() {
+        return json!({ "error": "intent must not be empty" });
+    }
+    match deps
+        .orchestrator_run_engine
+        .adjust(&deps.orchestrator_run_service, &user, &p.run_id, &p.intent)
+        .await
+    {
+        Ok(run) => {
+            if run.status == "running" && !deps.orchestrator_run_engine.is_running(&p.run_id) {
+                deps.orchestrator_run_engine.start(p.run_id.clone());
+            }
+            ok(json!({
+                "run_id": run.id,
+                "status": run.status,
+                "message": "已按你的意图增量调整编排（保留已完成节点、重做/新增其余）。调整后会继续执行，完成或失败时自动回执——无需轮询。",
+            }))
+        }
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// Re-run one node (+ cascade-reset its downstream). Mirrors the Tab `rerun_task`
+/// route. Retry a failed node — optionally after `nomi_task_config` changes it.
+async fn task_rerun(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: TaskRerunParams) -> Value {
+    let user = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    match deps
+        .orchestrator_run_engine
+        .rerun_task(&deps.orchestrator_run_service, &user, &p.run_id, &p.task_id)
+        .await
+    {
+        Ok(run) => {
+            if run.status == "running" && !deps.orchestrator_run_engine.is_running(&p.run_id) {
+                deps.orchestrator_run_engine.start(p.run_id.clone());
+            }
+            ok(json!({
+                "run_id": run.id,
+                "status": run.status,
+                "message": "已重跑该节点并级联重置其下游；继续执行、完成/失败自动回执。",
+            }))
+        }
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// Change a node's model / preset requirement. Mirrors the Tab `set_task_config`
+/// route (takes effect on next dispatch; for a settled node follow with rerun).
+async fn task_config(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: TaskConfigParams) -> Value {
+    let user = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    match deps
+        .orchestrator_run_service
+        .set_task_config(&user, &p.run_id, &p.task_id, p.provider_id, p.model, p.preset_prompt)
+        .await
+    {
+        Ok(()) => ok(json!({
+            "run_id": p.run_id,
+            "task_id": p.task_id,
+            "message": "已更新该节点的模型/预置要求。pending 节点下次派发即生效；已结算节点请再调 nomi_task_rerun 使其以新配置重跑。",
+        })),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// Cancel a run + terminate its in-flight sub-agents. Mirrors the Tab `cancel_run`
+/// route (engine.stop + run_service.cancel).
+async fn run_cancel(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCancelParams) -> Value {
+    if let Err(e) = require_user(&ctx) {
+        return e;
+    }
+    deps.orchestrator_run_engine.stop(&p.run_id);
+    match deps.orchestrator_run_service.cancel(&p.run_id).await {
+        Ok(()) => ok(json!({
+            "run_id": p.run_id,
+            "status": "cancelled",
+            "message": "已取消该编排，在飞子任务已终止。",
+        })),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
 }
 
 // ── result projections (RunDetail → compact LLM-friendly shape) ───────────
 
-/// Run status + per-task {id, title, status}.
+/// Run status + per-task {id, title, status, attempt, conversation_id, last_error}
+/// — enough for the supervising lead to diagnose (which node, how many attempts,
+/// why it failed) and decide a re-strategy.
 fn project_status(detail: &RunDetail) -> Value {
     json!({
         "run_id": detail.run.id,
@@ -832,14 +979,21 @@ fn project_status(detail: &RunDetail) -> Value {
         "tasks": detail
             .tasks
             .iter()
-            .map(|t| json!({ "id": t.id, "title": t.title, "status": t.status }))
+            .map(|t| json!({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "attempt": t.attempt,
+                "conversation_id": t.conversation_id,
+                "last_error": t.last_error,
+            }))
             .collect::<Vec<_>>(),
     })
 }
 
-/// Run status + summary + per-task {title, output_summary}. When the run is not
-/// yet terminal, `status` reflects the in-flight state (e.g. "running"); the
-/// summary / output fields are simply whatever has been persisted so far.
+/// Run status + summary + per-task {id, title, status, output_summary, attempt,
+/// last_error}. While not terminal, `status` reflects the in-flight state; failed
+/// nodes carry `last_error` so the lead can explain / re-strategize.
 fn project_result(detail: &RunDetail) -> Value {
     json!({
         "run_id": detail.run.id,
@@ -848,7 +1002,14 @@ fn project_result(detail: &RunDetail) -> Value {
         "tasks": detail
             .tasks
             .iter()
-            .map(|t| json!({ "title": t.title, "output_summary": t.output_summary }))
+            .map(|t| json!({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "output_summary": t.output_summary,
+                "attempt": t.attempt,
+                "last_error": t.last_error,
+            }))
             .collect::<Vec<_>>(),
     })
 }
@@ -907,6 +1068,51 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         )
         .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, _ctx, p| result(deps, p),
+    ));
+
+    // 4. Supervision / re-adjust (write, Desktop-only): let the master agent
+    //    RE-STRATEGIZE a run after a failure instead of only observing it — adjust
+    //    the plan, re-run a node, change a node's model, or cancel. Same domain
+    //    deny (Remote) as the rest.
+    out.push(Capability::new::<RunAdjustParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_run_adjust",
+            "orchestrator",
+            "Incrementally re-strategize a run from a natural-language intent (the lead reconciles it as keep/drop/new over existing tasks, preserving completed work). The primary lever to recover from a failure — e.g. redo the failed node a different way while keeping the rest. Params: run_id, intent. Returns run status.",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| run_adjust(deps, ctx, p),
+    ));
+    out.push(Capability::new::<TaskRerunParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_task_rerun",
+            "orchestrator",
+            "Re-run one node of a run (and cascade-reset its already-settled downstream) — e.g. retry a failed node, optionally after changing its model/prompt via nomi_task_config. Params: run_id, task_id (from nomi_run_status).",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| task_rerun(deps, ctx, p),
+    ));
+    out.push(Capability::new::<TaskConfigParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_task_config",
+            "orchestrator",
+            "Override a node's model (provider_id + model) and/or preset requirement before re-running it — e.g. route a failing node to a stronger model, then nomi_task_rerun. Params: run_id, task_id, provider_id?, model?, preset_prompt?.",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| task_config(deps, ctx, p),
+    ));
+    out.push(Capability::new::<RunCancelParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_run_cancel",
+            "orchestrator",
+            "Cancel a run and terminate its in-flight sub-agents. Params: run_id.",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| run_cancel(deps, ctx, p),
     ));
 }
 
@@ -1044,29 +1250,32 @@ mod tests {
         assert!(req.lead_conv_id.is_none());
     }
 
-    // 会话6 fix: the conversation entry (Path A, a lead conversation is bound) must
-    // default to `interactive` so the plan PARKS for approval instead of auto-running.
+    // A conversation-native `nomi_run_create` now keeps the 主管 ENGAGED instead of
+    // stopping it (the fix for「主 main 失联」): the background-planning relay message
+    // must tell the 主管 to poll the same run to completion and summarize — the
+    // `nomi_spawn` follow-up contract — and must NOT tell it to just wait. It still
+    // guards against re-creating the run (会话9).
     #[test]
-    fn default_autonomy_lead_conv_defaults_interactive() {
-        assert_eq!(default_autonomy(None, Some(6)).as_deref(), Some("interactive"), "lead conv → parks");
-        assert_eq!(
-            default_autonomy(Some("   ".into()), Some(6)).as_deref(),
-            Some("interactive"),
-            "blank autonomy treated as omitted → parks"
-        );
-    }
+    fn planning_started_message_defers_to_auto_report() {
+        // Dispatch-and-ack: the run auto-runs and the engine auto-REPORTS the result
+        // back to the lead conversation on completion/failure — so the 主管 must NOT
+        // be told to busy-poll; it dispatches, acks, and waits for the auto-report.
+        let auto = planning_started_message(false);
+        assert!(auto.contains("自动"), "must mention the auto-report: {auto}");
+        assert!(auto.contains("回执"), "must mention the receipt back to the lead: {auto}");
+        assert!(auto.contains("无需轮询"), "must tell the 主管 NOT to busy-poll: {auto}");
+        assert!(auto.contains("不要再次创建编排"), "must still guard against re-creating (会话9): {auto}");
+        assert!(!auto.contains("持续用"), "must NOT instruct busy-polling: {auto}");
+        assert!(!auto.contains("耐心等待"), "must NOT tell the 主管 to just wait idly: {auto}");
+        // On-demand progress stays available.
+        assert!(auto.contains("nomi_run_status"), "keeps nomi_run_status as an on-demand option: {auto}");
 
-    #[test]
-    fn default_autonomy_explicit_value_always_wins() {
-        assert_eq!(default_autonomy(Some("supervised".into()), Some(6)).as_deref(), Some("supervised"));
-        assert_eq!(default_autonomy(Some("interactive".into()), None).as_deref(), Some("interactive"));
-    }
-
-    #[test]
-    fn default_autonomy_no_lead_conv_stays_unset() {
-        // Pure MCP / no-session → None so create_adhoc applies its `supervised`
-        // default (no approval UI to park for).
-        assert_eq!(default_autonomy(None, None), None);
+        // Interactive: still relays the approval step, but after approval the result
+        // is also auto-reported — no busy-poll.
+        let inter = planning_started_message(true);
+        assert!(inter.contains("批准"), "interactive must relay the approval step: {inter}");
+        assert!(inter.contains("自动"), "interactive must still auto-report after approval: {inter}");
+        assert!(inter.contains("无需轮询"), "interactive must NOT instruct busy-polling: {inter}");
     }
 
     // The deterministic homepage channel: the exact `extra.orchestrator_model_range`
@@ -1163,7 +1372,7 @@ mod tests {
     #[test]
     fn orchestrator_tools_registered_and_visible_on_desktop() {
         let reg = Registry::global();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
             assert!(
                 reg.contains(name),
                 "orchestrator tool {name} is not registered"
@@ -1194,7 +1403,7 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
             // Not advertised on the Remote surface.
             assert!(
                 !remote.contains(&name),
