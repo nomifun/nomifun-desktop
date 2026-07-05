@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::adapters::{error_from_response, net_err, route_adapter_id};
+use crate::adapters::{MAX_ARTIFACT_BYTES, error_from_response, net_err, read_body_capped, route_adapter_id};
 use crate::dto::CreationTask;
 use crate::provider::{
     InputAsset, MediaProvider, PollResult, ProducedData, ResolvedProvider, SubmitAck, SubmitRequest,
@@ -433,11 +433,18 @@ impl CreationService {
             return;
         }
         // A fresh task transitions queued→running; a resume is already running.
-        if job.remote_task_id.is_none()
-            && let Err(e) = self.mark_running(&job.id).await
-        {
-            tracing::warn!(id = %job.id, error = %e, "creation: mark running failed; abandoning task");
-            return;
+        // The transition is conditional on the task still being live, so a
+        // cancel that lands after acquire_permits cannot be resurrected to
+        // `running` (and then finalized as succeeded).
+        if job.remote_task_id.is_none() {
+            match self.mark_running(&job.id).await {
+                Ok(true) => {}
+                Ok(false) => return, // canceled (or gone) before we claimed running
+                Err(e) => {
+                    tracing::warn!(id = %job.id, error = %e, "creation: mark running failed; abandoning task");
+                    return;
+                }
+            }
         }
 
         let outcome = self.execute(&job, &token).await;
@@ -498,7 +505,16 @@ impl CreationService {
         remote_task_id: &str,
         token: &CancellationToken,
     ) -> ExecOutcome {
-        let deadline = job.submitted_at + self.task_timeout.as_millis() as i64;
+        // A boot-resumed job (its `remote_task_id` was set at spawn from the
+        // persisted row) budgets from resume time, NOT the original submit: the
+        // app may have been down far longer than `task_timeout`, and an absolute
+        // `submitted_at + timeout` deadline would already be elapsed, failing the
+        // still-healthy remote job on the first iteration without a single poll.
+        let deadline = if job.remote_task_id.is_some() {
+            now_ms() + self.task_timeout.as_millis() as i64
+        } else {
+            job.submitted_at + self.task_timeout.as_millis() as i64
+        };
         loop {
             if token.is_cancelled() {
                 return ExecOutcome::Canceled;
@@ -690,7 +706,7 @@ impl CreationService {
                     .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let bytes = resp.bytes().await.map_err(net_err)?.to_vec();
+        let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
         Ok((bytes, mime))
     }
 
@@ -726,9 +742,13 @@ impl CreationService {
     // DB state transitions (best-effort; log on failure)
     // -----------------------------------------------------------------------
 
-    async fn mark_running(&self, id: &str) -> Result<(), AppError> {
-        self.repo
-            .update_task(
+    /// Transition queued→running, conditional on the task still being live.
+    /// Returns `false` when a concurrent cancel already wrote a terminal status
+    /// (so the worker must not proceed and resurrect it).
+    async fn mark_running(&self, id: &str) -> Result<bool, AppError> {
+        let applied = self
+            .repo
+            .update_task_if_live(
                 id,
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Running.as_str()),
@@ -737,7 +757,7 @@ impl CreationService {
                 },
             )
             .await?;
-        Ok(())
+        Ok(applied)
     }
 
     async fn set_remote(&self, id: &str, remote_task_id: &str) -> Result<(), AppError> {
@@ -755,8 +775,12 @@ impl CreationService {
 
     async fn write_succeeded(&self, id: &str, asset_ids: &[String]) -> Result<(), AppError> {
         let ids_json = serde_json::to_string(asset_ids).unwrap_or_else(|_| "[]".to_string());
-        self.repo
-            .update_task(
+        // Conditional: never overwrite a terminal status (e.g. a `canceled` that
+        // won the race with this finalize). The token check in `finalize` is a
+        // cheap early-out; THIS is the correctness gate.
+        let applied = self
+            .repo
+            .update_task_if_live(
                 id,
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Succeeded.as_str()),
@@ -766,14 +790,18 @@ impl CreationService {
                 },
             )
             .await?;
+        if !applied {
+            tracing::info!(id, "creation: succeeded write skipped; task no longer live (cancel won the race)");
+        }
         Ok(())
     }
 
     async fn write_failed(&self, id: &str, err: &CreationError) -> Result<(), AppError> {
         let error_json = serde_json::to_string(err)
             .unwrap_or_else(|_| r#"{"kind":"internal","message":"error serialization failed"}"#.to_string());
-        self.repo
-            .update_task(
+        let applied = self
+            .repo
+            .update_task_if_live(
                 id,
                 UpdateCreationTaskParams {
                     status: Some(TaskStatus::Failed.as_str()),
@@ -783,6 +811,9 @@ impl CreationService {
                 },
             )
             .await?;
+        if !applied {
+            tracing::info!(id, "creation: failed write skipped; task no longer live");
+        }
         Ok(())
     }
 }
@@ -1192,6 +1223,53 @@ mod tests {
         // resumed one completes via its poll loop
         let resumed = wait_terminal(&h.svc, "wst_resume").await;
         assert_eq!(resumed.status, "succeeded");
+    }
+
+    #[tokio::test]
+    async fn reconcile_resumed_task_uses_fresh_deadline_not_stale_submitted_at() {
+        // A resumable async task whose remote completes on the first poll.
+        let adapter = MockAdapter::with(
+            "openai_video",
+            vec![MediaCapability::T2v],
+            MockBehavior::AsyncDone { pending_polls: 0 },
+        );
+        let h = harness(adapter, "openai").await; // task_timeout = 30s
+        let repo = &h.svc.repo;
+
+        // submitted far in the past: an absolute (submitted_at + timeout)
+        // deadline would already be elapsed, so the old code would fail this on
+        // the first loop iteration WITHOUT ever polling the healthy remote job.
+        let old = now_ms() - 3_600_000; // 1h ago
+        repo.create_task(CreateCreationTaskParams {
+            id: "wst_old_resume",
+            canvas_id: None,
+            node_id: None,
+            provider_id: &h.provider_id,
+            model: "test-model",
+            capability: "t2v",
+            params: "{}",
+            status: "queued",
+            submitted_at: old,
+        })
+        .await
+        .unwrap();
+        repo.update_task(
+            "wst_old_resume",
+            UpdateCreationTaskParams {
+                status: Some("running"),
+                remote_task_id: Some(Some("remote-old")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let settled = h.svc.reconcile_on_boot().await;
+        assert_eq!(settled, 0, "the resumable task is resumed, not settled as failed");
+        // With a resume-relative deadline it polls to completion instead of an
+        // instant timeout.
+        let done = wait_terminal(&h.svc, "wst_old_resume").await;
+        assert_eq!(done.status, "succeeded", "resumed old job polls to completion; error={:?}", done.error);
     }
 
     #[tokio::test]

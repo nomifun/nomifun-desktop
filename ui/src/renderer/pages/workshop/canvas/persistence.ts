@@ -54,15 +54,27 @@ export function useDocPersistence(
   }, []);
 
   const doSave = useCallback(async (): Promise<void> => {
-    const doc = getRef.current();
-    const sig = JSON.stringify(doc);
-    if (sig === lastSavedSigRef.current) return;
-    if (savedResetRef.current != null) {
-      window.clearTimeout(savedResetRef.current);
-      savedResetRef.current = null;
-    }
-    setSaveState('saving');
+    // Chain onto any in-flight save so PUTs never overlap or complete out of
+    // order. We snapshot the doc AFTER the prior save resolves, so a chained save
+    // always persists the latest state (multiple edits queued during a slow save
+    // collapse into one final, newest PUT).
+    const prev = inFlightRef.current;
     const task = (async () => {
+      if (prev) {
+        try {
+          await prev;
+        } catch {
+          /* prior save already surfaced its own error state */
+        }
+      }
+      const doc = getRef.current();
+      const sig = JSON.stringify(doc);
+      if (sig === lastSavedSigRef.current) return;
+      if (savedResetRef.current != null) {
+        window.clearTimeout(savedResetRef.current);
+        savedResetRef.current = null;
+      }
+      setSaveState('saving');
       try {
         await putCanvasDoc(canvasId, doc);
         lastSavedSigRef.current = sig;
@@ -72,12 +84,15 @@ export function useDocPersistence(
       } catch (e) {
         console.error('[workshop] canvas autosave failed', e);
         setSaveState('error');
-      } finally {
-        inFlightRef.current = null;
       }
     })();
     inFlightRef.current = task;
-    await task;
+    try {
+      await task;
+    } finally {
+      // Only clear the pointer if a newer save hasn't chained on behind us.
+      if (inFlightRef.current === task) inFlightRef.current = null;
+    }
   }, [canvasId, setSaveState]);
 
   const schedule = useCallback(() => {
@@ -93,7 +108,8 @@ export function useDocPersistence(
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
     }
-    if (inFlightRef.current) await inFlightRef.current;
+    // doSave already serializes behind any in-flight save and reads the freshest
+    // doc, so a single call flushes the latest state to disk.
     await doSave();
   }, [doSave]);
 

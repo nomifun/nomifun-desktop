@@ -11,7 +11,7 @@
  * shows a guidance state.
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
 import { Contrast, DeleteFour } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
@@ -70,6 +70,17 @@ function CompareNodeImpl({ id, data, selected }: NodeProps<CompareFlowNode>) {
   const ready = !!contribA?.assetId && !!contribB?.assetId;
 
   const dragRef = useRef(false);
+
+  // Re-sync the local divider from the persisted `data.split` when it changes
+  // out-of-band (undo / redo / agent or collab update). Gated on `dragRef` so an
+  // active drag isn't interrupted, and threshold-compared to avoid feedback from
+  // the toFixed(3) round-trip we persist on drag end.
+  useEffect(() => {
+    if (dragRef.current) return;
+    const v = clamp01(typeof data.split === 'number' ? data.split : 0.5);
+    setSplit((prev) => (Math.abs(prev - v) > 1e-4 ? v : prev));
+  }, [data.split]);
+
   const updateSplitFromClientX = useCallback((clientX: number) => {
     const rect = boxRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0) return;

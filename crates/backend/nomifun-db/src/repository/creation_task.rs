@@ -21,6 +21,15 @@ pub trait ICreationTaskRepository: Send + Sync {
     /// Partial state-machine update. `DbError::NotFound` when the id is unknown.
     async fn update_task(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError>;
 
+    /// Conditional terminal-state write: apply `params` ONLY if the task is
+    /// still live (`status IN ('queued','running')`). Returns `Ok(true)` when
+    /// the row was updated, `Ok(false)` when the task was no longer live (e.g.
+    /// already `canceled`) or unknown. Unlike [`Self::update_task`] this never
+    /// overwrites a terminal status — the worker's finalize routes through it so
+    /// a `cancel` that lands mid-finalize is not silently flipped to
+    /// `succeeded`/`failed` (compare-and-set on `status`, not the token).
+    async fn update_task_if_live(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<bool, DbError>;
+
     /// Every task currently in a live (`queued`/`running`) state — the boot
     /// reconciliation input.
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError>;

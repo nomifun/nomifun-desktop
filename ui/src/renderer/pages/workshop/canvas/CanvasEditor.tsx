@@ -46,12 +46,12 @@ import { useTranslation } from 'react-i18next';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import AssetsPanel from '../assets/AssetsPanel';
 import { openImageEditor, type ImageEditorMode } from '../editor';
-import { patchAsset, uploadAsset } from '../api';
+import { patchAsset, uploadAsset, cancelTask } from '../api';
 import { readAssetDrag, type WorkshopAssetDragPayload } from '../lib/dnd';
 import { loadWorkshopMedia, revokeWorkshopMedia } from '../lib/media';
 import { abortAllLoopRuns, abortLoopRun } from '../generation/loop';
 import { nodeContribution } from '../generation/pipeline';
-import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc, WorkshopGeneratorMode } from '../types';
+import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc, WorkshopGeneratorMode, WorkshopGeneratorNodeData } from '../types';
 import { CanvasNodeContext, type CanvasNodeApi } from './CanvasNodeContext';
 import { useAgentOps, type AgentAddNodeOp, type AgentConnectOp } from './agentOps';
 import { useCanvasHistory } from './history';
@@ -292,7 +292,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     (nodeId: string) => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
       if (!node) return;
-      const { nodes: cloned } = cloneNodesWithEdges([node], [], { x: PASTE_OFFSET, y: PASTE_OFFSET });
+      const { nodes: cloned } = cloneNodesWithEdges([node], [], { x: PASTE_OFFSET, y: PASTE_OFFSET }, nodesRef.current);
       addNodes(cloned);
     },
     [addNodes]
@@ -344,6 +344,26 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     },
     [setNodes, setEdges]
   );
+
+  // react-flow native deletion (Delete / Backspace, box-select, multi-select)
+  // removes nodes straight through onNodesChange — it bypasses removeNode /
+  // deleteGroupWithChildren, the only two paths that abort a node's background
+  // work. Mirror that teardown here so a deleted node can't keep running: stop a
+  // loop node's coordinator, and cancel an in-flight generator task (best-effort;
+  // failures are ignored). Manual setNodes-filter deletes don't fire this, so
+  // there's no double-abort with the menu/toolbar paths.
+  const onNodesDelete = useCallback((deleted: WorkshopFlowNode[]) => {
+    for (const n of deleted) {
+      if (n.type === 'loop') {
+        abortLoopRun(n.id);
+      } else if (n.type === 'generator') {
+        const d = n.data as WorkshopGeneratorNodeData;
+        if (d.taskId && (d.status === 'queued' || d.status === 'running')) {
+          void cancelTask(d.taskId).catch(() => {});
+        }
+      }
+    }
+  }, []);
 
   // ── Compare / preview helpers ────────────────────────────────────────────────
 
@@ -690,7 +710,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     if (!clip || !clip.nodes.length) return false;
     pasteCountRef.current += 1;
     const off = PASTE_OFFSET * pasteCountRef.current;
-    const { nodes: cn, edges: ce } = cloneNodesWithEdges(clip.nodes, clip.edges, { x: off, y: off });
+    const { nodes: cn, edges: ce } = cloneNodesWithEdges(clip.nodes, clip.edges, { x: off, y: off }, nodesRef.current);
     addNodes(cn, ce);
     return true;
   }, [addNodes]);
@@ -828,7 +848,8 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
         const { nodes: cn, edges: ce } = cloneNodesWithEdges(
           sel,
           edgesRef.current.filter((edge) => sel.some((n) => n.id === edge.source) && sel.some((n) => n.id === edge.target)),
-          { x: PASTE_OFFSET, y: PASTE_OFFSET }
+          { x: PASTE_OFFSET, y: PASTE_OFFSET },
+          nodesRef.current
         );
         addNodes(cn, ce);
       }
@@ -1177,6 +1198,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
           nodeTypes={WORKSHOP_NODE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onNodesDelete={onNodesDelete}
           onConnect={onConnect}
           onConnectStart={onConnectStart}
           onConnectEnd={onConnectEnd}

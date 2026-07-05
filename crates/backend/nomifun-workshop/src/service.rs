@@ -104,6 +104,15 @@ pub struct AssetPatch {
     pub in_library: Option<bool>,
 }
 
+/// GC recency grace (ms). An asset row or on-disk file created/modified more
+/// recently than this is never reclaimed by [`WorkshopService::gc`] or the
+/// `delete_canvas` internal-asset sweep — it may still be an in-flight upload
+/// (file on disk before its row is inserted) or a reference an open canvas has
+/// added but not yet autosaved. A truly orphaned asset is still older than this
+/// on the next pass and gets reclaimed then. 10 minutes ≫ the max
+/// write+thumbnail latency and the 800ms autosave debounce.
+const GC_GRACE_MS: i64 = 10 * 60 * 1000;
+
 pub struct WorkshopService {
     repo: Arc<dyn IWorkshopRepository>,
     /// Backend data dir root. Asset `rel_path`s are relative to this.
@@ -112,15 +121,25 @@ pub struct WorkshopService {
     /// gateway enqueues into and the REST `pending-ops` routes drain. One
     /// instance per singleton service, so the gateway and the routes share it.
     agent_ops: crate::agent_ops::AgentOpsQueue,
+    /// GC recency grace (ms). Defaults to [`GC_GRACE_MS`]; tests override it to
+    /// `0` to drive immediate reclamation deterministically.
+    gc_grace_ms: i64,
 }
 
 impl WorkshopService {
     /// Build the service over its index repo + the data dir root.
     pub fn start(data_dir: &Path, repo: Arc<dyn IWorkshopRepository>) -> Arc<Self> {
+        Self::start_with_gc_grace(data_dir, repo, GC_GRACE_MS)
+    }
+
+    /// [`Self::start`] with an explicit GC recency grace (ms). Production uses
+    /// [`GC_GRACE_MS`]; tests pass `0` for immediate reclamation.
+    fn start_with_gc_grace(data_dir: &Path, repo: Arc<dyn IWorkshopRepository>, gc_grace_ms: i64) -> Arc<Self> {
         Arc::new(Self {
             repo,
             data_dir: data_dir.to_path_buf(),
             agent_ops: crate::agent_ops::AgentOpsQueue::new(),
+            gc_grace_ms,
         })
     }
 
@@ -309,7 +328,10 @@ impl WorkshopService {
 
         // GC: for each asset this canvas referenced, if it's canvas-internal
         // (`in_library = 0`) and no *other* canvas still references it, drop it.
+        // A recency grace protects a freshly-created asset that another OPEN
+        // canvas may reference but hasn't autosaved yet (its ref isn't on disk).
         if !own_refs.is_empty() {
+            let now = now_ms();
             let still_referenced = self.collect_all_referenced_asset_ids().await.unwrap_or_default();
             for asset_id in own_refs {
                 if still_referenced.contains(&asset_id) {
@@ -317,6 +339,7 @@ impl WorkshopService {
                 }
                 if let Ok(Some(row)) = self.repo.get_asset(&asset_id).await
                     && !row.in_library
+                    && now.saturating_sub(row.created_at.max(row.updated_at)) >= self.gc_grace_ms
                     && let Err(e) = self.delete_asset(&asset_id).await
                 {
                     tracing::warn!(asset_id, error = %e, "workshop GC: internal asset delete failed");
@@ -457,6 +480,16 @@ impl WorkshopService {
     /// Acknowledge (remove) applied 画布助手 ops by id.
     pub fn ack_agent_ops(&self, canvas_id: &str, op_ids: &[String]) {
         self.agent_ops.ack(canvas_id, op_ids);
+    }
+
+    /// Register that an editor just opened this canvas (its doc was loaded via
+    /// the REST canvas-doc GET). Marks the canvas "open" immediately so a
+    /// concurrent agent `apply_ops` in the gap before the first pending-ops poll
+    /// is queued for the live editor rather than direct-written and then
+    /// clobbered by the editor's first autosave. See
+    /// [`crate::agent_ops::AgentOpsQueue::mark_open`].
+    pub fn mark_canvas_open(&self, canvas_id: &str) {
+        self.agent_ops.mark_open(canvas_id);
     }
 
     // ---- assets ----
@@ -957,11 +990,17 @@ impl WorkshopService {
     pub async fn gc(&self) -> Result<GcStats, AppError> {
         let referenced = self.collect_all_referenced_asset_ids().await?;
         let all = self.repo.list_all_assets().await?;
+        let now = now_ms();
 
         let mut orphan_rows_deleted = 0usize;
         let mut surviving_ids: BTreeSet<String> = BTreeSet::new();
         for row in &all {
-            let orphan = !row.in_library && !referenced.contains(&row.id);
+            // Recency grace: a freshly-created canvas-internal asset may be
+            // referenced only by an open canvas whose autosave hasn't landed
+            // yet — reaping it now would leave a dangling reference. Keep it
+            // (it's still an orphan next pass if truly unreferenced).
+            let recent = now.saturating_sub(row.created_at.max(row.updated_at)) < self.gc_grace_ms;
+            let orphan = !row.in_library && !referenced.contains(&row.id) && !recent;
             if orphan {
                 if self.delete_asset(&row.id).await.is_ok() {
                     orphan_rows_deleted += 1;
@@ -979,8 +1018,8 @@ impl WorkshopService {
     /// not in `surviving_ids`. Best-effort; returns the number removed.
     async fn sweep_orphan_files(&self, surviving_ids: &BTreeSet<String>) -> usize {
         let assets = self.assets_dir();
-        let mut deleted = sweep_asset_dir(&assets, surviving_ids).await;
-        deleted += sweep_asset_dir(&assets.join("thumbs"), surviving_ids).await;
+        let mut deleted = sweep_asset_dir(&assets, surviving_ids, self.gc_grace_ms).await;
+        deleted += sweep_asset_dir(&assets.join("thumbs"), surviving_ids, self.gc_grace_ms).await;
         deleted
     }
 
@@ -1007,16 +1046,30 @@ fn default_doc_value() -> Value {
 }
 
 /// Delete `wsa_*` files directly under `dir` whose id-stem is not in
-/// `surviving_ids`. Non-recursive, best-effort; returns the count removed.
-async fn sweep_asset_dir(dir: &Path, surviving_ids: &BTreeSet<String>) -> usize {
+/// `surviving_ids` AND that were last modified more than `grace_ms` ago.
+/// Non-recursive, best-effort; returns the count removed. The mtime grace is
+/// the TOCTOU guard: [`WorkshopService::store_binary_asset`] writes the file
+/// (and thumbnail) BEFORE inserting the row, so a concurrent sweep must not
+/// reap a just-written file out from under the pending `create_asset`.
+async fn sweep_asset_dir(dir: &Path, surviving_ids: &BTreeSet<String>, grace_ms: i64) -> usize {
     let Ok(mut rd) = tokio::fs::read_dir(dir).await else {
         return 0;
     };
+    let grace = std::time::Duration::from_millis(grace_ms.max(0) as u64);
+    let now = std::time::SystemTime::now();
     let mut deleted = 0usize;
     while let Ok(Some(entry)) = rd.next_entry().await {
-        let is_file = entry.file_type().await.map(|t| t.is_file()).unwrap_or(false);
-        if !is_file {
+        let Ok(meta) = entry.metadata().await else { continue };
+        if !meta.is_file() {
             continue;
+        }
+        // Skip files written within the grace window (or with a future/unknown
+        // mtime — treat as recent) so in-flight uploads are never collected.
+        if let Ok(modified) = meta.modified() {
+            let recent = now.duration_since(modified).map(|age| age < grace).unwrap_or(true);
+            if recent {
+                continue;
+            }
         }
         let path = entry.path();
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -1098,11 +1151,17 @@ mod tests {
     use nomifun_db::SqliteWorkshopRepository;
 
     async fn service() -> (Arc<WorkshopService>, tempfile::TempDir) {
+        // Default test harness reclaims immediately (grace 0) so GC/delete tests
+        // stay deterministic; the grace behavior is covered by dedicated tests.
+        service_with_gc_grace(0).await
+    }
+
+    async fn service_with_gc_grace(grace_ms: i64) -> (Arc<WorkshopService>, tempfile::TempDir) {
         let db = nomifun_db::init_database_memory().await.unwrap();
         let repo: Arc<dyn IWorkshopRepository> = Arc::new(SqliteWorkshopRepository::new(db.pool().clone()));
         Box::leak(Box::new(db));
         let dir = tempfile::tempdir().unwrap();
-        (WorkshopService::start(dir.path(), repo), dir)
+        (WorkshopService::start_with_gc_grace(dir.path(), repo, grace_ms), dir)
     }
 
     // A 1x1 PNG.
@@ -1430,6 +1489,81 @@ mod tests {
         assert!(svc.serve_file(&orphan.id, false).await.is_err(), "orphan row gone");
         assert!(svc.serve_file(&kept.id, false).await.is_ok(), "library asset kept");
         assert!(!stray.exists(), "stray file swept");
+    }
+
+    #[tokio::test]
+    async fn gc_grace_protects_recent_orphan_row_and_file() {
+        // A generous grace (10 min): freshly-created orphans / stray files are
+        // in-flight and must survive a concurrent GC pass.
+        let (svc, dir) = service_with_gc_grace(GC_GRACE_MS).await;
+        // A just-created canvas-internal orphan (in_library=0, unreferenced).
+        let orphan = upload_png(&svc, false).await;
+        // A freshly written stray file with no row.
+        let assets_dir = dir.path().join("workshop/assets");
+        tokio::fs::create_dir_all(&assets_dir).await.unwrap();
+        let stray = assets_dir.join("wsa_fresh_stray.png");
+        tokio::fs::write(&stray, real_png(4, 4)).await.unwrap();
+
+        let stats = svc.gc().await.unwrap();
+        assert_eq!(stats.orphan_rows_deleted, 0, "recent orphan row protected by grace");
+        assert_eq!(stats.orphan_files_deleted, 0, "recent stray file protected by grace");
+        assert!(svc.serve_file(&orphan.id, false).await.is_ok(), "recent orphan not reaped");
+        assert!(stray.exists(), "recent stray file not swept");
+
+        // With no grace the same orphans ARE reclaimed (confirms the guard is the
+        // recency window, not a blanket skip).
+        let (svc0, dir0) = service_with_gc_grace(0).await;
+        let orphan0 = upload_png(&svc0, false).await;
+        let assets0 = dir0.path().join("workshop/assets");
+        tokio::fs::create_dir_all(&assets0).await.unwrap();
+        let stray0 = assets0.join("wsa_old_stray.png");
+        tokio::fs::write(&stray0, real_png(4, 4)).await.unwrap();
+        let stats0 = svc0.gc().await.unwrap();
+        assert_eq!(stats0.orphan_rows_deleted, 1, "orphan row reclaimed with no grace");
+        assert!(svc0.serve_file(&orphan0.id, false).await.is_err());
+        assert!(!stray0.exists(), "stray file swept with no grace");
+    }
+
+    #[tokio::test]
+    async fn delete_canvas_grace_protects_recent_internal_asset() {
+        // A large grace: an internal asset referenced only by the deleted canvas
+        // is NOT reaped while still recent (another open canvas may reference it
+        // but not have autosaved yet); a later full GC reclaims it once aged.
+        let (svc, _dir) = service_with_gc_grace(GC_GRACE_MS).await;
+        let asset = upload_png(&svc, false).await; // canvas-internal
+        let doc = serde_json::json!({
+            "schema": 1, "nodes": [{ "id": "n", "kind": "image", "data": { "assetId": asset.id } }], "edges": []
+        });
+        let c = svc.create_canvas(Some("c".into())).await.unwrap();
+        svc.save_doc(&c.id, &doc).await.unwrap();
+        svc.delete_canvas(&c.id).await.unwrap();
+        assert!(svc.serve_file(&asset.id, false).await.is_ok(), "recent internal asset survives delete_canvas grace");
+    }
+
+    #[tokio::test]
+    async fn mark_canvas_open_routes_agent_ops_to_queue() {
+        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
+        let (svc, _dir) = service().await;
+        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
+
+        // Simulate the editor's REST doc-load registering the canvas as open.
+        svc.mark_canvas_open(&canvas.id);
+
+        // An agent add_node now QUEUES (frontend authority) instead of writing
+        // straight to canvas.json — closing the cold-open clobber window.
+        let applied = svc
+            .apply_agent_ops(
+                &canvas.id,
+                vec![AgentOp::AddNode {
+                    node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
+                }],
+                "test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied[0].disposition, OpDisposition::Queued);
+        // The doc was NOT touched.
+        assert_eq!(svc.get_canvas(&canvas.id).await.unwrap().meta.node_count, 0);
     }
 
     #[tokio::test]
