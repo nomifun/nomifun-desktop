@@ -181,6 +181,10 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 clause(qb);
                 qb.push("collection = ").push_bind(collection);
             }
+            if p.ungrouped {
+                clause(qb);
+                qb.push("(collection IS NULL OR collection = '')");
+            }
             if let Some(q) = p.q {
                 clause(qb);
                 qb.push("LOWER(title) LIKE ").push_bind(format!("%{}%", q.to_lowercase()));
@@ -387,6 +391,49 @@ mod tests {
             .unwrap();
         assert_eq!(total, 3);
         assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_assets_ungrouped_filter() {
+        let (repo, _db) = repo().await;
+        // Two ungrouped (NULL and empty-string collection) + one grouped.
+        repo.create_asset(&sample_asset("wsa_null", "image", "no collection")).await.unwrap();
+        let mut empty = sample_asset("wsa_empty", "image", "empty collection");
+        empty.collection = Some(String::new());
+        repo.create_asset(&empty).await.unwrap();
+        let mut grouped = sample_asset("wsa_grp", "image", "grouped");
+        grouped.collection = Some("角色".to_string());
+        repo.create_asset(&grouped).await.unwrap();
+
+        // ungrouped=true → the NULL + empty-string rows only.
+        let (items, total) = repo
+            .list_assets(ListAssetsParams { ungrouped: true, page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+        let ids: std::collections::BTreeSet<&str> = items.iter().map(|a| a.id.as_str()).collect();
+        assert!(ids.contains("wsa_null") && ids.contains("wsa_empty"));
+        assert!(!ids.contains("wsa_grp"));
+
+        // named collection filter still returns only the grouped row.
+        let (_, total) = repo
+            .list_assets(ListAssetsParams { collection: Some("角色"), page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+
+        // ungrouped composes with other filters (kind).
+        let (_, total) = repo
+            .list_assets(ListAssetsParams {
+                ungrouped: true,
+                kind: Some("image"),
+                page: 1,
+                page_size: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
     }
 
     #[tokio::test]

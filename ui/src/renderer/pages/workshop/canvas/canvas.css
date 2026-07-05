@@ -113,6 +113,24 @@
   cursor: pointer;
 }
 
+/* Loop-node drive edges: accented cyan, dashed + marching-ants (animated). */
+.nomi-ws-flow .react-flow__edge.nomi-ws-loop-edge .react-flow__edge-path {
+  stroke: #06b6d4;
+  stroke-width: 2.5;
+  stroke-dasharray: 6 4;
+}
+.nomi-ws-flow .react-flow__edge.nomi-ws-loop-edge.selected .react-flow__edge-path,
+.nomi-ws-flow .react-flow__edge.nomi-ws-loop-edge:hover .react-flow__edge-path {
+  stroke: #22d3ee;
+  stroke-width: 3;
+}
+
+/* Group input-group edges: dashed neutral to read as "feeds as references". */
+.nomi-ws-flow .react-flow__edge.nomi-ws-group-edge .react-flow__edge-path {
+  stroke: color-mix(in srgb, rgb(var(--primary-6)) 50%, var(--color-border-3));
+  stroke-dasharray: 3 4;
+}
+
 /* Drag-over affordance while dropping files / assets onto the canvas. */
 .nomi-ws-dropzone-active::after {
   content: '';

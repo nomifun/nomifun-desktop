@@ -33,6 +33,8 @@ const SHORTCUTS: Shortcut[] = [
   { keysKey: 'k.copy', keysFallback: 'Ctrl/⌘ + C', descKey: 'd.copy', descFallback: '复制节点' },
   { keysKey: 'k.paste', keysFallback: 'Ctrl/⌘ + V', descKey: 'd.paste', descFallback: '粘贴（含系统剪贴板图片/文本）' },
   { keysKey: 'k.duplicate', keysFallback: 'Ctrl/⌘ + D', descKey: 'd.duplicate', descFallback: '复制副本' },
+  { keysKey: 'k.group', keysFallback: 'Ctrl/⌘ + G', descKey: 'd.group', descFallback: '打组' },
+  { keysKey: 'k.ungroup', keysFallback: 'Ctrl/⌘ + Shift + G', descKey: 'd.ungroup', descFallback: '解组' },
   { keysKey: 'k.delete', keysFallback: 'Delete / Backspace', descKey: 'd.delete', descFallback: '删除选中节点或连线' },
   { keysKey: 'k.undo', keysFallback: 'Ctrl/⌘ + Z', descKey: 'd.undo', descFallback: '撤销' },
   { keysKey: 'k.redo', keysFallback: 'Ctrl/⌘ + Shift + Z / Ctrl + Y', descKey: 'd.redo', descFallback: '重做' },

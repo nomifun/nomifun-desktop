@@ -41,7 +41,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import './canvas.css';
-import { CopyOne, DeleteFour, MagicWand, Pic, Text, VideoTwo } from '@icon-park/react';
+import { Contrast, CopyOne, Cycle, DeleteFour, MagicWand, Pic, PreviewOpen, Text, Ungroup, VideoTwo } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import AssetsPanel from '../assets/AssetsPanel';
@@ -49,6 +49,8 @@ import { openImageEditor, type ImageEditorMode } from '../editor';
 import { patchAsset, uploadAsset } from '../api';
 import { readAssetDrag, type WorkshopAssetDragPayload } from '../lib/dnd';
 import { loadWorkshopMedia, revokeWorkshopMedia } from '../lib/media';
+import { abortAllLoopRuns, abortLoopRun } from '../generation/loop';
+import { nodeContribution } from '../generation/pipeline';
 import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc, WorkshopGeneratorMode } from '../types';
 import { CanvasNodeContext, type CanvasNodeApi } from './CanvasNodeContext';
 import { useAgentOps, type AgentAddNodeOp, type AgentConnectOp } from './agentOps';
@@ -66,12 +68,18 @@ import {
   cloneNodesWithEdges,
   docToFlow,
   flowToDoc,
+  groupMemberIds,
+  groupSelectedNodes,
+  makeCompareNode,
   makeGeneratorNode,
   makeImageNode,
+  makeLoopNode,
+  makeOutputNode,
   makeTextNode,
   makeVideoNode,
   newEdgeId,
   snapshotToState,
+  ungroupNodes,
   type CanvasSnapshot,
   type WorkshopFlowEdge,
   type WorkshopFlowNode,
@@ -271,6 +279,9 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
 
   const removeNode = useCallback(
     (nodeId: string) => {
+      // If this is a running loop node, stop its coordinator so it can't keep
+      // spawning result nodes after deletion (harmless no-op for other kinds).
+      abortLoopRun(nodeId);
       setNodes((ns) => ns.filter((n) => n.id !== nodeId));
       setEdges((es) => es.filter((e) => e.source !== nodeId && e.target !== nodeId));
     },
@@ -285,6 +296,90 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
       addNodes(cloned);
     },
     [addNodes]
+  );
+
+  // ── Grouping (Ctrl+G / Ctrl+Shift+G) ────────────────────────────────────────
+
+  const groupSelection = useCallback(() => {
+    const selectedIds = nodesRef.current.filter((n) => n.selected).map((n) => n.id);
+    const title = t('workshopCanvas.node.group.defaultTitle', { defaultValue: '分组' });
+    const result = groupSelectedNodes(nodesRef.current, selectedIds, title);
+    if (!result) {
+      message.info(t('workshopCanvas.toast.groupNeedTwo', { defaultValue: '请选择至少两个可分组的节点' }));
+      return;
+    }
+    setNodes(result.nodes.map((n) => ({ ...n, selected: n.id === result.groupId }) as WorkshopFlowNode));
+  }, [setNodes, message, t]);
+
+  const ungroup = useCallback(
+    (groupId: string) => {
+      const next = ungroupNodes(nodesRef.current, groupId);
+      if (next) setNodes(next);
+    },
+    [setNodes]
+  );
+
+  const ungroupSelection = useCallback(() => {
+    const groupIds = new Set<string>();
+    for (const n of nodesRef.current) {
+      if (!n.selected) continue;
+      if (n.type === 'group') groupIds.add(n.id);
+      else if (n.parentId) groupIds.add(n.parentId);
+    }
+    if (!groupIds.size) return;
+    let arr: WorkshopFlowNode[] = nodesRef.current;
+    for (const gid of groupIds) {
+      const next = ungroupNodes(arr, gid);
+      if (next) arr = next;
+    }
+    if (arr !== nodesRef.current) setNodes(arr);
+  }, [setNodes]);
+
+  const deleteGroupWithChildren = useCallback(
+    (groupId: string) => {
+      const ids = new Set(groupMemberIds(nodesRef.current, groupId));
+      for (const id of ids) abortLoopRun(id);
+      setNodes((ns) => ns.filter((n) => !ids.has(n.id)));
+      setEdges((es) => es.filter((e) => !ids.has(e.source) && !ids.has(e.target)));
+    },
+    [setNodes, setEdges]
+  );
+
+  // ── Compare / preview helpers ────────────────────────────────────────────────
+
+  const openImagePreview = useCallback((assetIds: string[], startIndex = 0) => {
+    if (assetIds.length) setPreview({ assetIds, index: Math.max(0, Math.min(startIndex, assetIds.length - 1)) });
+  }, []);
+
+  /** Whether an image node has an upstream node that yields an image (drives the menu item). */
+  const upstreamImageSource = useCallback((nodeId: string): WorkshopFlowNode | null => {
+    for (const e of edgesRef.current) {
+      if (e.target !== nodeId) continue;
+      const src = nodesRef.current.find((n) => n.id === e.source);
+      if (src && nodeContribution(src)?.kind === 'image') return src;
+    }
+    return null;
+  }, []);
+
+  const compareWithUpstream = useCallback(
+    (imageNodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === imageNodeId);
+      if (!node) return;
+      const upstream = upstreamImageSource(imageNodeId);
+      if (!upstream) {
+        message.info(t('workshopCanvas.toast.noUpstreamImage', { defaultValue: '该图片没有可对比的上游图源' }));
+        return;
+      }
+      const parent = node.parentId ? nodesRef.current.find((n) => n.id === node.parentId) : undefined;
+      const absX = (parent?.position.x ?? 0) + node.position.x;
+      const absY = (parent?.position.y ?? 0) + node.position.y;
+      const cmp = makeCompareNode({ x: absX + (node.width ?? 240) + 80, y: absY });
+      addNodes([cmp], [
+        { id: newEdgeId(), source: upstream.id, target: cmp.id },
+        { id: newEdgeId(), source: node.id, target: cmp.id },
+      ]);
+    },
+    [addNodes, upstreamImageSource, message, t]
   );
 
   // ── Media / asset actions ───────────────────────────────────────────────────
@@ -739,6 +834,12 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
       }
       return;
     }
+    if (mod && e.key.toLowerCase() === 'g') {
+      e.preventDefault();
+      if (e.shiftKey) ungroupSelection();
+      else groupSelection();
+      return;
+    }
     if (e.key === 'Escape') {
       setMenu(null);
       setHelpOpen(false);
@@ -788,6 +889,9 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
       saveAssetToLibrary: (id) => void saveAssetToLibrary(id),
       downloadAsset: (id, filename) => void downloadAsset(id, filename),
       editImageNode: (id, mode) => void editImageNode(id, mode),
+      openImagePreview,
+      ungroupNode: ungroup,
+      deleteGroupWithChildren,
       commitInteraction,
       beginInteraction,
     }),
@@ -802,6 +906,9 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
       saveAssetToLibrary,
       downloadAsset,
       editImageNode,
+      openImagePreview,
+      ungroup,
+      deleteGroupWithChildren,
       commitInteraction,
       beginInteraction,
     ]
@@ -812,7 +919,28 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   const menuEntries = useMemo<MenuEntry[]>(() => {
     if (!menu) return [];
     if (menu.kind === 'node') {
-      return [
+      const node = menu.nodeId ? nodesRef.current.find((n) => n.id === menu.nodeId) : undefined;
+      // Groups are removed only via their own menu so members never get orphaned.
+      if (node?.type === 'group') {
+        return [
+          {
+            type: 'item',
+            key: 'ungroup',
+            label: t('workshopCanvas.node.group.ungroup', { defaultValue: '解组（保留子节点）' }),
+            icon: <Ungroup theme='outline' size={14} strokeWidth={3} />,
+            onClick: () => menu.nodeId && ungroup(menu.nodeId),
+          },
+          {
+            type: 'item',
+            key: 'delete-group',
+            label: t('workshopCanvas.node.group.deleteWithChildren', { defaultValue: '删除组与内容' }),
+            icon: <DeleteFour theme='outline' size={14} strokeWidth={3} />,
+            danger: true,
+            onClick: () => menu.nodeId && deleteGroupWithChildren(menu.nodeId),
+          },
+        ];
+      }
+      const entries: MenuEntry[] = [
         {
           type: 'item',
           key: 'duplicate',
@@ -829,6 +957,17 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
           onClick: () => menu.nodeId && removeNode(menu.nodeId),
         },
       ];
+      // Image node with an upstream image source → offer a quick A/B compare.
+      if (node?.type === 'image' && menu.nodeId && upstreamImageSource(menu.nodeId)) {
+        entries.splice(1, 0, {
+          type: 'item',
+          key: 'compare-upstream',
+          label: t('workshopCanvas.menu.compareUpstream', { defaultValue: '与上游对比' }),
+          icon: <Contrast theme='outline' size={14} strokeWidth={3} />,
+          onClick: () => menu.nodeId && compareWithUpstream(menu.nodeId),
+        });
+      }
+      return entries;
     }
     if (menu.kind === 'edge') {
       return [
@@ -888,6 +1027,36 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
         onClick: () => createAndConnect((p) => makeGeneratorNode(p), pos, source),
       },
     ];
+
+    // Flow nodes (loop / compare / output). Loop is a driver (no upstream), so it
+    // only appears in the pane menu; compare / output are sinks and connect from
+    // the source in the quick-create menu.
+    entries.push({ type: 'divider', key: 'flow-div' });
+    entries.push({ type: 'header', key: 'flow-h', label: t('workshopCanvas.menu.flowNodes', { defaultValue: '流程节点' }) });
+    if (menu.kind === 'pane') {
+      entries.push({
+        type: 'item',
+        key: 'loop',
+        label: t('workshopCanvas.menu.loop', { defaultValue: '循环节点' }),
+        icon: <Cycle theme='outline' size={14} strokeWidth={3} />,
+        onClick: () => createAndConnect((p) => makeLoopNode(p), pos, undefined),
+      });
+    }
+    entries.push({
+      type: 'item',
+      key: 'compare',
+      label: t('workshopCanvas.menu.compare', { defaultValue: '对比节点' }),
+      icon: <Contrast theme='outline' size={14} strokeWidth={3} />,
+      onClick: () => createAndConnect((p) => makeCompareNode(p), pos, source),
+    });
+    entries.push({
+      type: 'item',
+      key: 'output',
+      label: t('workshopCanvas.menu.output', { defaultValue: '输出节点' }),
+      icon: <PreviewOpen theme='outline' size={14} strokeWidth={3} />,
+      onClick: () => createAndConnect((p) => makeOutputNode(p), pos, source),
+    });
+
     if (menu.kind === 'pane') {
       entries.push({ type: 'divider', key: 'div' });
       entries.push({
@@ -907,6 +1076,10 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     t,
     duplicateNode,
     removeNode,
+    ungroup,
+    deleteGroupWithChildren,
+    upstreamImageSource,
+    compareWithUpstream,
     setEdges,
     createAndConnect,
     addImageViaUpload,
@@ -914,6 +1087,23 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     pasteInternal,
     pasteFromSystem,
   ]);
+
+  // Decorate edges leaving a loop node (accented dashed + marching-ants) and a
+  // group node (input-group tint) — view-only; the persisted edges are untouched.
+  const decoratedEdges = useMemo(() => {
+    const loopIds = new Set(nodes.filter((n) => n.type === 'loop').map((n) => n.id));
+    const groupIds = new Set(nodes.filter((n) => n.type === 'group').map((n) => n.id));
+    if (loopIds.size === 0 && groupIds.size === 0) return edges;
+    return edges.map((e) => {
+      if (loopIds.has(e.source)) return { ...e, animated: true, className: 'nomi-ws-loop-edge' };
+      if (groupIds.has(e.source)) return { ...e, className: 'nomi-ws-group-edge' };
+      return e;
+    });
+  }, [edges, nodes]);
+
+  // Abort any in-flight loop runs when the editor unmounts (navigating away) so
+  // their coordinators can't write into a torn-down flow instance.
+  useEffect(() => () => abortAllLoopRuns(), []);
 
   // ── 画布助手 (agent ops) — apply queued agent operations while the canvas is open ──
   // Poll the backend op queue and route each op through the same react-flow
@@ -983,7 +1173,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
         <ReactFlow<WorkshopFlowNode, WorkshopFlowEdge>
           className='nomi-ws-flow'
           nodes={nodes}
-          edges={edges}
+          edges={decoratedEdges}
           nodeTypes={WORKSHOP_NODE_TYPES}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
@@ -1060,7 +1250,13 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
             zoomable
             position='bottom-right'
             maskColor={flowColors.minimapMask}
-            style={{ background: flowColors.minimapBg, border: `1px solid ${flowColors.minimapStroke}` }}
+            style={{
+              background: flowColors.minimapBg,
+              border: `1px solid ${flowColors.minimapStroke}`,
+              transition: 'transform 0.24s ease, opacity 0.24s ease',
+              // Slide clear of the right-docked asset panel (~360px) when it's open.
+              transform: assetsOpen ? 'translateX(-372px)' : 'none',
+            }}
             nodeColor={(n) => minimapColorForKind(String(n.type ?? ''), theme)}
             nodeStrokeWidth={2}
           />

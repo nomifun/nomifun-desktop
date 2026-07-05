@@ -131,6 +131,12 @@ export interface ListAssetsQuery {
   collection?: string;
   q?: string;
   in_library?: boolean;
+  /**
+   * Append-only (M10a): `true` returns only assets with no collection
+   * (server-side `collection IS NULL OR ''`). Mutually exclusive with
+   * `collection` — the backend ignores `collection` when this is set.
+   */
+  ungrouped?: boolean;
   page?: number;
   page_size?: number;
 }
@@ -281,6 +287,49 @@ export interface WorkshopGeneratorNodeData {
  * it without breaking M0-era docs.
  */
 export type WorkshopPlaceholderNodeData = Record<string, unknown>;
+
+// ── M8 flow-node payloads (loop / compare / output / group) ──────────────────
+// Append-only refinements of {@link WorkshopPlaceholderNodeData}. Each is a plain
+// serialisable record (no callbacks) so it round-trips through the canvas doc and
+// history; components read a node's `data` via a cast to the matching shape. The
+// doc-level union keeps using the open `WorkshopPlaceholderNodeData` type, so
+// these additions never invalidate an M0-era doc.
+
+/** How a loop node dispatches its rounds. */
+export type WorkshopLoopMode = 'serial' | 'parallel';
+
+/**
+ * Loop node payload — a controller that drives repeated runs of a downstream
+ * generator card. Only the configuration persists; live run progress is kept in
+ * an in-memory registry so it survives node remounts without polluting history.
+ */
+export interface WorkshopLoopNodeData {
+  /** Total rounds to run (1–50). */
+  count: number;
+  /** 1-based index of the first upstream image the window starts at. */
+  start: number;
+  /** How many upstream images each round consumes. */
+  batch: number;
+  /** Serial = one round after the previous settles; parallel = rolling window (≤3). */
+  loopMode: WorkshopLoopMode;
+  /** Count-injection template prepended to each round's prompt (`{i}` ⇒ round no.). */
+  countTemplate: string;
+}
+
+/** Compare node payload — the A/B wipe divider position (0–1). Transient by design. */
+export interface WorkshopCompareNodeData {
+  split?: number;
+}
+
+/** Output node payload — an optional caption for the mid-chain inspector. */
+export interface WorkshopOutputNodeData {
+  label?: string;
+}
+
+/** Group node payload — the group's editable title. */
+export interface WorkshopGroupNodeData {
+  title: string;
+}
 
 /** Discriminated union over the payload for every node kind. */
 export type WorkshopNodeData =

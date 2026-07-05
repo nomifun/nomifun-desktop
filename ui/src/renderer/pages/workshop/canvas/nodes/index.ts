@@ -15,15 +15,18 @@ import ImageNode from './ImageNode';
 import TextNode from './TextNode';
 import VideoNode from './VideoNode';
 import GeneratorNode from './GeneratorNode';
-import PlaceholderNode from './PlaceholderNode';
+import LoopNode from './LoopNode';
+import CompareNode from './CompareNode';
+import OutputNode from './OutputNode';
+import GroupNode from './GroupNode';
 
 export const WORKSHOP_NODE_TYPES: NodeTypes = {
   image: ImageNode,
   text: TextNode,
   video: VideoNode,
   generator: GeneratorNode,
-  loop: PlaceholderNode,
-  compare: PlaceholderNode,
-  output: PlaceholderNode,
-  group: PlaceholderNode,
+  loop: LoopNode,
+  compare: CompareNode,
+  output: OutputNode,
+  group: GroupNode,
 } as const;

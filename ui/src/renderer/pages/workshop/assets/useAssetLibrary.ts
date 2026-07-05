@@ -13,9 +13,12 @@
  * so `AssetsPanel` stays a thin view.
  *
  * Collection filtering note: named collections filter server-side via the
- * `collection` query param. "Ungrouped" has no dedicated backend contract yet,
- * so it is applied as a client-side predicate over loaded items (see
- * `displayItems`); this is surfaced as a coordination item, not a silent bug.
+ * `collection` query param; "Ungrouped" filters server-side too via the
+ * `ungrouped=1` param (M10a — `collection IS NULL OR ''`). `displayItems` is
+ * therefore just `items` (no client-side predicate). Because an ungrouped page
+ * carries no named collections, the distinct-collection list is accumulated
+ * across loads (`knownCollections`) so the collection dropdown never empties
+ * while "Ungrouped" is selected.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -110,6 +113,10 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [kind, setKind] = useState<AssetKindFilter>('all');
   const [collection, setCollection] = useState<CollectionFilter>(COLLECTION_ALL);
+  // Distinct collection names seen across every load — accumulated (grow-only)
+  // so the collection dropdown keeps its options even while a filter (e.g.
+  // "Ungrouped") narrows the current page to collection-less items.
+  const [knownCollections, setKnownCollections] = useState<string[]>([]);
 
   const [uploads, setUploads] = useState<UploadEntry[]>([]);
 
@@ -128,7 +135,10 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
       if (kind !== 'all') q.kind = kind;
       const trimmed = debouncedQuery.trim();
       if (trimmed) q.q = trimmed;
-      if (collection !== COLLECTION_ALL && collection !== COLLECTION_UNGROUPED) q.collection = collection;
+      // "Ungrouped" and named collections both filter server-side (mutually
+      // exclusive on the wire).
+      if (collection === COLLECTION_UNGROUPED) q.ungrouped = true;
+      else if (collection !== COLLECTION_ALL) q.collection = collection;
       return q;
     },
     [kind, debouncedQuery, collection]
@@ -193,18 +203,34 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
 
   const hasMore = items.length < total;
 
-  // ─── Ungrouped client predicate + aggregated collection list ────────────────
-  const displayItems = useMemo(() => {
-    if (collection === COLLECTION_UNGROUPED) return items.filter((a) => !a.collection);
-    return items;
-  }, [items, collection]);
+  // ─── Aggregated collection list (server-filtered items → grow-only cache) ────
+  // Merge any new collection names from the current page into the accumulator.
+  // Returns the previous array unchanged when nothing is new, so this never
+  // loops on its own `items` dependency.
+  useEffect(() => {
+    setKnownCollections((prev) => {
+      const set = new Set(prev);
+      let changed = false;
+      for (const a of items) {
+        if (a.collection && !set.has(a.collection)) {
+          set.add(a.collection);
+          changed = true;
+        }
+      }
+      return changed ? [...set] : prev;
+    });
+  }, [items]);
+
+  // `displayItems` is just `items` now that "Ungrouped" filters server-side;
+  // kept in the API so `AssetsPanel` needs no change.
+  const displayItems = items;
 
   const collections = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(knownCollections);
     for (const a of items) if (a.collection) set.add(a.collection);
     if (collection !== COLLECTION_ALL && collection !== COLLECTION_UNGROUPED) set.add(collection);
     return [...set].sort((a, b) => a.localeCompare(b));
-  }, [items, collection]);
+  }, [items, collection, knownCollections]);
 
   const isFiltering = kind !== 'all' || collection !== COLLECTION_ALL || debouncedQuery.trim() !== '';
 

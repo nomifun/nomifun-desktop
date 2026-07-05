@@ -121,6 +121,7 @@ export async function listAssets(query: ListAssetsQuery = {}): Promise<ListAsset
     collection: query.collection,
     q: query.q,
     in_library: query.in_library,
+    ungrouped: query.ungrouped,
     page: query.page,
     page_size: query.page_size,
   });

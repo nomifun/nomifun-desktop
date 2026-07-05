@@ -27,6 +27,11 @@
     "video": "视频",
     "videoUpload": "上传视频",
     "generator": "生成卡片",
+    "flowNodes": "流程节点",
+    "loop": "循环节点",
+    "compare": "对比节点",
+    "output": "输出节点",
+    "compareUpstream": "与上游对比",
     "duplicate": "复制副本",
     "delete": "删除",
     "deleteEdge": "删除连线",
@@ -37,7 +42,9 @@
     "savedToLibrary": "已存入资产库",
     "saveToLibraryFailed": "存入资产库失败",
     "downloadFailed": "下载失败",
-    "maskDeferred": "局部重绘将在生成卡片接通后可用"
+    "maskDeferred": "局部重绘将在生成卡片接通后可用",
+    "groupNeedTwo": "请选择至少两个可分组的节点",
+    "noUpstreamImage": "该图片没有可对比的上游图源"
   },
   "preview": {
     "zoomIn": "放大",
@@ -60,6 +67,8 @@
       "copy": "Ctrl/⌘ + C",
       "paste": "Ctrl/⌘ + V",
       "duplicate": "Ctrl/⌘ + D",
+      "group": "Ctrl/⌘ + G",
+      "ungroup": "Ctrl/⌘ + Shift + G",
       "delete": "Delete / Backspace",
       "undo": "Ctrl/⌘ + Z",
       "redo": "Ctrl/⌘ + Shift + Z / Ctrl + Y",
@@ -76,6 +85,8 @@
       "copy": "复制节点",
       "paste": "粘贴（含系统剪贴板图片 / 文本）",
       "duplicate": "复制副本",
+      "group": "打组",
+      "ungroup": "解组",
       "delete": "删除选中节点或连线",
       "undo": "撤销",
       "redo": "重做",
@@ -141,6 +152,49 @@
         "success": "已完成",
         "error": "失败"
       }
+    },
+    "loop": {
+      "title": "循环",
+      "noTarget": "拖右侧锚点连到生成卡片",
+      "noModel": "目标卡片无可用模型",
+      "count": "次数",
+      "start": "起始",
+      "batch": "批次",
+      "template": "计数注入",
+      "templatePlaceholder": "现在生成第 {i} 张",
+      "previewLabel": "本轮注入",
+      "success": "成功",
+      "failed": "失败",
+      "done": "已完成",
+      "run": "运行循环",
+      "stop": "中止",
+      "mode": {
+        "serial": "串行",
+        "parallel": "并发"
+      },
+      "targetMode": {
+        "image": "图像生成",
+        "video": "视频生成",
+        "text": "文本生成"
+      }
+    },
+    "compare": {
+      "title": "对比",
+      "divider": "对比分界线",
+      "needTwo": "连入两个图源以对比（当前 {{n}}/2）"
+    },
+    "output": {
+      "title": "输出检视",
+      "empty": "从左侧连入一个节点以检视其当前结果",
+      "preview": "大图预览",
+      "textUpstream": "（上游文本节点）",
+      "loadFailed": "加载失败"
+    },
+    "group": {
+      "defaultTitle": "分组",
+      "ungroup": "解组（保留子节点）",
+      "deleteWithChildren": "删除组与内容",
+      "rename": "重命名分组"
     }
   }
 }

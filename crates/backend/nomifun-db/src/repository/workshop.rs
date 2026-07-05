@@ -71,6 +71,11 @@ pub struct ListAssetsParams<'a> {
     /// Case-insensitive substring over title.
     pub q: Option<&'a str>,
     pub in_library: Option<bool>,
+    /// Append-only (M10a): when `true`, restrict to assets with no collection
+    /// (`collection IS NULL OR collection = ''`). Callers keep this mutually
+    /// exclusive with `collection`; if both are set here the two clauses AND
+    /// together (never matching), so the caller is responsible for the split.
+    pub ungrouped: bool,
     /// 1-based page (clamped to `>= 1` by the caller).
     pub page: i64,
     /// Rows per page (clamped by the caller).
