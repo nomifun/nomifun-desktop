@@ -935,7 +935,12 @@ impl RunService {
         // own `done` write. The user pauses/stops (→ non-running) first. (Guards on
         // the RUN status, not the task: a task left `running` by a cancelled loop is
         // a valid adopt target.)
-        if run.status == "running" {
+        //
+        // 例外（审批模式，迁移 030）：`needs_review` 节点是引擎明确「不结算」的挂起
+        // 态（settle 守卫跳过它、循环对它干净退出）——loop 不拥有它的结算权，用户
+        // 作答后「采用为该节点产出」正是设计的恢复路径，故放行。engine 包装层的
+        // per-run 锁仍然串行化本写入与循环的终态判定。
+        if run.status == "running" && task.status != "needs_review" {
             return Err(OrchestratorError::BadRequest(
                 "run 运行中，引擎会自动结算该节点，无需手动采用".into(),
             )
@@ -969,6 +974,12 @@ impl RunService {
                     ..Default::default()
                 },
             )
+            .await
+            .map_err(OrchestratorError::from)?;
+        // 审批模式（迁移 030）：采用产出 = 该节点的提问已解决——清挂起问题，
+        // 前端提问徽标随 WS 刷新消失。无提问的节点此写为幂等 no-op。
+        self.run_repo
+            .set_task_question(task_id, None)
             .await
             .map_err(OrchestratorError::from)?;
         self.emitter.emit_task_status(run_id, task_id, "done");
@@ -1177,6 +1188,12 @@ impl RunService {
                     ..Default::default()
                 },
             )
+            .await
+            .map_err(OrchestratorError::from)?;
+        // 审批模式（迁移 030）：重跑即视为放弃/重来该节点的提问——清挂起问题，
+        // 前端提问徽标随 WS 刷新消失。best-effort 之外的一部分重置语义，同步清。
+        self.run_repo
+            .set_task_question(task_id, None)
             .await
             .map_err(OrchestratorError::from)?;
         Ok(())

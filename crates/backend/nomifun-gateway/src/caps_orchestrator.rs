@@ -199,6 +199,16 @@ struct RunCancelParams {
     run_id: String,
 }
 
+/// 审批模式（迁移 030）：worker 节点会话提交决策问题并挂起自己（`needs_review`），
+/// 等用户进入该节点作答。仅编排 worker 会话（extra 携 orchestrator 关联 id）可用；
+/// run_id/task_id 从调用会话的 extra 解析，不作为参数暴露（防伪造跨节点提问）。
+#[derive(Deserialize, JsonSchema)]
+struct TaskQuestionParams {
+    /// The decision question to surface to the user — state the candidate options
+    /// and your recommendation concisely.
+    question: String,
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────
 
 async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreateParams) -> Value {
@@ -1434,6 +1444,56 @@ async fn run_cancel(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunC
     }
 }
 
+/// 审批模式（迁移 030）— worker 节点提问。调用方必须是编排 worker 会话：
+/// run_id/task_id 从其 extra（`orchestrator_run_id`/`orchestrator_task_id`，
+/// `build_worker_extra` 烙印）解析——普通会话/lead 会话没有这两个键，直接拒绝。
+/// 委托 [`RunEngine::raise_task_question`]（锁内写 + 锁外 lead 回执）。
+async fn task_question(
+    deps: Arc<GatewayDeps>,
+    ctx: crate::deps::CallerCtx,
+    p: TaskQuestionParams,
+) -> Value {
+    let user = match require_user(&ctx) {
+        Ok(u) => u.to_owned(),
+        Err(e) => return e,
+    };
+    if ctx.conversation_id.is_empty() {
+        return json!({ "error": "nomi_task_question 仅编排 worker 节点会话可用（无会话上下文）" });
+    }
+    let conv = match deps.conversation_service.get(&user, &ctx.conversation_id).await {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": e.to_string() }),
+    };
+    let run_id = conv
+        .extra
+        .get("orchestrator_run_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let task_id = conv
+        .extra
+        .get("orchestrator_task_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let (Some(run_id), Some(task_id)) = (run_id, task_id) else {
+        return json!({
+            "error": "nomi_task_question 仅编排 worker 节点会话可用：本会话不是编排节点。若你是主 agent，请直接向用户提问。"
+        });
+    };
+    match deps
+        .orchestrator_run_engine
+        .raise_task_question(&user, &run_id, &task_id, &p.question)
+        .await
+    {
+        Ok(()) => ok(json!({
+            "run_id": run_id,
+            "task_id": task_id,
+            "status": "needs_review",
+            "message": "问题已提交，本节点已挂起等待用户作答。请立即结束本轮回复（可简述你已提交的问题），不要继续推进任务；用户会进入本会话直接回复选择。",
+        })),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
 // ── result projections (RunDetail → compact LLM-friendly shape) ───────────
 
 /// Run status + per-task {id, title, status, attempt, conversation_id, last_error}
@@ -1594,6 +1654,20 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         )
         .deny_on(ORCHESTRATOR_DENY_SURFACES),
         |deps, ctx, p| run_cancel(deps, ctx, p),
+    ));
+
+    // 10. 节点提问（write，审批模式）：worker 会话提交决策问题并把自己挂起为
+    //     needs_review 等用户作答。run/task id 从调用会话 extra 解析（防伪造）；
+    //     非 worker 会话 / 非审批模式 run 一律拒绝。同域同 deny：Desktop-only。
+    out.push(Capability::new::<TaskQuestionParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_task_question",
+            "orchestrator",
+            "ONLY for orchestration WORKER sessions in approval mode (审批模式): submit a decision question to the user and PARK this node until they answer. Params: question (state the candidate options and your recommendation concisely). After calling, END your turn immediately — the user will answer inside this conversation.",
+            DangerTier::Write,
+        )
+        .deny_on(ORCHESTRATOR_DENY_SURFACES),
+        |deps, ctx, p| task_question(deps, ctx, p),
     ));
 }
 
@@ -1943,7 +2017,7 @@ mod tests {
     #[test]
     fn orchestrator_tools_registered_and_visible_on_desktop() {
         let reg = Registry::global();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel", "nomi_task_question"] {
             assert!(
                 reg.contains(name),
                 "orchestrator tool {name} is not registered"
@@ -1974,7 +2048,7 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel"] {
+        for name in ["nomi_run_create", "nomi_spawn", "nomi_run_status", "nomi_run_result", "nomi_run_adjust", "nomi_run_add_tasks", "nomi_task_rerun", "nomi_task_config", "nomi_run_cancel", "nomi_task_question"] {
             // Not advertised on the Remote surface.
             assert!(
                 !remote.contains(&name),
