@@ -142,6 +142,12 @@ pub enum RunOutcome {
     /// [`BATCH_REPORT_MIN_NODES`] / [`BATCH_REPORT_INTERVAL`]) so a fast fan-out
     /// cannot spam the lead. Non-terminal; the run keeps running.
     BatchProgress,
+    /// A node raised a DECISION QUESTION and parked at `needs_review`
+    /// (审批模式，迁移 030): the worker called `nomi_task_question` mid-run, so the
+    /// lead must tell the USER to dive into that node (画布/进度条的提问图标 →
+    /// 投影视图), answer in the worker conversation, then 「采用为该节点产出」to
+    /// resume. Non-terminal; the run keeps running (other branches keep driving).
+    NodeQuestion,
 }
 
 impl RunOutcome {
@@ -154,6 +160,7 @@ impl RunOutcome {
             RunOutcome::AwaitingApproval => "awaiting_approval",
             RunOutcome::NodeFailed => "node_failed",
             RunOutcome::BatchProgress => "batch_progress",
+            RunOutcome::NodeQuestion => "node_question",
         }
     }
 }
