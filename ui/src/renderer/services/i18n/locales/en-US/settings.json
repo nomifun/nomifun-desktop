@@ -1182,7 +1182,7 @@
     "railTitle": "Other",
     "sectionWebhook": "Webhook"
   },
-  "assistantSkills": {
+  "assistantSkillsHub": {
     "title": "Assistant & Skill",
     "subtitle": "Manage assistants and reusable skill packages in one place.",
     "railTitle": "Assistant & Skill",
