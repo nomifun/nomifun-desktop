@@ -12,6 +12,10 @@ nomifun-auth.workspace = true
 nomifun-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# JSON Schema for the agent-op vocabulary (画布助手): the same `AgentOp` type the
+# gateway's `nomi_workshop_apply_ops` capability exposes to LLMs (single source →
+# no schema/validation drift). Same major as the gateway's `schemars = "1"`.
+schemars = "1"
 tokio.workspace = true
 axum.workspace = true
 # `RequestBodyLimitLayer` for the asset-upload route (raise past the app default).

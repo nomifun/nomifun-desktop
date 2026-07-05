@@ -106,6 +106,12 @@ pub async fn create_router(services: &AppServices) -> Router {
         workshop_repo: Arc::new(nomifun_db::SqliteWorkshopRepository::new(
             services.database.pool().clone(),
         )),
+        // 创意工坊 canvas/asset + 生成引擎 services: the SAME singletons the
+        // `/api/workshop/*` + `/api/creation/*` routes use, so the 画布助手 agent-op
+        // queue is shared (gateway enqueues; an open frontend polls/acks the same
+        // in-memory queue) and generation tasks land on the one live task queue.
+        workshop_service: services.workshop_service.clone(),
+        creation_service: services.creation_service.clone(),
         autowork_orchestrator: states.requirement.orchestrator.clone(),
         // System domain: reuse the SAME service instances the system routes use
         // (states.system is still owned here; it is moved into `system_routes`

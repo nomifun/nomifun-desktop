@@ -104,6 +104,10 @@ pub struct WorkshopService {
     repo: Arc<dyn IWorkshopRepository>,
     /// Backend data dir root. Asset `rel_path`s are relative to this.
     data_dir: PathBuf,
+    /// 画布助手 (canvas assistant) agent-op queue — the in-memory buffer the
+    /// gateway enqueues into and the REST `pending-ops` routes drain. One
+    /// instance per singleton service, so the gateway and the routes share it.
+    agent_ops: crate::agent_ops::AgentOpsQueue,
 }
 
 impl WorkshopService {
@@ -112,6 +116,7 @@ impl WorkshopService {
         Arc::new(Self {
             repo,
             data_dir: data_dir.to_path_buf(),
+            agent_ops: crate::agent_ops::AgentOpsQueue::new(),
         })
     }
 
@@ -328,6 +333,128 @@ impl WorkshopService {
         Ok(out)
     }
 
+    // ---- agent ops (画布助手) ----
+
+    /// Enqueue or directly apply a batch of 画布助手 agent ops. See
+    /// [`crate::agent_ops`] for the open-frontend-authority rule.
+    ///
+    /// All ops are validated up front (a single bad op fails the whole call so
+    /// the agent can self-correct). Then, per op:
+    /// - an OPEN canvas (a frontend is polling) queues EVERY op for the live
+    ///   frontend to apply (preserving its write authority);
+    /// - a CLOSED canvas applies `add_node` / `connect` straight to `canvas.json`
+    ///   and queues the data-mutating ops (`update_node_data` / `delete_node`)
+    ///   for whenever a frontend next opens.
+    ///
+    /// Returns a per-op disposition (`queued` | `applied` | `skipped`).
+    pub async fn apply_agent_ops(
+        &self,
+        canvas_id: &str,
+        ops: Vec<crate::agent_ops::AgentOp>,
+        source: &str,
+    ) -> Result<Vec<crate::agent_ops::AppliedOp>, AppError> {
+        use crate::agent_ops::{self, AgentOp, AppliedOp, OpDisposition, PendingOp};
+
+        if ops.is_empty() {
+            return Err(AppError::BadRequest("no ops provided".into()));
+        }
+        if ops.len() > agent_ops::MAX_OPS_PER_CALL {
+            return Err(AppError::BadRequest(format!(
+                "too many ops in one call: {} (max {})",
+                ops.len(),
+                agent_ops::MAX_OPS_PER_CALL
+            )));
+        }
+        if self.repo.get_canvas(canvas_id).await?.is_none() {
+            return Err(AppError::NotFound(format!("workshop canvas {canvas_id} not found")));
+        }
+        for (i, op) in ops.iter().enumerate() {
+            op.validate().map_err(|e| AppError::BadRequest(format!("ops[{i}]: {e}")))?;
+        }
+
+        let open = self.agent_ops.is_open(canvas_id);
+        let mut results: Vec<AppliedOp> = Vec::with_capacity(ops.len());
+        let mut to_queue: Vec<PendingOp> = Vec::new();
+        // Direct-apply path (closed canvas) mutates one doc snapshot, saved once.
+        let mut doc: Option<Value> = None;
+        let mut dirty = false;
+
+        for op in ops {
+            let op_id = agent_ops::new_op_id();
+            if !open && op.direct_applicable() {
+                if doc.is_none() {
+                    doc = Some(self.read_doc(canvas_id).await);
+                }
+                let d = doc.as_mut().expect("doc loaded above");
+                match op {
+                    AgentOp::AddNode { node } => {
+                        let node_id = agent_ops::apply_add_node(d, &node);
+                        dirty = true;
+                        results.push(AppliedOp {
+                            op_id,
+                            disposition: OpDisposition::Applied,
+                            node_id: Some(node_id),
+                            note: None,
+                        });
+                    }
+                    AgentOp::Connect { from_node_id, to_node_id } => match agent_ops::apply_connect(d, &from_node_id, &to_node_id) {
+                        Ok(Some(_edge)) => {
+                            dirty = true;
+                            results.push(AppliedOp { op_id, disposition: OpDisposition::Applied, node_id: None, note: None });
+                        }
+                        Ok(None) => results.push(AppliedOp {
+                            op_id,
+                            disposition: OpDisposition::Applied,
+                            node_id: None,
+                            note: Some("edge already existed".into()),
+                        }),
+                        Err(reason) => results.push(AppliedOp {
+                            op_id,
+                            disposition: OpDisposition::Skipped,
+                            node_id: None,
+                            note: Some(reason),
+                        }),
+                    },
+                    // direct_applicable() only matches AddNode/Connect.
+                    other => to_queue.push(PendingOp::new(op_id, other)),
+                }
+            } else {
+                results.push(AppliedOp {
+                    op_id: op_id.clone(),
+                    disposition: OpDisposition::Queued,
+                    node_id: None,
+                    note: None,
+                });
+                to_queue.push(PendingOp::new(op_id, op));
+            }
+        }
+
+        if dirty
+            && let Some(d) = &doc
+        {
+            self.save_doc(canvas_id, d).await?;
+        }
+        if !to_queue.is_empty() {
+            self.agent_ops.enqueue(canvas_id, to_queue);
+        }
+        tracing::info!(canvas_id, source, open, ops = results.len(), "workshop agent ops processed");
+        Ok(results)
+    }
+
+    /// Drain (idempotently — ops stay until acked) the pending 画布助手 ops for a
+    /// canvas, recording the poll so the canvas registers as "open".
+    pub async fn take_pending_ops(&self, canvas_id: &str) -> Result<Vec<crate::agent_ops::PendingOp>, AppError> {
+        if self.repo.get_canvas(canvas_id).await?.is_none() {
+            return Err(AppError::NotFound(format!("workshop canvas {canvas_id} not found")));
+        }
+        Ok(self.agent_ops.take_pending(canvas_id))
+    }
+
+    /// Acknowledge (remove) applied 画布助手 ops by id.
+    pub fn ack_agent_ops(&self, canvas_id: &str, op_ids: &[String]) {
+        self.agent_ops.ack(canvas_id, op_ids);
+    }
+
     // ---- assets ----
 
     pub async fn upload_asset(&self, input: NewAssetUpload) -> Result<WorkshopAsset, AppError> {
@@ -506,10 +633,13 @@ impl WorkshopService {
 
     /// Read an asset's original bytes + mime (used by serve + programmatic read).
     async fn read_original(&self, row: &WorkshopAssetRow) -> Result<(Vec<u8>, String), AppError> {
-        let rel = row
-            .rel_path
-            .as_deref()
-            .ok_or_else(|| AppError::NotFound(format!("asset {} has no file", row.id)))?;
+        let Some(rel) = row.rel_path.as_deref() else {
+            // Text assets keep their body inline in the row instead of on disk.
+            if let Some(text) = row.text_content.as_deref() {
+                return Ok((text.as_bytes().to_vec(), "text/plain; charset=utf-8".to_string()));
+            }
+            return Err(AppError::NotFound(format!("asset {} has no file", row.id)));
+        };
         let abs = self.resolve_within_workshop(rel)?;
         let bytes = tokio::fs::read(&abs)
             .await
@@ -1102,8 +1232,10 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 1);
 
-        // text asset has no file → serve is NotFound
-        assert!(svc.serve_file(&a.id, false).await.is_err());
+        // text assets serve their inline body as text/plain (no file on disk)
+        let served = svc.serve_file(&a.id, false).await.unwrap();
+        assert_eq!(served.mime, "text/plain; charset=utf-8");
+        assert_eq!(String::from_utf8(served.bytes).unwrap(), a.text_content.clone().unwrap());
         svc.delete_asset(&a.id).await.unwrap();
         assert!(svc.serve_file(&a.id, false).await.is_err());
     }
@@ -1293,5 +1425,114 @@ mod tests {
         assert!(svc.serve_file(&orphan.id, false).await.is_err(), "orphan row gone");
         assert!(svc.serve_file(&kept.id, false).await.is_ok(), "library asset kept");
         assert!(!stray.exists(), "stray file swept");
+    }
+
+    #[tokio::test]
+    async fn agent_ops_direct_apply_to_closed_canvas() {
+        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
+        let (svc, _dir) = service().await;
+        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
+
+        // No frontend has polled → canvas is CLOSED → add_node applies to the doc.
+        let ops = vec![
+            AgentOp::AddNode {
+                node: AddNodeSpec {
+                    kind: "generator".into(),
+                    x: None,
+                    y: None,
+                    w: None,
+                    h: None,
+                    data: Some(serde_json::json!({ "prompt": "a wolf" })),
+                },
+            },
+        ];
+        let applied = svc.apply_agent_ops(&canvas.id, ops, "test").await.unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].disposition, OpDisposition::Applied);
+        let node_id = applied[0].node_id.clone().unwrap();
+
+        // The node is persisted in canvas.json and node_count synced.
+        let read = svc.get_canvas(&canvas.id).await.unwrap();
+        assert_eq!(read.meta.node_count, 1);
+        assert_eq!(read.doc["nodes"][0]["id"], serde_json::json!(node_id));
+        assert_eq!(read.doc["nodes"][0]["data"]["prompt"], "a wolf");
+
+        // A connect to that node also applies directly.
+        let connect = vec![AgentOp::AddNode {
+            node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
+        }];
+        let more = svc.apply_agent_ops(&canvas.id, connect, "test").await.unwrap();
+        let img_id = more[0].node_id.clone().unwrap();
+        let edge = svc
+            .apply_agent_ops(
+                &canvas.id,
+                vec![AgentOp::Connect { from_node_id: node_id, to_node_id: img_id }],
+                "test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(edge[0].disposition, OpDisposition::Applied);
+        let read2 = svc.get_canvas(&canvas.id).await.unwrap();
+        assert_eq!(read2.doc["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_ops_queue_when_open_and_ack_removes() {
+        use crate::agent_ops::{AddNodeSpec, AgentOp, OpDisposition};
+        let (svc, _dir) = service().await;
+        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
+
+        // A poll marks the canvas OPEN → even add_node is queued (frontend owns writes).
+        assert!(svc.take_pending_ops(&canvas.id).await.unwrap().is_empty());
+        let applied = svc
+            .apply_agent_ops(
+                &canvas.id,
+                vec![AgentOp::AddNode {
+                    node: AddNodeSpec { kind: "image".into(), x: None, y: None, w: None, h: None, data: None },
+                }],
+                "test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied[0].disposition, OpDisposition::Queued);
+        // The doc was NOT touched (frontend authority preserved).
+        assert_eq!(svc.get_canvas(&canvas.id).await.unwrap().meta.node_count, 0);
+
+        // The op is pullable and stays until acked.
+        let pending = svc.take_pending_ops(&canvas.id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        svc.ack_agent_ops(&canvas.id, &[pending[0].op_id.clone()]);
+        assert!(svc.take_pending_ops(&canvas.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_ops_data_mutations_always_queue_and_bad_ops_rejected() {
+        use crate::agent_ops::{AgentOp, OpDisposition};
+        let (svc, _dir) = service().await;
+        let canvas = svc.create_canvas(Some("c".into())).await.unwrap();
+
+        // delete_node is a data-mutating op → queued even on a closed canvas.
+        let applied = svc
+            .apply_agent_ops(
+                &canvas.id,
+                vec![AgentOp::DeleteNode { node_id: "wsn_x".into() }],
+                "test",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied[0].disposition, OpDisposition::Queued);
+
+        // An invalid op fails the whole batch (BadRequest).
+        let bad = svc
+            .apply_agent_ops(
+                &canvas.id,
+                vec![AgentOp::Connect { from_node_id: "a".into(), to_node_id: "a".into() }],
+                "test",
+            )
+            .await;
+        assert!(matches!(bad, Err(AppError::BadRequest(_))));
+
+        // Unknown canvas → NotFound.
+        assert!(svc.take_pending_ops("wsc_missing").await.is_err());
     }
 }

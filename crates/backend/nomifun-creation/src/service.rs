@@ -60,6 +60,9 @@ pub struct PersistAsset {
     pub node_id: Option<String>,
     pub bytes: Vec<u8>,
     pub mime: String,
+    /// Whether the produced asset appears in the asset library. Generated
+    /// products default to `true` (see [`CreationService::persist_assets`]).
+    pub in_library: bool,
     /// `{prompt,model,provider_id,params,canvas_id,node_id,task_id}`.
     pub origin: Value,
 }
@@ -655,6 +658,7 @@ impl CreationService {
                     node_id: job.node_id.clone(),
                     bytes,
                     mime,
+                    in_library: true, // generated products land in the library by default
                     origin: origin.clone(),
                 })
                 .await?;
@@ -1253,11 +1257,15 @@ mod http_e2e_tests {
 
     struct CountingSink {
         count: AtomicUsize,
+        /// Captured `(mime, bytes)` of each persisted artifact — lets the text
+        /// e2e assert the produced MIME + body without the real bridge.
+        persisted: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
     }
     #[async_trait]
     impl AssetSink for CountingSink {
         async fn persist(&self, asset: PersistAsset) -> Result<String, CreationError> {
             assert!(!asset.bytes.is_empty(), "persisted asset must carry bytes");
+            self.persisted.lock().unwrap().push((asset.mime.clone(), asset.bytes.clone()));
             let n = self.count.fetch_add(1, Ordering::SeqCst);
             Ok(format!("wsa_e2e_{n}"))
         }
@@ -1300,7 +1308,7 @@ mod http_e2e_tests {
             .id;
         let repo: Arc<dyn ICreationTaskRepository> = Arc::new(SqliteCreationTaskRepository::new(pool.clone()));
         let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
-        let sink = Arc::new(CountingSink { count: AtomicUsize::new(0) });
+        let sink = Arc::new(CountingSink { count: AtomicUsize::new(0), persisted: std::sync::Mutex::new(Vec::new()) });
         let svc = CreationService::builder(repo)
             .with_providers(crate::default_adapters(reqwest::Client::new()))
             .with_provider_repo(provider_repo, TEST_KEY)
@@ -1408,6 +1416,69 @@ mod http_e2e_tests {
         let done = wait_terminal(&svc, &created.id).await;
         assert_eq!(done.status, "succeeded", "error={:?}", done.error);
         assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn openai_chat_text_end_to_end() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{"message": {"role": "assistant", "content": "hello from the model"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
+        let task = NewCreationTask {
+            canvas_id: Some("wsc_t".into()),
+            node_id: None,
+            provider_id: provider_id.clone(),
+            model: "gpt-4o-mini".into(),
+            capability: "text".into(),
+            params: json!({"prompt": "say hi"}),
+            inputs: vec![],
+        };
+        let created = svc.create_task(task).await.unwrap();
+        let done = wait_terminal(&svc, &created.id).await;
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(sink.count.load(Ordering::SeqCst), 1);
+        let persisted = sink.persisted.lock().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert!(persisted[0].0.starts_with("text/plain"), "mime={}", persisted[0].0);
+        assert_eq!(String::from_utf8_lossy(&persisted[0].1), "hello from the model");
+    }
+
+    #[tokio::test]
+    async fn gemini_text_end_to_end() {
+        let server = MockServer::start().await;
+        // A `gemini`-named model routes to the gemini_text adapter regardless of
+        // the seeded platform (routing keys off the model-name substring too).
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "candidates": [{"content": {"parts": [{"text": "gemini says "}, {"text": "hi"}]}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let (svc, provider_id, sink, _db) = build(&server.uri()).await;
+        let task = NewCreationTask {
+            canvas_id: None,
+            node_id: None,
+            provider_id: provider_id.clone(),
+            model: "gemini-2.5-flash".into(),
+            capability: "text".into(),
+            params: json!({"prompt": "greet me"}),
+            inputs: vec![],
+        };
+        let created = svc.create_task(task).await.unwrap();
+        let done = wait_terminal(&svc, &created.id).await;
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        let persisted = sink.persisted.lock().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert!(persisted[0].0.starts_with("text/plain"), "mime={}", persisted[0].0);
+        assert_eq!(String::from_utf8_lossy(&persisted[0].1), "gemini says hi");
     }
 }
 

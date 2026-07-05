@@ -19,10 +19,12 @@ mod fsio;
 mod imagemeta;
 mod thumbnail;
 
+pub mod agent_ops;
 pub mod routes;
 pub mod service;
 pub mod state;
 
+pub use agent_ops::{AddNodeSpec, AgentOp, AppliedOp, OpDisposition, PendingOp};
 pub use dto::{WorkshopAsset, WorkshopCanvasMeta};
 pub use routes::workshop_routes;
 pub use service::WorkshopService;
