@@ -3260,6 +3260,8 @@ export type I18nKey =
   | 'settings.discord.tokenLocked'
   | 'settings.discord.tokenRequired'
   | 'settings.display'
+  | 'settings.dragModelPriority'
+  | 'settings.dragProviderPriority'
   | 'settings.duplicateAssistant'
   | 'settings.editApiKey'
   | 'settings.editAssistant'
