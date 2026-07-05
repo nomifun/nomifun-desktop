@@ -25,6 +25,7 @@ import {
   SiderRequirementsEntry,
   SiderScheduledEntry,
   SiderSectionHeader,
+  SiderWorkshopEntry,
 } from './SiderNav';
 import SiderFooter from './SiderFooter';
 
@@ -88,6 +89,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleRequirementsClick = () => navTo('/requirements');
   const handleKnowledgeClick = () => navTo('/knowledge');
   const handleNomiClick = () => navTo('/nomi');
+  const handleWorkshopClick = () => navTo('/workshop');
   const handlePublicServiceClick = () => navTo('/public-companions');
   const handleAssistantSkillsClick = () => navTo('/assistants?tab=assistants');
   const handleMcpClick = () => navTo('/mcp');
@@ -179,6 +181,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleNomiClick}
+            />
+            {/* Creative Workshop (创意工坊) — infinite-canvas AI creation surface */}
+            <SiderWorkshopEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/workshop')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleWorkshopClick}
             />
             {/* 对外服务 — public-facing customer-service agents (对外伙伴), a domain
                 fully separate from the desktop-companion group above. */}

@@ -33,6 +33,10 @@ import publicCompanion from './publicCompanion.json';
 import sessionList from './sessionList.json';
 import modelFailover from './modelFailover.json';
 import orchestrator from './orchestrator.json';
+import workshop from './workshop.json';
+import workshopCanvas from './workshopCanvas.json';
+import workshopAssets from './workshopAssets.json';
+import workshopEditor from './workshopEditor.json';
 
 export default {
   common,
@@ -65,4 +69,8 @@ export default {
   sessionList,
   modelFailover,
   orchestrator,
+  workshop,
+  workshopCanvas,
+  workshopAssets,
+  workshopEditor,
 };

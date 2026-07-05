@@ -106,6 +106,13 @@ pub struct AppServices {
     /// service domain, entirely separate from `companion_service`. Owns its own
     /// `public-agents/` store, roster, and day-partitioned audit.
     pub public_agent_service: Arc<nomifun_public_agent::PublicAgentService>,
+    /// Singleton 创意工坊 (Creative Workshop) service — canvas/asset CRUD +
+    /// on-disk canvas docs / asset binaries under `{data_dir}/workshop/`. Shared
+    /// by the `/api/workshop/*` routes.
+    pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
+    /// Singleton 生成引擎 (creation) service — the media generation task queue
+    /// behind the workshop canvas. Shared by the `/api/creation/*` routes.
+    pub creation_service: Arc<nomifun_creation::CreationService>,
     /// Singleton knowledge service (knowledge base platform). Shared between
     /// the `/api/knowledge/*` routes and the `ConversationService`, which
     /// mounts bound bases into session workspaces at task start.
@@ -582,6 +589,19 @@ impl AppServices {
         // agent, not a growing personal companion.
         let public_agent_service = nomifun_public_agent::PublicAgentService::start(&data_dir);
 
+        // 创意工坊 (Creative Workshop) + 生成引擎 (creation): the workshop service
+        // owns canvas/asset index rows + on-disk docs/binaries; the creation
+        // service owns the media generation task queue. Both are plain repo-backed
+        // services (no agent-factory dependency), constructed here alongside the
+        // other singletons and reused by the router states.
+        let workshop_service = nomifun_workshop::WorkshopService::start(
+            &data_dir,
+            Arc::new(nomifun_db::SqliteWorkshopRepository::new(database.pool().clone())),
+        );
+        let creation_service = nomifun_creation::CreationService::new(Arc::new(
+            nomifun_db::SqliteCreationTaskRepository::new(database.pool().clone()),
+        ));
+
         // Headless seed: bind a Remote access token to the default companion so an
         // operator can configure the front door via env on a headless server.
         // (Desktop mints per-companion tokens via /api/webui/companions/{id}/access-token.)
@@ -722,6 +742,8 @@ impl AppServices {
             _knowledge_mcp_server: knowledge_mcp_server,
             companion_service,
             public_agent_service,
+            workshop_service,
+            creation_service,
             knowledge_service,
         })
     }

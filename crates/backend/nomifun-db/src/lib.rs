@@ -9,10 +9,11 @@ pub use error::DbError;
 pub use models::{
     AgentMetadataRow, AssistantOverrideRow, AssistantRow, AssistantTagRow, ConnectorCredentialRow,
     ConversationArtifactRow, CreateAssistantParams, CreateAssistantTagParams,
-    CreateKnowledgeTagParams, CronJobRunRow, KnowledgeBaseRow, KnowledgeBindingRow,
+    CreateKnowledgeTagParams, CreationTaskRow, CronJobRunRow, KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, UpdateAgentHandshakeParams,
     UpdateAssistantParams, UpdateAssistantTagParams, UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertOverrideParams, UpsertSkillTagParams, WebhookRow,
+    WorkshopAssetRow, WorkshopCanvasRow,
 };
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
@@ -50,6 +51,12 @@ pub use repository::{
     ReconcileDepRef, ReconcileNewTask, ReconcilePlan, SqliteFleetRepository,
     SqliteOrchWorkspaceRepository, SqliteRunRepository, UpdateFleetParams,
     UpdateOrchWorkspaceParams, UpdateRunParams, UpdateTaskParams,
+};
+// 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
+pub use repository::{
+    CreateCreationTaskParams, ICreationTaskRepository, IWorkshopRepository, ListAssetsParams,
+    ListCreationTasksParams, SqliteCreationTaskRepository, SqliteWorkshopRepository,
+    UpdateAssetParams, UpdateCreationTaskParams,
 };
 
 // Re-export sqlx (and its pool type) for downstream crates that run ad-hoc

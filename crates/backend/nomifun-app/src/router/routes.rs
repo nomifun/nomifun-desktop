@@ -20,6 +20,8 @@ use nomifun_auth::{
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
 use nomifun_public_agent::public_agent_routes;
+use nomifun_workshop::workshop_routes;
+use nomifun_creation::creation_routes;
 use nomifun_conversation::{conversation_ops_routes, conversation_routes};
 use nomifun_cron::cron_routes;
 use nomifun_extension::{extension_routes, hub_routes, skill_routes};
@@ -99,6 +101,11 @@ pub async fn create_router(services: &AppServices) -> Router {
         )),
         idmm_service: states.idmm.service.clone(),
         knowledge_service: services.knowledge_service.clone(),
+        // 创意工坊 canvas index: a fresh repo over the same pool the workshop
+        // routes/service use, backing the read-only nomi_workshop_list_canvases cap.
+        workshop_repo: Arc::new(nomifun_db::SqliteWorkshopRepository::new(
+            services.database.pool().clone(),
+        )),
         autowork_orchestrator: states.requirement.orchestrator.clone(),
         // System domain: reuse the SAME service instances the system routes use
         // (states.system is still owned here; it is moved into `system_routes`
@@ -409,6 +416,13 @@ pub fn create_router_with_all_state(
     let public_agent_authenticated = public_agent_routes(states.public_agent.clone())
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
+    // 创意工坊 (Creative Workshop) canvas/asset routes + 生成引擎 (creation) task
+    // routes — owner-only, behind auth middleware (same as knowledge).
+    let workshop_authenticated = workshop_routes(states.workshop)
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+    let creation_authenticated = creation_routes(states.creation)
+        .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
+
     // Knowledge Base platform routes protected by auth middleware
     let knowledge_authenticated = knowledge_routes(states.knowledge)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
@@ -564,6 +578,8 @@ pub fn create_router_with_all_state(
         .merge(idmm_authenticated)
         .merge(companion_authenticated)
         .merge(public_agent_authenticated)
+        .merge(workshop_authenticated)
+        .merge(creation_authenticated)
         .merge(knowledge_authenticated)
         .merge(webhook_authenticated)
         .merge(orchestrator_authenticated)
