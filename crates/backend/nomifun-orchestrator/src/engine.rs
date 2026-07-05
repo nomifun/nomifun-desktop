@@ -1701,11 +1701,13 @@ async fn run_loop(
         // completion may unblock downstream tasks, so the loop re-fills.
         if let Some((task_id, outcome)) = inflight.next().await {
             in_progress.remove(&task_id);
-            // Capture whether this settle is a node COMPLETION before `outcome` is
-            // moved into `settle_task_outcome` (it takes the value): `Ok(o) if o.ok`
-            // mirrors settle's own `done` arm. Retries / failures do not count.
-            let did_complete = matches!(&outcome, Ok(o) if o.ok);
-            settle_task_outcome(&deps, run_id, &task_id, outcome).await;
+            // Whether this settle actually landed the node as `done` — returned by
+            // settle itself, NOT inferred from `Ok(o) if o.ok`（评审确认缺陷：审批
+            // 模式的 needs_review park 路径 worker 同样以 ok:true 结束回合，但
+            // settle 顶部守卫提前 return、节点并未完成——按 outcome 推断会紧跟
+            // NodeQuestion 回执再发一条自相矛盾的虚假 BatchProgress）。Retries /
+            // failures / park 都不计入。
+            let did_complete = settle_task_outcome(&deps, run_id, &task_id, outcome).await;
 
             // Mid-run batch-progress heartbeat (Phase 3a Task 3). This branch is
             // reached ONLY while `inflight` is non-empty, so it is structurally
@@ -1964,12 +1966,16 @@ async fn dispatch_task(
 /// error) → AUTO-RETRY if the failure was a transient/retryable provider error and
 /// the retry budget remains (see [`settle_failed_or_retry`]), else mark `failed` +
 /// emit. Completion is what unblocks downstream tasks.
+///
+/// Returns `true` ONLY when this settle actually landed the node as `done` —
+/// the run_loop's batch-progress heartbeat keys off this instead of inferring
+/// from the raw outcome（needs_review park 也以 ok:true 回场，但并未完成）。
 async fn settle_task_outcome(
     deps: &Arc<RunEngineDeps>,
     run_id: &str,
     task_id: &str,
     outcome: Result<WorkerOutcome, AppError>,
-) {
+) -> bool {
     // 审批模式（迁移 030）：worker 在本轮中途经 nomi_task_question 把任务置为
     // `needs_review`（挂起等人工），随后它的回合正常结束并流到这里。此时绝不能把
     // 状态覆盖为 done/failed：只补写 conversation_id / 产出文本 / tokens（供投影
@@ -1997,7 +2003,7 @@ async fn settle_task_outcome(
                 .await;
         }
         info!(run_id, task_id, "Run loop: task parked at needs_review (节点提问) — settle skipped");
-        return;
+        return false;
     }
     match outcome {
         Ok(o) if o.ok => {
@@ -2032,15 +2038,18 @@ async fn settle_task_outcome(
                 )
                 .await;
             deps.emitter.emit_task_status(run_id, task_id, "done");
+            true
         }
         Ok(o) => {
             // Worker returned but produced no final text (rate-limit / transient
             // error / timeout / empty). Auto-retry transient errors; else fail.
             settle_failed_or_retry(deps, run_id, task_id, Some(o.conversation_id), o.tokens).await;
+            false
         }
         Err(e) => {
             warn!(run_id, task_id, error = %e, "Run loop: worker errored — failing or retrying task");
             settle_failed_or_retry(deps, run_id, task_id, None, None).await;
+            false
         }
     }
 }
@@ -5071,6 +5080,12 @@ mod tests {
         assert!(
             !reporter.reports.lock().unwrap().iter().any(|(_, _, o)| o == "completed" || o == "failed"),
             "park 不产生终态回执"
+        );
+        // 评审确认缺陷的回归锁：park 的 settle 以 ok:true 回场但节点并未完成，
+        // 绝不能紧跟 NodeQuestion 再发一条自相矛盾的虚假 batch_progress。
+        assert!(
+            !reporter.reports.lock().unwrap().iter().any(|(_, _, o)| o == "batch_progress"),
+            "park 不是完成——不得触发虚假 batch_progress 回执"
         );
 
         // ② 看门狗豁免：把 run 行老化到 STRAND_GRACE_MS 之外，reap 不得判 stalled。
