@@ -37,6 +37,8 @@ import workshop from './workshop.json';
 import workshopCanvas from './workshopCanvas.json';
 import workshopAssets from './workshopAssets.json';
 import workshopEditor from './workshopEditor.json';
+import workshopGeneration from './workshopGeneration.json';
+import workshopAssistant from './workshopAssistant.json';
 
 export default {
   common,
@@ -73,4 +75,6 @@ export default {
   workshopCanvas,
   workshopAssets,
   workshopEditor,
+  workshopGeneration,
+  workshopAssistant,
 };

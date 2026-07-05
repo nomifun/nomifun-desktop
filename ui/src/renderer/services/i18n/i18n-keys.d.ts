@@ -4435,6 +4435,7 @@ export type I18nKey =
   | 'workshopAssets.upload.failed'
   | 'workshopAssets.upload.queue'
   | 'workshopAssets.upload.tooLarge'
+  | 'workshopAssistant.assistant.placeholder'
   | 'workshopCanvas.background.blank'
   | 'workshopCanvas.background.dots'
   | 'workshopCanvas.background.lines'
@@ -4607,7 +4608,8 @@ export type I18nKey =
   | 'workshopEditor.upscale.progressive'
   | 'workshopEditor.upscale.progressiveDesc'
   | 'workshopEditor.upscale.summary'
-  | 'workshopEditor.upscale.target';
+  | 'workshopEditor.upscale.target'
+  | 'workshopGeneration.generation.placeholder';
 
 export type I18nModule =
   | 'common'
@@ -4643,4 +4645,6 @@ export type I18nModule =
   | 'workshop'
   | 'workshopCanvas'
   | 'workshopAssets'
-  | 'workshopEditor';
+  | 'workshopEditor'
+  | 'workshopGeneration'
+  | 'workshopAssistant';
