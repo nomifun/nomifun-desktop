@@ -23,6 +23,12 @@ pub(crate) const ARCHIVE_VERSION: u32 = 1;
 pub(crate) const CANVAS_ENTRY: &str = "canvas.json";
 pub(crate) const MANIFEST_ENTRY: &str = "manifest.json";
 
+/// Per-entry decompressed-size ceiling — no single archive member may inflate
+/// beyond this (matches the asset upload cap).
+const MAX_ENTRY_BYTES: u64 = crate::MAX_ASSET_BYTES as u64;
+/// Cumulative decompressed-size ceiling across ALL entries — the zip-bomb guard.
+const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Build a zip from `(entry_name, bytes)` pairs. Deflate-compressed.
 pub(crate) fn build_zip(entries: Vec<(String, Vec<u8>)>) -> std::io::Result<Vec<u8>> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -42,9 +48,28 @@ pub(crate) fn build_zip(entries: Vec<(String, Vec<u8>)>) -> std::io::Result<Vec<
 /// Extract every entry of a zip into `name → bytes`. Uses `enclosed_name` to
 /// reject zip-slip (`../`, absolute) entries. Directory entries are skipped.
 pub(crate) fn extract_zip(bytes: &[u8]) -> std::io::Result<HashMap<String, Vec<u8>>> {
+    extract_zip_bounded(bytes, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES)
+}
+
+/// [`extract_zip`] with explicit per-entry / cumulative decompression budgets
+/// (parameterized so tests can drive the overflow paths with small caps).
+///
+/// Crucially it never pre-allocates from the untrusted header-declared size
+/// (`file.size()`), which is attacker-controlled and can trigger an
+/// unsatisfiable allocation → `abort()`. Instead each entry is read through a
+/// `Read::take` bounded by the smaller of the per-entry cap and the remaining
+/// cumulative budget, so neither a lying `size` field nor a compression bomb
+/// can exhaust memory — an oversized entry returns an error (mapped to a
+/// `BadRequest` by the caller).
+fn extract_zip_bounded(
+    bytes: &[u8],
+    max_entry: u64,
+    max_total: u64,
+) -> std::io::Result<HashMap<String, Vec<u8>>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| std::io::Error::other(format!("open zip: {e}")))?;
     let mut out = HashMap::new();
+    let mut total: u64 = 0;
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
@@ -57,8 +82,19 @@ pub(crate) fn extract_zip(bytes: &[u8]) -> std::io::Result<HashMap<String, Vec<u
             return Err(std::io::Error::other("zip entry escapes archive root"));
         };
         let name = path.to_string_lossy().replace('\\', "/");
-        let mut buf = Vec::with_capacity(file.size() as usize);
-        file.read_to_end(&mut buf)?;
+        // Bound this entry by min(per-entry cap, remaining cumulative budget),
+        // reading one byte past the cap so an overflow is detectable rather than
+        // silently truncated.
+        let cap = max_entry.min(max_total.saturating_sub(total));
+        let mut buf = Vec::new();
+        (&mut file).take(cap.saturating_add(1)).read_to_end(&mut buf)?;
+        if buf.len() as u64 > cap {
+            return Err(std::io::Error::other(format!(
+                "archive entry '{name}' exceeds the decompression budget \
+                 ({max_entry} bytes/entry, {max_total} bytes total)"
+            )));
+        }
+        total = total.saturating_add(buf.len() as u64);
         out.insert(name, buf);
     }
     Ok(out)
@@ -83,5 +119,40 @@ mod tests {
     #[test]
     fn extract_rejects_garbage() {
         assert!(extract_zip(b"not a zip").is_err());
+    }
+
+    #[test]
+    fn extract_rejects_entry_over_per_entry_budget() {
+        // A single 50-byte entry against a 10-byte per-entry cap → rejected
+        // (the take-based reader stops at cap+1 and reports the overflow).
+        let zip = build_zip(vec![("assets/wsa_a.bin".to_string(), vec![7u8; 50])]).unwrap();
+        let err = extract_zip_bounded(&zip, 10, 1024).unwrap_err();
+        assert!(err.to_string().contains("decompression budget"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_rejects_cumulative_bomb() {
+        // Three 40-byte entries (120 total) against a 100-byte cumulative cap:
+        // the entry that crosses the running budget is rejected.
+        let zip = build_zip(vec![
+            ("assets/a.bin".to_string(), vec![1u8; 40]),
+            ("assets/b.bin".to_string(), vec![2u8; 40]),
+            ("assets/c.bin".to_string(), vec![3u8; 40]),
+        ])
+        .unwrap();
+        let err = extract_zip_bounded(&zip, 1000, 100).unwrap_err();
+        assert!(err.to_string().contains("decompression budget"), "got: {err}");
+    }
+
+    #[test]
+    fn extract_within_budget_succeeds() {
+        let zip = build_zip(vec![
+            (CANVAS_ENTRY.to_string(), b"{\"schema\":1}".to_vec()),
+            ("assets/wsa_a.png".to_string(), vec![1, 2, 3, 4]),
+        ])
+        .unwrap();
+        let extracted = extract_zip_bounded(&zip, 1024, 4096).unwrap();
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted.get("assets/wsa_a.png").unwrap(), &[1, 2, 3, 4]);
     }
 }

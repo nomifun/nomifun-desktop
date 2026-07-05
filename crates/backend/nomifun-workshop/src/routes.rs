@@ -136,6 +136,13 @@ async fn get_canvas(
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<CanvasDetailResponse>>, AppError> {
     let c = state.service.get_canvas(&id).await?;
+    // This REST route is the editor's canvas-doc load path (CanvasPage). Mark
+    // the canvas "open" now so an agent's concurrent apply_ops in the gap before
+    // the first pending-ops poll is queued for this editor rather than written
+    // straight to canvas.json and then clobbered by the editor's first autosave.
+    // The gateway agent reads via `service.get_canvas` directly and never hits
+    // this handler, so it is not falsely marked open.
+    state.service.mark_canvas_open(&id);
     Ok(Json(ApiResponse::ok(CanvasDetailResponse { meta: c.meta, doc: c.doc })))
 }
 

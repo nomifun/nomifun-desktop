@@ -29,9 +29,24 @@ const GRID_CELL = 176;
 const GRID_GAP = 22;
 const RIGHT_GAP = 64;
 
-function rightOf(card: WorkshopFlowNode): { x: number; y: number; width: number } {
+/** Resolve a node's absolute canvas position (accounting for a group parent). */
+function absolutePositionOf(rf: RF, node: WorkshopFlowNode): { x: number; y: number } {
+  if (node.parentId) {
+    const parent = rf.getNode(node.parentId);
+    if (parent) return { x: parent.position.x + node.position.x, y: parent.position.y + node.position.y };
+  }
+  return { x: node.position.x, y: node.position.y };
+}
+
+/**
+ * Origin (in absolute canvas coords) just right of the card. Spawned result /
+ * continue / text nodes are added as free (parent-less) nodes, so the origin
+ * must be absolute — a grouped card's own `position` is parent-relative.
+ */
+function rightOf(rf: RF, card: WorkshopFlowNode): { x: number; y: number; width: number } {
   const width = card.width ?? card.measured?.width ?? 344;
-  return { x: card.position.x + width + RIGHT_GAP, y: card.position.y, width };
+  const origin = absolutePositionOf(rf, card);
+  return { x: origin.x + width + RIGHT_GAP, y: origin.y, width };
 }
 
 /**
@@ -40,7 +55,7 @@ function rightOf(card: WorkshopFlowNode): { x: number; y: number; width: number 
  */
 export function spawnResultNodes(rf: RF, card: WorkshopFlowNode, assetIds: string[]): void {
   if (assetIds.length === 0) return;
-  const origin = rightOf(card);
+  const origin = rightOf(rf, card);
   const cols = Math.min(3, Math.ceil(Math.sqrt(assetIds.length)));
   const created: WorkshopFlowNode[] = [];
   const edges: WorkshopFlowEdge[] = [];
@@ -66,7 +81,7 @@ export function spawnContinueCard(
   card: WorkshopFlowNode,
   opts: { instruction: string; providerId?: string; model?: string; mode: 'image' | 'video' }
 ): void {
-  const origin = rightOf(card);
+  const origin = rightOf(rf, card);
   const pos = { x: origin.x, y: origin.y };
   const node = makeGeneratorNode(pos, opts.mode, {
     prompt: opts.instruction,
@@ -81,7 +96,7 @@ export function spawnContinueCard(
 
 /** Materialise a text result into a standalone text node wired from the card. */
 export function spawnTextNode(rf: RF, card: WorkshopFlowNode, content: string): void {
-  const origin = rightOf(card);
+  const origin = rightOf(rf, card);
   const node = makeTextNode({ x: origin.x, y: origin.y }, { content });
   rf.addNodes(node);
   rf.addEdges({ id: newEdgeId(), source: card.id, target: node.id });

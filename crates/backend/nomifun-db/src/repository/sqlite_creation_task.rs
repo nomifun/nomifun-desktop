@@ -19,6 +19,43 @@ impl SqliteCreationTaskRepository {
     }
 }
 
+/// The concrete column values written by both the unconditional and conditional
+/// update paths — `params` merged over the current row (`Some` replaces, `None`
+/// keeps; inner `Option` distinguishes "set NULL" from "keep").
+struct MergedTaskUpdate {
+    status: String,
+    error: Option<String>,
+    result_asset_ids: String,
+    remote_task_id: Option<String>,
+    attempt: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+}
+
+fn merge_update_fields(existing: &CreationTaskRow, params: &UpdateCreationTaskParams<'_>) -> MergedTaskUpdate {
+    MergedTaskUpdate {
+        status: params.status.unwrap_or(&existing.status).to_string(),
+        error: match params.error {
+            Some(e) => e.map(str::to_string),
+            None => existing.error.clone(),
+        },
+        result_asset_ids: params.result_asset_ids.unwrap_or(&existing.result_asset_ids).to_string(),
+        remote_task_id: match params.remote_task_id {
+            Some(r) => r.map(str::to_string),
+            None => existing.remote_task_id.clone(),
+        },
+        attempt: params.attempt.unwrap_or(existing.attempt),
+        started_at: match params.started_at {
+            Some(s) => s,
+            None => existing.started_at,
+        },
+        finished_at: match params.finished_at {
+            Some(f) => f,
+            None => existing.finished_at,
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl ICreationTaskRepository for SqliteCreationTaskRepository {
     async fn create_task(&self, params: CreateCreationTaskParams<'_>) -> Result<CreationTaskRow, DbError> {
@@ -88,51 +125,61 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
             .await?
             .ok_or_else(|| DbError::NotFound(format!("creation task '{id}' not found")))?;
 
-        let status = params.status.unwrap_or(&existing.status).to_string();
-        let error = match params.error {
-            Some(e) => e.map(str::to_string),
-            None => existing.error.clone(),
-        };
-        let result_asset_ids = params.result_asset_ids.unwrap_or(&existing.result_asset_ids).to_string();
-        let remote_task_id = match params.remote_task_id {
-            Some(r) => r.map(str::to_string),
-            None => existing.remote_task_id.clone(),
-        };
-        let attempt = params.attempt.unwrap_or(existing.attempt);
-        let started_at = match params.started_at {
-            Some(s) => s,
-            None => existing.started_at,
-        };
-        let finished_at = match params.finished_at {
-            Some(f) => f,
-            None => existing.finished_at,
-        };
+        let m = merge_update_fields(&existing, &params);
 
         sqlx::query(
             "UPDATE creation_tasks SET status = ?, error = ?, result_asset_ids = ?, remote_task_id = ?, \
              attempt = ?, started_at = ?, finished_at = ? WHERE id = ?",
         )
-        .bind(&status)
-        .bind(&error)
-        .bind(&result_asset_ids)
-        .bind(&remote_task_id)
-        .bind(attempt)
-        .bind(started_at)
-        .bind(finished_at)
+        .bind(&m.status)
+        .bind(&m.error)
+        .bind(&m.result_asset_ids)
+        .bind(&m.remote_task_id)
+        .bind(m.attempt)
+        .bind(m.started_at)
+        .bind(m.finished_at)
         .bind(id)
         .execute(&self.pool)
         .await?;
 
         Ok(CreationTaskRow {
-            status,
-            error,
-            result_asset_ids,
-            remote_task_id,
-            attempt,
-            started_at,
-            finished_at,
+            status: m.status,
+            error: m.error,
+            result_asset_ids: m.result_asset_ids,
+            remote_task_id: m.remote_task_id,
+            attempt: m.attempt,
+            started_at: m.started_at,
+            finished_at: m.finished_at,
             ..existing
         })
+    }
+
+    async fn update_task_if_live(&self, id: &str, params: UpdateCreationTaskParams<'_>) -> Result<bool, DbError> {
+        let Some(existing) = self.get_task(id).await? else {
+            return Ok(false); // unknown id → treat as "not live"
+        };
+        let m = merge_update_fields(&existing, &params);
+
+        // The `WHERE ... status IN ('queued','running')` predicate is the
+        // compare-and-set: if a concurrent cancel wrote a terminal status
+        // between our read and this write, zero rows match and we do not
+        // overwrite it.
+        let res = sqlx::query(
+            "UPDATE creation_tasks SET status = ?, error = ?, result_asset_ids = ?, remote_task_id = ?, \
+             attempt = ?, started_at = ?, finished_at = ? WHERE id = ? AND status IN ('queued', 'running')",
+        )
+        .bind(&m.status)
+        .bind(&m.error)
+        .bind(&m.result_asset_ids)
+        .bind(&m.remote_task_id)
+        .bind(m.attempt)
+        .bind(m.started_at)
+        .bind(m.finished_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(res.rows_affected() > 0)
     }
 
     async fn list_live_tasks(&self) -> Result<Vec<CreationTaskRow>, DbError> {
@@ -232,5 +279,48 @@ mod tests {
         // both queued+running are "live"
         let live = repo.list_live_tasks().await.unwrap();
         assert_eq!(live.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_task_if_live_refuses_terminal_overwrite() {
+        let (repo, _db) = repo().await;
+        repo.create_task(create_params("wst_c", None)).await.unwrap();
+        // queued → running (still live)
+        repo.update_task("wst_c", UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
+            .await
+            .unwrap();
+        // A cancel writes the terminal status (cancel path is unconditional).
+        repo.update_task(
+            "wst_c",
+            UpdateCreationTaskParams { status: Some("canceled"), finished_at: Some(Some(1)), ..Default::default() },
+        )
+        .await
+        .unwrap();
+        // finalize's terminal write must NOT overwrite the canceled row.
+        let applied = repo
+            .update_task_if_live(
+                "wst_c",
+                UpdateCreationTaskParams { status: Some("succeeded"), finished_at: Some(Some(2)), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(!applied, "terminal (canceled) row must not be overwritten");
+        assert_eq!(repo.get_task("wst_c").await.unwrap().unwrap().status, "canceled");
+
+        // A still-live task IS updated by the conditional write.
+        repo.create_task(create_params("wst_d", None)).await.unwrap();
+        let applied2 = repo
+            .update_task_if_live("wst_d", UpdateCreationTaskParams { status: Some("succeeded"), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(applied2);
+        assert_eq!(repo.get_task("wst_d").await.unwrap().unwrap().status, "succeeded");
+
+        // Unknown id → Ok(false), no error.
+        let applied3 = repo
+            .update_task_if_live("nope", UpdateCreationTaskParams { status: Some("failed"), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(!applied3);
     }
 }

@@ -13,7 +13,8 @@ use serde_json::Value;
 use std::time::Duration;
 
 use crate::adapters::{
-    error_from_response, net_err, openai_versioned_base, param_prompt, param_size,
+    MAX_ARTIFACT_BYTES, error_from_response, net_err, openai_versioned_base, param_prompt, param_size,
+    read_body_capped,
 };
 use crate::provider::{MediaProvider, PollResult, ProducedAsset, ProducedData, SubmitAck, SubmitRequest};
 use crate::types::{CreationError, MediaCapability};
@@ -135,7 +136,7 @@ impl MediaProvider for OpenAiVideoAdapter {
                     .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "video/mp4".to_string());
-                let bytes = resp.bytes().await.map_err(net_err)?.to_vec();
+                let bytes = read_body_capped(resp, MAX_ARTIFACT_BYTES).await?;
                 Ok(PollResult::Done(vec![ProducedAsset {
                     data: ProducedData::Bytes(bytes),
                     mime: Some(mime),

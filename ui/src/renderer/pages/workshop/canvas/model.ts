@@ -317,6 +317,26 @@ export interface CanvasSnapshot {
   background: WorkshopCanvasBackground;
 }
 
+/**
+ * Normalize a node's `data` for history so undo/redo can never resurrect a
+ * generator's in-flight run state. A non-terminal generator status
+ * (`queued` / `running`) is coerced to `idle` and its `taskId` cleared; terminal
+ * states (`success` / `error`) and `resultAssetIds` are preserved verbatim.
+ * Other node kinds pass through untouched.
+ *
+ * Only the in-memory history is scrubbed — the persisted doc (`flowToDoc`) keeps
+ * the live run state on purpose, so a full canvas reload remounts the card and
+ * resumes polling the (by-then-terminal) task instead of losing the result.
+ */
+function snapshotNodeData(node: WorkshopFlowNode): Record<string, unknown> {
+  const data = { ...(node.data as Record<string, unknown>) };
+  if (node.type === 'generator' && (data.status === 'queued' || data.status === 'running')) {
+    data.status = 'idle';
+    data.taskId = null;
+  }
+  return data;
+}
+
 /** Strip transient fields so measurement / selection churn never lands in history. */
 export function buildSnapshot(
   nodes: WorkshopFlowNode[],
@@ -335,7 +355,7 @@ export function buildSnapshot(
         width,
         height,
         position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
-        data: { ...n.data },
+        data: snapshotNodeData(n),
       };
     }) as WorkshopFlowNode[],
     edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
@@ -360,7 +380,7 @@ export function snapshotToState(snap: CanvasSnapshot): {
       selected: false,
       dragging: false,
       measured: undefined,
-      data: { ...n.data },
+      data: snapshotNodeData(n),
     })) as WorkshopFlowNode[],
     edges: snap.edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
   };
@@ -615,30 +635,49 @@ export function groupMemberIds(nodes: WorkshopFlowNode[], groupId: string): stri
  * when both a group and its members are in the set (members keep their relative
  * position so they ride along with the offset group); a member whose parent is
  * NOT in the set is promoted to a free node so no dangling `parentId` survives.
+ * A promoted member's parent-relative position is converted to absolute (via the
+ * optional `allNodes` graph, which supplies the parent's position) before the
+ * paste offset, so the clone lands beside the original instead of near the origin.
  * Returns the id remap so callers can select the clones.
  */
 export function cloneNodesWithEdges(
   nodes: WorkshopFlowNode[],
   edges: WorkshopFlowEdge[],
-  offset: XY
+  offset: XY,
+  allNodes?: WorkshopFlowNode[]
 ): { nodes: WorkshopFlowNode[]; edges: WorkshopFlowEdge[]; idMap: Map<string, string> } {
   const idMap = new Map<string, string>();
   const inSet = new Set(nodes.map((n) => n.id));
   for (const n of nodes) idMap.set(n.id, newNodeId());
 
+  // Absolute position of any node that could be an out-of-set parent (groups are
+  // always free, so their `position` is already absolute).
+  const posLookup = allNodes ? new Map(allNodes.map((n) => [n.id, n.position])) : null;
+
   const cloned = nodes.map((n) => {
     const parentKept = n.parentId && inSet.has(n.parentId);
+    let position: XY;
+    if (parentKept) {
+      // Members with an in-set parent keep their (relative) position so they stay
+      // put inside the offset group.
+      position = { x: n.position.x, y: n.position.y };
+    } else if (n.parentId) {
+      // Orphan promotion: the node loses its group, so its relative position must
+      // become absolute (parent origin + relative) before shifting by the offset.
+      const parentPos = posLookup?.get(n.parentId);
+      const baseX = parentPos ? parentPos.x + n.position.x : n.position.x;
+      const baseY = parentPos ? parentPos.y + n.position.y : n.position.y;
+      position = { x: baseX + offset.x, y: baseY + offset.y };
+    } else {
+      position = { x: n.position.x + offset.x, y: n.position.y + offset.y };
+    }
     const next = {
       ...n,
       id: idMap.get(n.id) as string,
       selected: true,
       dragging: false,
       measured: undefined,
-      // Members with an in-set parent keep their (relative) position so they stay
-      // put inside the offset group; everything else shifts by the paste offset.
-      position: parentKept
-        ? { x: n.position.x, y: n.position.y }
-        : { x: n.position.x + offset.x, y: n.position.y + offset.y },
+      position,
       data: { ...n.data },
     } as WorkshopFlowNode;
     if (parentKept) {

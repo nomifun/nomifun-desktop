@@ -24,6 +24,14 @@ use crate::server::ok;
 
 /// Max chars of prompt/caption/text folded into a node summary.
 const SUMMARY_TEXT_MAX: usize = 120;
+/// Max nodes/edges emitted in a canvas summary. A valid canvas doc (≤ 8 MB) can
+/// carry tens of thousands of small nodes; bounding the tool result keeps a
+/// single `get_canvas` from flooding the agent's context / token budget.
+const MAX_SUMMARY_NODES: usize = 200;
+const MAX_SUMMARY_EDGES: usize = 400;
+/// Default / max canvases returned by `list_canvases`.
+const LIST_CANVASES_DEFAULT: i64 = 100;
+const LIST_CANVASES_MAX: i64 = 200;
 
 // ── param structs (single source: schema + runtime) ──────────────────────────
 
@@ -32,6 +40,9 @@ struct ListCanvasesParams {
     /// Optional case-insensitive substring filter over canvas titles.
     #[serde(default)]
     query: Option<String>,
+    /// Max canvases to return (default 100, capped at 200).
+    #[serde(default)]
+    limit: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -97,11 +108,18 @@ struct GetTaskParams {
 
 async fn list_canvases(deps: Arc<GatewayDeps>, p: ListCanvasesParams) -> Value {
     let query = p.query.map(|q| q.trim().to_lowercase()).filter(|q| !q.is_empty());
+    let limit = p.limit.unwrap_or(LIST_CANVASES_DEFAULT).clamp(1, LIST_CANVASES_MAX) as usize;
     match deps.workshop_repo.list_canvases().await {
         Ok(rows) => {
-            let canvases: Vec<Value> = rows
+            let filtered: Vec<_> = rows
                 .into_iter()
                 .filter(|c| query.as_deref().is_none_or(|q| c.title.to_lowercase().contains(q)))
+                .collect();
+            let total = filtered.len();
+            let truncated = total > limit;
+            let canvases: Vec<Value> = filtered
+                .into_iter()
+                .take(limit)
                 .map(|c| {
                     json!({
                         "id": c.id,
@@ -110,7 +128,7 @@ async fn list_canvases(deps: Arc<GatewayDeps>, p: ListCanvasesParams) -> Value {
                     })
                 })
                 .collect();
-            ok(json!({ "total": canvases.len(), "canvases": canvases }))
+            ok(json!({ "total": total, "truncated": truncated, "canvases": canvases }))
         }
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -230,14 +248,14 @@ async fn get_task(deps: Arc<GatewayDeps>, p: GetTaskParams) -> Value {
 /// Build a compact, base64-free canvas summary for the agent: node briefs +
 /// edges + meta. Deliberately omits asset bytes/data URLs.
 fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) -> Value {
-    let nodes: Vec<Value> = doc
-        .get("nodes")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().map(summarize_node).collect())
+    let node_arr = doc.get("nodes").and_then(Value::as_array);
+    let total_nodes = node_arr.map(Vec::len).unwrap_or(0);
+    let nodes: Vec<Value> = node_arr
+        .map(|arr| arr.iter().take(MAX_SUMMARY_NODES).map(summarize_node).collect())
         .unwrap_or_default();
-    let edges: Vec<Value> = doc
-        .get("edges")
-        .and_then(Value::as_array)
+    let edge_arr = doc.get("edges").and_then(Value::as_array);
+    let total_edges = edge_arr.map(Vec::len).unwrap_or(0);
+    let edges: Vec<Value> = edge_arr
         .map(|arr| {
             arr.iter()
                 .filter_map(|e| {
@@ -245,6 +263,7 @@ fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) ->
                     let to = e.get("to").and_then(Value::as_str)?;
                     Some(json!({ "from": from, "to": to }))
                 })
+                .take(MAX_SUMMARY_EDGES)
                 .collect()
         })
         .unwrap_or_default();
@@ -255,6 +274,10 @@ fn summarize_canvas(meta: &nomifun_workshop::WorkshopCanvasMeta, doc: &Value) ->
         "updated_at": meta.updated_at,
         "nodes": nodes,
         "edges": edges,
+        "total_nodes": total_nodes,
+        "total_edges": total_edges,
+        "nodes_truncated": total_nodes > MAX_SUMMARY_NODES,
+        "edges_truncated": total_edges > MAX_SUMMARY_EDGES,
     })
 }
 
@@ -355,4 +378,48 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         |deps, _ctx, p| get_task(deps, p),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta() -> nomifun_workshop::WorkshopCanvasMeta {
+        nomifun_workshop::WorkshopCanvasMeta {
+            id: "wsc_1".into(),
+            title: "c".into(),
+            thumbnail_url: None,
+            node_count: 250,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn summarize_canvas_caps_nodes_and_edges() {
+        let nodes: Vec<Value> = (0..250)
+            .map(|i| json!({ "id": format!("n{i}"), "kind": "image", "data": {} }))
+            .collect();
+        let edges: Vec<Value> = (0..450)
+            .map(|i| json!({ "from": format!("n{i}"), "to": format!("n{}", i + 1) }))
+            .collect();
+        let doc = json!({ "nodes": nodes, "edges": edges });
+        let summary = summarize_canvas(&meta(), &doc);
+        assert_eq!(summary["nodes"].as_array().unwrap().len(), MAX_SUMMARY_NODES);
+        assert_eq!(summary["edges"].as_array().unwrap().len(), MAX_SUMMARY_EDGES);
+        assert_eq!(summary["total_nodes"], 250);
+        assert_eq!(summary["total_edges"], 450);
+        assert_eq!(summary["nodes_truncated"], true);
+        assert_eq!(summary["edges_truncated"], true);
+    }
+
+    #[test]
+    fn summarize_canvas_small_not_truncated() {
+        let doc = json!({ "nodes": [ { "id": "a", "kind": "image" } ], "edges": [] });
+        let summary = summarize_canvas(&meta(), &doc);
+        assert_eq!(summary["nodes_truncated"], false);
+        assert_eq!(summary["edges_truncated"], false);
+        assert_eq!(summary["total_nodes"], 1);
+        assert_eq!(summary["nodes"].as_array().unwrap().len(), 1);
+    }
 }

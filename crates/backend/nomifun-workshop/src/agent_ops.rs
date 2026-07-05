@@ -211,6 +211,18 @@ impl AgentOpsQueue {
             .is_some_and(|c| now_ms().saturating_sub(c.last_poll_ms) <= OPEN_WINDOW_MS)
     }
 
+    /// Register that a frontend just opened this canvas for editing (its doc was
+    /// loaded via the REST canvas-doc GET). Bumps the open marker WITHOUT
+    /// returning ops, collapsing the "opened but the first pending-ops poll has
+    /// not reached the backend yet" window to milliseconds — otherwise an
+    /// agent's concurrent `apply_ops` in that gap would be direct-written to
+    /// `canvas.json` and then silently clobbered by the editor's first autosave.
+    pub fn mark_open(&self, canvas_id: &str) {
+        let mut guard = self.inner.lock().unwrap();
+        let entry = guard.entry(canvas_id.to_string()).or_default();
+        entry.last_poll_ms = now_ms();
+    }
+
     /// Append ops (already assigned op ids) to a canvas's queue.
     pub fn enqueue(&self, canvas_id: &str, ops: Vec<PendingOp>) {
         if ops.is_empty() {

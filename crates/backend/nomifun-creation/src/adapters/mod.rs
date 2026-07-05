@@ -171,6 +171,40 @@ pub(crate) async fn error_from_response(resp: reqwest::Response) -> crate::types
         .with_http_status(status.as_u16())
 }
 
+/// Hard ceiling on a single downloaded artifact / video-content body. Streams
+/// are aborted once this is exceeded so a large or hostile provider response
+/// cannot exhaust process memory.
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a response body fully into memory under a hard byte cap. Rejects early
+/// on an oversized `Content-Length`, then streams chunk-by-chunk (Content-Length
+/// may be absent or spoofed) aborting the moment the running total would exceed
+/// `max_bytes`. Replaces the unbounded `resp.bytes()` used for artifact/video
+/// downloads.
+pub(crate) async fn read_body_capped(
+    mut resp: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>, crate::types::CreationError> {
+    use crate::types::CreationError;
+    if let Some(len) = resp.content_length()
+        && len > max_bytes
+    {
+        return Err(CreationError::provider_error(format!(
+            "artifact too large: declared {len} bytes exceeds cap of {max_bytes}"
+        )));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
+        if buf.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(CreationError::provider_error(format!(
+                "artifact exceeded size cap of {max_bytes} bytes"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +276,29 @@ mod tests {
         assert_eq!(param_count(&serde_json::json!({})), 1); // default
         assert_eq!(param_prompt(&serde_json::json!({})), "");
         assert!(param_size(&serde_json::json!({})).is_none());
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_enforces_cap() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/artifact"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 100]))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let url = format!("{}/artifact", server.uri());
+
+        // Over the cap → error (rejected on the declared Content-Length).
+        let resp = client.get(&url).send().await.unwrap();
+        assert!(read_body_capped(resp, 10).await.is_err(), "oversized body must be rejected");
+
+        // Within the cap → full body returned (streaming accumulation path).
+        let resp2 = client.get(&url).send().await.unwrap();
+        let body = read_body_capped(resp2, 1024).await.unwrap();
+        assert_eq!(body.len(), 100);
     }
 }
