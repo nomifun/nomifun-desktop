@@ -25,6 +25,7 @@ mod tag_setting;
 mod terminal_session;
 mod user;
 mod webhook;
+mod workshop;
 
 pub use acp_session::AcpSessionRow;
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
@@ -63,3 +64,4 @@ pub use tag_setting::TagSettingRow;
 pub use terminal_session::TerminalSessionRow;
 pub use user::User;
 pub use webhook::WebhookRow;
+pub use workshop::{CreationTaskRow, WorkshopAssetRow, WorkshopCanvasRow};
