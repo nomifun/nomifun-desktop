@@ -119,8 +119,8 @@
     "node": {
       "tokens": "tok"
     },
-    "canvas": {
-      "mainNode": "main · 主 agent"
+    "question": {
+      "badge": "待作答"
     },
     "timing": {
       "took": "用时 {{value}}",
