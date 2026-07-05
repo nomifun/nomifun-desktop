@@ -13,7 +13,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { type NodeProps, useNodesData, useStore } from '@xyflow/react';
-import { DeleteFour, Info, Left as LeftArrow, PreviewOpen } from '@icon-park/react';
+import { DeleteFour, Info, Left, PreviewOpen } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useCanvasNode } from '../CanvasNodeContext';
 import { useWorkshopMedia } from '../media';
@@ -76,7 +76,7 @@ function OutputNodeImpl({ id, selected }: NodeProps<OutputFlowNode>) {
           <div className='relative min-h-0 flex-1' style={{ background: 'var(--color-fill-1)' }}>
             {!sourceId || !resolved ? (
               <div className='flex h-full w-full flex-col items-center justify-center gap-6px px-14px text-center text-[var(--color-text-3)]'>
-                <LeftArrow theme='outline' size={18} strokeWidth={3} />
+                <Left theme='outline' size={18} strokeWidth={3} />
                 <span className='text-11px leading-[1.5]'>
                   {t('workshopCanvas.node.output.empty', { defaultValue: '从左侧连入一个节点以检视其当前结果' })}
                 </span>
