@@ -614,6 +614,7 @@ export type I18nKey =
   | 'conversation.skill_generator.type_rule'
   | 'conversation.skill_generator.type_skill'
   | 'conversation.skills.loaded'
+  | 'conversation.slashCommands.compact.description'
   | 'conversation.steer.button'
   | 'conversation.steer.fallbackQueued'
   | 'conversation.thinking.complete'
