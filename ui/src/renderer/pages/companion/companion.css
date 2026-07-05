@@ -37,6 +37,26 @@
   cursor: grabbing;
 }
 
+/* Stable bottom-anchored figure island.
+   The native window grows upward for chat bubbles, so viewport-anchored chrome
+   would move on screen. Put badge/suggestions on the same stage as the figure:
+   screen Y = window bottom - bottom chrome - figure height, independent of
+   chat-sized window height. */
+.nomi-companion-stage {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.nomi-companion-figure-hit {
+  flex: none;
+  line-height: 0;
+}
+
 /* ---- forehead reply bubble ---- */
 
 .nomi-companion-bubble {
@@ -218,8 +238,9 @@
 
 .nomi-companion-badge {
   position: absolute;
-  top: 10px;
-  right: 26px;
+  top: 4px;
+  right: 12px;
+  transform: translate(45%, -25%);
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
@@ -526,6 +547,7 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
   padding: 6px;
   z-index: 5;
+  line-height: 1.4;
 }
 
 .nomi-companion-suggestions__item {
