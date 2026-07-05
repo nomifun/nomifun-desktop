@@ -46,12 +46,12 @@ describe('MessageTips structured error presentation', () => {
     const headerRule = cssRuleFor('.message-error-note__details .arco-collapse-item-header');
     const iconRule = cssRuleFor('.message-error-note__details .arco-collapse-item-icon-hover');
 
-    expect(headerRule).toContain('display: flex');
-    expect(headerRule).toContain('align-items: center');
-    expect(headerRule).toContain('justify-content: flex-start');
-    expect(iconRule).toContain('position: static');
-    expect(iconRule).toContain('width: 16px');
-    expect(iconRule).toContain('transform: none');
+    expect(headerRule.includes('display: flex')).toBe(true);
+    expect(headerRule.includes('align-items: center')).toBe(true);
+    expect(headerRule.includes('justify-content: flex-start')).toBe(true);
+    expect(iconRule.includes('position: static')).toBe(true);
+    expect(iconRule.includes('width: 16px')).toBe(true);
+    expect(iconRule.includes('transform: none')).toBe(true);
   });
 
   test('pins the feedback action to a centered footer slot without inherited icon offset', () => {
