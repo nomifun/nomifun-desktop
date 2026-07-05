@@ -8,6 +8,9 @@
 //!   (t2i / i2i).
 //! - [`openai_video`] — OpenAI-compatible async `/v1/videos` submit→poll→content
 //!   (t2v / i2v).
+//! - [`openai_chat`] — OpenAI-compatible sync `/v1/chat/completions` (`text`);
+//!   the reply is returned inline as `text/plain` UTF-8.
+//! - [`gemini_text`] — Google `:generateContent` text mode (`text`).
 //!
 //! `ark` (火山方舟) and `modelscope` are P1 stubs (empty module files that keep
 //! the extension seam explicit). Register the live adapters on the
@@ -23,7 +26,9 @@ use crate::types::MediaCapability;
 
 pub(crate) mod ark;
 pub(crate) mod gemini_image;
+pub(crate) mod gemini_text;
 pub(crate) mod modelscope;
+pub(crate) mod openai_chat;
 pub(crate) mod openai_images;
 pub(crate) mod openai_video;
 
@@ -33,7 +38,9 @@ pub fn default_adapters(http: reqwest::Client) -> Vec<Arc<dyn MediaProvider>> {
     vec![
         Arc::new(openai_images::OpenAiImagesAdapter::new(http.clone())),
         Arc::new(gemini_image::GeminiImageAdapter::new(http.clone())),
-        Arc::new(openai_video::OpenAiVideoAdapter::new(http)),
+        Arc::new(openai_video::OpenAiVideoAdapter::new(http.clone())),
+        Arc::new(openai_chat::OpenAiChatAdapter::new(http.clone())),
+        Arc::new(gemini_text::GeminiTextAdapter::new(http)),
     ]
 }
 
@@ -42,9 +49,10 @@ pub fn default_adapters(http: reqwest::Client) -> Vec<Arc<dyn MediaProvider>> {
 /// - video caps → `openai_video`;
 /// - `gemini` platform or a model whose name contains `gemini` → `gemini_image`
 ///   (which serves t2i/i2i; inpaint always falls to `openai_images`);
-/// - everything else image → `openai_images`.
+/// - everything else image → `openai_images`;
+/// - `text` → `gemini_text` (gemini platform/model) or `openai_chat`.
 ///
-/// Returns `None` for capabilities no adapter routes yet (`tts` / `text`).
+/// Returns `None` for capabilities no adapter routes yet (`tts`).
 pub fn route_adapter_id(cap: MediaCapability, platform: &str, model: &str) -> Option<&'static str> {
     use MediaCapability::*;
     match cap {
@@ -57,7 +65,14 @@ pub fn route_adapter_id(cap: MediaCapability, platform: &str, model: &str) -> Op
                 Some("openai_images")
             }
         }
-        Tts | Text => None,
+        Text => {
+            if is_gemini(platform, model) {
+                Some("gemini_text")
+            } else {
+                Some("openai_chat")
+            }
+        }
+        Tts => None,
     }
 }
 
@@ -184,8 +199,11 @@ mod tests {
         // video
         assert_eq!(route_adapter_id(T2v, "openai", "sora-2"), Some("openai_video"));
         assert_eq!(route_adapter_id(I2v, "openai", "sora-2"), Some("openai_video"));
+        // text → openai_chat by default, gemini_text by platform OR model substring
+        assert_eq!(route_adapter_id(Text, "openai", "gpt-4o"), Some("openai_chat"));
+        assert_eq!(route_adapter_id(Text, "gemini", "gemini-2.5-pro"), Some("gemini_text"));
+        assert_eq!(route_adapter_id(Text, "custom", "gemini-flash"), Some("gemini_text"));
         // unrouted
-        assert_eq!(route_adapter_id(Text, "openai", "gpt-4o"), None);
         assert_eq!(route_adapter_id(Tts, "openai", "tts-1"), None);
     }
 

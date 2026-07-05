@@ -49,8 +49,9 @@ import { openImageEditor, type ImageEditorMode } from '../editor';
 import { patchAsset, uploadAsset } from '../api';
 import { readAssetDrag, type WorkshopAssetDragPayload } from '../lib/dnd';
 import { loadWorkshopMedia, revokeWorkshopMedia } from '../lib/media';
-import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc } from '../types';
+import type { WorkshopAsset, WorkshopCanvasBackground, WorkshopCanvasDoc, WorkshopGeneratorMode } from '../types';
 import { CanvasNodeContext, type CanvasNodeApi } from './CanvasNodeContext';
+import { useAgentOps, type AgentAddNodeOp, type AgentConnectOp } from './agentOps';
 import { useCanvasHistory } from './history';
 import { isImageFile, isVideoFile, pickFiles, readImageSize } from './media';
 import { useDocPersistence, type SaveState } from './persistence';
@@ -382,10 +383,6 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
       if (!node || node.type !== 'image') return;
       const data = node.data as { assetId?: string; naturalWidth?: number; naturalHeight?: number };
       if (!data.assetId) return;
-      if (mode === 'mask') {
-        message.info(t('workshopCanvas.toast.maskDeferred', { defaultValue: '局部重绘将在生成卡片接通后可用' }));
-        return;
-      }
       let src: string;
       try {
         src = await loadWorkshopMedia(data.assetId);
@@ -423,6 +420,20 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
         }
         void cols;
         if (created.length) addNodes(created, newEdges);
+      } else if (result.type === 'mask') {
+        // Mask repaint → upload the mask, then spawn an inpaint generation card
+        // to the right (original image wired in as reference, mask as its mask),
+        // seeded with the repaint instruction and set to auto-run on mount.
+        const maskFile = new File([result.maskBlob], 'mask.png', { type: result.maskBlob.type || 'image/png' });
+        const maskAsset = await uploadFile(maskFile);
+        if (!maskAsset) return;
+        const pos = { x: node.position.x + (node.width ?? 240) + 60, y: node.position.y };
+        const genNode = makeGeneratorNode(pos, 'image', {
+          prompt: result.prompt,
+          maskAssetId: maskAsset.id,
+          autoRun: true,
+        });
+        addNodes([genNode], [{ id: newEdgeId(), source: node.id, target: genNode.id }]);
       }
     },
     [message, t, uploadFile, updateNodeData, addNodes]
@@ -903,6 +914,59 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     pasteInternal,
     pasteFromSystem,
   ]);
+
+  // ── 画布助手 (agent ops) — apply queued agent operations while the canvas is open ──
+  // Poll the backend op queue and route each op through the same react-flow
+  // mutation primitives a user's edits use (so history + autosave apply). The
+  // poll registers this canvas as "open", keeping backend writes queued for us.
+  const agentWaterfallRef = useRef(0);
+  const agentAddNode = useCallback(
+    (op: AgentAddNodeOp) => {
+      const spec = op.node;
+      const n = agentWaterfallRef.current;
+      agentWaterfallRef.current = (n + 1) % 8;
+      const center = viewportCenterFlow();
+      const pos = { x: (spec.x ?? center.x) + n * 32, y: (spec.y ?? center.y) + n * 32 };
+      const data = (spec.data ?? {}) as Record<string, unknown>;
+      let node: WorkshopFlowNode;
+      switch (spec.kind) {
+        case 'text':
+          node = makeTextNode(pos, data);
+          break;
+        case 'video':
+          node = makeVideoNode(pos, data);
+          break;
+        case 'generator':
+          node = makeGeneratorNode(pos, (data.mode as WorkshopGeneratorMode) ?? 'image', data);
+          break;
+        case 'image':
+        default:
+          node = makeImageNode(pos, data);
+          break;
+      }
+      addNodes([node]);
+    },
+    [viewportCenterFlow, addNodes]
+  );
+
+  const agentConnect = useCallback(
+    (op: AgentConnectOp) => {
+      setEdges((es) => {
+        if (es.some((e) => e.source === op.from_node_id && e.target === op.to_node_id)) return es;
+        return [...es, { id: newEdgeId(), source: op.from_node_id, target: op.to_node_id }];
+      });
+    },
+    [setEdges]
+  );
+
+  useAgentOps(canvasId, {
+    addNode: agentAddNode,
+    connect: agentConnect,
+    updateNodeData,
+    deleteNode: removeNode,
+    onApplied: (count) =>
+      message.info(t('workshopAssistant.applied.ops', { count, defaultValue: 'Nomi 更新了画布（{{count}} 项操作）' })),
+  });
 
   // ── Render ──────────────────────────────────────────────────────────────────
 

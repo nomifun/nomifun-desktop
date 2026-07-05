@@ -19,6 +19,7 @@ use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
 use crate::MAX_ASSET_BYTES;
+use crate::agent_ops::PendingOp;
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
 use crate::service::{AssetPatch, AssetQuery, NewAssetUpload, NewTextAsset};
 use crate::state::WorkshopRouterState;
@@ -42,6 +43,14 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         )
         .route("/api/workshop/canvases/{id}/doc", axum::routing::put(put_doc))
         .route("/api/workshop/canvases/{id}/export", get(export_canvas))
+        .route(
+            "/api/workshop/canvases/{id}/pending-ops",
+            get(get_pending_ops),
+        )
+        .route(
+            "/api/workshop/canvases/{id}/pending-ops/ack",
+            post(ack_pending_ops),
+        )
         .route("/api/workshop/canvas-thumbs/{id}", get(serve_canvas_thumb))
         .route("/api/workshop/gc", post(run_gc))
         .route("/api/workshop/assets", get(list_assets).post(create_text_asset))
@@ -117,6 +126,48 @@ async fn put_doc(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let updated_at = state.service.save_doc(&id, &req.doc).await?;
     Ok(Json(ApiResponse::ok(PutDocResponse { updated_at })))
+}
+
+// ── 画布助手 (agent-op) pending queue ─────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct PendingOpsResponse {
+    ops: Vec<PendingOp>,
+}
+
+/// Drain the pending agent ops for an open canvas (idempotent — ops stay until
+/// acked). Polling this also registers the canvas as "open" so the agent's writes
+/// route to this frontend rather than the backend direct applier.
+async fn get_pending_ops(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<PendingOpsResponse>>, AppError> {
+    let ops = state.service.take_pending_ops(&id).await?;
+    Ok(Json(ApiResponse::ok(PendingOpsResponse { ops })))
+}
+
+#[derive(Deserialize)]
+struct AckOpsRequest {
+    #[serde(default)]
+    op_ids: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct AckOpsResponse {
+    acked: usize,
+}
+
+/// Acknowledge (remove) agent ops the frontend has applied.
+async fn ack_pending_ops(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<AckOpsRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<AckOpsResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    state.service.ack_agent_ops(&id, &req.op_ids);
+    Ok(Json(ApiResponse::ok(AckOpsResponse { acked: req.op_ids.len() })))
 }
 
 #[derive(Deserialize)]

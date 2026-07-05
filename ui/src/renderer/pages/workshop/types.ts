@@ -261,6 +261,18 @@ export interface WorkshopGeneratorNodeData {
   resultAssetIds: string[];
   batch?: WorkshopGeneratorBatch;
   errorMessage?: string;
+  /**
+   * Append-only (M7): mask asset (`wsa_…`) for local-repaint (inpaint) cards
+   * spawned from the image editor's mask tool. Present ⇒ image-mode runs derive
+   * the `inpaint` capability and attach the mask as a `role: 'mask'` input.
+   */
+  maskAssetId?: string;
+  /**
+   * Append-only (M7): transient flag set when a card is spawned mid-chain
+   * (mask repaint / continuous-edit) so it should run itself once on mount.
+   * The card clears the flag before dispatching so it never re-fires.
+   */
+  autoRun?: boolean;
 }
 
 /**
