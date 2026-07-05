@@ -305,7 +305,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({
   leadThinking,
   activeTaskId,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // The static `fitView` prop fits ONCE at initial mount. If the canvas ever
   // mounts inside a COLLAPSED / ~0-size
@@ -473,9 +473,10 @@ const DagCanvas: React.FC<DagCanvasProps> = ({
       // 廉价签名（需求3 性能）：手工拼渲染相关字段，替代整对象 JSON.stringify。
       // 覆盖 data 的全部“信息源”字段——status/title/kind/output_summary（verify/
       // judge/loop pill 全由它派生）/分组/成员/锁/attempt/tokens/提问/选中/坐标/
-      // 入场序号。新增 TaskNodeData 字段时必须同步加入这里，否则该字段变化不会
-      // 触发节点对象重建（渲染不更新）。
+      // 入场序号/语言（本地化文案随语言切换必须重建）。新增 TaskNodeData 字段时
+      // 必须同步加入这里，否则该字段变化不会触发节点对象重建（渲染不更新）。
       const sig = [
+        i18n.language,
         task.status,
         task.title,
         task.kind,
@@ -572,7 +573,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({
       }
     }
     return taskNodes;
-  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t, activeTaskId]);
+  }, [detail?.tasks, detail?.deps, assignmentByTask, memberById, handleOpenTask, t, i18n.language, activeTaskId]);
 
   const edges = useMemo<Edge[]>(() => {
     const tasks = detail?.tasks ?? [];
