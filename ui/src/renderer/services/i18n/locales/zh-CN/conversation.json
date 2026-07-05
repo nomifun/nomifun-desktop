@@ -571,6 +571,11 @@
     "action": "编辑",
     "banner": "正在编辑消息——发送后将从这里重新生成"
   },
+  "slashCommands": {
+    "compact": {
+      "description": "压缩会话上下文"
+    }
+  },
   "clearContext": {
     "description": "清空会话上下文",
     "success": "上下文已清空",
