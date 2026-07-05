@@ -1,7 +1,19 @@
-//! `/api/workshop/*` route handlers (contract §3.1/§3.2). Owner-only — mounted
-//! behind the app's authenticated router (same auth extractor as the knowledge
-//! routes). The multipart upload route raises the body limit to
-//! [`MAX_ASSET_BYTES`]; every other route rides the app's default limit.
+//! `/api/workshop/*` route handlers (contract §3.1/§3.2). The management surface
+//! (list/create/patch/delete, doc read/write, upload, export/import, gc,
+//! agent-ops) is owner-only — mounted behind the app's authenticated router
+//! (same auth extractor as the knowledge routes). The multipart upload route
+//! raises the body limit to [`MAX_ASSET_BYTES`]; every other route rides the
+//! app's default limit.
+//!
+//! The two **read-only binary serve** routes ([`serve_file`] +
+//! [`serve_canvas_thumb`]) instead live on the auth-EXEMPT public router
+//! ([`workshop_public_routes`]): `<img>` / `<video>` / `new Image()` loads carry
+//! no custom-header API, so under the desktop's `TrustLocalToken` policy they
+//! cannot present the `x-nomi-local-trust` header — the authenticated router
+//! would 403 every asset thumbnail and canvas gallery image. They are GET-only,
+//! serve opaque unguessable ids (`wsa_`/`wsc_` + uuidv7 — a capability URL, not
+//! an enumeration surface), keep the service's traversal sandbox, and never
+//! extract `CurrentUser` (see the note on the public router).
 
 use axum::Router;
 use axum::body::Body;
@@ -51,14 +63,34 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
             "/api/workshop/canvases/{id}/pending-ops/ack",
             post(ack_pending_ops),
         )
-        .route("/api/workshop/canvas-thumbs/{id}", get(serve_canvas_thumb))
         .route("/api/workshop/gc", post(run_gc))
         .route("/api/workshop/assets", get(list_assets).post(create_text_asset))
         .route("/api/workshop/assets/{id}", axum::routing::patch(patch_asset).delete(delete_asset))
-        .route("/api/workshop/files/{asset_id}", get(serve_file))
         .with_state(state)
         .merge(upload_router)
 }
+
+/// Auth-EXEMPT read-only binary serve routes (see the module doc). GET-only, two
+/// prefixes only, opaque unguessable ids. Merged into the app's public router
+/// next to the other auth-exempt serve routes (logos / office proxy / companion
+/// figure images). Every write / list / delete route stays under auth in
+/// [`workshop_routes`].
+///
+/// These handlers MUST NOT extract `Extension<CurrentUser>`: `<img>`/`<video>`
+/// loads carry no trust header, so `trust_resolve_middleware` injects no
+/// `CurrentUser` and that extractor would 500 the very requests this router
+/// exists to serve.
+pub fn workshop_public_routes(state: WorkshopRouterState) -> Router {
+    Router::new()
+        .route("/api/workshop/files/{asset_id}", get(serve_file))
+        .route("/api/workshop/canvas-thumbs/{id}", get(serve_canvas_thumb))
+        .with_state(state)
+}
+
+/// `Cache-Control` for served binaries: privately cacheable for an hour. Ids are
+/// content-immutable capability URLs, but `private` keeps shared proxies from
+/// caching a user's media.
+const SERVE_CACHE_CONTROL: &str = "private, max-age=3600";
 
 // ── canvases ────────────────────────────────────────────────────────────────
 
@@ -264,13 +296,21 @@ async fn run_gc(
     })))
 }
 
+/// AUTH-EXEMPT (mounted on [`workshop_public_routes`]): no `CurrentUser`
+/// extractor. Serves a canvas gallery thumbnail (JPEG).
 async fn serve_canvas_thumb(
     State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let served = state.service.serve_canvas_thumbnail(&id).await?;
-    Ok(([(header::CONTENT_TYPE, served.mime)], Body::from(served.bytes)).into_response())
+    Ok((
+        [
+            (header::CONTENT_TYPE, served.mime),
+            (header::CACHE_CONTROL, SERVE_CACHE_CONTROL.to_string()),
+        ],
+        Body::from(served.bytes),
+    )
+        .into_response())
 }
 
 // ── assets ────────────────────────────────────────────────────────────────
@@ -281,6 +321,11 @@ struct ListAssetsQuery {
     collection: Option<String>,
     q: Option<String>,
     in_library: Option<String>,
+    /// Append-only (M10a): `ungrouped=1` returns only assets with no collection
+    /// (`collection IS NULL OR ''`). Mutually exclusive with `collection` — when
+    /// set, `collection` is ignored so the two never fight.
+    #[serde(default)]
+    ungrouped: Option<String>,
     page: Option<i64>,
     page_size: Option<i64>,
 }
@@ -300,13 +345,20 @@ async fn list_assets(
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListAssetsQuery>,
 ) -> Result<Json<ApiResponse<AssetListResponse>>, AppError> {
+    let ungrouped = query.ungrouped.as_deref().map(parse_bool_flag).unwrap_or(false);
     let page = state
         .service
         .list_assets(AssetQuery {
             kind: query.kind.filter(|s| !s.trim().is_empty()),
-            collection: query.collection.filter(|s| !s.trim().is_empty()),
+            // `ungrouped` wins over `collection` (contract: mutually exclusive).
+            collection: if ungrouped {
+                None
+            } else {
+                query.collection.filter(|s| !s.trim().is_empty())
+            },
             q: query.q,
             in_library: query.in_library.as_deref().map(parse_bool_flag),
+            ungrouped,
             page: query.page.unwrap_or(1),
             page_size: query.page_size.unwrap_or(30),
         })
@@ -490,16 +542,21 @@ struct FileQuery {
     thumb: Option<String>,
 }
 
+/// AUTH-EXEMPT (mounted on [`workshop_public_routes`]): no `CurrentUser`
+/// extractor. Serves an asset's original binary (or, with `?thumb=1`, its
+/// thumbnail). Traversal-safe via the service; missing → 404.
 async fn serve_file(
     State(state): State<WorkshopRouterState>,
-    Extension(_user): Extension<CurrentUser>,
     Path(asset_id): Path<String>,
     Query(query): Query<FileQuery>,
 ) -> Result<Response, AppError> {
     let thumb = query.thumb.as_deref().map(parse_bool_flag).unwrap_or(false);
     let served = state.service.serve_file(&asset_id, thumb).await?;
     Ok((
-        [(header::CONTENT_TYPE, served.mime)],
+        [
+            (header::CONTENT_TYPE, served.mime),
+            (header::CACHE_CONTROL, SERVE_CACHE_CONTROL.to_string()),
+        ],
         Body::from(served.bytes),
     )
         .into_response())

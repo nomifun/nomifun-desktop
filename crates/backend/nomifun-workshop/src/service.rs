@@ -86,6 +86,10 @@ pub struct AssetQuery {
     pub collection: Option<String>,
     pub q: Option<String>,
     pub in_library: Option<bool>,
+    /// Append-only (M10a): when `true`, return only assets with no collection
+    /// (`collection IS NULL OR ''`). The caller keeps this mutually exclusive
+    /// with `collection`.
+    pub ungrouped: bool,
     pub page: i64,
     pub page_size: i64,
 }
@@ -683,6 +687,7 @@ impl WorkshopService {
                 collection: query.collection.as_deref(),
                 q: query.q.as_deref().filter(|s| !s.trim().is_empty()),
                 in_library: query.in_library,
+                ungrouped: query.ungrouped,
                 page: query.page,
                 page_size: query.page_size,
             })
@@ -1425,6 +1430,61 @@ mod tests {
         assert!(svc.serve_file(&orphan.id, false).await.is_err(), "orphan row gone");
         assert!(svc.serve_file(&kept.id, false).await.is_ok(), "library asset kept");
         assert!(!stray.exists(), "stray file swept");
+    }
+
+    #[tokio::test]
+    async fn list_assets_ungrouped_filters_serverside() {
+        let (svc, _dir) = service().await;
+        // Two ungrouped text assets (no collection) + one in a named collection.
+        svc.create_text_asset(NewTextAsset {
+            title: "散图".into(),
+            text_content: "x".into(),
+            collection: None,
+            tags: None,
+            in_library: Some(true),
+        })
+        .await
+        .unwrap();
+        svc.create_text_asset(NewTextAsset {
+            title: "散图2".into(),
+            text_content: "y".into(),
+            // A whitespace-only collection normalizes to NULL → still ungrouped.
+            collection: Some("   ".into()),
+            tags: None,
+            in_library: Some(true),
+        })
+        .await
+        .unwrap();
+        svc.create_text_asset(NewTextAsset {
+            title: "角色图".into(),
+            text_content: "z".into(),
+            collection: Some("角色".into()),
+            tags: None,
+            in_library: Some(true),
+        })
+        .await
+        .unwrap();
+
+        // ungrouped=true → only the two collection-less assets.
+        let page = svc
+            .list_assets(AssetQuery { ungrouped: true, page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.items.iter().all(|a| a.collection.is_none()));
+
+        // Named collection filter is unaffected.
+        let grouped = svc
+            .list_assets(AssetQuery {
+                collection: Some("角色".into()),
+                page: 1,
+                page_size: 50,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(grouped.total, 1);
+        assert_eq!(grouped.items[0].collection.as_deref(), Some("角色"));
     }
 
     #[tokio::test]

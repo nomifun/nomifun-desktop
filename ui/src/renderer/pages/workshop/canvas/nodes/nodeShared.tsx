@@ -23,10 +23,13 @@ const HANDLE_STYLE: React.CSSProperties = {
   background: 'rgb(var(--primary-6))',
 };
 
-export const NodeHandles: React.FC<{ connectable?: boolean }> = ({ connectable = true }) => (
+export const NodeHandles: React.FC<{ connectable?: boolean; sides?: 'both' | 'target' | 'source' }> = ({
+  connectable = true,
+  sides = 'both',
+}) => (
   <>
-    <Handle type='target' position={Position.Left} isConnectable={connectable} style={HANDLE_STYLE} />
-    <Handle type='source' position={Position.Right} isConnectable={connectable} style={HANDLE_STYLE} />
+    {sides !== 'source' && <Handle type='target' position={Position.Left} isConnectable={connectable} style={HANDLE_STYLE} />}
+    {sides !== 'target' && <Handle type='source' position={Position.Right} isConnectable={connectable} style={HANDLE_STYLE} />}
   </>
 );
 

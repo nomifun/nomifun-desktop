@@ -27,6 +27,11 @@
     "video": "Video",
     "videoUpload": "Upload video",
     "generator": "Generator card",
+    "flowNodes": "Flow nodes",
+    "loop": "Loop node",
+    "compare": "Compare node",
+    "output": "Output node",
+    "compareUpstream": "Compare with upstream",
     "duplicate": "Duplicate",
     "delete": "Delete",
     "deleteEdge": "Delete edge",
@@ -37,7 +42,9 @@
     "savedToLibrary": "Saved to asset library",
     "saveToLibraryFailed": "Failed to save to library",
     "downloadFailed": "Download failed",
-    "maskDeferred": "Inpainting becomes available once the generator card is wired up"
+    "maskDeferred": "Inpainting becomes available once the generator card is wired up",
+    "groupNeedTwo": "Select at least two groupable nodes",
+    "noUpstreamImage": "This image has no upstream image source to compare"
   },
   "preview": {
     "zoomIn": "Zoom in",
@@ -60,6 +67,8 @@
       "copy": "Ctrl/⌘ + C",
       "paste": "Ctrl/⌘ + V",
       "duplicate": "Ctrl/⌘ + D",
+      "group": "Ctrl/⌘ + G",
+      "ungroup": "Ctrl/⌘ + Shift + G",
       "delete": "Delete / Backspace",
       "undo": "Ctrl/⌘ + Z",
       "redo": "Ctrl/⌘ + Shift + Z / Ctrl + Y",
@@ -76,6 +85,8 @@
       "copy": "Copy nodes",
       "paste": "Paste (incl. system clipboard image / text)",
       "duplicate": "Duplicate",
+      "group": "Group",
+      "ungroup": "Ungroup",
       "delete": "Delete selected nodes or edges",
       "undo": "Undo",
       "redo": "Redo",
@@ -141,6 +152,49 @@
         "success": "Done",
         "error": "Error"
       }
+    },
+    "loop": {
+      "title": "Loop",
+      "noTarget": "Drag the right anchor to a generator card",
+      "noModel": "The target card has no usable model",
+      "count": "Rounds",
+      "start": "Start",
+      "batch": "Batch",
+      "template": "Count injection",
+      "templatePlaceholder": "Generating image {i}",
+      "previewLabel": "This round",
+      "success": "OK",
+      "failed": "Failed",
+      "done": "Done",
+      "run": "Run loop",
+      "stop": "Stop",
+      "mode": {
+        "serial": "Serial",
+        "parallel": "Parallel"
+      },
+      "targetMode": {
+        "image": "Image gen",
+        "video": "Video gen",
+        "text": "Text gen"
+      }
+    },
+    "compare": {
+      "title": "Compare",
+      "divider": "Compare divider",
+      "needTwo": "Wire two image sources to compare ({{n}}/2)"
+    },
+    "output": {
+      "title": "Output preview",
+      "empty": "Wire a node into the left to inspect its current result",
+      "preview": "Open preview",
+      "textUpstream": "(upstream text node)",
+      "loadFailed": "Failed to load"
+    },
+    "group": {
+      "defaultTitle": "Group",
+      "ungroup": "Ungroup (keep members)",
+      "deleteWithChildren": "Delete group & members",
+      "rename": "Rename group"
     }
   }
 }

@@ -37,6 +37,15 @@ export interface CanvasNodeApi {
   downloadAsset: (assetId: string, filename?: string) => void;
   /** Open the image editor for an image node in a specific mode. */
   editImageNode: (nodeId: string, mode: ImageEditorMode) => void;
+  /**
+   * Append-only (M8): open the big-image lightbox on an explicit asset list
+   * (used by the output / compare nodes to preview a specific upstream result).
+   */
+  openImagePreview: (assetIds: string[], startIndex?: number) => void;
+  /** Append-only (M8): dissolve a group, keeping its members (absolute coords restored). */
+  ungroupNode: (groupId: string) => void;
+  /** Append-only (M8): delete a group together with every member node. */
+  deleteGroupWithChildren: (groupId: string) => void;
   /** Record a discrete history step + schedule a save (e.g. after resize end). */
   commitInteraction: () => void;
   beginInteraction: () => void;
@@ -56,6 +65,9 @@ const DEFAULT_API: CanvasNodeApi = {
   saveAssetToLibrary: noop,
   downloadAsset: noop,
   editImageNode: noop,
+  openImagePreview: noop,
+  ungroupNode: noop,
+  deleteGroupWithChildren: noop,
   commitInteraction: noop,
   beginInteraction: noop,
 };

@@ -135,6 +135,17 @@ export interface RunPlanInput {
   mentions: string[];
   maskAssetId?: string;
   basePrompt: string;
+  /**
+   * Append-only (M8, loop node): keep only the image references falling in the
+   * half-open window `[offset, offset+size)` of the collected image sequence.
+   * Non-image references (e.g. video) are unaffected. Absent ⇒ all images kept.
+   */
+  imageWindow?: { offset: number; size: number };
+  /**
+   * Append-only (M8, loop node): a line prepended to the assembled prompt (the
+   * rendered count-injection template). Absent ⇒ no prefix.
+   */
+  promptPrefix?: string;
 }
 
 export interface RunPlan {
@@ -174,7 +185,7 @@ async function resolveMention(ref: string, nodes: WorkshopFlowNode[]): Promise<R
  * preserving first-seen order.
  */
 export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
-  const { node, nodes, edges, mode, mentions, maskAssetId, basePrompt } = input;
+  const { node, nodes, edges, mode, mentions, maskAssetId, basePrompt, imageWindow, promptPrefix } = input;
 
   const refAssets: { assetId: string; kind: WorkshopAssetKind }[] = [];
   const texts: string[] = [];
@@ -186,11 +197,23 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
     refAssets.push({ assetId, kind });
   };
 
-  // 1) Upstream edge-connected nodes (in edge order).
+  // 1) Upstream edge-connected nodes (in edge order). A group source (M8) expands
+  //    into its members, ordered by position, so a group acts as an input group.
+  const upstreamSources: WorkshopFlowNode[] = [];
   for (const edge of edges) {
     if (edge.target !== node.id) continue;
     const src = nodes.find((n) => n.id === edge.source);
     if (!src) continue;
+    if (src.type === 'group') {
+      const members = nodes
+        .filter((n) => n.parentId === src.id)
+        .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
+      upstreamSources.push(...members);
+    } else {
+      upstreamSources.push(src);
+    }
+  }
+  for (const src of upstreamSources) {
     const contrib = nodeContribution(src);
     if (!contrib) continue;
     if (contrib.kind === 'text') {
@@ -212,10 +235,24 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
     }
   }
 
+  // 2b) Loop windowing: keep only the image references inside the window.
+  let effectiveRefs = refAssets;
+  if (imageWindow) {
+    const start = Math.max(0, Math.round(imageWindow.offset));
+    const end = start + Math.max(0, Math.round(imageWindow.size));
+    const windowed = new Set(
+      refAssets
+        .filter((r) => r.kind === 'image')
+        .slice(start, end)
+        .map((r) => r.assetId)
+    );
+    effectiveRefs = refAssets.filter((r) => r.kind !== 'image' || windowed.has(r.assetId));
+  }
+
   // 3) Build inputs.
   const inputs: CreationInput[] = [];
   let imageRefCount = 0;
-  for (const ref of refAssets) {
+  for (const ref of effectiveRefs) {
     if (ref.kind === 'image') {
       // Image references drive i2i / i2v and get numbered 图N.
       inputs.push({ asset_id: ref.assetId, role: 'reference' });
@@ -241,8 +278,10 @@ export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
     capability = imageRefCount > 0 ? 'i2i' : 't2i';
   }
 
-  // 5) Prompt (base + upstream/mention text fragments).
-  const prompt = [basePrompt.trim(), ...texts].filter((s) => s.length > 0).join('\n\n');
+  // 5) Prompt (optional count-injection prefix + base + upstream/mention text).
+  const prompt = [promptPrefix?.trim() ?? '', basePrompt.trim(), ...texts]
+    .filter((s) => s.length > 0)
+    .join('\n\n');
 
-  return { capability, inputs, prompt, referenceCount: refAssets.length };
+  return { capability, inputs, prompt, referenceCount: effectiveRefs.length };
 }
