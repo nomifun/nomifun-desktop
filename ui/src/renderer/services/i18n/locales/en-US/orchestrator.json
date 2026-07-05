@@ -119,8 +119,8 @@
     "node": {
       "tokens": "tok"
     },
-    "canvas": {
-      "mainNode": "main · lead agent"
+    "question": {
+      "badge": "Awaiting answer"
     },
     "timing": {
       "took": "Took {{value}}",
