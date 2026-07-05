@@ -111,6 +111,7 @@
   "optional": "（可选）",
   "clear": "清除",
   "unit": {
+    "hour_short": "时",
     "minute_short": "分",
     "second_short": "秒"
   }

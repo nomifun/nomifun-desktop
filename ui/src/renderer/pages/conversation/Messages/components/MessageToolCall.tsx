@@ -16,7 +16,7 @@ import { IconDown, IconRight } from '@arco-design/web-react/icon';
 import { createTwoFilesPatch } from 'diff';
 import React, { useMemo, useState } from 'react';
 import type { BadgeProps } from '@arco-design/web-react';
-import './MessageToolGroupSummary.css';
+import './MessageToolDetails.css';
 
 const statusToBadge = (status: NormalizedToolStatus): BadgeProps['status'] => {
   switch (status) {

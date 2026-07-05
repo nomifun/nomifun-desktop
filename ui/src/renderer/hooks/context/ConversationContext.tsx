@@ -41,6 +41,13 @@ export interface ConversationContextValue {
   hideSendBox?: boolean;
 
   /**
+   * True while the current conversation turn is still producing output.
+   * Message rendering uses this to keep the tail in "正文 + 过程收据" mode
+   * until the request actually settles.
+   */
+  isProcessing?: boolean;
+
+  /**
    * Loaded skill names for this conversation (snapshot from conversation.extra.skills).
    * Surfaced inside the SendBox `+` menu so users can review/jump to active skills.
    */
