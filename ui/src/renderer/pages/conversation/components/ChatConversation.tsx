@@ -12,7 +12,7 @@ import { usePresetAssistantInfo, resolveAssistantConfigId } from '@/renderer/hoo
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
 import { History } from '@icon-park/react';
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import useSWR from 'swr';
@@ -24,8 +24,12 @@ import NanobotChat from '../platforms/nanobot/NanobotChat';
 import OpenClawChat from '../platforms/openclaw/OpenClawChat';
 import RemoteChat from '../platforms/remote/RemoteChat';
 import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import { configService } from '@/common/config/configService';
+import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
+import { resolveHealModel } from '../platforms/nomi/healConversationModel';
 import { getConversationOrNull, seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
+import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
@@ -187,6 +191,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     [conversation.id]
   );
 
+  const { t } = useTranslation();
   const onSelectModel = useCallback(
     async (_provider: IProvider, modelName: string) => {
       const selected = { ..._provider, use_model: modelName } as TProviderWithModel;
@@ -236,6 +241,28 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
       className='nomi-sendbox-model-btn'
     />
   );
+
+  const { providers: healProviders, getAvailableModels: healGetAvailable } = useModelProviderList();
+  useEffect(() => {
+    if (!healProviders.length) return;
+    const saved = configService.get('nomi.defaultModel');
+    const heal = resolveHealModel(
+      conversation.model,
+      healProviders,
+      healGetAvailable,
+      saved && typeof saved === 'object' && 'id' in saved ? saved : undefined
+    );
+    if (!heal) return;
+    void (async () => {
+      const selected = { ...heal.provider, use_model: heal.use_model } as TProviderWithModel;
+      const ok = await ipcBridge.conversation.update.invoke({ id: conversation.id, updates: { model: selected } });
+      if (ok) {
+        void saveNomiDefaultModel(heal.provider.id, heal.use_model);
+        Message.info(t('conversation.chat.modelHealedToDefault', { model: heal.use_model }));
+      }
+    })();
+    // 仅在会话或供应商列表变化时评估
+  }, [conversation.id, conversation.model?.id, conversation.model?.use_model, healProviders, healGetAvailable, t]);
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetAssistantInfo } = usePresetAssistantInfo(conversation);
@@ -297,6 +324,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
                 }
                 agent_name={presetAssistantInfo?.name}
                 collaboratorSelectorNode={collaboratorSelectorNode}
+                isProcessing={isConversationProcessing(conversation)}
               />
             </ConversationContentSwitcher>
           </div>

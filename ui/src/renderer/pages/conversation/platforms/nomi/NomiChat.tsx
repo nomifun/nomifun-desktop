@@ -18,9 +18,11 @@ import {
 } from '@renderer/pages/conversation/Messages/hooks';
 import { usePendingConfirmationsRecovery } from '@renderer/pages/conversation/Messages/usePendingConfirmationsRecovery';
 import HOC from '@renderer/utils/ui/HOC';
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
 import NomiSendBox from './NomiSendBox';
+import { mergeWithCapabilities, type AgentModeOption } from '@/renderer/utils/model/agentModes';
+import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 
 const NomiChat: React.FC<{
@@ -35,6 +37,7 @@ const NomiChat: React.FC<{
   loadedMcpServers?: string[];
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
+  isProcessing?: boolean;
   /** Hide the permission/agent-mode selector in the send box (locked surfaces). */
   hideModeSelector?: boolean;
   /** 会话内「协作模型」选择器节点，透传给 send box 紧跟主模型选择器渲染（锁定表面不传）。 */
@@ -51,6 +54,7 @@ const NomiChat: React.FC<{
   loadedMcpServers,
   loadedMcpStatuses,
   agent_name,
+  isProcessing,
   hideModeSelector,
   collaboratorSelectorNode,
 }) => {
@@ -60,6 +64,15 @@ const NomiChat: React.FC<{
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
   const historyPaging = useMessageLstCache(conversation_id, { windowed: true });
   usePendingConfirmationsRecovery(conversation_id);
+  const [dynamicModes, setDynamicModes] = useState<AgentModeOption[]>([]);
+  const turnActivity = useNomiMessage(conversation_id, {
+    onConfigChanged: (capabilities) => {
+      const modes = (capabilities as { modes?: string[] })?.modes;
+      if (modes && modes.length > 0) {
+        setDynamicModes(mergeWithCapabilities('nomi', modes));
+      }
+    },
+  });
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
@@ -71,11 +84,22 @@ const NomiChat: React.FC<{
       type: 'nomi',
       cron_job_id,
       hideSendBox,
+      isProcessing: isProcessing === true || turnActivity.running,
       loadedSkills,
       loadedMcpServers,
       loadedMcpStatuses,
     };
-  }, [conversation_id, workspace, cron_job_id, hideSendBox, loadedSkills, loadedMcpServers, loadedMcpStatuses]);
+  }, [
+    conversation_id,
+    workspace,
+    cron_job_id,
+    hideSendBox,
+    isProcessing,
+    turnActivity.running,
+    loadedSkills,
+    loadedMcpServers,
+    loadedMcpStatuses,
+  ]);
 
   return (
     <ConversationProvider value={conversationValue}>
@@ -99,6 +123,8 @@ const NomiChat: React.FC<{
               agent_name={agent_name}
               hideModeSelector={hideModeSelector}
               collaboratorSelectorNode={collaboratorSelectorNode}
+              dynamicModes={dynamicModes}
+              turnActivity={turnActivity}
             />
           )}
         </div>
