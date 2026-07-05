@@ -7,7 +7,7 @@ use nomifun_ai_agent::protocol::events::{
 };
 use nomifun_channel::pending_decision::PendingDecisionStore;
 use nomifun_channel::stream_relay::{ChannelSender, ChannelStreamRelay, MessageRecorder, RelayConfig};
-use nomifun_channel::types::{ParseMode, PluginType};
+use nomifun_channel::types::{OutgoingMessageType, ParseMode, PluginType};
 use tokio::sync::broadcast;
 
 /// Builds a relay with a fresh (unshared) pending-decision store. Tests that
@@ -82,7 +82,10 @@ async fn relay_sends_thinking_then_final_message() {
     let edits = recorder.take_edits();
     let last = edits.last().unwrap();
     assert!(last.text.as_deref().unwrap().contains("Hello World"));
-    assert!(last.buttons.is_some());
+    // The final message keeps the `Buttons` type as its "final turn" marker but
+    // no longer carries action buttons (Regenerate/Continue/New Session removed).
+    assert_eq!(last.message_type, OutgoingMessageType::Buttons);
+    assert!(last.buttons.is_none());
 }
 
 #[tokio::test]
