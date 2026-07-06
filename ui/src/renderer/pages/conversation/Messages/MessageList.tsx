@@ -43,7 +43,7 @@ import {
   getToolReceiptIconFromSummaryParts,
   type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
-import ProcessTraceItem from './components/ProcessTraceItem';
+import ProcessTraceItem, { type ProcessTraceItemExpansionControls } from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
 import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
 import type { WriteFileResult } from './types';
@@ -541,10 +541,20 @@ const renderProcessTraceItem = (
   item: IRenderableItem,
   variant: 'list' | 'receipt' = 'list',
   workspaceRoots: string[] = [],
-  stateOverride?: TurnDisclosureProcessState
+  stateOverride?: TurnDisclosureProcessState,
+  thinkingExpansion?: ProcessTraceItemExpansionControls
 ) => (
-  <ProcessTraceItem item={item} variant={variant} workspaceRoots={workspaceRoots} stateOverride={stateOverride} />
+  <ProcessTraceItem
+    item={item}
+    variant={variant}
+    workspaceRoots={workspaceRoots}
+    stateOverride={stateOverride}
+    thinkingExpansion={thinkingExpansion}
+  />
 );
+
+const isCompletedThinkingProcessItem = (item: IRenderableItem): boolean =>
+  'type' in item && item.type === 'thinking' && item.content.status === 'done';
 
 const getProcessItemLayoutKind = (item: IRenderableItem): string => {
   if ('type' in item && item.type === 'text') return 'text';
@@ -1025,12 +1035,19 @@ const MessageList: React.FC<{
       <TurnProcessDisclosure
         item={item}
         highlighted={highlighted}
-        renderProcessItem={(processItem) =>
-          renderProcessTraceItem(processItem, 'list', workspaceRoots, getDisclosureProcessItemState(processItem))
+        renderProcessItem={(processItem, expansionControls) =>
+          renderProcessTraceItem(
+            processItem,
+            'list',
+            workspaceRoots,
+            getDisclosureProcessItemState(processItem),
+            expansionControls
+          )
         }
         getProcessItemKey={getProcessedItemAnchorId}
         getProcessItemState={getDisclosureProcessItemState}
         getProcessItemLayoutKind={getProcessItemLayoutKind}
+        getProcessItemCanExpandAll={isCompletedThinkingProcessItem}
       />
     );
   };
