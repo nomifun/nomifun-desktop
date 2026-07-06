@@ -166,7 +166,7 @@
 ### 5.2 后端
 - **`nomifun-workshop`**(域 crate,完全对标 `nomifun-public-agent` 范式):`service.rs`(start(data_dir))、`fsio.rs`(原子写)、`routes.rs`(`/api/workshop/*`:画布 CRUD/资产 CRUD/媒体 serve/导入导出)、`state.rs`;画布正文 `canvas.json` 文件存储(原子写+损坏回退),`workshop_canvases` 轻索引表。
 - **`nomifun-creation`**(生成引擎 crate):§4.2。
-- 迁移:`030_workshop.sql`(`workshop_canvases`、`workshop_assets`、`creation_tasks`;主键字符串 uuidv7、时间戳 ms;检查 pre_baseline 是否需 bump;提交前 `git pull --rebase` 防撞号)。
+- 迁移:`032_workshop.sql`(`workshop_canvases`、`workshop_assets`、`creation_tasks`;主键字符串 uuidv7、时间戳 ms;检查 pre_baseline 是否需 bump;提交前 `git pull --rebase` 防撞号)。
 - 装配:`nomifun-app` services/state/routes 三点接入;provider 删除清理登记 `provider_deletion.rs`。
 - 网关:新增 `caps_workshop` 域(3 步契约+CI 守卫):读画布状态/应用操作(建节点/连线/改参数/触发生成)/查任务/取产物,供画布助手与桌面伙伴调用。
 
