@@ -14,8 +14,6 @@ import MobileActionSheet, {
   useAttachEntry,
 } from '@/renderer/components/chat/MobileActionSheet';
 import SendBox from '@/renderer/components/chat/SendBox';
-import ThoughtDisplay from '@/renderer/components/chat/ThoughtDisplay';
-import { useProcessingStartedAt } from '@/renderer/pages/conversation/platforms/useProcessingStartedAt';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
 import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
@@ -149,8 +147,7 @@ const NomiSendBox: React.FC<{
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
 
-  const { thought, running, hasHydratedRunningState, tokenUsage, setActiveMsgId, setWaitingResponse, resetState } =
-    turnActivity;
+  const { running, hasHydratedRunningState, tokenUsage, setActiveMsgId, setWaitingResponse, resetState } = turnActivity;
   const hasContextUsage =
     typeof tokenUsage?.context_window === 'number' &&
     tokenUsage.context_window > 0 &&
@@ -199,7 +196,6 @@ const NomiSendBox: React.FC<{
   const removeMessagesFrom = useRemoveMessagesFrom();
   const { setSendBoxHandler } = usePreviewContext();
   const isBusy = running;
-  const processingStartedAt = useProcessingStartedAt(conversation_id, running);
 
   const setContentRef = useLatestRef(setContent);
   const contentRef = useLatestRef(content);
@@ -732,8 +728,6 @@ const NomiSendBox: React.FC<{
         onRemove={remove}
         onClear={clear}
       />
-      <ThoughtDisplay thought={thought} running={running} startedAt={processingStartedAt} onStop={handleStop} />
-
       {hasContextUsage && (
         <div className='flex items-center justify-end px-1 pb-1 select-none' data-testid='nomi-context-usage-slot'>
           <ContextUsagePill used={tokenUsage?.context_tokens} max={tokenUsage?.context_window} />

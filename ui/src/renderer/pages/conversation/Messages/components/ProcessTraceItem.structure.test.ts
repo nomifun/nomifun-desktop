@@ -26,8 +26,11 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('messages.processReceipt.thinkingCompletedDuration')).toBe(true);
   });
 
-  test('renders readable thinking as solid process text without a toggle row', () => {
-    expect(source.includes('const thinkingClassName = classNames(')).toBe(true);
+  test('keeps thinking detail on the existing receipt detail path', () => {
+    expect(source.includes('ThinkingStreamPanel')).toBe(false);
+    expect(source.includes('useStreamingThinkingText')).toBe(false);
+    expect(source.includes('shouldAutoCollapseThinkingStreamPanel')).toBe(false);
+    expect(source.includes('turn-process-thinking-stream')).toBe(false);
     expect(source.includes("variant === 'receipt' && 'turn-process-trace-receipt-detail'")).toBe(true);
     expect(source.includes("variant !== 'receipt' && 'turn-process-trace'")).toBe(true);
     expect(source.includes("variant !== 'receipt' && 'turn-process-trace-thinking-inline'")).toBe(true);
@@ -55,5 +58,11 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
     expect(source.includes('messages.processReceipt.readTargets')).toBe(true);
     expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
+  });
+
+  test('can render closed process details with an effective state override', () => {
+    expect(source.includes('stateOverride?: TurnDisclosureProcessState')).toBe(true);
+    expect(source.includes('const state = stateOverride ?? getProcessItemState(item);')).toBe(true);
+    expect(source.includes('stateOverride={stateOverride}')).toBe(true);
   });
 });

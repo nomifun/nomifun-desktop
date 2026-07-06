@@ -445,20 +445,25 @@ const ToolProcessTraceRows: React.FC<{
   messages: ToolProcessMessage[];
   variant?: ProcessTraceVariant;
   workspaceRoots: string[];
+  stateOverride?: TurnDisclosureProcessState;
 }> = ({
   messages,
   variant = 'list',
   workspaceRoots,
+  stateOverride,
 }) => {
   const { t } = useTranslation();
   const tools = useMemo(() => normalizeToolMessages(messages), [messages]);
   const rows = useMemo(
     () =>
-      buildToolReceiptDetailRows(tools).map((row) => ({
-        row,
-        label: formatToolReceiptDetailLabel(row, t, workspaceRoots),
-      })),
-    [t, tools, workspaceRoots]
+      buildToolReceiptDetailRows(tools).map((row) => {
+        const effectiveRow = stateOverride ? { ...row, state: stateOverride } : row;
+        return {
+          row: effectiveRow,
+          label: formatToolReceiptDetailLabel(effectiveRow, t, workspaceRoots),
+        };
+      }),
+    [stateOverride, t, tools, workspaceRoots]
   );
 
   const fileRows = rows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);
@@ -550,14 +555,16 @@ const ProcessTraceItem: React.FC<{
   item: ProcessTraceRenderableItem;
   variant?: ProcessTraceVariant;
   workspaceRoots?: string[];
+  stateOverride?: TurnDisclosureProcessState;
 }> = ({
   item,
   variant = 'list',
   workspaceRoots,
+  stateOverride,
 }) => {
   const { t } = useTranslation();
   const conversationContext = useConversationContextSafe();
-  const state = getProcessItemState(item);
+  const state = stateOverride ?? getProcessItemState(item);
   const resolvedWorkspaceRoots = useMemo(
     () =>
       workspaceRoots && workspaceRoots.length
@@ -589,7 +596,14 @@ const ProcessTraceItem: React.FC<{
   }
 
   if ('type' in item && item.type === 'tool_summary') {
-    return <ToolProcessTraceRows messages={item.messages} variant={variant} workspaceRoots={resolvedWorkspaceRoots} />;
+    return (
+      <ToolProcessTraceRows
+        messages={item.messages}
+        variant={variant}
+        workspaceRoots={resolvedWorkspaceRoots}
+        stateOverride={stateOverride}
+      />
+    );
   }
 
   switch (item.type) {
@@ -633,7 +647,14 @@ const ProcessTraceItem: React.FC<{
     case 'tool_call':
     case 'tool_group':
     case 'acp_tool_call':
-      return <ToolProcessTraceRows messages={[item]} variant={variant} workspaceRoots={resolvedWorkspaceRoots} />;
+      return (
+        <ToolProcessTraceRows
+          messages={[item]}
+          variant={variant}
+          workspaceRoots={resolvedWorkspaceRoots}
+          stateOverride={stateOverride}
+        />
+      );
     case 'agent_status':
       return (
         <ProcessTraceRows
@@ -705,14 +726,16 @@ const ProcessTraceItem: React.FC<{
       );
     case 'thinking': {
       const thinkingDuration = formatReceiptDuration(getThinkingDurationMs(item), t);
+      const completedThinkingLabel = thinkingDuration
+        ? t('messages.processReceipt.thinkingCompletedDuration', {
+            duration: thinkingDuration,
+            defaultValue: 'Thought {{duration}}',
+          })
+        : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' });
+      const runningThinkingLabel = t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' });
       const thinkingDisplay = buildThinkingReceiptDisplay(item.content, {
-        completedFallback: thinkingDuration
-          ? t('messages.processReceipt.thinkingCompletedDuration', {
-              duration: thinkingDuration,
-              defaultValue: 'Thought {{duration}}',
-            })
-          : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
-        runningFallback: t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' }),
+        completedFallback: completedThinkingLabel,
+        runningFallback: runningThinkingLabel,
         waitingFallback: t('messages.processReceipt.thinkingWaiting', {
           defaultValue: 'Waiting for model output',
         }),
