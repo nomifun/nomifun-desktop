@@ -50,7 +50,14 @@ export const ResizeFrame: React.FC<{
       keepAspectRatio={keepAspectRatio}
       color='rgb(var(--primary-6))'
       handleStyle={{ width: 9, height: 9, borderRadius: 3 }}
-      lineStyle={{ borderColor: 'rgb(var(--primary-6))' }}
+      // Hide the resizer's edge lines: every node draws its own rounded selected
+      // border + ring (NodeCard / GroupNode). A visible resizer line is a
+      // sharp-cornered rectangle at the node bounds, so it doubles that border
+      // and overshoots the card's rounded corners. NodeResizer forces
+      // `borderColor: color` after our lineStyle, so `borderColor: transparent`
+      // wouldn't stick — zero the border width instead. The 1px line div stays
+      // as an edge-drag hit area; corner handles remain the resize affordance.
+      lineStyle={{ borderWidth: 0 }}
       onResizeStart={() => api.beginInteraction()}
       onResizeEnd={() => api.commitInteraction()}
     />
