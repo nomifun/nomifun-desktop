@@ -33,17 +33,12 @@ pub enum SubmitChunks {
 /// `resolve_agent_family(..).is_some()`.
 pub fn encode_submit_chunks(text: &str, is_agent_tui: bool) -> SubmitChunks {
     let trimmed = text.trim_end_matches(|c| c == '\r' || c == '\n');
-    if trimmed.contains('\n') {
+    if trimmed.contains('\n') && is_agent_tui {
         let mut paste = Vec::with_capacity(trimmed.len() + 13);
         paste.extend_from_slice(b"\x1b[200~");
         paste.extend_from_slice(trimmed.as_bytes());
         paste.extend_from_slice(b"\x1b[201~");
-        if is_agent_tui {
-            SubmitChunks::PasteThenCr { paste, cr: vec![b'\r'] }
-        } else {
-            paste.push(b'\r');
-            SubmitChunks::Single(paste)
-        }
+        SubmitChunks::PasteThenCr { paste, cr: vec![b'\r'] }
     } else {
         let mut bytes = Vec::with_capacity(trimmed.len() + 1);
         bytes.extend_from_slice(trimmed.as_bytes());
@@ -114,13 +109,13 @@ mod tests {
     }
 
     #[test]
-    fn multiline_to_shell_is_paste_plus_cr_one_write() {
+    fn multiline_to_shell_is_raw_plus_cr_one_write() {
         let out = encode_submit_chunks("a\nb", false);
         match out {
             SubmitChunks::Single(bytes) => {
-                assert!(bytes.starts_with(PASTE_START));
-                // paste-end 之后紧跟一个 CR，同一次写。
-                assert!(bytes.ends_with(b"\x1b[201~\r"));
+                assert_eq!(bytes, b"a\nb\r".to_vec());
+                assert!(!bytes.windows(PASTE_START.len()).any(|w| w == PASTE_START));
+                assert!(!bytes.windows(PASTE_END.len()).any(|w| w == PASTE_END));
             }
             other => panic!("expected Single, got {other:?}"),
         }

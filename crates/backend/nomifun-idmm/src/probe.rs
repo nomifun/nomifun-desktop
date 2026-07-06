@@ -1073,7 +1073,10 @@ impl SessionProbe for TerminalProbe {
             // plain y/n / numbered text), so a Confirm is a no-op here.
             WakeAction::Wait(_) | WakeAction::Stop(_) | WakeAction::Confirm { .. } => return Ok(()),
         };
-        // agent TUI 判定：探测目标 backend（probe 仅持有 backend，非完整 command/args）。
+        // IDMM's terminal session metadata only carries the declared backend, not
+        // the full launcher command/args. Treat that declared backend as the
+        // agent-family signal so backend-only terminal presets still get the
+        // shared paste-then-CR submit path.
         let is_agent = self
             .driver
             .describe(self.terminal_id)
@@ -1812,6 +1815,7 @@ mod tests {
     /// what a `WakeAction` was encoded to. Only `write_input`/`subscribe_*` matter.
     struct CapturingDriver {
         written: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        backend: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -1827,9 +1831,15 @@ mod tests {
             true
         }
         async fn describe(&self, _id: i64) -> Result<Option<nomifun_terminal::TerminalDescription>, TermError> {
-            // No stored backend → the shared encoder's shell path (single-line
-            // answers still stay raw + CR; this is the terminal-failover fixture).
-            Ok(None)
+            Ok(Some(nomifun_terminal::TerminalDescription {
+                user_id: "u1".into(),
+                cwd: ".".into(),
+                command: "$SHELL".into(),
+                args: vec![],
+                backend: self.backend.clone(),
+                mode: None,
+                last_status: "running".into(),
+            }))
         }
         async fn read_autowork(&self, _id: i64) -> Result<Option<String>, TermError> {
             unimplemented!()
@@ -1854,7 +1864,10 @@ mod tests {
         // terminal/ACP CLI self-manages its model. A Failover must degrade to the
         // same "continue" nudge a Retry produces — never error, never a no-op.
         let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let driver = Arc::new(CapturingDriver { written: written.clone() });
+        let driver = Arc::new(CapturingDriver {
+            written: written.clone(),
+            backend: None,
+        });
         let probe = TerminalProbe::new(driver.clone(), 7);
 
         probe.inject(&WakeAction::Failover).await.expect("failover inject ok");
@@ -1865,6 +1878,31 @@ mod tests {
         assert_eq!(w[0], w[1], "Failover must encode to the same bytes as Retry on a terminal");
         // "continue" is single-line → the shared encoder keeps it raw + CR, one write.
         assert_eq!(w[0], b"continue\r".to_vec(), "degrades to the continue nudge");
+    }
+
+    #[tokio::test]
+    async fn terminal_inject_backend_agent_multiline_uses_paste_then_cr() {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let driver = Arc::new(CapturingDriver {
+            written: written.clone(),
+            backend: Some("claude".into()),
+        });
+        let probe = TerminalProbe::new(driver.clone(), 7);
+
+        probe
+            .inject(&WakeAction::AnswerChoice("line one\nline two".into()))
+            .await
+            .expect("multiline answer inject ok");
+
+        let w = written.lock().unwrap();
+        assert_eq!(w.len(), 2, "agent multiline injection must split paste and CR");
+        assert!(w[0].starts_with(b"\x1b[200~"));
+        assert!(w[0].ends_with(b"\x1b[201~"));
+        assert!(
+            w[0].windows(b"line one\nline two".len()).any(|x| x == b"line one\nline two"),
+            "paste body should contain the multiline answer"
+        );
+        assert_eq!(w[1], b"\r".to_vec(), "submit CR must be its own write");
     }
 
     #[tokio::test]
