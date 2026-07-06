@@ -35,6 +35,26 @@ struct WriteInputParams {
     data_b64: String,
 }
 
+/// Parameters for submitting text to a terminal so it EXECUTES (the high-level
+/// "type it and press Enter" op — no base64, no manual newline).
+#[derive(Deserialize, JsonSchema)]
+struct SubmitTerminalParams {
+    /// The terminal session id (from nomi_list_terminals).
+    id: i64,
+    /// Plain UTF-8 text/command to type into the terminal and RUN. Do NOT
+    /// base64-encode and do NOT append a newline — submission (Enter) is handled
+    /// for you, including the bracketed-paste sequence agent CLIs (claude/codex/
+    /// gemini) need so the text actually executes instead of sitting unrun.
+    text: String,
+    /// Wait for the turn to settle and return an output tail. Default false
+    /// (fire-and-forget). true → also returns settle_reason + output_tail.
+    #[serde(default)]
+    wait: bool,
+    /// Max seconds to wait when `wait` is true (default 300, capped 1800).
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
 /// Parameters for terminating a terminal's running process (SIGKILL).
 #[derive(Deserialize, JsonSchema)]
 struct KillTerminalParams {
@@ -117,6 +137,39 @@ async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams
         Ok(()) => ok(json!({"written": true})),
         Err(e) => json!({"error": e.to_string()}),
     }
+}
+
+async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTerminalParams) -> Value {
+    if ctx.user_id.is_empty() {
+        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+    }
+    if let Err(e) = deps.terminal_service.submit_text(p.id, &p.text).await {
+        // A not-live session is the common, actionable failure — point at relaunch.
+        return json!({
+            "error": e.to_string(),
+            "hint": "if the session has exited, call nomi_terminal_relaunch first, then retry"
+        });
+    }
+    if !p.wait {
+        return ok(json!({"submitted": true, "id": p.id, "note": "text submitted; use nomi_terminal_read_output to see the result"}));
+    }
+    let secs = p.timeout_secs.unwrap_or(300).min(1800);
+    let reason = deps
+        .terminal_service
+        .await_turn_settle(p.id, std::time::Duration::from_secs(secs))
+        .await;
+    let tail = deps
+        .terminal_service
+        .read_output_tail(p.id, 4096)
+        .await
+        .map(|t| t.text)
+        .unwrap_or_default();
+    ok(json!({
+        "submitted": true,
+        "id": p.id,
+        "settle_reason": reason,
+        "output_tail": tail,
+    }))
 }
 
 async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalParams) -> Value {
@@ -204,11 +257,21 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_terminal_write_input",
             "terminal",
-            "Write base64-encoded bytes/keystrokes to a terminal's PTY stdin. Powerful: can execute arbitrary commands in the running shell.",
+            "Write base64-encoded bytes/keystrokes to a terminal's PTY stdin. Powerful: can execute arbitrary commands in the running shell. For sending a command/prompt to run, prefer nomi_terminal_send (handles Enter + agent-CLI paste); use this for raw control bytes like Ctrl-C.",
             DangerTier::Write,
         )
         .deny_on(&[Surface::Channel]),
         |deps, ctx, p| write_input(deps, ctx, p),
+    ));
+    out.push(Capability::new::<SubmitTerminalParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_terminal_send",
+            "terminal",
+            "Type text/a command into a terminal and RUN it (plain text, no base64, no manual newline — Enter and the agent-CLI paste sequence are handled). Optional wait=true returns settle_reason + output_tail. Preferred over nomi_terminal_write_input for sending commands.",
+            DangerTier::Write,
+        )
+        .deny_on(&[Surface::Channel]),
+        |deps, ctx, p| submit_terminal(deps, ctx, p),
     ));
     out.push(Capability::new::<KillTerminalParams, _, _>(
         CapabilityMeta::new(
@@ -258,4 +321,27 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         |deps, ctx, p| update_terminal(deps, ctx, p),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn submit_params_plain_text_no_base64() {
+        let p: SubmitTerminalParams =
+            serde_json::from_value(json!({"id": 7, "text": "git status"})).unwrap();
+        assert_eq!(p.id, 7);
+        assert_eq!(p.text, "git status");
+        assert!(!p.wait);
+        assert_eq!(p.timeout_secs, None);
+
+        let p2: SubmitTerminalParams = serde_json::from_value(
+            json!({"id": 1, "text": "run", "wait": true, "timeout_secs": 60}),
+        )
+        .unwrap();
+        assert!(p2.wait);
+        assert_eq!(p2.timeout_secs, Some(60));
+    }
 }
