@@ -55,6 +55,17 @@ struct SubmitTerminalParams {
     timeout_secs: Option<u64>,
 }
 
+/// Parameters for reading a terminal's recent output (ANSI-stripped scrollback tail).
+#[derive(Deserialize, JsonSchema)]
+struct ReadTerminalOutputParams {
+    /// The terminal session id.
+    id: i64,
+    /// Max bytes of the scrollback TAIL to return after ANSI stripping
+    /// (default 16384, capped 65536).
+    #[serde(default)]
+    max_bytes: Option<usize>,
+}
+
 /// Parameters for terminating a terminal's running process (SIGKILL).
 #[derive(Deserialize, JsonSchema)]
 struct KillTerminalParams {
@@ -172,6 +183,22 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
     }))
 }
 
+async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTerminalOutputParams) -> Value {
+    if ctx.user_id.is_empty() {
+        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+    }
+    let cap = p.max_bytes.unwrap_or(16_384).min(65_536);
+    match deps.terminal_service.read_output_tail(p.id, cap).await {
+        Ok(t) => ok(json!({
+            "id": p.id,
+            "text": t.text,
+            "truncated": t.truncated,
+            "status": t.status,
+        })),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
 async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
         return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
@@ -273,6 +300,15 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         .deny_on(&[Surface::Channel]),
         |deps, ctx, p| submit_terminal(deps, ctx, p),
     ));
+    out.push(Capability::new::<ReadTerminalOutputParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_terminal_read_output",
+            "terminal",
+            "Read a terminal's recent output (ANSI-stripped scrollback tail) to see a command's result or diagnose. The terminal analogue of nomi_conversation_status.",
+            DangerTier::Read,
+        ),
+        |deps, ctx, p| read_terminal_output(deps, ctx, p),
+    ));
     out.push(Capability::new::<KillTerminalParams, _, _>(
         CapabilityMeta::new(
             "nomi_terminal_kill",
@@ -343,5 +379,30 @@ mod tests {
         .unwrap();
         assert!(p2.wait);
         assert_eq!(p2.timeout_secs, Some(60));
+    }
+
+    #[test]
+    fn read_output_params_defaults() {
+        let p: ReadTerminalOutputParams = serde_json::from_value(json!({"id": 3})).unwrap();
+        assert_eq!(p.id, 3);
+        assert_eq!(p.max_bytes, None);
+    }
+
+    #[test]
+    fn send_and_read_are_registered_and_desktop_visible_but_channel_denied() {
+        use crate::registry::Registry;
+        let reg = Registry::global();
+        for name in ["nomi_terminal_send", "nomi_terminal_read_output"] {
+            assert!(reg.contains(name), "{name} must be registered");
+            assert!(
+                reg.tool_visible(crate::registry::Surface::Desktop, name),
+                "{name} must be visible to the Desktop companion"
+            );
+        }
+        // send 写类：渠道面必须拒绝。read 只读：渠道面可见（不放大攻击面，仅只读）。
+        assert!(
+            !reg.tool_visible(crate::registry::Surface::Channel, "nomi_terminal_send"),
+            "nomi_terminal_send must be denied on Channel"
+        );
     }
 }
