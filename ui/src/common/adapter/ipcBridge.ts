@@ -1775,6 +1775,13 @@ export interface ICreateConversationParams {
      *  gateway handler from the conversation's extra (deterministic, not via the
      *  LLM). Absent ⇒ Auto (every enabled model). */
     orchestrator_model_range?: TModelRange;
+    /** 「agent 集群」意图标记（需求1）：composer 顶部 toggle 选中后落此键。后端
+     *  nomi 工厂据此在常驻 subagent 提示之上追加 CLUSTER_MODE_HINT（对每个任务
+     *  刻意评估是否开集群、太简单先向用户说明原因）。 */
+    agent_cluster_mode?: boolean;
+    /** 节点级审批模式（需求5，迁移 030）：'manual' = 集群节点遇关键决策挂起向
+     *  用户提问；'auto'/缺省 = 全授权。建 run 时由网关从会话 extra 读取生效。 */
+    orchestrator_approval_mode?: string;
     /** Transient: preset opt-in skills. Consumed by backend create handler
      *  and stripped before persistence. */
     preset_enabled_skills?: string[];
@@ -3569,6 +3576,16 @@ export interface IKnowledgeFileEntry {
   modified_at: number | null;
 }
 
+export interface IKnowledgeTreeEntry {
+  name: string;
+  rel_path: string;
+  is_dir: boolean;
+  is_file: boolean;
+  size?: number;
+  modified_at: number | null;
+  children?: IKnowledgeTreeEntry[];
+}
+
 export interface IKnowledgeFileContent {
   rel_path: string;
   content: string;
@@ -3824,6 +3841,14 @@ export const knowledge = {
     (p) => `/api/knowledge/bases/${p.id}${p.purge ? '?purge=true' : ''}`
   ),
   listFiles: httpGet<IKnowledgeFileEntry[], { id: string }>((p) => `/api/knowledge/bases/${p.id}/files`, { timeoutMs: KB_READ_TIMEOUT_MS }),
+  listTree: httpGet<IKnowledgeTreeEntry[], { id: string; path?: string }>(
+    (p) => `/api/knowledge/bases/${p.id}/tree${p.path ? `?path=${encodeURIComponent(p.path)}` : ''}`,
+    { timeoutMs: KB_READ_TIMEOUT_MS }
+  ),
+  createFolder: httpPost<IKnowledgeTreeEntry, { id: string; path: string }>(
+    (p) => `/api/knowledge/bases/${p.id}/folder`,
+    (p) => ({ path: p.path })
+  ),
   readFile: httpGet<IKnowledgeFileContent, { id: string; path: string }>(
     (p) => `/api/knowledge/bases/${p.id}/file?path=${encodeURIComponent(p.path)}`,
     { timeoutMs: KB_READ_TIMEOUT_MS }
