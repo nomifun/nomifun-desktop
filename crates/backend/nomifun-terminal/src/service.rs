@@ -63,6 +63,17 @@ pub trait TerminalSupervisionHook: Send + Sync {
     fn on_terminal_activity(&self, terminal_id: i64);
 }
 
+/// ANSI-stripped tail of a terminal's scrollback, for read-back by agents.
+#[derive(Debug, Clone)]
+pub struct TerminalOutputTail {
+    /// Human-readable text (control/escape sequences removed).
+    pub text: String,
+    /// True when older output was dropped to fit `max_bytes`.
+    pub truncated: bool,
+    /// The session's status: "running" | "exited" | "error".
+    pub status: String,
+}
+
 /// Manages terminal sessions: DB-persisted metadata + live in-memory PTYs.
 #[derive(Clone)]
 pub struct TerminalService {
@@ -777,6 +788,28 @@ impl TerminalService {
         Ok(row_to_response(&row, scrollback, &self.work_dir))
     }
 
+    /// Read the terminal's scrollback as ANSI-stripped text, keeping at most
+    /// `max_bytes` from the TAIL. The terminal analogue of a conversation's
+    /// transcript read-back — what an agent uses to SEE a command's result.
+    pub async fn read_output_tail(
+        &self,
+        id: i64,
+        max_bytes: usize,
+    ) -> Result<TerminalOutputTail, TerminalError> {
+        let resp = self.get(id).await?;
+        let raw = resp
+            .scrollback_b64
+            .and_then(|b64| BASE64.decode(b64).ok())
+            .unwrap_or_default();
+        let text = crate::ansi::strip_ansi(&raw);
+        let (tail, truncated) = tail_on_char_boundary(&text, max_bytes);
+        Ok(TerminalOutputTail {
+            text: tail,
+            truncated,
+            status: resp.last_status,
+        })
+    }
+
     /// Enumerate entries under `path` (workspace-relative) inside this terminal
     /// session's working directory. The root is server-authoritative — derived
     /// from the row's `cwd`, never a client-supplied path — so listing it grants
@@ -1456,6 +1489,19 @@ fn default_name(command: &str, backend: Option<&str>) -> String {
     } else {
         command.to_owned()
     }
+}
+
+/// Return the last `max_bytes` of `s` on a UTF-8 char boundary, plus whether it
+/// was truncated. Cheap and allocation-light for the common (no-truncation) path.
+fn tail_on_char_boundary(s: &str, max_bytes: usize) -> (String, bool) {
+    if s.len() <= max_bytes {
+        return (s.to_owned(), false);
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    (s[start..].to_owned(), true)
 }
 
 #[cfg(test)]
@@ -2249,6 +2295,35 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[tokio::test]
+    async fn read_output_tail_strips_ansi_and_tails() {
+        let (svc, _bc) = service();
+        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        svc.submit_text(id, "marker-xyz").await.unwrap();
+
+        // 等回显落入 scrollback。
+        let mut ok = false;
+        for _ in 0..40 {
+            let out = svc.read_output_tail(id, 65536).await.unwrap();
+            if out.text.contains("marker-xyz") {
+                assert!(!out.truncated);
+                assert_eq!(out.status, "running");
+                // strip_ansi 已去除裸控制符：不应含 ESC。
+                assert!(!out.text.contains('\u{1b}'));
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(ok, "tail should contain the echoed marker");
+
+        // 极小上界 → 截断标记为真。
+        let tiny = svc.read_output_tail(id, 4).await.unwrap();
+        assert!(tiny.truncated);
+        assert!(tiny.text.len() <= 4 + 3); // 允许 char-boundary 前移少量
+        svc.delete(id).await.ok();
     }
 
     #[tokio::test]
