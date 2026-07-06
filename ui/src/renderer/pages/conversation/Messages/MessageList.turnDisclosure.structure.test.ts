@@ -31,7 +31,7 @@ describe('MessageList turn completion disclosure structure', () => {
   });
 
   test('does not reuse legacy process cards inside receipt expansion', () => {
-    expect(source.includes("renderProcessItem={(processItem) => renderProcessTraceItem(processItem, 'list', workspaceRoots)}")).toBe(true);
+    expect(source.includes("renderProcessTraceItem(processItem, 'list', workspaceRoots")).toBe(true);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
@@ -44,10 +44,33 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('getProcessedItemProcessEndedAt')).toBe(true);
   });
 
-  test('renders readable thinking receipts as solid text instead of an expandable receipt shell', () => {
-    expect(source.includes('isReadableThinkingReceipt')).toBe(true);
-    expect(source.includes("if (isReadableThinkingReceipt(item)) {")).toBe(true);
-    expect(source.includes("renderProcessTraceItem(item.item, 'receipt', workspaceRoots)")).toBe(true);
+  test('renders readable thinking receipts through the collapsed receipt shell', () => {
+    const thinkingCase = buildSummarySource.match(/case 'thinking': \{[\s\S]*?case 'permission':/)?.[0] ?? '';
+    const renderProcessReceiptSource =
+      source.match(/const renderProcessReceipt = \(item: IProcessReceiptVO, highlighted: boolean\) => \{[\s\S]*?  \};/)?.[0] ?? '';
+
+    expect(source.includes('isReadableThinkingReceipt')).toBe(false);
+    expect(source.includes("if (isReadableThinkingReceipt(item)) {")).toBe(false);
+    expect(renderProcessReceiptSource.includes('<TurnProcessReceipt')).toBe(true);
+    expect(thinkingCase.includes('defaultExpanded: false')).toBe(true);
+    expect(thinkingCase.includes('hasDetail: shouldShowThinkingReceiptDetail(item.content)')).toBe(true);
+  });
+
+  test('suppresses copy and timestamp actions for active process text', () => {
+    expect(source.includes('isActiveProcessTextItem')).toBe(true);
+    expect(source.includes('lastUserTextIndex')).toBe(true);
+    expect(source.includes("conversationContext?.isProcessing === true")).toBe(true);
+    expect(source.includes('<MessageText message={message} hideActions={hideActions}></MessageText>')).toBe(true);
+    expect(source.includes('hideActions={isActiveProcessTextItem(item, _index)}')).toBe(true);
+  });
+
+  test('passes closed-turn effective process state into disclosure details', () => {
+    expect(source.includes('processItemStates: Record<string, TurnDisclosureProcessState>')).toBe(true);
+    expect(source.includes('processItemStates: entry.processItemStates')).toBe(true);
+    expect(source.includes('getDisclosureProcessItemState')).toBe(true);
+    expect(
+      source.includes("renderProcessTraceItem(processItem, 'list', workspaceRoots, getDisclosureProcessItemState(processItem))")
+    ).toBe(true);
   });
 
   test('keeps model activity receipts as static single-line status rows', () => {
