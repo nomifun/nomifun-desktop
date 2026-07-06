@@ -233,20 +233,15 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     [mainModelRef, persistModelRange]
   );
 
-  // 会话内「协作模型」选择器:主模型选择器旁的 pill。锁定伙伴表面走
-  // CompanionChatPanel(不经此面板),故此处天然只在普通会话构造。
-  // 「agent 集群」pill（需求1/5）与其同槽注入:集群模式 + 节点审批模式开关,
-  // 写回会话 extra(agent_cluster_mode / orchestrator_approval_mode)。
+  // 会话内「协作模型」选择器:紧跟主模型选择器渲染。集群开关另放到权限旁边，
+  // 避免把主模型 / 协作模型的关系打断。
   const collaboratorSelectorNode = (
-    <>
-      <ClusterModePill conversation={conversation} />
-      <GuidCollaboratorSelector
-        value={collaborators}
-        onChange={onCollaboratorsChange}
-        mainModel={mainModelRef}
-        className='nomi-sendbox-model-btn'
-      />
-    </>
+    <GuidCollaboratorSelector
+      value={collaborators}
+      onChange={onCollaboratorsChange}
+      mainModel={mainModelRef}
+      className='nomi-sendbox-model-btn'
+    />
   );
 
   const { providers: healProviders, getAvailableModels: healGetAvailable } = useModelProviderList();
@@ -335,6 +330,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
                 }
                 agent_name={presetAssistantInfo?.name}
                 collaboratorSelectorNode={collaboratorSelectorNode}
+                extraRightTools={<ClusterModePill conversation={conversation} />}
                 isProcessing={isConversationProcessing(conversation)}
               />
             </ConversationContentSwitcher>
