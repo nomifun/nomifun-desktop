@@ -22,7 +22,7 @@
 - 时间戳一律 INTEGER 毫秒(Unix ms)。
 - Wire JSON 一律 **snake_case**。画布正文 doc 对后端是**不透明 JSON**(后端只存取、算 node_count、限制大小 ≤ 8MB),doc 内部字段由前端契约(§4)约束。
 
-## 2. 数据库迁移 `030_workshop.sql`
+## 2. 数据库迁移 `032_workshop.sql`
 
 实施者须先看 `018_orchestrator.sql`/`029_task_on_fail.sql` 的风格,并检查 `nomifun-db/src/database.rs` 与 db_lifecycle 的 pre_baseline 机制(历史规矩:每加迁移需同步 bump pre_baseline,如机制存在必须照做)。表结构(可按仓库惯例微调列序/索引名,语义不得变):
 

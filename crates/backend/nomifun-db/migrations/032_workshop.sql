@@ -1,4 +1,4 @@
--- 030 创意工坊 (Creative Workshop) 域。append-only；基线不动。
+-- 032 创意工坊 (Creative Workshop) 域。append-only；基线不动。
 -- 三表：画布轻索引 workshop_canvases（正文 canvas.json 落文件系统，本表只存元数据+node_count）、
 -- 资产 workshop_assets（元数据入库，二进制落 data_dir）、生成任务 creation_tasks（状态机+参数快照）。
 -- ID 规则：跨表实体用 TEXT 前缀 id（应用层 generate_prefixed_id：画布 wsc_ / 资产 wsa_ / 任务 wst_）。
