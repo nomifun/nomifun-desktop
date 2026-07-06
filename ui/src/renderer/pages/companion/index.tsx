@@ -36,6 +36,7 @@ import { placeResizedWindow } from './windowGeometry';
 import { buildCompanionMenuEntries, type CompanionMenuAction } from './companionNativeMenu';
 import { useCompanionClickThrough } from './useCompanionClickThrough';
 import { createCompanionBarRevealController, type CompanionBarRevealController } from './companionBarReveal';
+import { shouldCaptureWholeCompanionWindow } from './companionCapturePolicy';
 import './companion.css';
 
 const isTauri = (): boolean =>
@@ -899,8 +900,14 @@ const CompanionPage: React.FC = () => {
     else void exitChatSize();
   }, [hasBubble, composerOpen, enterChatSize, exitChatSize]);
 
-  const forceCompanionCapture =
-    composerOpen || barRevealed || Boolean(input) || sending || showSuggestions;
+  const forceCompanionCapture = shouldCaptureWholeCompanionWindow({
+    composerOpen,
+    barRevealed,
+    hasInput: Boolean(input),
+    sending,
+    showSuggestions,
+    dragOver,
+  });
 
   // 按区域点击穿透：默认整窗穿透，只有光标落在标了 data-companion-hit 的交互元素
   // （立绘 / 气泡 / 输入条 / 角标 / 建议）包围盒内时才捕获鼠标。删除了「整块透明
@@ -1453,28 +1460,6 @@ const CompanionPage: React.FC = () => {
         }
       }}
     >
-      {unread > 0 && (
-        <div
-          className='nomi-companion-badge'
-          data-companion-hit
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowSuggestions((v) => !v);
-          }}
-        >
-          {unread > 99 ? '99+' : unread}
-        </div>
-      )}
-      {showSuggestions && suggestions.length > 0 && (
-        <div className='nomi-companion-suggestions' data-companion-hit onClick={(e) => e.stopPropagation()}>
-          {suggestions.map((s) => (
-            <div key={s.id} className='nomi-companion-suggestions__item' onClick={() => void clickSuggestion(s)}>
-              <div className='nomi-companion-suggestions__title'>{s.title}</div>
-              <div className='nomi-companion-suggestions__body'>{s.body}</div>
-            </div>
-          ))}
-        </div>
-      )}
       {bubble && (
         <div
           className={`nomi-companion-bubble ${bubbleLoading ? 'nomi-companion-bubble--loading' : ''}`}
@@ -1518,16 +1503,45 @@ const CompanionPage: React.FC = () => {
           </div>
         </div>
       )}
-      <div ref={figureHitRef} data-companion-hit onMouseDown={(e) => void startDrag(e)}>
-        <CompanionAvatar
-          character={profile?.character}
-          mood={mood}
-          activity={activity}
-          size={desk.figureHeight}
-          companionId={companionId ?? undefined}
-          customFigure={customFigureMetaOf(profile)}
-          figureHitRef={figureHitRef}
-        />
+      <div className='nomi-companion-stage'>
+        {unread > 0 && (
+          <div
+            className='nomi-companion-badge'
+            data-companion-hit
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowSuggestions((v) => !v);
+            }}
+          >
+            {unread > 99 ? '99+' : unread}
+          </div>
+        )}
+        {showSuggestions && suggestions.length > 0 && (
+          <div className='nomi-companion-suggestions' data-companion-hit onClick={(e) => e.stopPropagation()}>
+            {suggestions.map((s) => (
+              <div key={s.id} className='nomi-companion-suggestions__item' onClick={() => void clickSuggestion(s)}>
+                <div className='nomi-companion-suggestions__title'>{s.title}</div>
+                <div className='nomi-companion-suggestions__body'>{s.body}</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div
+          ref={figureHitRef}
+          className='nomi-companion-figure-hit'
+          data-companion-hit
+          onMouseDown={(e) => void startDrag(e)}
+        >
+          <CompanionAvatar
+            character={profile?.character}
+            mood={mood}
+            activity={activity}
+            size={desk.figureHeight}
+            companionId={companionId ?? undefined}
+            customFigure={customFigureMetaOf(profile)}
+            figureHitRef={figureHitRef}
+          />
+        </div>
       </div>
       {composerOpen ? (
         <div
