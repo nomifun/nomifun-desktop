@@ -36,15 +36,13 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
 
-  test('keeps completed thinking as process evidence for disclosure duration and audit', () => {
-    expect(source.includes("if (message.type === 'thinking' && message.content.status === 'done') continue;")).toBe(false);
-    expect(source.includes("if (message.type === 'thinking') continue;")).toBe(false);
-    expect(source.includes('thinkingCompletedWithDuration')).toBe(false);
-    expect(source.includes('getProcessedItemProcessStartedAt')).toBe(true);
-    expect(source.includes('getProcessedItemProcessEndedAt')).toBe(true);
+  test('keeps thinking in the process disclosure content without turning it into a receipt', () => {
+    expect(source.includes("case 'thinking':\n      return 'process_content';")).toBe(true);
+    expect(source.includes("case 'thinking':\n    case 'tool_call':")).toBe(false);
+    expect(source.includes('renderProcessTraceItem(processItem')).toBe(true);
   });
 
-  test('renders readable thinking receipts through the collapsed receipt shell', () => {
+  test('renders thinking through the process trace body instead of process receipts', () => {
     const thinkingCase = buildSummarySource.match(/case 'thinking': \{[\s\S]*?case 'permission':/)?.[0] ?? '';
     const renderProcessReceiptSource =
       source.match(/const renderProcessReceipt = \(item: IProcessReceiptVO, highlighted: boolean\) => \{[\s\S]*?  \};/)?.[0] ?? '';
@@ -52,8 +50,9 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('isReadableThinkingReceipt')).toBe(false);
     expect(source.includes("if (isReadableThinkingReceipt(item)) {")).toBe(false);
     expect(renderProcessReceiptSource.includes('<TurnProcessReceipt')).toBe(true);
-    expect(thinkingCase.includes('defaultExpanded: false')).toBe(true);
-    expect(thinkingCase.includes('hasDetail: shouldShowThinkingReceiptDetail(item.content)')).toBe(true);
+    expect(thinkingCase).toBe('');
+    expect(source.includes("case 'thinking':\n        return <MessageThinking message={message}></MessageThinking>;")).toBe(true);
+    expect(source.includes('isProcessTraceRenderableItem')).toBe(false);
   });
 
   test('suppresses copy and timestamp actions for active process text', () => {
