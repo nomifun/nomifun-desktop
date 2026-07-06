@@ -878,6 +878,34 @@ impl TerminalService {
         Ok(())
     }
 
+    /// Submit a block of text to a terminal so it EXECUTES (as if typed + Enter).
+    /// Resolves the target's agent family from its stored command/args/backend to
+    /// choose the correct submit sequence (bracketed-paste + separated CR for
+    /// agent TUIs, raw + CR for single lines / shells). Uses the raw PTY write
+    /// path — this is deliberate driving, so it does NOT arm IDMM supervision or
+    /// auto-title the way `input` (user typing) does. `Err(NotFound)` if not live.
+    pub async fn submit_text(&self, id: i64, text: &str) -> Result<(), TerminalError> {
+        if !self.live.contains_key(&id) {
+            return Err(TerminalError::NotFound(id.to_string()));
+        }
+        let is_agent = match self.describe(id).await? {
+            Some(d) => {
+                let (program, prog_args) = crate::types::resolve_command(&d.command, &d.args);
+                crate::enhance::resolve_agent_family(&program, &prog_args, d.backend.as_deref())
+                    .is_some()
+            }
+            None => false,
+        };
+        match crate::submit::encode_submit_chunks(text, is_agent) {
+            crate::submit::SubmitChunks::Single(bytes) => self.write_input(id, &bytes).await,
+            crate::submit::SubmitChunks::PasteThenCr { paste, cr } => {
+                self.write_input(id, &paste).await?;
+                tokio::time::sleep(crate::submit::TERMINAL_SUBMIT_DELAY).await;
+                self.write_input(id, &cr).await
+            }
+        }
+    }
+
     /// Accumulate the first line of user input for a session, then auto-title
     /// from it. Fires for ALL sessions (shell AND agent CLIs): titling from the
     /// user's first input line is reliable and immediate, independent of the
@@ -2294,6 +2322,40 @@ mod tests {
         let after = svc.get(resp.id).await.unwrap();
         assert_eq!((after.cols, after.rows), (120, 40));
         svc.kill(resp.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_text_single_line_executes_via_cat_echo() {
+        // cat 会回显收到的字节。shell 后端(None) → 单行 raw+CR 一次写。
+        let (svc, _bc) = service();
+        let id = svc.create("u", req("cat", &[])).await.unwrap().id;
+        svc.submit_text(id, "hello-world").await.unwrap();
+
+        // 等 cat 把 "hello-world\r" 回显进 live scrollback。
+        let mut seen = false;
+        for _ in 0..40 {
+            if let Ok(resp) = svc.get(id).await {
+                if let Some(b64) = resp.scrollback_b64 {
+                    let s = String::from_utf8_lossy(&BASE64.decode(b64).unwrap()).to_string();
+                    if s.contains("hello-world") {
+                        seen = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(seen, "cat should echo the submitted single line");
+        svc.delete(id).await.ok();
+    }
+
+    #[tokio::test]
+    async fn submit_text_not_found_when_not_live() {
+        let (svc, _bc) = service();
+        assert!(matches!(
+            svc.submit_text(999_999, "x").await.unwrap_err(),
+            TerminalError::NotFound(_)
+        ));
     }
 
     #[tokio::test]
