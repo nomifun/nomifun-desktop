@@ -7,7 +7,7 @@
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import { Down } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 export interface TurnProcessDisclosureView<T> {
@@ -29,6 +29,11 @@ interface TurnProcessDisclosureProps<T> {
   getProcessItemLayoutKind?: (item: T) => string;
 }
 
+export interface TurnProcessDisclosureExpansionSnapshot {
+  itemId: string;
+  hasProcessItems: boolean;
+}
+
 const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'messages.turnProcessed',
   running: 'messages.turnProcessing',
@@ -46,6 +51,18 @@ const defaultLabelByState: Record<TurnDisclosureProcessState, string> = {
 };
 
 const sanitizeDomId = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
+
+const getDefaultExpanded = (hasProcessItems: boolean, defaultCollapsed: boolean): boolean =>
+  hasProcessItems && !defaultCollapsed;
+
+export function shouldResetTurnProcessDisclosureExpansion(
+  previous: TurnProcessDisclosureExpansionSnapshot,
+  next: TurnProcessDisclosureExpansionSnapshot
+): boolean {
+  if (previous.itemId !== next.itemId) return true;
+  if (previous.hasProcessItems !== next.hasProcessItems) return true;
+  return false;
+}
 
 const formatTurnDuration = (ms: number, t: ReturnType<typeof useTranslation>['t']): string => {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
@@ -72,11 +89,21 @@ function TurnProcessDisclosure<T>({
 }: TurnProcessDisclosureProps<T>) {
   const { t } = useTranslation();
   const hasProcessItems = item.processItems.length > 0;
-  const [expanded, setExpanded] = useState(hasProcessItems && !item.defaultCollapsed);
+  const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
   const [now, setNow] = useState(() => Date.now());
+  const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
+    itemId: item.id,
+    hasProcessItems,
+  });
 
   useEffect(() => {
-    setExpanded(hasProcessItems && !item.defaultCollapsed);
+    const nextSnapshot: TurnProcessDisclosureExpansionSnapshot = { itemId: item.id, hasProcessItems };
+    const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
+    expansionSnapshotRef.current = nextSnapshot;
+
+    if (shouldReset) {
+      setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
+    }
   }, [hasProcessItems, item.defaultCollapsed, item.id]);
 
   useEffect(() => {

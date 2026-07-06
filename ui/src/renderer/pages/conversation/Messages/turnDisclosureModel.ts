@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'other';
+export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'other';
 export type TurnDisclosureProcessState = 'completed' | 'running' | 'waiting' | 'failed' | 'canceled';
 
 export interface TurnDisclosureInputItem {
@@ -162,15 +162,8 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolea
     return segment.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
-  const state = resolveDisclosureState(processItems, stateOptions);
-  if (state !== 'running' && state !== 'waiting' && !isClosed) {
-    return segment.map((entry) => {
-      if (entry.role === 'process') {
-        return toProcessReceipt(entry);
-      }
-      return { type: 'item', id: entry.id };
-    });
-  }
+  const resolvedState = resolveDisclosureState(processItems, stateOptions);
+  const state = !isClosed && resolvedState === 'completed' ? 'running' : resolvedState;
 
   const finalOrProcessItems =
     finalAssistantIndex === -1 ? processItems : [...processItems, segment[finalAssistantIndex]].filter(Boolean);

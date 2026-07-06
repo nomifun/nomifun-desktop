@@ -45,10 +45,6 @@ import {
 import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
 import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
-import {
-  buildThinkingReceiptDisplay,
-  shouldShowThinkingReceiptDetail,
-} from './processTraceDisplayModel';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
 import { useAutoPreviewOfficeFiles } from '@/renderer/hooks/file/useAutoPreviewOfficeFiles';
@@ -198,6 +194,7 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
       if (isContextCompressionTip(item)) return 'process';
       return 'assistant';
     case 'thinking':
+      return 'process_content';
     case 'tool_call':
     case 'tool_group':
     case 'agent_status':
@@ -224,15 +221,6 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
   if (typeof value !== 'string') return fallback;
   const compacted = value.replace(/\s+/g, ' ').trim();
   return compacted || fallback;
-};
-
-const formatReceiptDuration = (ms: number | undefined, t: TranslationFn): string | undefined => {
-  if (ms === undefined) return undefined;
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
-  const sUnit = t('common.unit.second_short', { defaultValue: 's' });
-  const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
-  if (totalSeconds < 60) return `${totalSeconds}${sUnit}`;
-  return `${Math.floor(totalSeconds / 60)}${mUnit} ${totalSeconds % 60}${sUnit}`;
 };
 
 const getToolReceiptDisplayTarget = (part: ToolReceiptSummaryPart, workspaceRoots: string[]): string | undefined => {
@@ -442,30 +430,6 @@ const buildProcessReceiptSummary = (
   }
 
   switch (item.type) {
-    case 'thinking': {
-      const thinkingDuration = formatReceiptDuration(getThinkingDurationMs(item), t);
-      const display = buildThinkingReceiptDisplay(item.content, {
-        completedFallback: thinkingDuration
-          ? t('messages.processReceipt.thinkingCompletedDuration', {
-              duration: thinkingDuration,
-              defaultValue: 'Thought {{duration}}',
-            })
-          : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
-        runningFallback: t('messages.processReceipt.thinkingRunning', { defaultValue: 'Thinking' }),
-        waitingFallback: t('messages.processReceipt.thinkingWaiting', {
-          defaultValue: 'Waiting for model output',
-        }),
-      });
-      return {
-        label:
-          state === 'running'
-            ? display.label
-            : t('messages.processReceipt.thinkingCompleted', { defaultValue: 'Thought' }),
-        icon: 'thinking',
-        defaultExpanded: false,
-        hasDetail: shouldShowThinkingReceiptDetail(item.content),
-      };
-    }
     case 'permission':
       return {
         label: t('messages.processReceipt.waitingPermission', {

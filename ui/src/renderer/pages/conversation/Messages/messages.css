@@ -692,7 +692,6 @@ button.turn-process-trace__row:focus-visible {
   border-left: 1px solid var(--color-border-2, #e5e6eb);
 }
 
-.turn-process-trace-thinking-inline > .turn-process-trace__paragraph,
 .turn-process-trace-receipt-detail > .turn-process-trace__paragraph {
   color: var(--color-text-1, #1d2129);
 }
