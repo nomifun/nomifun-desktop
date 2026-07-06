@@ -204,7 +204,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
           )}
         </div>
         <div className='nodrag mb-8px'>
-          <SegmentedTabs items={modeItems} activeKey={mode} onChange={(k) => setMode(k as WorkshopGeneratorMode)} size='sm' />
+          <SegmentedTabs items={modeItems} activeKey={mode} onChange={(k) => setMode(k as WorkshopGeneratorMode)} size='sm' block />
         </div>
         <ModelPicker
           mode={mode}
@@ -215,7 +215,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
       </div>
 
       {/* Body */}
-      <div className='nowheel flex min-h-0 flex-1 flex-col gap-10px overflow-y-auto px-11px py-10px'>
+      <div className='nowheel flex min-h-0 min-w-0 flex-1 flex-col gap-10px overflow-y-auto px-11px py-10px'>
         {status === 'success' && results.length > 0 && (
           <ResultView mode={mode} resultAssetIds={results} batch={data.batch} onContinueEdit={continueEdit} onToTextNode={toTextNode} />
         )}
@@ -249,7 +249,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
               cancel();
             }}
             onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && cancel()}
-            className='nodrag flex w-full items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-8px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-[rgb(var(--danger-6))] hover:text-[rgb(var(--danger-6))]'
+            className='nodrag flex w-full box-border items-center justify-center gap-6px rounded-9px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-10px py-8px text-12px font-600 text-[var(--color-text-2)] cursor-pointer transition-colors hover:border-[rgb(var(--danger-6))] hover:text-[rgb(var(--danger-6))]'
           >
             <Pause theme='outline' size={13} strokeWidth={3} />
             {t('workshopGeneration.run.cancel', { defaultValue: '取消' })}
@@ -271,7 +271,7 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
             }}
             title={effectiveModel ? undefined : t('workshopGeneration.run.noModel', { defaultValue: '请先选择模型' })}
             className={[
-              'nodrag flex w-full items-center justify-center gap-6px rounded-9px px-10px py-8px text-12px font-700 transition-all select-none',
+              'nodrag flex w-full box-border items-center justify-center gap-6px rounded-9px px-10px py-8px text-12px font-700 transition-all select-none',
               effectiveModel
                 ? 'bg-[rgb(var(--primary-6))] text-white cursor-pointer hover:opacity-92 shadow-[0_4px_14px_rgba(var(--primary-6),0.32)]'
                 : 'bg-[var(--color-fill-3)] text-[var(--color-text-3)] cursor-not-allowed',

@@ -31,7 +31,7 @@ import {
 // ─── Reusable compact widgets ───────────────────────────────────────────────────
 
 const FieldRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div className='flex flex-col gap-5px'>
+  <div className='flex min-w-0 flex-col gap-5px'>
     <span className='text-10px font-600 uppercase tracking-wide text-[var(--color-text-3)]'>{label}</span>
     {children}
   </div>
@@ -42,12 +42,13 @@ interface PillOption {
   label: string;
 }
 
-const PillGroup: React.FC<{ options: PillOption[]; value: string; onSelect: (key: string) => void }> = ({
+const PillGroup: React.FC<{ options: PillOption[]; value: string; onSelect: (key: string) => void; fill?: boolean }> = ({
   options,
   value,
   onSelect,
+  fill = false,
 }) => (
-  <div className='flex flex-wrap gap-4px'>
+  <div className={fill ? 'flex w-full flex-wrap gap-4px' : 'flex flex-wrap gap-4px'}>
     {options.map((opt) => {
       const active = opt.key === value;
       return (
@@ -58,7 +59,8 @@ const PillGroup: React.FC<{ options: PillOption[]; value: string; onSelect: (key
           onClick={() => onSelect(opt.key)}
           onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onSelect(opt.key)}
           className={[
-            'nodrag rounded-7px border border-solid px-8px py-4px text-11px font-500 cursor-pointer transition-colors select-none',
+            'nodrag rounded-7px border border-solid px-8px py-4px text-11px font-500 cursor-pointer transition-colors select-none text-center',
+            fill ? 'box-border flex-1 min-w-max max-w-full' : '',
             active
               ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.12)] text-[rgb(var(--primary-6))]'
               : 'border-[var(--color-border-2)] bg-[var(--color-fill-1)] text-[var(--color-text-2)] hover:border-[var(--color-border-3)]',
@@ -129,7 +131,7 @@ const NumberBox: React.FC<{ value: number; onChange: (v: number) => void }> = ({
       if (Number.isFinite(n)) onChange(Math.round(n));
     }}
     onKeyDown={(e) => e.stopPropagation()}
-    className='nodrag w-full rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))]'
+    className='nodrag w-full min-w-0 box-border rounded-7px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-8px py-5px text-12px text-[var(--color-text-1)] outline-none focus:border-[rgb(var(--primary-6))]'
   />
 );
 
@@ -157,17 +159,18 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
       label: t(`workshopGeneration.quality.${q}`, { defaultValue: q }),
     }));
     return (
-      <div className='flex flex-col gap-11px'>
+      <div className='flex min-w-0 flex-col gap-11px'>
         <FieldRow label={t('workshopGeneration.param.size', { defaultValue: '尺寸' })}>
           <PillGroup
             options={presetOptions}
             value={p.preset}
+            fill
             onSelect={(key) => {
               const preset = IMAGE_SIZE_PRESETS.find((s) => s.key === key);
               if (preset) onChange({ preset: preset.key, width: preset.width, height: preset.height });
             }}
           />
-          <div className='flex items-center gap-6px'>
+          <div className='grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-6px'>
             <NumberBox value={p.width} onChange={(v) => onChange({ width: v, preset: 'custom' })} />
             <span className='text-11px text-[var(--color-text-3)]'>×</span>
             <NumberBox value={p.height} onChange={(v) => onChange({ height: v, preset: 'custom' })} />
@@ -181,7 +184,7 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
         </div>
 
         <FieldRow label={t('workshopGeneration.param.quality', { defaultValue: '质量' })}>
-          <PillGroup options={qualityOptions} value={p.quality} onSelect={(key) => onChange({ quality: key })} />
+          <PillGroup options={qualityOptions} value={p.quality} fill onSelect={(key) => onChange({ quality: key })} />
         </FieldRow>
       </div>
     );
@@ -192,7 +195,7 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
   const resOptions: PillOption[] = VIDEO_RESOLUTIONS.map((r) => ({ key: r, label: r }));
   const aspectOptions: PillOption[] = VIDEO_ASPECTS.map((a) => ({ key: a, label: a }));
   return (
-    <div className='flex flex-col gap-11px'>
+    <div className='flex min-w-0 flex-col gap-11px'>
       <FieldRow label={t('workshopGeneration.param.duration', { defaultValue: '时长' })}>
         <Stepper
           value={p.seconds}
@@ -203,10 +206,10 @@ const ParamControls: React.FC<ParamControlsProps> = ({ mode, params, onChange })
         />
       </FieldRow>
       <FieldRow label={t('workshopGeneration.param.resolution', { defaultValue: '分辨率' })}>
-        <PillGroup options={resOptions} value={p.resolution} onSelect={(key) => onChange({ resolution: key })} />
+        <PillGroup options={resOptions} value={p.resolution} fill onSelect={(key) => onChange({ resolution: key })} />
       </FieldRow>
       <FieldRow label={t('workshopGeneration.param.aspect', { defaultValue: '比例' })}>
-        <PillGroup options={aspectOptions} value={p.aspect} onSelect={(key) => onChange({ aspect: key })} />
+        <PillGroup options={aspectOptions} value={p.aspect} fill onSelect={(key) => onChange({ aspect: key })} />
       </FieldRow>
       <div className='flex flex-col gap-4px pt-2px'>
         <Toggle

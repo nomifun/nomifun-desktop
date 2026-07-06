@@ -86,7 +86,7 @@ const ModelPicker: React.FC<ModelPickerProps> = ({ mode, providerId, model, onCh
           }
         }}
         className={[
-          'nodrag flex w-full items-center gap-8px rounded-9px border border-solid px-10px py-7px cursor-pointer',
+          'nodrag flex w-full box-border items-center gap-8px rounded-9px border border-solid px-10px py-7px cursor-pointer',
           'transition-colors select-none',
           open
             ? 'border-[rgb(var(--primary-6))] bg-[rgba(var(--primary-6),0.06)]'

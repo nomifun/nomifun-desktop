@@ -163,7 +163,7 @@ const PromptField: React.FC<PromptFieldProps> = ({ value, mode, selfId, onChange
         onBlur={() => window.setTimeout(() => setOpen(false), 120)}
         placeholder={t('workshopGeneration.prompt.placeholder', { defaultValue: '描述你想生成的内容，输入 @ 引用素材…' })}
         className={[
-          'nodrag nowheel w-full resize-none rounded-9px border border-solid px-10px py-8px',
+          'nodrag nowheel w-full box-border resize-none rounded-9px border border-solid px-10px py-8px',
           'border-[var(--color-border-2)] bg-[var(--color-fill-1)] text-12px leading-[1.55] text-[var(--color-text-1)]',
           'outline-none transition-colors placeholder:text-[var(--color-text-3)] focus:border-[rgb(var(--primary-6))]',
         ].join(' ')}
