@@ -146,45 +146,40 @@ async fn materialize_embedded_builtin_skills_unlocked(
     tokio::fs::write(&version_path, binary_version).await?;
 
     // Move existing target out of the way, then move staging in.
+    commit_staging_dir(&target, &staging, &old).await
+}
+
+/// Atomically replace `target` with the fully-populated `staging` directory.
+///
+/// Moves any existing `target` aside to `old`, renames `staging` → `target`,
+/// restores `old` on failure, then best-effort removes `old`. `old` must be a
+/// sibling scratch path the caller owns. Reused by the builtin-skills and
+/// superpowers baseline materialization paths and the superpowers download
+/// installer, so the subtle Windows-safe rename/restore logic lives once here.
+pub(crate) async fn commit_staging_dir(target: &Path, staging: &Path, old: &Path) -> Result<(), ExtensionError> {
     if target.exists() {
         if old.exists() {
             // Tolerate leftover .old from a crashed rename sequence.
-            if let Err(e) = retry_startup_file_op("remove old builtin skills dir", &old, || {
-                tokio::fs::remove_dir_all(&old)
-            })
-            .await
+            if let Err(e) = retry_startup_file_op("remove old materialize dir", old, || tokio::fs::remove_dir_all(old)).await
             {
-                warn!(
-                    old = %old.display(),
-                    error = %e,
-                    "failed to remove stale old builtin skills tree before refresh"
-                );
+                warn!(old = %old.display(), error = %e, "failed to remove stale old tree before refresh");
             }
         }
-        retry_startup_file_op("rename builtin skills target to old", &target, || {
-            tokio::fs::rename(&target, &old)
-        })
-        .await?;
+        retry_startup_file_op("rename target to old", target, || tokio::fs::rename(target, old)).await?;
     }
 
-    if let Err(e) = retry_startup_file_op("rename builtin skills staging to target", &staging, || {
-        tokio::fs::rename(&staging, &target)
-    })
-    .await
+    if let Err(e) = retry_startup_file_op("rename staging to target", staging, || tokio::fs::rename(staging, target)).await
     {
-        // Try to restore the original target so we don't leave the user
-        // with no builtin skills.
+        // Try to restore the original target so we don't leave the user with nothing.
         if old.exists()
-            && let Err(restore_error) = retry_startup_file_op("restore old builtin skills target", &old, || {
-                tokio::fs::rename(&old, &target)
-            })
-            .await
+            && let Err(restore_error) =
+                retry_startup_file_op("restore old target", old, || tokio::fs::rename(old, target)).await
         {
             warn!(
                 old = %old.display(),
                 target = %target.display(),
                 error = %restore_error,
-                "failed to restore old builtin skills tree after refresh failure"
+                "failed to restore old tree after refresh failure"
             );
         }
         return Err(ExtensionError::Io(std::io::Error::new(
@@ -199,16 +194,9 @@ async fn materialize_embedded_builtin_skills_unlocked(
 
     // Best-effort cleanup of the superseded tree.
     if old.exists()
-        && let Err(e) = retry_startup_file_op("remove superseded builtin skills dir", &old, || {
-            tokio::fs::remove_dir_all(&old)
-        })
-        .await
+        && let Err(e) = retry_startup_file_op("remove superseded dir", old, || tokio::fs::remove_dir_all(old)).await
     {
-        warn!(
-            old = %old.display(),
-            error = %e,
-            "failed to remove superseded builtin skills tree (leaving behind)"
-        );
+        warn!(old = %old.display(), error = %e, "failed to remove superseded tree (leaving behind)");
     }
 
     Ok(())
@@ -224,7 +212,7 @@ async fn existing_builtin_skills_looks_usable(target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-async fn retry_startup_file_op<T, F, Fut>(operation: &str, path: &Path, mut op: F) -> std::io::Result<T>
+pub(crate) async fn retry_startup_file_op<T, F, Fut>(operation: &str, path: &Path, mut op: F) -> std::io::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = std::io::Result<T>>,
@@ -260,16 +248,24 @@ fn is_retryable_startup_file_error(error: &std::io::Error) -> bool {
     }
 }
 
-struct MaterializeLockGuard {
+pub(crate) struct MaterializeLockGuard {
     file: std::fs::File,
 }
 
 impl MaterializeLockGuard {
     async fn acquire(data_dir: &Path) -> std::io::Result<Self> {
+        Self::acquire_named(data_dir, LOCK_FILE_NAME).await
+    }
+
+    /// Acquire an exclusive file lock named `lock_name` under `data_dir`.
+    /// Lets separate corpora (builtin skills vs superpowers) use distinct lock
+    /// files so they don't needlessly serialize against each other.
+    pub(crate) async fn acquire_named(data_dir: &Path, lock_name: &str) -> std::io::Result<Self> {
         let data_dir = data_dir.to_path_buf();
+        let lock_name = lock_name.to_string();
         tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&data_dir)?;
-            let lock_path = data_dir.join(LOCK_FILE_NAME);
+            let lock_path = data_dir.join(&lock_name);
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -280,7 +276,7 @@ impl MaterializeLockGuard {
             Ok(Self { file })
         })
         .await
-        .map_err(|e| std::io::Error::other(format!("builtin skills lock task failed: {e}")))?
+        .map_err(|e| std::io::Error::other(format!("materialize lock task failed: {e}")))?
     }
 }
 
@@ -292,7 +288,7 @@ impl Drop for MaterializeLockGuard {
 
 /// Recursively copy every file in an `include_dir::Dir` tree into `dest`.
 /// Directories are created as needed. Files overwrite silently.
-async fn write_dir_recursive(dir: &Dir<'static>, dest: &Path) -> Result<(), ExtensionError> {
+pub(crate) async fn write_dir_recursive(dir: &Dir<'static>, dest: &Path) -> Result<(), ExtensionError> {
     // The include_dir API is synchronous; we flatten into a Vec then
     // feed the writes through tokio::fs to stay off the reactor's thread
     // for big IO bursts.
@@ -314,4 +310,47 @@ async fn write_dir_recursive(dir: &Dir<'static>, dest: &Path) -> Result<(), Exte
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn commit_staging_dir_replaces_existing_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        let staging = tmp.path().join("staging");
+        let old = tmp.path().join("old");
+
+        // Existing target with stale content that must be replaced.
+        tokio::fs::create_dir_all(target.join("sub")).await.unwrap();
+        tokio::fs::write(target.join("stale.txt"), b"old").await.unwrap();
+        // Fully-populated staging.
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        tokio::fs::write(staging.join("fresh.txt"), b"new").await.unwrap();
+
+        commit_staging_dir(&target, &staging, &old).await.unwrap();
+
+        assert!(target.join("fresh.txt").is_file(), "fresh content moved in");
+        assert!(!target.join("stale.txt").exists(), "stale content replaced");
+        assert!(!staging.exists(), "staging consumed by rename");
+        assert!(!old.exists(), "old scratch cleaned up");
+    }
+
+    #[tokio::test]
+    async fn commit_staging_dir_creates_target_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        let staging = tmp.path().join("staging");
+        let old = tmp.path().join("old");
+        tokio::fs::create_dir_all(&staging).await.unwrap();
+        tokio::fs::write(staging.join("fresh.txt"), b"new").await.unwrap();
+
+        commit_staging_dir(&target, &staging, &old).await.unwrap();
+
+        assert!(target.join("fresh.txt").is_file());
+        assert!(!staging.exists());
+    }
 }
