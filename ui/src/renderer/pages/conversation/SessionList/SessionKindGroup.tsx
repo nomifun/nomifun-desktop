@@ -139,7 +139,7 @@ const SessionKindGroup: React.FC<SessionKindGroupProps> = ({
             <button
               type='button'
               aria-expanded={showAll}
-              className='ml-64px mt-1px mb-2px inline-flex h-20px w-fit max-w-full appearance-none items-center border-none bg-transparent p-0 text-left text-12px leading-20px text-t-quaternary transition-colors cursor-pointer select-none hover:text-t-secondary focus:outline-none focus-visible:text-t-primary'
+              className='ml-64px mt-1px mb-2px inline-flex h-20px w-fit max-w-full appearance-none items-center border-none bg-transparent p-0 text-left text-12px leading-20px text-t-secondary transition-colors cursor-pointer select-none hover:text-t-primary focus:outline-none focus-visible:text-t-primary'
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleShowAll();

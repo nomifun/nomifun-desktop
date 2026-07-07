@@ -107,6 +107,25 @@ describe('buildToolReceiptSummaryParts', () => {
       { action: 'run_commands', count: 1, state: 'running', target: 'bun test MessageList' },
     ]);
   });
+
+  test('summarizes non-fatal command exits as completed command runs', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [
+        tool({
+          key: 'grep',
+          name: 'Bash',
+          description: 'grep -rn "missing" .',
+          status: 'error',
+          nonFatalFailure: true,
+        }),
+      ],
+      'completed'
+    );
+
+    expect(parts).toEqual([
+      { action: 'run_commands', count: 1, state: 'completed', target: 'grep -rn "missing" .' },
+    ]);
+  });
 });
 
 describe('getToolReceiptIconFromSummaryParts', () => {
@@ -240,6 +259,30 @@ describe('buildToolReceiptDetailRows', () => {
         input: 'python snake.py',
         output: 'pygame 2.6.1\\nGame started',
         truncated: true,
+      },
+    ]);
+  });
+
+  test('keeps non-fatal command exit details inspectable without failed row styling', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({
+        key: 'grep',
+        name: 'Bash',
+        description: 'grep -rn "missing" .',
+        status: 'error',
+        nonFatalFailure: true,
+        output: 'exit code 1',
+      }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'grep',
+        action: 'run_commands',
+        state: 'completed',
+        title: 'Bash',
+        target: 'grep -rn "missing" .',
+        output: 'exit code 1',
       },
     ]);
   });

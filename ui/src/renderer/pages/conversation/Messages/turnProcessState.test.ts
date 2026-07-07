@@ -35,6 +35,46 @@ describe('turn process state', () => {
     ).toBe('canceled');
   });
 
+  test('does not let non-fatal ACP shell command exits fail the whole process receipt', () => {
+    expect(
+      getToolMessagesProcessState([
+        {
+          type: 'acp_tool_call',
+          content: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              tool_call_id: 'call-bash',
+              title: 'Bash',
+              kind: 'execute',
+              status: 'failed',
+              rawInput: { command: 'grep -rn "missing" .' },
+            },
+          },
+        } as any,
+      ])
+    ).toBe('completed');
+  });
+
+  test('does not let failed ACP read probes fail the whole process receipt', () => {
+    expect(
+      getToolMessagesProcessState([
+        {
+          type: 'acp_tool_call',
+          content: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              tool_call_id: 'call-read',
+              title: 'config.yaml',
+              kind: 'read',
+              status: 'failed',
+              rawInput: { path: 'config.yaml' },
+            },
+          },
+        } as any,
+      ])
+    ).toBe('completed');
+  });
+
   test('keeps permission and active thinking steps open', () => {
     expect(getProcessItemState({ type: 'permission' } as any)).toBe('waiting');
     expect(getProcessItemState({ type: 'thinking', content: { status: 'thinking' } } as any)).toBe('running');

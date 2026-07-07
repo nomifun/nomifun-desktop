@@ -6,6 +6,8 @@ export interface NormalizedToolCall {
   key: string;
   name: string;
   status: NormalizedToolStatus;
+  /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
+  nonFatalFailure?: boolean;
   description?: string;
   input?: string;
   output?: string;
@@ -103,6 +105,31 @@ function normalizeAcpStatus(status: string): NormalizedToolStatus {
   }
 }
 
+const shellCommandTitles = new Set(['bash', 'shell', 'terminal', 'command', 'cmd', 'powershell']);
+
+const hasShellCommandInput = (value: unknown): boolean => {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+
+  for (const key of ['command', 'cmd', 'script', 'shell', 'bash']) {
+    const field = record[key];
+    if (typeof field === 'string' && field.trim()) return true;
+  }
+
+  return Object.values(record).some(hasShellCommandInput);
+};
+
+const isNonFatalAcpToolFailure = (
+  update: AcpToolCallUpdateCompat,
+  rawInput: Record<string, unknown> | undefined
+): boolean => {
+  if (update.status !== 'failed') return false;
+  if (update.kind === 'read') return true;
+  if (update.kind !== 'execute') return false;
+  if (hasShellCommandInput(rawInput)) return true;
+  return shellCommandTitles.has((update.title ?? '').trim().toLowerCase());
+};
+
 const buildParamSummary = (kind: string, rawInput?: Record<string, unknown>): string | undefined => {
   if (!rawInput) return undefined;
 
@@ -175,6 +202,7 @@ export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedTo
     key: update.tool_call_id,
     name: update.title,
     status: normalizeAcpStatus(update.status),
+    ...(isNonFatalAcpToolFailure(update, rawInput) ? { nonFatalFailure: true } : {}),
     description: keyParam || (rawInput?.command as string) || update.kind,
     input,
     output,
