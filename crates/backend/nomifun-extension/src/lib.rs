@@ -46,7 +46,8 @@ pub use superpowers::{
     materialize_superpowers_baseline, superpowers_baseline_version, superpowers_corpus, superpowers_corpus_fingerprint,
 };
 pub use superpowers::update::{
-    SuperpowersRelease, install_superpowers_overlay, installed_overlay_version, superpowers_repo,
+    SuperpowersRelease, fetch_latest_release, install_superpowers_overlay, installed_overlay_version, parse_latest_release,
+    superpowers_repo,
 };
 pub use template::{resolve_env_map, resolve_env_templates, resolve_file_reference};
 pub use types::*;

@@ -82,6 +82,46 @@ pub async fn install_superpowers_overlay(
     Ok(())
 }
 
+/// Query GitHub for the latest superpowers release. Builds its own proxy-aware
+/// client. Returns the resolved [`SuperpowersRelease`] (zipball URL, no sha256 —
+/// GitHub does not publish a digest for source zipballs).
+pub async fn fetch_latest_release() -> Result<SuperpowersRelease, ExtensionError> {
+    let repo = superpowers_repo();
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let bytes = fetch_bytes(&url).await?;
+    parse_latest_release(&bytes)
+}
+
+/// Parse the GitHub `releases/latest` JSON payload into a [`SuperpowersRelease`].
+/// Pure — unit-testable without the network. Extracts `tag_name` (with any
+/// leading `v` stripped for clean version comparison) and `zipball_url`.
+pub fn parse_latest_release(bytes: &[u8]) -> Result<SuperpowersRelease, ExtensionError> {
+    let json: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| ExtensionError::Download(format!("parsing GitHub release JSON: {e}")))?;
+    let tag = json
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ExtensionError::Download("release JSON missing tag_name".into()))?;
+    let zip_url = json
+        .get("zipball_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ExtensionError::Download("release JSON missing zipball_url".into()))?;
+    let version = tag
+        .strip_prefix('v')
+        .or_else(|| tag.strip_prefix('V'))
+        .unwrap_or(tag)
+        .to_owned();
+    Ok(SuperpowersRelease {
+        version,
+        zip_url: zip_url.to_owned(),
+        sha256: None,
+    })
+}
+
 /// Fetch `url` into memory with host allowlisting, a timeout, and a size cap.
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>, ExtensionError> {
     if !host_allowed(url) {
@@ -344,5 +384,32 @@ mod tests {
         assert!(verify_sha256(bytes, &digest).is_ok());
         assert!(verify_sha256(bytes, &digest.to_uppercase()).is_ok());
         assert!(verify_sha256(bytes, "00").is_err());
+    }
+
+    #[test]
+    fn parses_github_release_json_and_strips_v_prefix() {
+        let json = br#"{
+            "tag_name": "v6.0.4",
+            "name": "6.0.4",
+            "zipball_url": "https://api.github.com/repos/obra/superpowers/zipball/v6.0.4"
+        }"#;
+        let r = parse_latest_release(json).unwrap();
+        assert_eq!(r.version, "6.0.4", "leading v stripped for clean comparison");
+        assert_eq!(r.zip_url, "https://api.github.com/repos/obra/superpowers/zipball/v6.0.4");
+        assert!(r.sha256.is_none());
+
+        // A tag with no v prefix is preserved verbatim.
+        let json2 = br#"{"tag_name":"7.1.0","zipball_url":"https://api.github.com/z"}"#;
+        assert_eq!(parse_latest_release(json2).unwrap().version, "7.1.0");
+    }
+
+    #[test]
+    fn parse_rejects_missing_or_invalid_fields() {
+        assert!(parse_latest_release(br#"{"name":"x"}"#).is_err(), "missing tag_name");
+        assert!(
+            parse_latest_release(br#"{"tag_name":"v1"}"#).is_err(),
+            "missing zipball_url"
+        );
+        assert!(parse_latest_release(b"not json").is_err());
     }
 }
