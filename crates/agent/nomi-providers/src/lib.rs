@@ -5,7 +5,7 @@ pub mod openai;
 pub mod retry;
 pub mod vertex;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -88,29 +88,36 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(120);
 static HTTP_CLIENT_BUILD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
-pub(crate) fn reset_http_client_build_count() {
-    HTTP_CLIENT_BUILD_COUNT.store(0, Ordering::SeqCst);
-}
-
-#[cfg(test)]
 pub(crate) fn http_client_build_count() -> usize {
     HTTP_CLIENT_BUILD_COUNT.load(Ordering::SeqCst)
 }
 
-/// Shared reqwest client for all LLM providers, configured with connection and
-/// idle-read timeouts. A stalled upstream produces a `reqwest` timeout error,
-/// which the SSE loop converts into `LlmEvent::Error` (surfaced to the user as
-/// `Nomi agent error: ...`) instead of an indefinite hang.
+/// Process-wide shared reqwest client for all LLM providers, configured with
+/// connection and idle-read timeouts. Built exactly once (lazily, on first use)
+/// so its keep-alive connection pool is reused across every request and every
+/// provider. Previously a fresh client was built on every `stream()` call, which
+/// gave each request an empty pool and thus a cold TCP+TLS handshake on the
+/// first-token path of EVERY turn — the single largest avoidable首字 cost.
+///
+/// A stalled upstream produces a `reqwest` timeout error, which the SSE loop
+/// converts into `LlmEvent::Error` (surfaced as `Nomi agent error: ...`) instead
+/// of an indefinite hang. The detected proxy is captured at first build; a
+/// runtime proxy change takes effect on the next app start.
 pub(crate) fn http_client() -> reqwest::Client {
-    #[cfg(test)]
-    HTTP_CLIENT_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            #[cfg(test)]
+            HTTP_CLIENT_BUILD_COUNT.fetch_add(1, Ordering::SeqCst);
 
-    let builder = reqwest::Client::builder()
-        .connect_timeout(HTTP_CONNECT_TIMEOUT)
-        .read_timeout(HTTP_READ_TIMEOUT);
-    nomifun_net::proxy::apply_detected_proxy(builder)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
+            let builder = reqwest::Client::builder()
+                .connect_timeout(HTTP_CONNECT_TIMEOUT)
+                .read_timeout(HTTP_READ_TIMEOUT);
+            nomifun_net::proxy::apply_detected_proxy(builder)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
 }
 
 pub(crate) fn non_empty_rate_limit_message(body: String) -> String {

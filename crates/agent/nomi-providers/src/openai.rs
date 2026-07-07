@@ -1988,8 +1988,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_builds_http_client_for_each_call() {
-        use crate::{http_client_build_count, reset_http_client_build_count};
+    async fn stream_reuses_shared_http_client() {
+        use crate::http_client_build_count;
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2009,13 +2009,24 @@ mod tests {
             .await;
 
         let provider = OpenAIProvider::new("key", &server.uri(), openai_compat());
-        reset_http_client_build_count();
 
+        // First call may trigger the one-time lazy build (0 if another test in
+        // this binary already initialized the process-wide shared client).
         drain_stream(provider.stream(&simple_request()).await.unwrap()).await;
-        assert_eq!(http_client_build_count(), 1);
+        let after_first = http_client_build_count();
 
+        // A second call must NOT rebuild — the shared client (and its keep-alive
+        // connection pool) is reused across requests and providers.
         drain_stream(provider.stream(&simple_request()).await.unwrap()).await;
-        assert_eq!(http_client_build_count(), 2);
+        assert_eq!(
+            http_client_build_count(),
+            after_first,
+            "shared HTTP client must be reused, not rebuilt per call"
+        );
+        assert!(
+            after_first <= 1,
+            "shared HTTP client must be built at most once per process, got {after_first}"
+        );
     }
 
     // --- max_tokens_field ---
