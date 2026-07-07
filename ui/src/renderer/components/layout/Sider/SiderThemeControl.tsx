@@ -12,6 +12,7 @@ import classNames from 'classnames';
 import { ThemeSwitcher } from '@renderer/components/settings/ThemeSwitcher';
 import FontSizeControl from '@renderer/components/settings/FontSizeControl';
 import CssThemeModal from '@renderer/pages/settings/DisplaySettings/CssThemeModal';
+import { getCssThemeDisplayName } from '@renderer/pages/settings/DisplaySettings/presets';
 import { useCssTheme } from '@renderer/hooks/ui/useCssTheme';
 import type { ICssTheme } from '@/common/config/storage';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
@@ -114,6 +115,7 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ isMobile, collaps
           {themes.map((theme) => {
             const active = activeThemeId === theme.id;
             const accent = pickAccent(theme.css || '');
+            const displayName = getCssThemeDisplayName(theme, t);
             return (
               <div
                 key={theme.id}
@@ -137,7 +139,7 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ isMobile, collaps
                       active ? 'text-primary-6 font-500' : 'text-t-primary'
                     )}
                   >
-                    {theme.name}
+                    {displayName}
                   </span>
                 </button>
                 {active && <CheckOne theme='filled' size='15' fill='rgb(var(--primary-6))' className='shrink-0' />}

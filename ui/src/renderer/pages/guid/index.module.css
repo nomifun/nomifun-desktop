@@ -977,21 +977,32 @@ button.guidResourceCard:focus-visible {
 }
 
 .drawerSurface {
+  --drawer-surface-bg:
+    radial-gradient(circle at 18% 0%, color-mix(in srgb, rgb(var(--primary-6)) 13%, transparent), transparent 30%),
+    linear-gradient(180deg, color-mix(in srgb, var(--color-bg-1) 78%, var(--color-bg-2)) 0%, var(--color-bg-2) 100%);
+  --drawer-panel-bg: color-mix(in srgb, var(--color-bg-2) 82%, var(--color-bg-1));
+  --drawer-panel-hover-bg: color-mix(in srgb, var(--color-bg-2) 62%, var(--color-bg-1));
+  --drawer-panel-selected-bg:
+    linear-gradient(135deg, color-mix(in srgb, rgb(var(--primary-6)) 10%, var(--color-bg-2)), transparent 52%),
+    color-mix(in srgb, var(--color-bg-2) 72%, var(--color-bg-1));
+  --drawer-control-bg: color-mix(in srgb, var(--color-fill-2) 58%, var(--color-bg-1));
+  --drawer-control-hover-bg: color-mix(in srgb, var(--color-fill-3) 54%, var(--color-bg-1));
+  --drawer-accent-soft: color-mix(in srgb, rgb(var(--primary-6)) 8%, transparent);
+  --drawer-accent-panel: color-mix(in srgb, rgb(var(--primary-6)) 11%, var(--color-bg-2));
+  --drawer-accent-border: color-mix(in srgb, rgb(var(--primary-6)) 24%, var(--color-border-2));
+  --drawer-hairline: color-mix(in srgb, rgb(var(--primary-6)) 13%, var(--color-border-2));
+  --drawer-hairline-strong: color-mix(in srgb, rgb(var(--primary-6)) 28%, var(--color-border-2));
+  --drawer-inner-highlight: color-mix(in srgb, var(--color-bg-white) 48%, transparent);
+  --drawer-soft-shadow: color-mix(in srgb, var(--color-text-1) 8%, transparent);
+  --drawer-strong-shadow: color-mix(in srgb, var(--color-text-1) 14%, transparent);
+  --drawer-focus-ring: color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
   position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
   color: var(--color-text-1);
-  background:
-    radial-gradient(circle at 18% 0%, rgba(var(--primary-6), 0.11), transparent 28%),
-    linear-gradient(180deg, var(--color-bg-1) 0%, var(--color-bg-2) 100%);
-}
-
-:global([data-theme='dark']) .drawerSurface {
-  background:
-    radial-gradient(circle at 18% 0%, rgba(var(--primary-6), 0.18), transparent 30%),
-    linear-gradient(180deg, #242426 0%, #1f1f22 100%);
+  background: var(--drawer-surface-bg);
 }
 
 .drawerTopbar {
@@ -1006,21 +1017,14 @@ button.guidResourceCard:focus-visible {
   align-items: center;
   gap: 4px;
   min-height: 40px;
-  border: 1px solid rgba(var(--primary-6), 0.12);
+  border: 1px solid var(--drawer-hairline);
   border-radius: 15px;
   padding: 4px;
-  background: rgba(255, 255, 255, 0.62);
+  background: var(--drawer-panel-bg);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.72),
-    0 12px 28px rgba(26, 20, 51, 0.06);
+    inset 0 1px 0 var(--drawer-inner-highlight),
+    0 12px 28px var(--drawer-soft-shadow);
   backdrop-filter: blur(18px);
-}
-
-:global([data-theme='dark']) .drawerSegmented {
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 14px 30px rgba(0, 0, 0, 0.24);
 }
 
 .drawerSegment {
@@ -1046,20 +1050,16 @@ button.guidResourceCard:focus-visible {
 .drawerSegment:hover,
 .drawerSegment:focus-visible {
   color: var(--color-text-1);
-  background: rgba(var(--primary-6), 0.06);
+  background: var(--drawer-accent-soft);
   outline: none;
 }
 
 .drawerSegmentActive {
   color: rgb(var(--primary-6));
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--drawer-accent-panel);
   box-shadow:
-    0 8px 18px rgba(var(--primary-6), 0.12),
-    inset 0 0 0 1px rgba(var(--primary-6), 0.08);
-}
-
-:global([data-theme='dark']) .drawerSegmentActive {
-  background: rgba(var(--primary-6), 0.18);
+    0 8px 18px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 12%, transparent);
 }
 
 .drawerCloseButton {
@@ -1069,10 +1069,10 @@ button.guidResourceCard:focus-visible {
   align-items: center;
   justify-content: center;
   margin-left: auto;
-  border: 1px solid rgba(var(--primary-6), 0.1);
+  border: 1px solid var(--drawer-hairline);
   border-radius: 13px;
   color: var(--color-text-3);
-  background: rgba(255, 255, 255, 0.48);
+  background: var(--drawer-control-bg);
   cursor: pointer;
   transition:
     background-color 0.16s ease,
@@ -1084,14 +1084,10 @@ button.guidResourceCard:focus-visible {
 .drawerCloseButton:hover,
 .drawerCloseButton:focus-visible {
   color: var(--color-text-1);
-  border-color: rgba(var(--primary-6), 0.18);
-  background: rgba(255, 255, 255, 0.76);
+  border-color: var(--drawer-hairline-strong);
+  background: var(--drawer-control-hover-bg);
   outline: none;
   transform: translateY(-1px);
-}
-
-:global([data-theme='dark']) .drawerCloseButton {
-  background: rgba(255, 255, 255, 0.07);
 }
 
 .drawerSearchPanel {
@@ -1101,21 +1097,21 @@ button.guidResourceCard:focus-visible {
 .drawerSearchInput:global(.arco-input-inner-wrapper) {
   width: 100%;
   height: 42px;
-  border: 1px solid rgba(var(--primary-6), 0.1) !important;
+  border: 1px solid var(--drawer-hairline) !important;
   border-radius: 14px !important;
-  background: rgba(255, 255, 255, 0.56) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72) !important;
+  background: var(--drawer-panel-bg) !important;
+  box-shadow: inset 0 1px 0 var(--drawer-inner-highlight) !important;
   overflow: hidden;
 }
 
 .drawerSearchInput:global(.arco-input-inner-wrapper):hover {
-  border-color: rgba(var(--primary-6), 0.16) !important;
-  background: rgba(255, 255, 255, 0.68) !important;
+  border-color: var(--drawer-hairline-strong) !important;
+  background: var(--drawer-panel-hover-bg) !important;
 }
 
 .drawerSearchInput:global(.arco-input-inner-wrapper-focus) {
-  border-color: rgba(var(--primary-6), 0.18) !important;
-  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.045) !important;
+  border-color: var(--drawer-hairline-strong) !important;
+  box-shadow: 0 0 0 3px var(--drawer-focus-ring) !important;
 }
 
 .drawerSearchInput :global(.arco-input-prefix) {
@@ -1134,15 +1130,6 @@ button.guidResourceCard:focus-visible {
 .drawerSearchInput :global(.arco-input::placeholder) {
   color: var(--color-text-3);
   font-weight: 500;
-}
-
-:global([data-theme='dark']) .drawerSearchInput:global(.arco-input-inner-wrapper) {
-  background: rgba(255, 255, 255, 0.075) !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
-}
-
-:global([data-theme='dark']) .drawerSearchInput:global(.arco-input-inner-wrapper):hover {
-  background: rgba(255, 255, 255, 0.1) !important;
 }
 
 .drawerFilterPanel {
@@ -1182,14 +1169,14 @@ button.guidResourceCard:focus-visible {
   grid-template-columns: 46px minmax(0, 1fr) auto;
   gap: 14px;
   align-items: start;
-  border: 1px solid rgba(var(--primary-6), 0.08);
+  border: 1px solid var(--drawer-hairline);
   border-radius: 16px;
   padding: 14px;
   color: var(--color-text-1);
-  background: rgba(255, 255, 255, 0.66);
+  background: var(--drawer-panel-bg);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.72),
-    0 10px 28px rgba(25, 22, 40, 0.045);
+    inset 0 1px 0 var(--drawer-inner-highlight),
+    0 10px 28px var(--drawer-soft-shadow);
   cursor: pointer;
   overflow: hidden;
   transition:
@@ -1205,17 +1192,17 @@ button.guidResourceCard:focus-visible {
   inset: 10px auto 10px 0;
   width: 3px;
   border-radius: 999px;
-  background: rgba(var(--primary-6), 0);
+  background: transparent;
   transition: background-color 0.16s ease;
 }
 
 .drawerCard:hover,
 .drawerCard:focus-visible {
-  border-color: rgba(var(--primary-6), 0.2);
-  background: rgba(255, 255, 255, 0.88);
+  border-color: var(--drawer-hairline-strong);
+  background: var(--drawer-panel-hover-bg);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.82),
-    0 16px 34px rgba(25, 22, 40, 0.08);
+    inset 0 1px 0 var(--drawer-inner-highlight),
+    0 16px 34px var(--drawer-strong-shadow);
   outline: none;
   transform: translateY(-1px);
 }
@@ -1223,35 +1210,15 @@ button.guidResourceCard:focus-visible {
 .drawerCard:hover::before,
 .drawerCard:focus-visible::before,
 .drawerCardSelected::before {
-  background: rgba(var(--primary-6), 0.42);
+  background: color-mix(in srgb, rgb(var(--primary-6)) 48%, transparent);
 }
 
 .drawerCardSelected {
-  border-color: rgba(var(--primary-6), 0.26);
-  background:
-    linear-gradient(135deg, rgba(var(--primary-6), 0.11), rgba(255, 255, 255, 0.72) 42%),
-    rgba(255, 255, 255, 0.82);
+  border-color: var(--drawer-accent-border);
+  background: var(--drawer-panel-selected-bg);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.78),
-    0 18px 38px rgba(var(--primary-6), 0.12);
-}
-
-:global([data-theme='dark']) .drawerCard {
-  background: rgba(255, 255, 255, 0.07);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 16px 34px rgba(0, 0, 0, 0.22);
-}
-
-:global([data-theme='dark']) .drawerCard:hover,
-:global([data-theme='dark']) .drawerCard:focus-visible {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-:global([data-theme='dark']) .drawerCardSelected {
-  background:
-    linear-gradient(135deg, rgba(var(--primary-6), 0.18), rgba(255, 255, 255, 0.07) 46%),
-    rgba(255, 255, 255, 0.08);
+    inset 0 1px 0 var(--drawer-inner-highlight),
+    0 18px 38px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
 }
 
 .drawerCardStatus {
@@ -1263,10 +1230,10 @@ button.guidResourceCard:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(var(--primary-6), 0.16);
+  border: 1px solid var(--drawer-hairline-strong);
   border-radius: 8px;
   color: transparent;
-  background: rgba(255, 255, 255, 0.54);
+  background: var(--drawer-control-bg);
 }
 
 .drawerCardStatusSelected {
@@ -1282,12 +1249,12 @@ button.guidResourceCard:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid rgba(var(--primary-6), 0.1);
+  border: 1px solid var(--drawer-hairline);
   border-radius: 14px;
   color: rgb(var(--primary-6));
   background:
-    linear-gradient(135deg, rgba(var(--primary-6), 0.13), rgba(255, 255, 255, 0.48)),
-    rgba(var(--primary-6), 0.06);
+    linear-gradient(135deg, color-mix(in srgb, rgb(var(--primary-6)) 14%, var(--color-bg-2)), transparent 64%),
+    var(--drawer-accent-soft);
   font-size: 14px;
   font-weight: 760;
   letter-spacing: 0;
@@ -1335,14 +1302,14 @@ button.guidResourceCard:focus-visible {
 
 .drawerBadgePrimary {
   color: rgb(var(--primary-6));
-  border-color: rgba(var(--primary-6), 0.18);
-  background: rgba(var(--primary-6), 0.1);
+  border-color: var(--drawer-accent-border);
+  background: var(--drawer-accent-soft);
 }
 
 .drawerBadgeMuted {
   color: var(--color-text-3);
-  border-color: rgba(var(--primary-6), 0.09);
-  background: rgba(255, 255, 255, 0.48);
+  border-color: var(--drawer-hairline);
+  background: var(--drawer-control-bg);
 }
 
 .drawerBadgeSuccess {
@@ -1375,11 +1342,11 @@ button.guidResourceCard:focus-visible {
   display: inline-flex;
   align-items: center;
   min-height: 21px;
-  border: 1px solid rgba(var(--primary-6), 0.1);
+  border: 1px solid var(--drawer-hairline);
   border-radius: 999px;
   padding: 0 8px;
   color: var(--color-text-3);
-  background: rgba(255, 255, 255, 0.42);
+  background: var(--drawer-control-bg);
   font-size: 10px;
   font-weight: 620;
   line-height: 1;
@@ -1389,8 +1356,8 @@ button.guidResourceCard:focus-visible {
 .drawerEngineBadge {
   gap: 5px;
   color: rgb(var(--primary-6));
-  border-color: rgba(var(--primary-6), 0.16);
-  background: rgba(var(--primary-6), 0.08);
+  border-color: var(--drawer-accent-border);
+  background: var(--drawer-accent-soft);
 }
 
 .drawerEngineGlyph {
@@ -1436,16 +1403,11 @@ button.guidResourceCard:focus-visible {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid rgba(var(--primary-6), 0.09);
+  border-top: 1px solid var(--drawer-hairline);
   padding: 13px 20px 16px;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 -12px 28px rgba(26, 20, 51, 0.04);
+  background: var(--drawer-panel-bg);
+  box-shadow: 0 -12px 28px var(--drawer-soft-shadow);
   backdrop-filter: blur(18px);
-}
-
-:global([data-theme='dark']) .drawerFooter {
-  background: rgba(31, 31, 34, 0.78);
-  box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.18);
 }
 
 .drawerFooterHint {
@@ -1482,15 +1444,15 @@ button.guidResourceCard:focus-visible {
 .drawerGhostButton {
   margin-left: auto;
   color: var(--color-text-2);
-  border-color: rgba(var(--primary-6), 0.1);
-  background: rgba(255, 255, 255, 0.5);
+  border-color: var(--drawer-hairline);
+  background: var(--drawer-control-bg);
 }
 
 .drawerGhostButton:hover,
 .drawerGhostButton:focus-visible {
   color: rgb(var(--primary-6));
-  border-color: rgba(var(--primary-6), 0.2);
-  background: rgba(var(--primary-6), 0.08);
+  border-color: var(--drawer-hairline-strong);
+  background: var(--drawer-accent-soft);
   outline: none;
   transform: translateY(-1px);
 }

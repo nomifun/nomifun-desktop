@@ -195,6 +195,13 @@
     "selectOrCustomize": "Select preset theme or custom CSS",
     "addManually": "Add Manually",
     "default": "Default",
+    "presets": {
+      "codexNeutral": "Classic",
+      "rhythmDark": "Rhythm Dark",
+      "neonRainbow": "Neon Night",
+      "frostedGlass": "Frosted Glass",
+      "sunsetAfterglow": "Sunset Afterglow"
+    },
     "addToPreset": "Add Theme",
     "editTheme": "Edit Theme",
     "previewCover": "Background Image",
