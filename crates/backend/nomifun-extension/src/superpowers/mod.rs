@@ -19,6 +19,8 @@ use tracing::warn;
 use crate::error::ExtensionError;
 use crate::startup_materialize::{MaterializeLockGuard, commit_staging_dir, write_dir_recursive};
 
+pub mod update;
+
 /// Embedded upstream superpowers corpus — the offline baseline. Contains the
 /// 14 skill directories plus `LICENSE` and `VERSION`.
 static SUPERPOWERS: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/assets/superpowers");

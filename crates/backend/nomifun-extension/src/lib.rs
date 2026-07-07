@@ -45,6 +45,9 @@ pub use superpowers::{
     SUPERPOWERS_BASELINE_DIR, SUPERPOWERS_BUNDLED_VERSION, SUPERPOWERS_OVERLAY_DIR, effective_superpowers_dir,
     materialize_superpowers_baseline, superpowers_baseline_version, superpowers_corpus, superpowers_corpus_fingerprint,
 };
+pub use superpowers::update::{
+    SuperpowersRelease, install_superpowers_overlay, installed_overlay_version, superpowers_repo,
+};
 pub use template::{resolve_env_map, resolve_env_templates, resolve_file_reference};
 pub use types::*;
 pub use watcher::ExtensionWatcher;
