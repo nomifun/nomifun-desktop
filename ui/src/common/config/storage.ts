@@ -525,6 +525,36 @@ export type ModelCapability = {
   is_user_selected?: boolean;
 };
 
+/**
+ * 统一多模态能力词表 —— 镜像 crates/backend/nomifun-api-types/src/model_task.rs。
+ * ModelTask 决定端点/请求体；ModelTrait 是同一任务内的细化（主要修饰 chat）。
+ * 无 ts-rs：改动须同步 Rust 与此处。
+ */
+export type ModelTask =
+  | 'chat'
+  | 'image_generation'
+  | 'image_edit'
+  | 'video_generation'
+  | 'speech_synthesis'
+  | 'speech_recognition'
+  | 'embedding'
+  | 'rerank';
+
+export type ModelTrait = 'vision_input' | 'function_calling' | 'reasoning' | 'web_search';
+
+export type ProfileSource = 'inferred' | 'user' | 'catalog';
+
+/** 权威 per-model 能力档案（键 (provider_id, model)）。 */
+export interface ModelProfile {
+  provider_id: string;
+  model: string;
+  tasks: ModelTask[];
+  traits: ModelTrait[];
+  params?: Record<string, unknown>;
+  source?: ProfileSource;
+  updated_at: number;
+}
+
 export interface IProvider {
   id: string;
   platform: string;
