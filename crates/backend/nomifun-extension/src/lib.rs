@@ -24,6 +24,7 @@ pub mod superpowers;
 pub mod template;
 pub mod types;
 pub mod watcher;
+mod zip_safe;
 
 pub use classifier::{AssistantClassifier, AssistantRuleDispatcher};
 pub use constants::*;

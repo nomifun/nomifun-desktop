@@ -1,5 +1,4 @@
-use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use include_dir::{Dir, include_dir};
@@ -803,7 +802,7 @@ async fn import_skills_from_zip(
     let archive = archive_path.to_path_buf();
     let destination = extract_dir.clone();
     let extraction =
-        tokio::task::spawn_blocking(move || extract_zip_archive(&archive, &destination))
+        tokio::task::spawn_blocking(move || crate::zip_safe::extract_zip_archive(&archive, &destination))
             .await
             .map_err(|e| {
                 ExtensionError::InvalidSkillPath(format!("Zip extraction task failed: {e}"))
@@ -1428,71 +1427,6 @@ async fn collect_skill_dirs_recursive(
 
     result.sort();
     Ok(())
-}
-
-fn extract_zip_archive(archive_path: &Path, destination: &Path) -> Result<(), ExtensionError> {
-    let file = std::fs::File::open(archive_path)?;
-    let mut archive = zip::ZipArchive::new(file).map_err(zip_error)?;
-
-    for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(zip_error)?;
-        let entry_name = entry.name().to_string();
-        reject_zip_symlink(&entry)?;
-        let relative_path = safe_zip_entry_path(&entry_name)?;
-        let output_path = destination.join(relative_path);
-
-        if entry.is_dir() {
-            std::fs::create_dir_all(&output_path)?;
-            continue;
-        }
-
-        if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut output = std::fs::File::create(&output_path)?;
-        io::copy(&mut entry, &mut output)?;
-    }
-
-    Ok(())
-}
-
-fn safe_zip_entry_path(name: &str) -> Result<PathBuf, ExtensionError> {
-    if name.is_empty() || name.contains('\\') {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let path = Path::new(name);
-    if path.is_absolute() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    let mut safe_path = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(part) => safe_path.push(part),
-            Component::CurDir => {}
-            _ => return Err(ExtensionError::PathTraversal(name.to_string())),
-        }
-    }
-
-    if safe_path.as_os_str().is_empty() {
-        return Err(ExtensionError::PathTraversal(name.to_string()));
-    }
-
-    Ok(safe_path)
-}
-
-fn reject_zip_symlink(entry: &zip::read::ZipFile<'_>) -> Result<(), ExtensionError> {
-    if let Some(mode) = entry.unix_mode()
-        && mode & 0o170000 == 0o120000
-    {
-        return Err(ExtensionError::PathTraversal(entry.name().to_string()));
-    }
-    Ok(())
-}
-
-fn zip_error(err: zip::result::ZipError) -> ExtensionError {
-    ExtensionError::InvalidSkillPath(format!("Invalid zip archive: {err}"))
 }
 
 /// Parse SKILL.md frontmatter to extract name and description.
