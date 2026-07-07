@@ -10,6 +10,7 @@ const textColors = {
   't-primary': 'var(--text-primary)', // text-t-primary - 主要文字
   't-secondary': 'var(--text-secondary)', // text-t-secondary - 次要文字
   't-tertiary': 'var(--bg-6)', // text-t-tertiary - 三级说明/提示文字
+  't-quaternary': 'var(--text-secondary)', // text-t-quaternary - low-emphasis readable text
   't-disabled': 'var(--text-disabled)', // text-t-disabled - 禁用文字
 };
 
