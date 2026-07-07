@@ -13,10 +13,10 @@
  * copy-prompt shortcut. Footer: insert / edit / delete.
  */
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '@arco-design/web-react';
-import { Copy, Delete, EditTwo, FileText, ImageFiles, LinkOne, VideoTwo } from '@icon-park/react';
+import { Copy, Delete, Download, EditTwo, FileText, ImageFiles, Left, LinkOne, Right, VideoTwo } from '@icon-park/react';
 
 import type { WorkshopAsset } from '../types';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
@@ -26,9 +26,17 @@ import { formatBytes, formatDimensions } from './format';
 export interface AssetDetailModalProps {
   asset: WorkshopAsset | null;
   onClose: () => void;
-  onInsert: (asset: WorkshopAsset) => void;
+  /** Insert-into-canvas action. Omitted on the standalone Asset Library page. */
+  onInsert?: (asset: WorkshopAsset) => void;
   onEdit: (asset: WorkshopAsset) => void;
   onDelete: (asset: WorkshopAsset) => void;
+  /** Download action (Asset Library page). Omitted in the in-canvas drawer. */
+  onDownload?: (asset: WorkshopAsset) => void;
+  /** Step to the previous / next asset in the current list (Asset Library page). */
+  onPrev?: () => void;
+  onNext?: () => void;
+  hasPrev?: boolean;
+  hasNext?: boolean;
 }
 
 // ─── Preview pane ───────────────────────────────────────────────────────────
@@ -84,9 +92,51 @@ const KIND_ICON = {
   text: FileText,
 } as const;
 
-const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ asset, onClose, onInsert, onEdit, onDelete }) => {
+const AssetDetailModal: React.FC<AssetDetailModalProps> = ({
+  asset,
+  onClose,
+  onInsert,
+  onEdit,
+  onDelete,
+  onDownload,
+  onPrev,
+  onNext,
+  hasPrev = false,
+  hasNext = false,
+}) => {
   const { t } = useTranslation();
   const [message, holder] = useArcoMessage();
+
+  // ←/→ steps through the current list when the page wires prev/next. Arco owns
+  // Esc; we only add the arrow keys, and only while a detail asset is shown.
+  useEffect(() => {
+    if (!asset || (!onPrev && !onNext)) return;
+    const onKey = (e: KeyboardEvent) => {
+      // Don't hijack arrow keys from controls that legitimately consume them —
+      // e.g. <video> scrubbing, text inputs, or a focused Select.
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        tag === 'VIDEO' ||
+        tag === 'AUDIO' ||
+        el?.isContentEditable
+      ) {
+        return;
+      }
+      if (e.key === 'ArrowLeft' && hasPrev && onPrev) {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === 'ArrowRight' && hasNext && onNext) {
+        e.preventDefault();
+        onNext();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [asset, onPrev, onNext, hasPrev, hasNext]);
 
   if (!asset) {
     return (
@@ -112,13 +162,47 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ asset, onClose, onI
     }
   };
 
+  const copyText = async () => {
+    if (asset.kind !== 'text' || !asset.text_content) return;
+    try {
+      await navigator.clipboard.writeText(asset.text_content);
+      message.success(t('workshopAssets.detail.copiedText', { defaultValue: '已复制正文' }));
+    } catch {
+      /* clipboard unavailable — silently ignore */
+    }
+  };
+
   const footerActions: { key: string; icon: React.ReactNode; label: string; run: () => void; danger?: boolean }[] = [
-    {
-      key: 'insert',
-      icon: <LinkOne theme='outline' size={14} strokeWidth={3} />,
-      label: t('workshopAssets.detail.insert', { defaultValue: '插入画布' }),
-      run: () => onInsert(asset),
-    },
+    ...(onInsert
+      ? [
+          {
+            key: 'insert',
+            icon: <LinkOne theme='outline' size={14} strokeWidth={3} />,
+            label: t('workshopAssets.detail.insert', { defaultValue: '插入画布' }),
+            run: () => onInsert(asset),
+          },
+        ]
+      : []),
+    ...(asset.kind === 'text'
+      ? [
+          {
+            key: 'copyText',
+            icon: <Copy theme='outline' size={14} strokeWidth={3} />,
+            label: t('workshopAssets.detail.copyText', { defaultValue: '复制正文' }),
+            run: () => void copyText(),
+          },
+        ]
+      : []),
+    ...(onDownload
+      ? [
+          {
+            key: 'download',
+            icon: <Download theme='outline' size={14} strokeWidth={3} />,
+            label: t('workshopAssets.detail.download', { defaultValue: '下载' }),
+            run: () => onDownload(asset),
+          },
+        ]
+      : []),
     {
       key: 'edit',
       icon: <EditTwo theme='outline' size={14} strokeWidth={3} />,
@@ -133,6 +217,8 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ asset, onClose, onI
       danger: true,
     },
   ];
+
+  const showNav = Boolean(onPrev || onNext);
 
   return (
     <Modal
@@ -247,32 +333,82 @@ const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ asset, onClose, onI
       </div>
 
       {/* Footer actions */}
-      <div className='mt-18px flex items-center justify-end gap-8px'>
-        {footerActions.map((action) => (
-          <div
-            key={action.key}
-            role='button'
-            tabIndex={0}
-            onClick={action.run}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                action.run();
-              }
-            }}
-            className={[
-              'inline-flex items-center gap-6px rounded-9px border border-solid px-14px py-7px text-13px font-500 cursor-pointer transition-colors',
-              action.danger
-                ? 'border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-transparent hover:bg-[rgba(var(--danger-6),0.08)]'
-                : action.key === 'insert'
-                  ? 'border-transparent bg-[rgb(var(--primary-6))] text-white hover:bg-[rgb(var(--primary-5))]'
-                  : 'border-[var(--color-border-2)] text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
-            ].join(' ')}
-          >
-            {action.icon}
-            {action.label}
+      <div className='mt-18px flex items-center justify-between gap-12px'>
+        {showNav ? (
+          <div className='flex items-center gap-6px'>
+            <div
+              role='button'
+              tabIndex={hasPrev ? 0 : -1}
+              aria-disabled={!hasPrev}
+              onClick={() => hasPrev && onPrev?.()}
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && hasPrev) {
+                  e.preventDefault();
+                  onPrev?.();
+                }
+              }}
+              className={[
+                'inline-flex items-center gap-4px rounded-8px border border-solid border-[var(--color-border-2)] px-10px py-6px text-12px transition-colors',
+                hasPrev
+                  ? 'cursor-pointer text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]'
+                  : 'cursor-not-allowed text-[var(--color-text-2)] opacity-40',
+              ].join(' ')}
+            >
+              <Left theme='outline' size={13} strokeWidth={3} />
+              {t('workshopAssets.detail.prev', { defaultValue: '上一个' })}
+            </div>
+            <div
+              role='button'
+              tabIndex={hasNext ? 0 : -1}
+              aria-disabled={!hasNext}
+              onClick={() => hasNext && onNext?.()}
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ' ') && hasNext) {
+                  e.preventDefault();
+                  onNext?.();
+                }
+              }}
+              className={[
+                'inline-flex items-center gap-4px rounded-8px border border-solid border-[var(--color-border-2)] px-10px py-6px text-12px transition-colors',
+                hasNext
+                  ? 'cursor-pointer text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]'
+                  : 'cursor-not-allowed text-[var(--color-text-2)] opacity-40',
+              ].join(' ')}
+            >
+              {t('workshopAssets.detail.next', { defaultValue: '下一个' })}
+              <Right theme='outline' size={13} strokeWidth={3} />
+            </div>
           </div>
-        ))}
+        ) : (
+          <span />
+        )}
+        <div className='flex items-center gap-8px'>
+          {footerActions.map((action) => (
+            <div
+              key={action.key}
+              role='button'
+              tabIndex={0}
+              onClick={action.run}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  action.run();
+                }
+              }}
+              className={[
+                'inline-flex items-center gap-6px rounded-9px border border-solid px-14px py-7px text-13px font-500 cursor-pointer transition-colors',
+                action.danger
+                  ? 'border-[rgba(var(--danger-6),0.35)] text-[rgb(var(--danger-6))] bg-transparent hover:bg-[rgba(var(--danger-6),0.08)]'
+                  : action.key === 'insert'
+                    ? 'border-transparent bg-[rgb(var(--primary-6))] text-white hover:bg-[rgb(var(--primary-5))]'
+                    : 'border-[var(--color-border-2)] text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
+              ].join(' ')}
+            >
+              {action.icon}
+              {action.label}
+            </div>
+          ))}
+        </div>
       </div>
     </Modal>
   );

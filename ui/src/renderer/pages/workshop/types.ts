@@ -28,6 +28,13 @@
 /** Asset media kind. */
 export type WorkshopAssetKind = 'image' | 'video' | 'text';
 
+/**
+ * Append-only (asset-library page): result-ordering token for
+ * {@link ListAssetsQuery.sort}. Mirrors the backend `sort` param; an unknown /
+ * absent value falls back to newest-created first server-side.
+ */
+export type AssetSortKey = 'created_desc' | 'created_asc' | 'updated_desc' | 'name_asc' | 'size_desc';
+
 /** Media generation capability a task exercises. */
 export type MediaCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'v2v' | 'tts' | 'text';
 
@@ -137,6 +144,10 @@ export interface ListAssetsQuery {
    * `collection` — the backend ignores `collection` when this is set.
    */
   ungrouped?: boolean;
+  /** Append-only (asset-library page): exact-match filter on one tag. */
+  tag?: string;
+  /** Append-only (asset-library page): result ordering (default `created_desc`). */
+  sort?: AssetSortKey;
   page?: number;
   page_size?: number;
 }

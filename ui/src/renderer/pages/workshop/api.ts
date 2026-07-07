@@ -122,6 +122,8 @@ export async function listAssets(query: ListAssetsQuery = {}): Promise<ListAsset
     q: query.q,
     in_library: query.in_library,
     ungrouped: query.ungrouped,
+    tag: query.tag,
+    sort: query.sort,
     page: query.page,
     page_size: query.page_size,
   });
@@ -142,6 +144,18 @@ export async function patchAsset(id: string, patch: PatchAssetBody): Promise<Wor
 /** Delete an asset (index row + on-disk file). */
 export async function deleteAsset(id: string): Promise<void> {
   await httpRequest<void>('DELETE', `/api/workshop/assets/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Bulk-rename a collection across every asset that used it (asset-library
+ * management). A blank `to` ungroups the affected assets. Returns rows updated.
+ */
+export async function renameCollection(from: string, to: string): Promise<number> {
+  const res = await httpRequest<{ updated: number }>('POST', '/api/workshop/collections/rename', {
+    from,
+    to,
+  });
+  return res?.updated ?? 0;
 }
 
 /** Options for {@link uploadAsset} — metadata plus progress / cancellation hooks. */

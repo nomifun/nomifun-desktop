@@ -5586,7 +5586,7 @@ dependencies = [
 
 [[package]]
 name = "nomifun-creation"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -6150,7 +6150,7 @@ dependencies = [
 
 [[package]]
 name = "nomifun-workshop"
-version = "0.2.4"
+version = "0.2.7"
 dependencies = [
  "axum",
  "image",

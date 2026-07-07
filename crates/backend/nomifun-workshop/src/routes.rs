@@ -66,6 +66,7 @@ pub fn workshop_routes(state: WorkshopRouterState) -> Router {
         .route("/api/workshop/gc", post(run_gc))
         .route("/api/workshop/assets", get(list_assets).post(create_text_asset))
         .route("/api/workshop/assets/{id}", axum::routing::patch(patch_asset).delete(delete_asset))
+        .route("/api/workshop/collections/rename", post(rename_collection))
         .with_state(state)
         .merge(upload_router)
 }
@@ -333,6 +334,14 @@ struct ListAssetsQuery {
     /// set, `collection` is ignored so the two never fight.
     #[serde(default)]
     ungrouped: Option<String>,
+    /// Append-only (asset-library page): exact-match filter on one tag.
+    #[serde(default)]
+    tag: Option<String>,
+    /// Append-only (asset-library page): result ordering token
+    /// (`created_desc`|`created_asc`|`updated_desc`|`name_asc`|`size_desc`).
+    /// Unknown/absent → newest-created first.
+    #[serde(default)]
+    sort: Option<String>,
     page: Option<i64>,
     page_size: Option<i64>,
 }
@@ -345,6 +354,19 @@ struct AssetListResponse {
 
 fn parse_bool_flag(v: &str) -> bool {
     matches!(v.trim(), "1" | "true" | "True" | "TRUE" | "yes")
+}
+
+/// Map a `sort` query token to an [`AssetSort`]. Unknown/empty → the default
+/// (newest-created first).
+fn parse_asset_sort(v: &str) -> nomifun_db::AssetSort {
+    use nomifun_db::AssetSort;
+    match v.trim() {
+        "created_asc" => AssetSort::CreatedAsc,
+        "updated_desc" => AssetSort::UpdatedDesc,
+        "name_asc" => AssetSort::TitleAsc,
+        "size_desc" => AssetSort::SizeDesc,
+        _ => AssetSort::CreatedDesc,
+    }
 }
 
 async fn list_assets(
@@ -366,6 +388,8 @@ async fn list_assets(
             q: query.q,
             in_library: query.in_library.as_deref().map(parse_bool_flag),
             ungrouped,
+            tag: query.tag.filter(|s| !s.trim().is_empty()),
+            sort: query.sort.as_deref().map(parse_asset_sort).unwrap_or_default(),
             page: query.page.unwrap_or(1),
             page_size: query.page_size.unwrap_or(30),
         })
@@ -541,6 +565,31 @@ async fn delete_asset(
 ) -> Result<StatusCode, AppError> {
     state.service.delete_asset(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RenameCollectionRequest {
+    from: String,
+    /// The new collection name; a blank value ungroups the affected assets.
+    #[serde(default)]
+    to: String,
+}
+
+#[derive(serde::Serialize)]
+struct RenameCollectionResponse {
+    updated: u64,
+}
+
+/// Bulk-rename a collection across every asset that used it (management
+/// surface). Returns the number of rows updated.
+async fn rename_collection(
+    State(state): State<WorkshopRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    body: Result<Json<RenameCollectionRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<RenameCollectionResponse>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let updated = state.service.rename_collection(&req.from, &req.to).await?;
+    Ok(Json(ApiResponse::ok(RenameCollectionResponse { updated })))
 }
 
 #[derive(Deserialize)]
