@@ -195,6 +195,13 @@
     "selectOrCustomize": "选择预设主题或自定义 CSS",
     "addManually": "手动添加",
     "default": "默认",
+    "presets": {
+      "codexNeutral": "经典",
+      "rhythmDark": "律动暗黑",
+      "neonRainbow": "暗夜霓虹",
+      "frostedGlass": "冰晶幻境",
+      "sunsetAfterglow": "落日余晖"
+    },
     "addToPreset": "添加主题",
     "editTheme": "编辑主题",
     "previewCover": "背景图",

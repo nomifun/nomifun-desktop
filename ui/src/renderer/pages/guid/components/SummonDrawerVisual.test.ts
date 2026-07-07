@@ -16,6 +16,14 @@ const classBlock = (css: string, className: string) => {
   return css.slice(start, end);
 };
 
+const sectionBetween = (css: string, startMarker: string, endMarker: string) => {
+  const start = css.indexOf(startMarker);
+  expect(start).toBeGreaterThan(-1);
+  const end = css.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  return css.slice(start, end);
+};
+
 describe('Guid summon drawer visual system', () => {
   test('uses a scoped command-panel shell instead of old utility-class controls', () => {
     const source = readSource(new URL('./SummonDrawer.tsx', import.meta.url));
@@ -98,5 +106,31 @@ describe('Guid summon drawer visual system', () => {
     expect(css.includes('min-height: 44px')).toBe(false);
     expect(css.includes('0 10px 24px rgba(26, 20, 51, 0.04)')).toBe(false);
     expect(css.includes('.drawerSearchInput :global(.arco-input-prefix)')).toBe(true);
+  });
+
+  test('derives drawer colors from theme tokens instead of hard-coded dark or white panels', () => {
+    const css = readSource(new URL('../index.module.css', import.meta.url));
+    const drawerSection = sectionBetween(css, '.drawerSurface {', '@media (max-width: 640px)');
+
+    expect(drawerSection.includes('--drawer-surface-bg')).toBe(true);
+    expect(drawerSection.includes('--drawer-panel-bg')).toBe(true);
+    expect(drawerSection.includes('--drawer-panel-hover-bg')).toBe(true);
+    expect(drawerSection.includes('--drawer-hairline')).toBe(true);
+    expect(drawerSection.includes('--drawer-inner-highlight')).toBe(true);
+    expect(/#(?:242426|1f1f22|262626|3a3a3a)\b/i.test(drawerSection)).toBe(false);
+    expect(drawerSection.includes('rgba(255, 255, 255')).toBe(false);
+    expect(drawerSection.includes(":global([data-theme='dark']) .drawer")).toBe(false);
+  });
+
+  test('uses theme-derived surfaces for the shared drawer tag filter', () => {
+    const css = readSource(new URL('../../settings/AssistantSettings/AssistantTagFilterBar.module.css', import.meta.url));
+    const filterSection = sectionBetween(css, '.drawerFilterBar {', '.drawerEmpty {');
+
+    expect(filterSection.includes('--drawer-filter-surface')).toBe(true);
+    expect(filterSection.includes('--drawer-filter-chip-bg')).toBe(true);
+    expect(filterSection.includes('--drawer-filter-chip-hover-bg')).toBe(true);
+    expect(filterSection.includes('--drawer-filter-hairline')).toBe(true);
+    expect(filterSection.includes('rgba(255, 255, 255')).toBe(false);
+    expect(filterSection.includes(":global([data-theme='dark'])")).toBe(false);
   });
 });

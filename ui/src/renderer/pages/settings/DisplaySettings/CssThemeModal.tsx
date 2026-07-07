@@ -17,6 +17,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { CSSProperties } from 'react';
 import { injectBackgroundCssBlock } from './backgroundUtils.ts';
+import { getCssThemeDisplayName } from './presets';
 
 /** CodeMirror 编辑器样式 / CodeMirror editor styles */
 const CODE_MIRROR_STYLE: CSSProperties = {
@@ -61,7 +62,7 @@ const CssThemeModal: React.FC<CssThemeModalProps> = ({ visible, theme, onClose, 
   // 编辑模式时加载主题数据 / Load theme data in edit mode
   useEffect(() => {
     if (theme) {
-      setName(theme.name);
+      setName(getCssThemeDisplayName(theme, t));
       setCover(theme.cover || '');
       setCss(theme.css);
     } else {
@@ -69,7 +70,7 @@ const CssThemeModal: React.FC<CssThemeModalProps> = ({ visible, theme, onClose, 
       setCover('');
       setCss('');
     }
-  }, [theme, visible]);
+  }, [theme, t, visible]);
 
   /**
    * 处理封面图片上传 / Handle cover image upload

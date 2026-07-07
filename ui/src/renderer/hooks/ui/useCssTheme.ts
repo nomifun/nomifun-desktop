@@ -13,7 +13,7 @@ import {
   backgroundCssBlockNeedsUpgrade,
   injectBackgroundCssBlock,
 } from '@renderer/pages/settings/DisplaySettings/backgroundUtils';
-import { DEFAULT_THEME_ID, PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets';
+import { DEFAULT_THEME_ID, getCssThemeDisplayName, PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets';
 import { resolveExtensionAssetUrl } from '@renderer/utils/platform';
 import { resolveCssByActiveTheme, setExtensionThemesCache } from '@renderer/utils/theme/themeCssSync';
 import { Message } from '@arco-design/web-react';
@@ -205,7 +205,7 @@ export const useCssTheme = (): UseCssThemeResult => {
           themes.filter((x) => !x.is_preset)
         );
         await applyCssThemeRaw(css, theme.id);
-        Message.success(t('settings.cssTheme.applied', { name: theme.name }));
+        Message.success(t('settings.cssTheme.applied', { name: getCssThemeDisplayName(theme, t) }));
       } catch {
         Message.error(t('settings.cssTheme.applyFailed'));
       }
