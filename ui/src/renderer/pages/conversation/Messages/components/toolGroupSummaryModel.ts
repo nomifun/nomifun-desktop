@@ -54,9 +54,9 @@ const toolReceiptIconByAction: Record<ToolReceiptAction, ToolReceiptIcon> = {
 
 const stateMatchesTool = (state: TurnDisclosureProcessState, tool: NormalizedToolCall): boolean => {
   if (state === 'running') return tool.status === 'running' || tool.status === 'pending';
-  if (state === 'failed') return tool.status === 'error';
+  if (state === 'failed') return tool.status === 'error' && !tool.nonFatalFailure;
   if (state === 'canceled') return tool.status === 'canceled';
-  if (state === 'completed') return tool.status === 'completed';
+  if (state === 'completed') return tool.status === 'completed' || tool.nonFatalFailure === true;
   return tool.status === 'pending' || tool.status === 'running';
 };
 
@@ -206,6 +206,7 @@ const getToolReceiptDetailTarget = (tool: NormalizedToolCall, action: ToolReceip
 
 const getToolProcessState = (tool: NormalizedToolCall): TurnDisclosureProcessState => {
   if (tool.status === 'running' || tool.status === 'pending') return 'running';
+  if (tool.nonFatalFailure) return 'completed';
   if (tool.status === 'error') return 'failed';
   if (tool.status === 'canceled') return 'canceled';
   return 'completed';
