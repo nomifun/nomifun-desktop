@@ -9,6 +9,7 @@ nomifun-api-types.workspace = true
 nomifun-db.workspace = true
 nomifun-realtime.workspace = true
 nomifun-runtime.workspace = true
+nomifun-net.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 dirs.workspace = true
