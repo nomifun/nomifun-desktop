@@ -1075,15 +1075,20 @@ const SendBox: React.FC<{
     handlePasteFocus();
     setIsInputFocused(true);
 
-    // Pre-warm worker bootstrap after focus stays for 1s (debounce).
-    // Avoids triggering warmup for every conversation during rapid switching.
+    // Pre-warm worker bootstrap shortly after focus (short debounce). Focusing
+    // the input is a strong "about to send" intent, so warm eagerly to hide the
+    // session build (MCP connect / skill load / prompt build) behind the user's
+    // typing. The debounce only guards against warming while focus flickers
+    // during rapid switching; kept short so the build starts well before submit.
+    // (Idempotent: single-flight in warmupConversation + warmedConversationRef +
+    // the backend's per-conversation OnceCell, so a redundant call is a no-op.)
     const cid = conversationContext?.conversation_id;
     if (cid && warmedConversationRef.current !== cid) {
       if (warmupTimerRef.current) clearTimeout(warmupTimerRef.current);
       warmupTimerRef.current = setTimeout(() => {
         warmedConversationRef.current = cid;
         warmupConversation(cid).catch(() => {});
-      }, 1000);
+      }, 300);
     }
   }, [handlePasteFocus, isMobile, conversationContext?.conversation_id]);
   const handleInputBlur = useCallback(() => {
