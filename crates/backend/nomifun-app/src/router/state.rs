@@ -186,6 +186,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let agent_service = AgentService::new(
         services.agent_registry.clone(),
         provider_repo,
+        services.model_profile_repo.clone(),
         encryption_key,
         services.data_dir.clone(),
     );
