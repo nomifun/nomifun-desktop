@@ -20,7 +20,6 @@ pub mod skill_routes;
 pub mod skill_service;
 pub mod startup_materialize;
 pub mod state;
-pub mod superpowers;
 pub mod template;
 pub mod types;
 pub mod watcher;
@@ -41,14 +40,6 @@ pub use registry::{ExtensionRegistry, ExtensionSummary};
 pub use resolvers::{resolve_all_contributions, resolve_extension_contributions, resolve_i18n_for_all};
 pub use startup_materialize::materialize_if_needed;
 pub use state::{ExtensionStateStore, load_states_from_file, resolve_state_file_path, save_states_to_file};
-pub use superpowers::{
-    SUPERPOWERS_BASELINE_DIR, SUPERPOWERS_BUNDLED_VERSION, SUPERPOWERS_OVERLAY_DIR, effective_superpowers_dir,
-    materialize_superpowers_baseline, superpowers_baseline_version, superpowers_corpus, superpowers_corpus_fingerprint,
-};
-pub use superpowers::update::{
-    SuperpowersRelease, fetch_latest_release, install_superpowers_overlay, installed_overlay_version, parse_latest_release,
-    should_install_release, superpowers_repo,
-};
 pub use template::{resolve_env_map, resolve_env_templates, resolve_file_reference};
 pub use types::*;
 pub use watcher::ExtensionWatcher;
