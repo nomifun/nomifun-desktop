@@ -166,15 +166,18 @@ pub fn build_system_prompt(
 
     let mut parts = Vec::new();
 
-    // Section: intro (session permanent)
+    // Section: intro (session permanent). Deliberately EXCLUDES the working
+    // directory and current date: those are volatile (cwd varies per conversation,
+    // date per day) and live in the `environment` section at the very END, so this
+    // large stable core (persona → tools → memory → skills) forms a reusable cache
+    // prefix across conversations/days. Domestic OpenAI-compatible providers do
+    // automatic prefix caching, so a per-conversation cwd or a daily date at the
+    // FRONT would defeat prefix reuse on every new chat's first token.
     let intro = cache.sections.entry("intro").or_insert_with(|| {
         format!(
             "You are an AI assistant that can use tools to help with tasks.\n\
              You are powered by the model {model}.\n\
-             Working directory: \"{cwd}\"\n\
-             Paths may contain spaces (e.g. \"Application Support\" on macOS) — always quote paths in shell commands.\n\
-             Current date: {}",
-            chrono::Local::now().format("%Y-%m-%d")
+             Paths may contain spaces (e.g. \"Application Support\" on macOS) — always quote paths in shell commands."
         )
     });
     parts.push(intro.clone());
@@ -266,6 +269,18 @@ pub fn build_system_prompt(
             parts.push(skills_section.clone());
         }
     }
+
+    // Section: environment (working directory + current date) — placed LAST so
+    // the stable core above stays a reusable cache prefix (see the intro note).
+    // Cached like intro; the date is captured once at session build, matching the
+    // prior behavior when it lived inline in the intro section.
+    let env_section = cache.sections.entry("environment").or_insert_with(|| {
+        format!(
+            "Working directory: \"{cwd}\"\nCurrent date: {}",
+            chrono::Local::now().format("%Y-%m-%d")
+        )
+    });
+    parts.push(env_section.clone());
 
     let joined = parts.join("\n\n");
     cache.joined = Some(joined.clone());
@@ -1120,7 +1135,7 @@ mod tests {
             false,
             false,
         );
-        let intro_pos = result.find("Working directory").unwrap();
+        let intro_pos = result.find("You are an AI assistant").unwrap();
         let guidance_pos = result.find("# Using your tools").unwrap();
         let custom_pos = result.find("CUSTOM_MARKER_43").unwrap();
         assert!(

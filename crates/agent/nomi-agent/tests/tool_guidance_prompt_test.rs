@@ -182,8 +182,8 @@ fn tc_4_3_05_order_after_intro_before_custom() {
     );
 
     let intro_pos = result
-        .find("Working directory")
-        .expect("intro should contain 'Working directory'");
+        .find("You are an AI assistant")
+        .expect("intro should contain the assistant identity line");
     let guidance_pos = result
         .find("# Using your tools")
         .expect("tool guidance section should exist");
@@ -308,7 +308,7 @@ fn tc_4_3_07_all_sections_coexist() {
     );
 
     // All sections should exist
-    assert!(result.contains("Working directory"), "intro should exist");
+    assert!(result.contains("You are an AI assistant"), "intro should exist");
     assert!(
         result.contains("# Using your tools"),
         "tool guidance should exist"
@@ -331,7 +331,7 @@ fn tc_4_3_07_all_sections_coexist() {
     );
 
     // Verify ordering: intro < guidance < custom < agents.md < memory < skills
-    let intro_pos = result.find("Working directory").unwrap();
+    let intro_pos = result.find("You are an AI assistant").unwrap();
     let guidance_pos = result.find("# Using your tools").unwrap();
     let custom_pos = result.find("CUSTOM_COEXIST").unwrap();
     let agents_pos = result.find("PROJECT_RULES_COEXIST").unwrap();
