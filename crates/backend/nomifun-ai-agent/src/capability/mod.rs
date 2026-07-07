@@ -11,5 +11,6 @@ pub(crate) mod first_message_injector;
 pub mod model_identity_reminder;
 pub mod prompt_pipeline;
 pub(crate) mod skill_manager;
+pub mod superpowers_scenario;
 
 pub use prompt_pipeline::{PostRecvHook, PreSendHook, PromptCtx, PromptPipeline};
