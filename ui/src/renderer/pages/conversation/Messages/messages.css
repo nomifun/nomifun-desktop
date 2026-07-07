@@ -381,6 +381,7 @@
 .turn-process-disclosure__header {
   box-sizing: border-box;
   display: flex;
+  position: relative;
   width: 100%;
   min-height: 34px;
   align-items: center;
@@ -395,6 +396,10 @@
   line-height: 20px;
   padding: 4px 2px 8px;
   text-align: left;
+}
+
+.turn-process-disclosure__header--with-actions {
+  padding-right: 190px;
 }
 
 .turn-process-disclosure__toggle {
@@ -456,10 +461,14 @@
 
 .turn-process-disclosure__header-actions {
   display: flex;
+  position: absolute;
+  top: 50%;
+  right: 2px;
   align-items: center;
   justify-content: flex-end;
-  margin-left: auto;
   min-width: 0;
+  max-width: min(180px, 48%);
+  transform: translateY(-50%);
 }
 
 .turn-process-disclosure__expand-thinking {
@@ -475,8 +484,15 @@
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
+  max-width: 100%;
   padding: 0;
   white-space: nowrap;
+}
+
+.turn-process-disclosure__expand-thinking span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .turn-process-disclosure__expand-thinking-icon {
@@ -671,6 +687,7 @@
   min-height: 22px;
   min-width: 0;
   align-items: center;
+  gap: 6px;
   border: 0;
   background: transparent;
   color: var(--color-text-3, #86909c);
@@ -717,13 +734,41 @@ button.turn-process-trace__row:focus-visible {
 }
 
 .turn-process-trace__text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.turn-process-trace__row-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-4, #c9cdd4);
+  line-height: 0;
+}
+
+.turn-process-trace__row-icon svg {
+  display: block;
+}
+
+.turn-process-trace__paragraph-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.turn-process-trace__paragraph-row .turn-process-trace__row-icon {
+  margin-top: 3px;
+}
+
 .turn-process-trace__paragraph {
+  min-width: 0;
   color: var(--color-text-2, #4e5969);
   font-size: var(--conversation-message-font-size, 14px);
   line-height: var(--conversation-message-line-height, 22px);

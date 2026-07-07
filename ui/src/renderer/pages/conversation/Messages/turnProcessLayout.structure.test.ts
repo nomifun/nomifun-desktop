@@ -63,6 +63,25 @@ describe('turn process disclosure content layout', () => {
     expect(messageListSource.includes('expansionControls')).toBe(true);
   });
 
+  test('keeps the disclosure header line stable when the thinking action appears', () => {
+    const headerRule = cssRuleFor('.turn-process-disclosure__header');
+    const headerWithActionsRule = cssRuleFor('.turn-process-disclosure__header--with-actions');
+    const headerActionsRule = cssRuleFor('.turn-process-disclosure__header-actions');
+
+    expect(disclosureSource.includes('const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems')).toBe(
+      true
+    );
+    expect(disclosureSource.includes("hasHeaderActions && 'turn-process-disclosure__header--with-actions'")).toBe(
+      true
+    );
+    expect(disclosureSource.includes('{hasHeaderActions && (')).toBe(true);
+    expect(headerRule.includes('position: relative')).toBe(true);
+    expect(headerWithActionsRule.includes('padding-right')).toBe(true);
+    expect(headerActionsRule.includes('position: absolute')).toBe(true);
+    expect(headerActionsRule.includes('top: 50%')).toBe(true);
+    expect(headerActionsRule.includes('transform: translateY(-50%)')).toBe(true);
+  });
+
   test('uses tighter same-kind spacing and clearer cross-kind spacing', () => {
     expect(cssRuleFor('.turn-process-disclosure__body').includes('gap: 0')).toBe(true);
     expect(cssRuleFor('.turn-process-disclosure__item').includes('margin-top: 14px')).toBe(true);

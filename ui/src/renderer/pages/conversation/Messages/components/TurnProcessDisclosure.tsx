@@ -199,12 +199,14 @@ function TurnProcessDisclosure<T>({
   });
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
+  const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems;
 
   return (
     <div className={classNames('turn-process-disclosure', `turn-process-disclosure--${item.state}`)}>
       <div
         className={classNames(
           'turn-process-disclosure__header',
+          hasHeaderActions && 'turn-process-disclosure__header--with-actions',
           !hasProcessItems && 'turn-process-disclosure__header--static'
         )}
       >
@@ -230,7 +232,7 @@ function TurnProcessDisclosure<T>({
             />
           )}
         </button>
-        {disclosureExpanded && hasExpandableProcessItems && (
+        {hasHeaderActions && (
           <div className='turn-process-disclosure__header-actions'>
             <button
               type='button'

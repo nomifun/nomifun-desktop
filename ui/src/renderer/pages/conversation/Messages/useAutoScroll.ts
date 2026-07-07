@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TMessage } from '@/common/chat/chatLib';
 
 const PROGRAMMATIC_SCROLL_GUARD_MS = 150;
+const USER_LAYOUT_CHANGE_GUARD_MS = 600;
 const AT_BOTTOM_THRESHOLD_PX = 100;
 // Must absorb sub-pixel scroll rounding on HiDPI/fractional-DPR displays, where
 // scrollTop can settle ~1-3px off an integer "bottom"; too small a threshold
@@ -63,6 +64,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
   const initialScrollDoneRef = useRef(false);
   const pendingAutoFollowFrameRef = useRef<number | null>(null);
   const userInputActiveRef = useRef(false);
+  const resizeAutoFollowBlockedUntilRef = useRef(0);
 
   const markProgrammaticScroll = useCallback(() => {
     lastProgrammaticScrollTimeRef.current = Date.now();
@@ -100,6 +102,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
 
   const scheduleAutoFollow = useCallback(() => {
     if (!scrollerEl || userScrolledRef.current) return;
+    if (Date.now() < resizeAutoFollowBlockedUntilRef.current) return;
 
     if (pendingAutoFollowFrameRef.current !== null) {
       cancelAnimationFrame(pendingAutoFollowFrameRef.current);
@@ -177,6 +180,7 @@ export function useAutoScroll({ messages, itemCount }: UseAutoScrollOptions): Us
 
   const handlePointerDown = useCallback(() => {
     userInputActiveRef.current = true;
+    resizeAutoFollowBlockedUntilRef.current = Date.now() + USER_LAYOUT_CHANGE_GUARD_MS;
   }, []);
 
   useEffect(() => {

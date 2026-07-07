@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 
 const source = readFileSync(new URL('./ProcessTraceItem.tsx', import.meta.url), 'utf8');
+const cssSource = readFileSync(new URL('../messages.css', import.meta.url), 'utf8');
 
 describe('ProcessTraceItem Codex-style execution rows', () => {
   test('keeps tool rows interactive with expandable detail panels', () => {
@@ -51,6 +52,16 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
     expect(source.includes('messages.processReceipt.readTargets')).toBe(true);
     expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
+  });
+
+  test('gives system and tool process rows a consistent icon slot', () => {
+    expect(source.includes('TraceRowIcon')).toBe(true);
+    expect(source.includes('getToolTraceIconKind')).toBe(true);
+    expect(source.includes('<TraceRowIcon kind={row.iconKind ??')).toBe(true);
+    expect(source.includes('<TraceRowIcon kind={getToolTraceIconKind(row.action)}')).toBe(true);
+    expect(source.includes("className='turn-process-trace__paragraph-row'")).toBe(true);
+    expect(cssSource.includes('.turn-process-trace__row-icon')).toBe(true);
+    expect(cssSource.includes('.turn-process-trace__paragraph-row')).toBe(true);
   });
 
   test('can render closed process details with an effective state override', () => {
