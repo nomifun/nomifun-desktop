@@ -83,6 +83,20 @@ pub fn is_coding_scenario(sig: &ScenarioSignals) -> bool {
 /// bootstrap loading).
 pub const SUPERPOWERS_BOOTSTRAP: &str = "【Superpowers 编码增强】本次为编码场景，已为你装载 superpowers 方法论技能库（brainstorming / test-driven-development / systematic-debugging / writing-plans / verification-before-completion 等，见上方技能清单）。动手前请先检查是否有匹配的技能：只要有哪怕 1% 的可能适用，就用 `Skill` 工具加载并严格遵循它——例如新增功能或改动行为前先走 brainstorming 厘清设计，写实现前按 test-driven-development 先写会失败的测试，遇到 bug/异常先用 systematic-debugging 定位根因，声称完成/修好前用 verification-before-completion 跑验证拿证据。这些是流程纪律而非可选建议；但用户明确的指令永远优先。";
 
+/// Append [`SUPERPOWERS_BOOTSTRAP`] to a system prompt when the session is a
+/// coding scenario (composition, not replacement — any persona/preset/knowledge
+/// content is preserved before it). `active == false` returns `base` unchanged.
+/// Mirrors `factory::nomi::compose_subagent_hint`; pure so it is unit-testable.
+pub fn compose_superpowers_bootstrap(base: Option<String>, active: bool) -> Option<String> {
+    if !active {
+        return base;
+    }
+    Some(match base {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}\n\n{SUPERPOWERS_BOOTSTRAP}"),
+        _ => SUPERPOWERS_BOOTSTRAP.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +162,31 @@ mod tests {
         assert!(SUPERPOWERS_BOOTSTRAP.contains("test-driven-development"));
         assert!(SUPERPOWERS_BOOTSTRAP.contains("systematic-debugging"));
         assert!(SUPERPOWERS_BOOTSTRAP.contains("Skill"));
+    }
+
+    #[test]
+    fn compose_appends_bootstrap_after_base_when_active() {
+        let out = compose_superpowers_bootstrap(Some("人格提示".into()), true).unwrap();
+        assert!(out.starts_with("人格提示"), "existing prompt preserved first");
+        assert!(out.contains(SUPERPOWERS_BOOTSTRAP), "bootstrap appended");
+    }
+
+    #[test]
+    fn compose_is_passthrough_when_inactive() {
+        let base = Some("人格提示".to_string());
+        assert_eq!(compose_superpowers_bootstrap(base.clone(), false), base);
+        assert_eq!(compose_superpowers_bootstrap(None, false), None);
+    }
+
+    #[test]
+    fn compose_uses_bootstrap_alone_when_base_empty() {
+        assert_eq!(
+            compose_superpowers_bootstrap(None, true),
+            Some(SUPERPOWERS_BOOTSTRAP.to_owned())
+        );
+        assert_eq!(
+            compose_superpowers_bootstrap(Some("   ".into()), true),
+            Some(SUPERPOWERS_BOOTSTRAP.to_owned())
+        );
     }
 }
