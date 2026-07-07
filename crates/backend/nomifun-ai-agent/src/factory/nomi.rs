@@ -193,6 +193,31 @@ pub(super) async fn build(
         overrides.agent_cluster_mode,
     );
 
+    // Superpowers 编码增强：当本会话判定为编码场景时，喂入 superpowers 技能目录（有效目录 =
+    // 热更新 overlay 优先，缺省内置 baseline）并注入 using-superpowers 引导，使方法论技能
+    // （brainstorming / test-driven-development / systematic-debugging / …）自动触发。判定保守
+    // （需文件工具 + workspace 像工程 或 显式 coding 标签）——PublicService 已被钳制无文件工具，
+    // 恒不启用（陌生人不注入）；非编码场景 skill_dirs 为空、引导不注入，零回归。
+    let superpowers_active = crate::capability::superpowers_scenario::is_coding_scenario(
+        &crate::capability::superpowers_scenario::ScenarioSignals {
+            workspace: Some(std::path::PathBuf::from(&ctx.workspace)),
+            file_tools_enabled: !matches!(
+                overrides.exposure,
+                nomifun_api_types::ExposureMode::PublicService
+            ),
+            scenario_tags: Vec::new(),
+        },
+    );
+    let superpowers_skill_dirs: Vec<std::path::PathBuf> = if superpowers_active {
+        vec![nomifun_extension::effective_superpowers_dir(&deps.data_dir)]
+    } else {
+        Vec::new()
+    };
+    overrides.system_prompt = crate::capability::superpowers_scenario::compose_superpowers_bootstrap(
+        overrides.system_prompt.take(),
+        superpowers_active,
+    );
+
     // Companion-owned sessions (local 桌面伙伴 chat + IM channel master) — AND
     // 对外伙伴 (public agent) sessions — must reply in the app's UI language, not a
     // hardcoded one. The persona prompt no longer forces a language, so it is
@@ -487,6 +512,7 @@ pub(super) async fn build(
             overrides.channel_platform.as_deref(),
             &ctx.workspace,
         ),
+        superpowers_skill_dirs,
     };
 
     // Scope of the native knowledge_search / knowledge_read tools. Public-agent

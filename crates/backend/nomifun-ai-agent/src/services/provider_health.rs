@@ -131,6 +131,7 @@ impl ProviderHealthCheckService {
             in_process_spawn: false,
             allowed_tools: Vec::new(),
             write_root: None,
+            superpowers_skill_dirs: Vec::new(),
         })
     }
 }
@@ -562,6 +563,7 @@ mod tests {
             in_process_spawn: false,
             allowed_tools: Vec::new(),
             write_root: None,
+            superpowers_skill_dirs: Vec::new(),
         };
 
         assert!(should_use_openai_model_probe("custom", &config));
