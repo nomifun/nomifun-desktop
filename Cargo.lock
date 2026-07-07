@@ -5634,7 +5634,6 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
- "nomifun-net",
  "nomifun-realtime",
  "nomifun-runtime",
  "notify",

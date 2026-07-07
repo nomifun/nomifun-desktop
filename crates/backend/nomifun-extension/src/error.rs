@@ -79,12 +79,6 @@ pub enum ExtensionError {
     #[error("Invalid skill path: {0}")]
     InvalidSkillPath(String),
 
-    #[error("Download failed: {0}")]
-    Download(String),
-
-    #[error("Verification failed: {0}")]
-    Verify(String),
-
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
@@ -121,8 +115,6 @@ impl From<ExtensionError> for AppError {
             }
             ExtensionError::SkillNotFound(name) => AppError::NotFound(format!("Skill not found: {name}")),
             ExtensionError::InvalidSkillPath(path) => AppError::BadRequest(format!("Invalid skill path: {path}")),
-            ExtensionError::Download(msg) => AppError::Internal(format!("Download failed: {msg}")),
-            ExtensionError::Verify(msg) => AppError::Internal(format!("Verification failed: {msg}")),
             ExtensionError::Io(e) => AppError::Internal(e.to_string()),
             ExtensionError::JsonParse(e) => AppError::BadRequest(e.to_string()),
         }
@@ -206,21 +198,5 @@ mod tests {
         assert!(matches!(err, ExtensionError::Io(_)));
         let app_err: AppError = err.into();
         assert!(matches!(app_err, AppError::Internal(_)));
-    }
-
-    #[test]
-    fn test_download_and_verify_errors() {
-        assert_eq!(
-            ExtensionError::Download("connection timed out".into()).to_string(),
-            "Download failed: connection timed out"
-        );
-        assert_eq!(
-            ExtensionError::Verify("sha256 mismatch".into()).to_string(),
-            "Verification failed: sha256 mismatch"
-        );
-        let app: AppError = ExtensionError::Download("x".into()).into();
-        assert!(matches!(app, AppError::Internal(_)));
-        let app: AppError = ExtensionError::Verify("x".into()).into();
-        assert!(matches!(app, AppError::Internal(_)));
     }
 }

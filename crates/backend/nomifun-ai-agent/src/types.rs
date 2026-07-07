@@ -156,10 +156,6 @@ pub struct NomiResolvedConfig {
     /// manager 灌进 `config.tools.write_root`。与 gateway file-service 的
     /// `PathAuthority` 同一信任模型（见 file-access-authority spec）。
     pub write_root: Option<String>,
-    /// Superpowers 技能目录（有效 = overlay 优先/缺省 baseline），仅当会话判定为
-    /// 编码场景时非空；由 manager 灌进 `AgentBootstrap::extra_skill_dirs`，使
-    /// superpowers 方法论技能进入技能清单、可经 `Skill` 工具加载。空 = 不启用（今日行为）。
-    pub superpowers_skill_dirs: Vec<PathBuf>,
 }
 
 /// **P3-X2**: the shared browser secret vault location + its machine-bound key

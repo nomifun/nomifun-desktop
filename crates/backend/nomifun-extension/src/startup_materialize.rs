@@ -153,9 +153,8 @@ async fn materialize_embedded_builtin_skills_unlocked(
 ///
 /// Moves any existing `target` aside to `old`, renames `staging` → `target`,
 /// restores `old` on failure, then best-effort removes `old`. `old` must be a
-/// sibling scratch path the caller owns. Reused by the builtin-skills and
-/// superpowers baseline materialization paths and the superpowers download
-/// installer, so the subtle Windows-safe rename/restore logic lives once here.
+/// sibling scratch path the caller owns. Reused by the builtin-skills
+/// materialization path, so the subtle Windows-safe rename/restore logic lives once here.
 pub(crate) async fn commit_staging_dir(target: &Path, staging: &Path, old: &Path) -> Result<(), ExtensionError> {
     if target.exists() {
         if old.exists() {
@@ -258,8 +257,8 @@ impl MaterializeLockGuard {
     }
 
     /// Acquire an exclusive file lock named `lock_name` under `data_dir`.
-    /// Lets separate corpora (builtin skills vs superpowers) use distinct lock
-    /// files so they don't needlessly serialize against each other.
+    /// Lets separate corpora use distinct lock files so they don't needlessly
+    /// serialize against each other.
     pub(crate) async fn acquire_named(data_dir: &Path, lock_name: &str) -> std::io::Result<Self> {
         let data_dir = data_dir.to_path_buf();
         let lock_name = lock_name.to_string();

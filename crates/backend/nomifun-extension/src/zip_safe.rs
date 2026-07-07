@@ -1,6 +1,5 @@
 //! Shared, safety-hardened zip extraction. Used by skill import
-//! ([`crate::skill_service`]) and by the superpowers GitHub-release installer
-//! ([`crate::superpowers`]). Guards against zip-slip (path traversal) and
+//! ([`crate::skill_service`]). Guards against zip-slip (path traversal) and
 //! symlink entries so an untrusted archive can never write outside `destination`.
 
 use std::io;

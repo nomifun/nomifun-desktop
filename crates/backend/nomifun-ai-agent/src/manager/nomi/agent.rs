@@ -371,13 +371,6 @@ impl NomiAgentManager {
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
             .goal(goal_spec)
             .approval_manager(approval_manager.clone());
-        // Superpowers: feed the effective skills dir(s) so the methodology skills
-        // (brainstorming/TDD/systematic-debugging/…) appear in the skills listing
-        // and load via the `Skill` tool. Non-empty only on coding-scenario sessions
-        // (the factory decides); empty → default behavior, no superpowers.
-        if !config_extra.superpowers_skill_dirs.is_empty() {
-            bootstrap = bootstrap.extra_skill_dirs(config_extra.superpowers_skill_dirs.clone());
-        }
         // P3-X2: thread the per-pet browser secret vault (path + machine-bound key) so the
         // native BrowserTool loads the registered credentials (`secret:NAME`, origin-gated)
         // and derives the firewall domain allowlist from their allowed_origins (裁决⑤). None
@@ -1144,7 +1137,6 @@ mod tests {
             in_process_spawn: true,
             allowed_tools: Vec::new(),
             write_root: None,
-            superpowers_skill_dirs: Vec::new(),
         }
     }
 
