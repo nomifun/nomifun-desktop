@@ -169,5 +169,9 @@
 ## 交付状态（2026-07-07）
 - ✅ **Phase 1 已交付**（T1–T6）：内置语料库 + 启动物化 + 有效目录 + 编码场景判定 + nomi `extra_skill_dirs` 喂入 + `using-superpowers` 引导注入。nomifun-ai-agent 619 / nomifun-extension 403 lib 测试全绿，nomifun-app 编译通过。
 - ✅ **Phase 2 已交付**（T7–T11）：zip 安全共享化 + Download/Verify 错误 + GitHub 下载/校验/原子替换 overlay + 查询最新 Release + 周期 janitor（默认开，env 可调）。全部纯逻辑单测覆盖。
-- ⏸️ **Phase 2.5（ACP）未实现，作为后续项**：让 superpowers 对 ACP（外部 Claude Code/codex）生效需跨 conversation-service 的技能解析（`AcpSkillManager` / `resolve_skill_paths` 纳入 superpowers 目录）与 ACP prompt 管线（`first_message_injector` 的 `preset_context` 追加引导）两处协同，且**无法在本环境端到端验证**（需真机外部 CLI）。接入点已定位：`capability/first_message_injector.rs` 的 `InjectionConfig.preset_context`、`skill_service::link_workspace_skills`。
+- ⏸️ **Phase 2.5（ACP）未实现，作为后续项**（已评估成本/风险）：真实 ACP 编码场景 = 用户选自己的仓库（custom workspace）。
+  - **MVP（light/temp 工作区）**：成本低(~70-90 LOC，复用 `link_workspace_skills`+`compose_superpowers_bootstrap`)、风险低（条件注入 + 幂等 first-write-wins 不覆盖用户技能），但**基本打不中**——ACP temp 工作区创建时为空目录判不出编码场景；custom 工作区被现有 `!is_custom_workspace` 门控禁链且强制 heavy 模式。低价值。
+  - **完整（heavy/custom，path B）**：需改 `skill_service::{SkillPaths,resolve_skill_paths,list_available_skills,resolve_skill_source_path}` + `AcpSkillManager`(`skill_manager/mod.rs`) 的技能发现根 + 注入器把 superpowers 纳入 `config.skills`；成本中(+150~250 LOC)、回归面大、**只能真机验证**外部 CLI 发现与 `[LOAD_SKILL:]` 触发。
+  - **接入点（已定位）**：引导追加 → `factory/acp_assembler.rs:84-92`（`assemble_acp_params`，可拿 `workspace`+`data_dir`）；技能链接 → `conversation/src/service.rs:668-679` 与 `:2536-2539` 的 `link_workspace_skills` 调用点；技能解析根 → `skill_service.rs:1076 resolve_skill_source_path`（现只含 builtin/user/cron，无 superpowers）。
+  - **裁决**：不满足"低成本+无风险+有效"三者兼具（能安全落地的没价值，有价值的须真机验证），暂缓；要做时走 path B + 真机联调。
 - ⏸️ **Phase 3（可选增强）未实现**：引擎循环级 `ConditionalSkillManager::activate_for_paths` 接入（`engine.rs:1050`，需给 `AgentEngine` 加字段/改构造器/`SkillTool` 共享可变——高危）、`SkillWatcher` 活会话热切、settings-UI 开关（DB 迁移 + 前端 `bun run build`）。
