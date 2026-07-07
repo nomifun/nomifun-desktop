@@ -60,6 +60,30 @@ pub trait IWorkshopRepository: Send + Sync {
     /// Delete an asset row (the service removes the file). `DbError::NotFound`
     /// when the id is unknown.
     async fn delete_asset(&self, id: &str) -> Result<(), DbError>;
+
+    /// Bulk-rename a collection: every asset whose `collection` equals `from`
+    /// gets `to` (or `NULL` when `to` is `None`, i.e. ungrouped). Returns the
+    /// number of rows updated (0 when no asset used `from`). Append-only
+    /// management operation.
+    async fn rename_collection(&self, from: &str, to: Option<&str>, now: i64) -> Result<u64, DbError>;
+}
+
+/// Result ordering for [`IWorkshopRepository::list_assets`]. Append-only (the
+/// asset-library management page): existing callers keep the `Default`
+/// (newest-created first) via `..Default::default()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AssetSort {
+    /// Newest created first (the default, matching the original hard-coded order).
+    #[default]
+    CreatedDesc,
+    /// Oldest created first.
+    CreatedAsc,
+    /// Most recently updated first.
+    UpdatedDesc,
+    /// Title A→Z (case-insensitive).
+    TitleAsc,
+    /// Largest byte size first (text assets carry no `bytes` and sort last).
+    SizeDesc,
 }
 
 /// Filters + pagination for [`IWorkshopRepository::list_assets`]. All filters
@@ -76,6 +100,12 @@ pub struct ListAssetsParams<'a> {
     /// exclusive with `collection`; if both are set here the two clauses AND
     /// together (never matching), so the caller is responsible for the split.
     pub ungrouped: bool,
+    /// Append-only (asset-library page): exact-match filter on one entry of the
+    /// JSON `tags` array. `None` means "no tag filter".
+    pub tag: Option<&'a str>,
+    /// Append-only (asset-library page): result ordering. Defaults to
+    /// [`AssetSort::CreatedDesc`].
+    pub sort: AssetSort,
     /// 1-based page (clamped to `>= 1` by the caller).
     pub page: i64,
     /// Rows per page (clamped by the caller).

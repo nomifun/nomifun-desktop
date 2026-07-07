@@ -3,12 +3,24 @@ use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use crate::error::DbError;
 use crate::models::{WorkshopAssetRow, WorkshopCanvasRow};
 use crate::repository::IWorkshopRepository;
-use crate::repository::workshop::{ListAssetsParams, UpdateAssetParams};
+use crate::repository::workshop::{AssetSort, ListAssetsParams, UpdateAssetParams};
 
 /// SQLite-backed implementation of [`IWorkshopRepository`].
 #[derive(Clone, Debug)]
 pub struct SqliteWorkshopRepository {
     pool: SqlitePool,
+}
+
+/// Map a [`AssetSort`] to its ORDER BY clause. The strings are fixed literals
+/// (never user input), each with an `id` tiebreaker for a stable total order.
+fn order_by_sql(sort: AssetSort) -> &'static str {
+    match sort {
+        AssetSort::CreatedDesc => "created_at DESC, id DESC",
+        AssetSort::CreatedAsc => "created_at ASC, id ASC",
+        AssetSort::UpdatedDesc => "updated_at DESC, id DESC",
+        AssetSort::TitleAsc => "title COLLATE NOCASE ASC, id DESC",
+        AssetSort::SizeDesc => "bytes DESC, id DESC",
+    }
 }
 
 impl SqliteWorkshopRepository {
@@ -189,6 +201,14 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
                 clause(qb);
                 qb.push("LOWER(title) LIKE ").push_bind(format!("%{}%", q.to_lowercase()));
             }
+            if let Some(tag) = p.tag {
+                clause(qb);
+                // Match one entry of the JSON `tags` array (stored as e.g.
+                // `["人物","场景"]`) via a case-sensitive substring search for the
+                // quoted needle `"tag"`. `instr` (unlike LIKE) is case-sensitive
+                // and treats `%`/`_` literally, so no metachar escaping is needed.
+                qb.push("instr(tags, ").push_bind(format!("\"{tag}\"")).push(") > 0");
+            }
             if let Some(in_library) = p.in_library {
                 clause(qb);
                 qb.push("in_library = ").push_bind(in_library);
@@ -205,7 +225,12 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
 
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM workshop_assets");
         push_filters(&mut qb, &params);
-        qb.push(" ORDER BY created_at DESC, id DESC LIMIT ")
+        // ORDER BY is a fixed static clause chosen from a closed enum (never
+        // user text), so pushing it verbatim is injection-safe. Every variant
+        // carries an `id` tiebreaker for a stable total order.
+        qb.push(" ORDER BY ")
+            .push(order_by_sql(params.sort))
+            .push(" LIMIT ")
             .push_bind(page_size)
             .push(" OFFSET ")
             .push_bind(offset);
@@ -277,6 +302,16 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
             return Err(DbError::NotFound(format!("workshop asset '{id}' not found")));
         }
         Ok(())
+    }
+
+    async fn rename_collection(&self, from: &str, to: Option<&str>, now: i64) -> Result<u64, DbError> {
+        let result = sqlx::query("UPDATE workshop_assets SET collection = ?, updated_at = ? WHERE collection = ?")
+            .bind(to)
+            .bind(now)
+            .bind(from)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -497,5 +532,98 @@ mod tests {
         repo.create_asset(&internal).await.unwrap();
         let all = repo.list_all_assets().await.unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn list_assets_tag_filter_exact_match() {
+        let (repo, _db) = repo().await;
+        let mut a = sample_asset("wsa_ta", "image", "带标签");
+        a.tags = r#"["人物","场景"]"#.to_string();
+        repo.create_asset(&a).await.unwrap();
+        let mut b = sample_asset("wsa_tb", "image", "另一个");
+        b.tags = r#"["场景"]"#.to_string();
+        repo.create_asset(&b).await.unwrap();
+
+        // "人物" → only wsa_ta
+        let (items, total) = repo
+            .list_assets(ListAssetsParams { tag: Some("人物"), page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].id, "wsa_ta");
+
+        // "场景" → both
+        let (_, total) = repo
+            .list_assets(ListAssetsParams { tag: Some("场景"), page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+
+        // exact match: a partial "人" must NOT match "人物"
+        let (_, total) = repo
+            .list_assets(ListAssetsParams { tag: Some("人"), page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn list_assets_sort_variants() {
+        let (repo, _db) = repo().await;
+        let mut a = sample_asset("wsa_s1", "image", "Banana");
+        (a.created_at, a.updated_at, a.bytes) = (100, 400, Some(50));
+        repo.create_asset(&a).await.unwrap();
+        let mut b = sample_asset("wsa_s2", "image", "apple");
+        (b.created_at, b.updated_at, b.bytes) = (200, 300, Some(999));
+        repo.create_asset(&b).await.unwrap();
+        let mut c = sample_asset("wsa_s3", "image", "Cherry");
+        (c.created_at, c.updated_at, c.bytes) = (300, 100, Some(10));
+        repo.create_asset(&c).await.unwrap();
+
+        let ids = |items: &[WorkshopAssetRow]| items.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        let list = |sort: AssetSort| ListAssetsParams { sort, page: 1, page_size: 50, ..Default::default() };
+
+        let (items, _) = repo.list_assets(list(AssetSort::CreatedDesc)).await.unwrap();
+        assert_eq!(ids(&items), ["wsa_s3", "wsa_s2", "wsa_s1"]);
+        let (items, _) = repo.list_assets(list(AssetSort::CreatedAsc)).await.unwrap();
+        assert_eq!(ids(&items), ["wsa_s1", "wsa_s2", "wsa_s3"]);
+        let (items, _) = repo.list_assets(list(AssetSort::UpdatedDesc)).await.unwrap();
+        assert_eq!(ids(&items), ["wsa_s1", "wsa_s2", "wsa_s3"]); // updated 400,300,100
+        let (items, _) = repo.list_assets(list(AssetSort::TitleAsc)).await.unwrap();
+        assert_eq!(ids(&items), ["wsa_s2", "wsa_s1", "wsa_s3"]); // apple,Banana,Cherry (NOCASE)
+        let (items, _) = repo.list_assets(list(AssetSort::SizeDesc)).await.unwrap();
+        assert_eq!(ids(&items), ["wsa_s2", "wsa_s1", "wsa_s3"]); // 999,50,10
+    }
+
+    #[tokio::test]
+    async fn rename_collection_bulk_and_ungroup() {
+        let (repo, _db) = repo().await;
+        for (id, coll) in [("wsa_c1", "旧集合"), ("wsa_c2", "旧集合"), ("wsa_c3", "其他")] {
+            let mut row = sample_asset(id, "image", id);
+            row.collection = Some(coll.to_string());
+            repo.create_asset(&row).await.unwrap();
+        }
+
+        // rename 旧集合 → 新集合 (2 rows)
+        let updated = repo.rename_collection("旧集合", Some("新集合"), 5000).await.unwrap();
+        assert_eq!(updated, 2);
+        let (_, total) = repo
+            .list_assets(ListAssetsParams { collection: Some("新集合"), page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 2);
+
+        // ungroup 其他 (to = None → NULL)
+        let updated = repo.rename_collection("其他", None, 6000).await.unwrap();
+        assert_eq!(updated, 1);
+        let (_, total) = repo
+            .list_assets(ListAssetsParams { ungrouped: true, page: 1, page_size: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+
+        // no match → 0 rows updated
+        let updated = repo.rename_collection("不存在", Some("x"), 7000).await.unwrap();
+        assert_eq!(updated, 0);
     }
 }

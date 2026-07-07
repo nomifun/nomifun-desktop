@@ -18,7 +18,7 @@
 
 import React, { useCallback, useState } from 'react';
 import type { TFunction } from 'i18next';
-import { Delete, EditTwo, FileText, LinkOne } from '@icon-park/react';
+import { Check, Delete, Download, EditTwo, FileText, LinkOne } from '@icon-park/react';
 
 import type { WorkshopAsset } from '../types';
 import { writeAssetDrag } from '../lib/dnd';
@@ -29,9 +29,24 @@ export interface AssetCardProps {
   asset: WorkshopAsset;
   t: TFunction;
   onOpenDetail: (asset: WorkshopAsset) => void;
-  onInsert: (asset: WorkshopAsset) => void;
+  /** Insert-into-canvas action. Omitted on the standalone Asset Library page. */
+  onInsert?: (asset: WorkshopAsset) => void;
   onEdit: (asset: WorkshopAsset) => void;
   onDelete: (asset: WorkshopAsset) => void;
+  /** Download action (Asset Library page). Omitted in the in-canvas drawer. */
+  onDownload?: (asset: WorkshopAsset) => void;
+  /** Enable drag-to-canvas (default true). The platform page has no drop zone. */
+  draggable?: boolean;
+  /** Multi-select mode: renders a hover/persistent checkbox. */
+  selectable?: boolean;
+  /** Whether this card is currently selected. */
+  selected?: boolean;
+  /**
+   * True when ≥1 asset is selected anywhere. In that state a plain card click
+   * toggles selection instead of opening the detail sheet (gallery pattern).
+   */
+  selectionActive?: boolean;
+  onToggleSelect?: (asset: WorkshopAsset) => void;
 }
 
 interface HoverAction {
@@ -80,11 +95,25 @@ const HoverActions: React.FC<{ actions: HoverAction[] }> = ({ actions }) => (
   </div>
 );
 
-const AssetCard: React.FC<AssetCardProps> = ({ asset, t, onOpenDetail, onInsert, onEdit, onDelete }) => {
+const AssetCard: React.FC<AssetCardProps> = ({
+  asset,
+  t,
+  onOpenDetail,
+  onInsert,
+  onEdit,
+  onDelete,
+  onDownload,
+  draggable = true,
+  selectable = false,
+  selected = false,
+  selectionActive = false,
+  onToggleSelect,
+}) => {
   const [dragging, setDragging] = useState(false);
 
   const handleDragStart = useCallback(
     (e: React.DragEvent) => {
+      if (!draggable) return;
       writeAssetDrag(e.dataTransfer, {
         asset_id: asset.id,
         kind: asset.kind,
@@ -94,16 +123,39 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, t, onOpenDetail, onInsert,
       });
       setDragging(true);
     },
-    [asset]
+    [asset, draggable]
   );
 
+  const toggleSelect = useCallback(() => onToggleSelect?.(asset), [onToggleSelect, asset]);
+
+  // In an active multi-select session a plain click toggles selection; otherwise
+  // it opens the detail sheet (standard gallery behavior).
+  const handleActivate = useCallback(() => {
+    if (selectable && selectionActive) toggleSelect();
+    else onOpenDetail(asset);
+  }, [selectable, selectionActive, toggleSelect, onOpenDetail, asset]);
+
   const actions: HoverAction[] = [
-    {
-      key: 'insert',
-      icon: <LinkOne theme='outline' size={13} strokeWidth={3} />,
-      label: t('workshopAssets.card.insert', { defaultValue: '插入画布' }),
-      run: () => onInsert(asset),
-    },
+    ...(onInsert
+      ? [
+          {
+            key: 'insert',
+            icon: <LinkOne theme='outline' size={13} strokeWidth={3} />,
+            label: t('workshopAssets.card.insert', { defaultValue: '插入画布' }),
+            run: () => onInsert(asset),
+          },
+        ]
+      : []),
+    ...(onDownload
+      ? [
+          {
+            key: 'download',
+            icon: <Download theme='outline' size={13} strokeWidth={3} />,
+            label: t('workshopAssets.card.download', { defaultValue: '下载' }),
+            run: () => onDownload(asset),
+          },
+        ]
+      : []),
     {
       key: 'edit',
       icon: <EditTwo theme='outline' size={13} strokeWidth={3} />,
@@ -119,6 +171,34 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, t, onOpenDetail, onInsert,
     },
   ];
 
+  const selectBox = selectable ? (
+    <div
+      role='checkbox'
+      aria-checked={selected}
+      tabIndex={0}
+      title={t('workshopAssets.card.select', { defaultValue: '选择' })}
+      onClick={(e) => {
+        e.stopPropagation();
+        toggleSelect();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleSelect();
+        }
+      }}
+      className={[
+        'absolute left-8px top-8px z-10 grid h-22px w-22px place-items-center rounded-6px cursor-pointer border border-solid transition-all',
+        selected
+          ? 'border-transparent bg-[rgb(var(--primary-6))] text-white opacity-100'
+          : 'border-[var(--color-border-2)] bg-[var(--color-bg-2)] text-transparent opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:border-[var(--color-border-3)]',
+      ].join(' ')}
+    >
+      <Check theme='outline' size={13} strokeWidth={4} />
+    </div>
+  ) : null;
+
   const isText = asset.kind === 'text';
   const durationLabel = asset.kind === 'video' ? formatDuration(originDurationSeconds(asset.origin?.params)) : null;
 
@@ -126,14 +206,14 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, t, onOpenDetail, onInsert,
     <div
       role='button'
       tabIndex={0}
-      draggable
+      draggable={draggable}
       onDragStart={handleDragStart}
       onDragEnd={() => setDragging(false)}
-      onClick={() => onOpenDetail(asset)}
+      onClick={handleActivate}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          onOpenDetail(asset);
+          handleActivate();
         }
       }}
       className={[
@@ -141,9 +221,11 @@ const AssetCard: React.FC<AssetCardProps> = ({ asset, t, onOpenDetail, onInsert,
         'border-[var(--color-border-2)] bg-[var(--color-bg-2)] box-border',
         'transition-all duration-150',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_8px_24px_rgba(0,0,0,0.14)] hover:-translate-y-1px',
+        selected ? 'ring-2 ring-[rgb(var(--primary-6))] !border-[rgb(var(--primary-6))]' : '',
         dragging ? 'opacity-45 ring-2 ring-[rgba(var(--primary-6),0.5)]' : '',
       ].join(' ')}
     >
+      {selectBox}
       {isText ? (
         // ── Text snippet ────────────────────────────────────────────────────
         <div className='flex flex-col gap-8px p-12px'>

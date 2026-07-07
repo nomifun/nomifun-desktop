@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_common::{AppError, generate_prefixed_id, now_ms};
-use nomifun_db::{IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow};
+use nomifun_db::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams, WorkshopAssetRow};
 use serde_json::{Value, json};
 
 use crate::dto::{WorkshopAsset, WorkshopCanvasMeta};
@@ -90,6 +90,10 @@ pub struct AssetQuery {
     /// (`collection IS NULL OR ''`). The caller keeps this mutually exclusive
     /// with `collection`.
     pub ungrouped: bool,
+    /// Append-only (asset-library page): exact-match filter on one tag.
+    pub tag: Option<String>,
+    /// Append-only (asset-library page): result ordering (default newest first).
+    pub sort: AssetSort,
     pub page: i64,
     pub page_size: i64,
 }
@@ -721,6 +725,8 @@ impl WorkshopService {
                 q: query.q.as_deref().filter(|s| !s.trim().is_empty()),
                 in_library: query.in_library,
                 ungrouped: query.ungrouped,
+                tag: query.tag.as_deref().filter(|s| !s.trim().is_empty()),
+                sort: query.sort,
                 page: query.page,
                 page_size: query.page_size,
             })
@@ -745,6 +751,19 @@ impl WorkshopService {
             in_library: patch.in_library,
         };
         Ok(self.repo.update_asset(id, params, now_ms()).await?.into())
+    }
+
+    /// Bulk-rename a collection across every asset that used it (asset-library
+    /// management). `from` must be non-empty; a whitespace-only `to` ungroups
+    /// those assets (sets `collection` to NULL). Returns rows updated.
+    pub async fn rename_collection(&self, from: &str, to: &str) -> Result<u64, AppError> {
+        let from = from.trim();
+        if from.is_empty() {
+            return Err(AppError::BadRequest("collection name must not be empty".into()));
+        }
+        let to = to.trim();
+        let to_opt = if to.is_empty() { None } else { Some(to) };
+        Ok(self.repo.rename_collection(from, to_opt, now_ms()).await?)
     }
 
     pub async fn delete_asset(&self, id: &str) -> Result<(), AppError> {

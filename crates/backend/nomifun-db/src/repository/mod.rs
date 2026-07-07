@@ -118,4 +118,4 @@ pub use tag_setting::ITagSettingRepository;
 pub use terminal::{CreateTerminalParams, ITerminalRepository};
 pub use user::IUserRepository;
 pub use webhook::IWebhookRepository;
-pub use workshop::{IWorkshopRepository, ListAssetsParams, UpdateAssetParams};
+pub use workshop::{AssetSort, IWorkshopRepository, ListAssetsParams, UpdateAssetParams};

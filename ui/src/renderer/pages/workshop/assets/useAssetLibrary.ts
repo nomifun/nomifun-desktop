@@ -33,6 +33,7 @@ import {
 } from '../api';
 import { revokeWorkshopMedia } from '../lib/media';
 import type {
+  AssetSortKey,
   CreateTextAssetBody,
   ListAssetsQuery,
   PatchAssetBody,
@@ -83,6 +84,15 @@ export interface UseAssetLibrary {
   setCollection: (c: CollectionFilter) => void;
   /** Distinct collection names aggregated from loaded items (+ current selection). */
   collections: string[];
+  /**
+   * Result ordering. The in-canvas drawer leaves this at `'created_desc'`; the
+   * platform Asset Library page drives it. Changing it reloads.
+   */
+  sort: AssetSortKey;
+  setSort: (s: AssetSortKey) => void;
+  /** Exact-match tag filter (asset-library page). `null` = no tag filter. */
+  tag: string | null;
+  setTag: (t: string | null) => void;
   isFiltering: boolean;
   clearFilters: () => void;
 
@@ -113,6 +123,11 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [kind, setKind] = useState<AssetKindFilter>('all');
   const [collection, setCollection] = useState<CollectionFilter>(COLLECTION_ALL);
+  // Ordering + tag filter — only the platform Asset Library page drives these;
+  // the in-canvas drawer leaves them at their defaults (identical behavior to
+  // before: `created_desc` maps to the backend's default order, no tag filter).
+  const [sort, setSort] = useState<AssetSortKey>('created_desc');
+  const [tag, setTag] = useState<string | null>(null);
   // Distinct collection names seen across every load — accumulated (grow-only)
   // so the collection dropdown keeps its options even while a filter (e.g.
   // "Ungrouped") narrows the current page to collection-less items.
@@ -131,17 +146,18 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
 
   const buildQuery = useCallback(
     (nextPage: number): ListAssetsQuery => {
-      const q: ListAssetsQuery = { in_library: true, page: nextPage, page_size: ASSETS_PAGE_SIZE };
+      const q: ListAssetsQuery = { in_library: true, page: nextPage, page_size: ASSETS_PAGE_SIZE, sort };
       if (kind !== 'all') q.kind = kind;
       const trimmed = debouncedQuery.trim();
       if (trimmed) q.q = trimmed;
+      if (tag) q.tag = tag;
       // "Ungrouped" and named collections both filter server-side (mutually
       // exclusive on the wire).
       if (collection === COLLECTION_UNGROUPED) q.ungrouped = true;
       else if (collection !== COLLECTION_ALL) q.collection = collection;
       return q;
     },
-    [kind, debouncedQuery, collection]
+    [kind, debouncedQuery, collection, sort, tag]
   );
 
   // Guard against out-of-order responses when filters change rapidly.
@@ -194,7 +210,7 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
     if (!open) return;
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, kind, collection, debouncedQuery]);
+  }, [open, kind, collection, debouncedQuery, sort, tag]);
 
   // First open: mark as opened (the effect above handles the initial load).
   useEffect(() => {
@@ -232,12 +248,13 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [items, collection, knownCollections]);
 
-  const isFiltering = kind !== 'all' || collection !== COLLECTION_ALL || debouncedQuery.trim() !== '';
+  const isFiltering = kind !== 'all' || collection !== COLLECTION_ALL || debouncedQuery.trim() !== '' || tag !== null;
 
   const clearFilters = useCallback(() => {
     setKind('all');
     setCollection(COLLECTION_ALL);
     setQuery('');
+    setTag(null);
   }, []);
 
   // ─── Optimistic list mutations ──────────────────────────────────────────────
@@ -370,6 +387,10 @@ export function useAssetLibrary(open: boolean): UseAssetLibrary {
     collection,
     setCollection,
     collections,
+    sort,
+    setSort,
+    tag,
+    setTag,
     isFiltering,
     clearFilters,
     reload: load,
