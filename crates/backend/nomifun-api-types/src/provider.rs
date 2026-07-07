@@ -74,6 +74,11 @@ pub enum ProviderHealthCheckErrorKind {
 pub struct ProviderHealthCheckRequest {
     pub provider_id: String,
     pub model: String,
+    /// Which task to probe. `None` → look up the model's stored profile primary
+    /// task, falling back to Chat. Lets image/tts/asr models be probed at the
+    /// correct endpoint instead of always hitting `/chat/completions`.
+    #[serde(default)]
+    pub task: Option<crate::model_task::ModelTask>,
 }
 
 /// Response body for `POST /api/agents/provider-health-check`.
