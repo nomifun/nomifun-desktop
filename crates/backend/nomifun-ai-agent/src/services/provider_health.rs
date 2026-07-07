@@ -831,7 +831,7 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/images/generations"))
+            .and(path("/v1/images/generations"))
             .and(header("authorization", "Bearer sk-test"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{ "b64_json": "AAAA" }]
@@ -864,7 +864,7 @@ mod tests {
         // Reproduces the StepFun 404 shape — but now at the CORRECT image endpoint.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/images/generations"))
+            .and(path("/v1/images/generations"))
             .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
                 "error": { "message": "The model \"x\" does not exist", "type": "model_invalid" }
             })))

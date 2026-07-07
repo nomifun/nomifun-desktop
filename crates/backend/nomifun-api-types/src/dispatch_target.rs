@@ -80,8 +80,12 @@ pub fn resolve_dispatch_target(
         // 2. base_url is already the complete endpoint.
         trimmed.to_string()
     } else {
-        // 3. Convention.
-        format!("{trimmed}{conv_path}")
+        // 3. Convention. Normalize to a single `/v1` version root (mirrors
+        // nomifun-creation's `openai_versioned_base`): a base is tolerated with
+        // or without a trailing `/v1`, and StepFun's `.../step_plan/v1` collapses
+        // to itself. All OpenAI-compatible task endpoints live under `/v1`.
+        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
+        format!("{root}/v1{conv_path}")
     };
 
     // request_shape override.

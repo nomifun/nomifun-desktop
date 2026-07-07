@@ -9,13 +9,12 @@
 //! that return a `url` instead (the engine fetches it).
 
 use async_trait::async_trait;
+use nomifun_api_types::{resolve_dispatch_target, ModelTask};
 use reqwest::multipart::{Form, Part};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-use crate::adapters::{
-    error_from_response, net_err, openai_versioned_base, param_count, param_prompt, param_size,
-};
+use crate::adapters::{error_from_response, net_err, param_count, param_prompt, param_size};
 use crate::provider::{MediaProvider, ProducedAsset, ProducedData, SubmitAck, SubmitRequest};
 use crate::types::{CreationError, MediaCapability};
 
@@ -32,7 +31,14 @@ impl OpenAiImagesAdapter {
     }
 
     async fn submit_generations(&self, req: &SubmitRequest) -> Result<SubmitAck, CreationError> {
-        let url = format!("{}/images/generations", openai_versioned_base(&req.provider));
+        let url = resolve_dispatch_target(
+            &req.provider.platform,
+            &req.provider.base_url,
+            req.provider.is_full_url,
+            ModelTask::ImageGeneration,
+            &req.params,
+        )
+        .url;
         let mut body = json!({
             "model": req.model,
             "prompt": param_prompt(&req.params),
@@ -63,7 +69,14 @@ impl OpenAiImagesAdapter {
     }
 
     async fn submit_edits(&self, req: &SubmitRequest) -> Result<SubmitAck, CreationError> {
-        let url = format!("{}/images/edits", openai_versioned_base(&req.provider));
+        let url = resolve_dispatch_target(
+            &req.provider.platform,
+            &req.provider.base_url,
+            req.provider.is_full_url,
+            ModelTask::ImageEdit,
+            &req.params,
+        )
+        .url;
 
         let images: Vec<_> = req.inputs.iter().filter(|i| i.role != "mask").collect();
         if images.is_empty() {
