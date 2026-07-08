@@ -86,6 +86,14 @@ a deferred tool, use ToolSearch to load its full schema first.
 and tests (or the narrowest command that exercises your change) with Bash, and \
 fix what you broke. Don't claim something works that you haven't run.",
     );
+    s.push_str(
+        "\n - Treat every tool or command error as a hard checkpoint. Do not run \
+dependent follow-up steps after a failure until you inspect the result and decide whether to \
+retry, increase the timeout, change strategy, or verify the required state another way. \
+For installs, dependency downloads, builds, migrations, servers, and other long-running \
+commands, choose a generous explicit timeout or use exec_command/write_stdin so you can poll \
+without killing the process.",
+    );
     // Windows-only: launching GUI apps/URLs via `cmd /c start` is unreliable — the
     // `start` builtin mis-parses the target as a window title and pops a blocking
     // "Windows cannot find 'X'" dialog. Steer toward the Computer tool's reliable
