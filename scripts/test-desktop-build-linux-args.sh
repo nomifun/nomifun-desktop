@@ -40,13 +40,28 @@ cat > "$TMP_DIR/bin/bun" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
 
+printf "APPIMAGE_EXTRACT_AND_RUN=%s\n" "${APPIMAGE_EXTRACT_AND_RUN:-}" >> "$NOMIFUN_TEST_BUN_LOG"
 for arg in "$@"; do
   printf "<%s>\n" "$arg" >> "$NOMIFUN_TEST_BUN_LOG"
 done
 printf -- "---\n" >> "$NOMIFUN_TEST_BUN_LOG"
 STUB
 
-chmod +x "$TMP_DIR/bin/rustup" "$TMP_DIR/bin/bun"
+cat > "$TMP_DIR/bin/pkg-config" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--exists" ]]; then
+  case "${2:-}" in
+    gbm|ayatana-appindicator3-0.1|appindicator3-0.1) exit 0 ;;
+  esac
+fi
+
+echo "unexpected pkg-config invocation: $*" >&2
+exit 1
+STUB
+
+chmod +x "$TMP_DIR/bin/rustup" "$TMP_DIR/bin/bun" "$TMP_DIR/bin/pkg-config"
 
 run_build_linux() {
   PATH="$TMP_DIR/bin:$PATH" \
@@ -70,6 +85,7 @@ assert_log_contains "<--config>"
 assert_log_contains "<apps/desktop/tauri.updater.conf.json>"
 assert_log_contains "<--target>"
 assert_log_contains "<x86_64-unknown-linux-gnu>"
+assert_log_contains "APPIMAGE_EXTRACT_AND_RUN=1"
 
 : > "$LOG"
 run_build_linux x64 --config apps/desktop/tauri.updater.conf.json
@@ -77,5 +93,6 @@ assert_log_contains "<--config>"
 assert_log_contains "<apps/desktop/tauri.updater.conf.json>"
 assert_log_contains "<--target>"
 assert_log_contains "<x86_64-unknown-linux-gnu>"
+assert_log_contains "APPIMAGE_EXTRACT_AND_RUN=1"
 
 echo "desktop-build-linux args: ok"
