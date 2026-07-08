@@ -64,6 +64,20 @@ echo "unexpected rustup invocation: $*" >&2
 exit 1
 STUB
 
+cat > "$TMP_DIR/bin/pkg-config" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "--exists" ]]; then
+  case "${2:-}" in
+    gbm|ayatana-appindicator3-0.1|appindicator3-0.1) exit 0 ;;
+  esac
+fi
+
+echo "unexpected pkg-config invocation: $*" >&2
+exit 1
+STUB
+
 cat > "$TMP_DIR/bin/bun" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -120,7 +134,7 @@ echo "unexpected bun invocation: $*" >&2
 exit 1
 STUB
 
-chmod +x "$TMP_DIR/bin/gh" "$TMP_DIR/bin/rustup" "$TMP_DIR/bin/bun"
+chmod +x "$TMP_DIR/bin/gh" "$TMP_DIR/bin/rustup" "$TMP_DIR/bin/pkg-config" "$TMP_DIR/bin/bun"
 
 (
   cd "$WORK"

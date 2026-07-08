@@ -38,6 +38,38 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
 
+require_linux_build_deps() {
+  local missing=()
+
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    missing+=("pkg-config")
+  else
+    pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
+    if ! pkg-config --exists ayatana-appindicator3-0.1 && ! pkg-config --exists appindicator3-0.1; then
+      missing+=("libayatana-appindicator3-dev 或 libappindicator3-dev (pkg-config: *appindicator3-0.1)")
+    fi
+  fi
+
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    echo "❌ Linux 打包依赖不完整:" >&2
+    local item
+    for item in "${missing[@]}"; do
+      echo "   - $item" >&2
+    done
+    cat >&2 <<'EOF'
+
+Debian/Ubuntu 可先安装:
+  sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev
+
+说明:
+  - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。
+  - libayatana-appindicator3-dev 提供 Tauri 托盘/AppIndicator 打包探测。
+  - 本脚本会设置 APPIMAGE_EXTRACT_AND_RUN=1，让 linuxdeploy AppImage 在无 FUSE2 的构建机上也能运行。
+EOF
+    exit 1
+  fi
+}
+
 # 当前机器架构对应的 triple(用于判断哪个是「原生」)
 HOST_ARCH="$(uname -m)"
 case "$HOST_ARCH" in
@@ -83,6 +115,9 @@ else
     TRIPLES+=("$(resolve_triple "$s")")
   done
 fi
+
+require_linux_build_deps
+export APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}"
 
 ensure_target() {
   local t="$1"
