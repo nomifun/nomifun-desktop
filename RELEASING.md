@@ -110,12 +110,12 @@ Use this order for every desktop release.
    Prepare the native Linux packaging dependencies first:
 
    ```bash
-   sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev
+   sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev librsvg2-dev
    ```
 
-   `build:linux` preflights the `gbm` and AppIndicator `pkg-config` entries and
-   sets `APPIMAGE_EXTRACT_AND_RUN=1` so linuxdeploy can run on builders without
-   FUSE2.
+   `build:linux` preflights the `gbm`, AppIndicator, and `librsvg-2.0`
+   `pkg-config` entries and sets `APPIMAGE_EXTRACT_AND_RUN=1` so linuxdeploy can
+   run on builders without FUSE2.
 
    ```bash
    export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
