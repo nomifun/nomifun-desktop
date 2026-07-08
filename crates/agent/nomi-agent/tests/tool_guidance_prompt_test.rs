@@ -134,6 +134,30 @@ fn tc_4_3_03_parallel_call_guidance() {
     );
 }
 
+#[test]
+fn tc_4_3_03b_failure_checkpoint_guidance() {
+    let result = build_system_prompt(
+        &mut SystemPromptCache::new(),
+        None,
+        "/tmp",
+        "test-model",
+        &[],
+        None,
+        None,
+        false,
+        false,
+        false, // browser_enabled
+    );
+    assert!(
+        result.contains("hard checkpoint"),
+        "tool guidance should make command errors a hard checkpoint"
+    );
+    assert!(
+        result.contains("generous explicit timeout") && result.contains("exec_command/write_stdin"),
+        "tool guidance should steer long-running commands toward larger timeouts or polling"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // TC-4.3-04: Edit-over-Write and Read-before-Edit rules
 // ---------------------------------------------------------------------------

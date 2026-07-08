@@ -1,12 +1,18 @@
 mod common;
 
+use std::sync::Arc;
+
 use common::{MockTool, auto_approve_confirmer};
-use nomi_agent::orchestration::execute_tool_calls;
+use nomi_agent::orchestration::{execute_tool_calls, execute_tool_calls_with_approval};
 use nomi_compact::CompactionLevel;
 use nomi_config::hooks::{HookDef, HookEngine, HooksConfig};
+use nomi_protocol::events::ProtocolEvent;
+use nomi_protocol::writer::ProtocolEmitter;
 use nomi_tools::registry::ToolRegistry;
 use nomi_types::message::ContentBlock;
+use nomi_types::tool::ToolResult;
 use serde_json::json;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,6 +44,33 @@ fn make_post_hook(name: &str, tool_match: &str, command: &str) -> HookDef {
         file_match: vec![],
         command: command.to_string(),
         timeout_ms: 5_000,
+    }
+}
+
+fn make_sequential_tool(name: &str, result: &str, is_error: bool) -> MockTool {
+    MockTool {
+        tool_name: name.to_string(),
+        tool_description: format!("Mock sequential tool: {name}"),
+        concurrent_safe: false,
+        result: Mutex::new(ToolResult {
+            content: result.to_string(),
+            is_error,
+            images: Vec::new(),
+        }),
+    }
+}
+
+#[derive(Default)]
+struct CapturingEmitter {
+    events: Mutex<Vec<String>>,
+}
+
+impl ProtocolEmitter for CapturingEmitter {
+    fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+        let encoded = serde_json::to_string(event)
+            .map_err(|e| std::io::Error::other(format!("serialize protocol event: {e}")))?;
+        self.events.lock().unwrap().push(encoded);
+        Ok(())
     }
 }
 
@@ -164,6 +197,100 @@ async fn test_execute_non_concurrent_tools_sequential() {
 
     assert_eq!(content_map.get("id-a"), Some(&"seq_result_a"));
     assert_eq!(content_map.get("id-b"), Some(&"seq_result_b"));
+}
+
+/// A failed sequential tool should stop later same-turn tools so the model can
+/// inspect the failure and decide whether to retry, extend timeout, or change
+/// strategy before dependent work runs.
+#[tokio::test]
+async fn test_execute_non_concurrent_tools_stops_after_error() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(make_sequential_tool("seq_fail", "timeout", true)));
+    registry.register(Box::new(make_sequential_tool("seq_later", "must_not_run", false)));
+
+    let tool_calls = vec![
+        make_tool_use("id-fail", "seq_fail"),
+        make_tool_use("id-later", "seq_later"),
+    ];
+    let confirmer = auto_approve_confirmer();
+
+    let results = execute_tool_calls(
+        &registry,
+        &tool_calls,
+        &confirmer,
+        None,
+        CompactionLevel::Off,
+        false,
+    )
+    .await
+    .expect("execution should succeed");
+
+    assert_eq!(results.len(), 2);
+    assert!(matches!(
+        &results[0],
+        ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "id-fail" && content == "timeout" && *is_error
+    ));
+    assert!(matches!(
+        &results[1],
+        ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "id-later"
+                && *is_error
+                && content.contains("Skipped because a previous tool call")
+                && !content.contains("must_not_run")
+    ));
+}
+
+#[tokio::test]
+async fn test_protocol_execution_stops_after_sequential_error() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(make_sequential_tool("seq_fail", "timeout", true)));
+    registry.register(Box::new(make_sequential_tool("seq_later", "must_not_run", false)));
+
+    let tool_calls = vec![
+        make_tool_use("id-fail", "seq_fail"),
+        make_tool_use("id-later", "seq_later"),
+    ];
+    let approval_manager = Arc::new(nomi_protocol::ToolApprovalManager::new());
+    let writer_capture = Arc::new(CapturingEmitter::default());
+    let writer: Arc<dyn ProtocolEmitter> = writer_capture.clone();
+
+    let outcome = execute_tool_calls_with_approval(
+        &registry,
+        &tool_calls,
+        &approval_manager,
+        &writer,
+        "msg-sequential-error",
+        true,
+        &[],
+        None,
+        CompactionLevel::Off,
+        false,
+    )
+    .await
+    .expect("execution should succeed");
+
+    assert_eq!(outcome.results.len(), 2);
+    assert!(matches!(
+        &outcome.results[0],
+        ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "id-fail" && content == "timeout" && *is_error
+    ));
+    assert!(matches!(
+        &outcome.results[1],
+        ContentBlock::ToolResult { tool_use_id, content, is_error, .. }
+            if tool_use_id == "id-later"
+                && *is_error
+                && content.contains("Skipped because a previous tool call")
+                && !content.contains("must_not_run")
+    ));
+
+    let events = writer_capture.events.lock().unwrap();
+    let later_result = events.iter().find(|event| {
+        event.contains(r#""call_id":"id-later""#)
+            && event.contains("Skipped because a previous tool call")
+    });
+    assert!(later_result.is_some(), "skipped call should still emit a paired tool result");
 }
 
 /// Calling a tool that is not registered returns an error ToolResult with "Unknown tool"

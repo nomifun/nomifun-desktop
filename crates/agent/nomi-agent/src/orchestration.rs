@@ -18,6 +18,8 @@ const RECOVERED_PARTIAL_WRITE_KEY: &str = "__nomi_recovered_partial_write";
 const RECOVERED_PARTIAL_WRITE_RESULT_HINT: &str = "\
 Recovered a partial Write from an output-token cutoff. The file now contains the generated prefix only. \
 Read the file, inspect the tail, then append or edit small chunks until the deliverable is complete before finalizing.";
+const SKIPPED_AFTER_PRIOR_ERROR: &str = "\
+Skipped because a previous tool call in this assistant turn failed. Inspect the failed result first, then decide whether to retry with a larger timeout, use exec_command/write_stdin for long-running commands, or choose a different next step. Do not assume this step ran.";
 
 /// The combined output of a tool execution batch: protocol content blocks
 /// paired with per-call context modifiers (None for non-skill tools).
@@ -50,8 +52,17 @@ pub async fn execute_tool_calls(
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
+    let mut halt_after_error = false;
 
     for batch in partition(registry, tool_calls) {
+        if halt_after_error {
+            for call in &batch.calls {
+                results.push(skipped_after_prior_error(call));
+                modifiers.push(None);
+            }
+            continue;
+        }
+
         if batch.is_concurrent {
             // For concurrent batch, confirm all first, then execute approved ones.
             // Concurrent tools are never SkillTool (is_concurrency_safe=false for Skill),
@@ -76,13 +87,22 @@ pub async fn execute_tool_calls(
                 .collect();
             let batch_results = futures::future::join_all(futures).await;
             for (block, modifier) in batch_results {
+                if block_is_error(&block) {
+                    halt_after_error = true;
+                }
                 results.push(block);
                 modifiers.push(modifier);
             }
         } else {
             for call in &batch.calls {
+                if halt_after_error {
+                    results.push(skipped_after_prior_error(call));
+                    modifiers.push(None);
+                    continue;
+                }
                 match confirm_call(confirmer, call)? {
                     Some(denied) => {
+                        halt_after_error = true;
                         results.push(denied);
                         modifiers.push(None);
                     }
@@ -104,6 +124,8 @@ pub async fn execute_tool_calls(
                         // Merge skill hooks after a successful sequential execution.
                         if !block_is_error(&block) {
                             maybe_merge_skill_hooks(registry, call, hooks.as_deref_mut());
+                        } else {
+                            halt_after_error = true;
                         }
                         results.push(block);
                         modifiers.push(modifier);
@@ -305,6 +327,42 @@ async fn execute_single(
     )
 }
 
+fn skipped_after_prior_error(call: &ContentBlock) -> ContentBlock {
+    let ContentBlock::ToolUse { id, .. } = call else {
+        unreachable!("skipped_after_prior_error called with non-ToolUse block")
+    };
+    ContentBlock::ToolResult {
+        tool_use_id: id.clone(),
+        content: SKIPPED_AFTER_PRIOR_ERROR.to_string(),
+        is_error: true,
+        images: Vec::new(),
+    }
+}
+
+fn emit_skipped_after_prior_error(
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    call: &ContentBlock,
+) -> ContentBlock {
+    let block = skipped_after_prior_error(call);
+    if let (
+        ContentBlock::ToolUse { id, name, .. },
+        ContentBlock::ToolResult { content, .. },
+    ) = (call, &block)
+    {
+        let _ = writer.emit(&ProtocolEvent::ToolResult {
+            msg_id: msg_id.to_string(),
+            call_id: id.clone(),
+            tool_name: name.clone(),
+            status: ToolStatus::Error,
+            output: content.clone(),
+            output_type: OutputType::Text,
+            metadata: None,
+        });
+    }
+    block
+}
+
 /// Execute tool calls with JSON stream protocol approval flow
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_tool_calls_with_approval(
@@ -321,6 +379,7 @@ pub async fn execute_tool_calls_with_approval(
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
+    let mut halt_after_error = false;
 
     // Decide which calls can run concurrently (concurrency-safe AND needing no
     // interactive approval); the rest keep their serial approval+execution flow.
@@ -347,6 +406,15 @@ pub async fn execute_tool_calls_with_approval(
         .collect();
 
     for group in group_batches(&batchable) {
+        if halt_after_error {
+            for idx in group.clone() {
+                let block = emit_skipped_after_prior_error(writer, msg_id, &tool_calls[idx]);
+                results.push(block);
+                modifiers.push(None);
+            }
+            continue;
+        }
+
         // Concurrent batch: concurrency-safe, pre-approved, non-skill tools. Emit
         // running for all, execute in parallel (join_all preserves submission
         // order so tool_use/tool_result pairing stays intact), emit results in
@@ -400,6 +468,9 @@ pub async fn execute_tool_calls_with_approval(
                         metadata: None,
                     });
                 }
+                if block_is_error(&block) {
+                    halt_after_error = true;
+                }
                 results.push(block);
                 modifiers.push(modifier);
             }
@@ -452,6 +523,7 @@ pub async fn execute_tool_calls_with_approval(
                         call_id: id.clone(),
                         reason: reason.clone(),
                     });
+                    halt_after_error = true;
                     results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: format!("Tool denied: {reason}"),
@@ -508,6 +580,8 @@ pub async fn execute_tool_calls_with_approval(
         // Merge skill hooks after a successful execution.
         if !block_is_error(&result) {
             maybe_merge_skill_hooks(registry, call, hooks.as_deref_mut());
+        } else {
+            halt_after_error = true;
         }
 
         results.push(result);

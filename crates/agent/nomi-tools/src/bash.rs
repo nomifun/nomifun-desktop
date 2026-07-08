@@ -13,6 +13,10 @@ use crate::Tool;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+const COMMAND_TIMEOUT_GUIDANCE: &str = "\
+The command was stopped before completion. Do not assume its side effects finished. \
+Inspect the partial state, retry with a larger timeout, or use exec_command/write_stdin \
+for long-running or interactive commands before running dependent steps.";
 /// Per-stream byte budget for Bash output before head/tail elision. Matches
 /// `Tool::max_result_size()` so the engine-level fallback rarely fires.
 const BASH_OUTPUT_MAX_BYTES: usize = 50_000;
@@ -76,8 +80,9 @@ impl BashTool {
         {
             Ok(outcome) if outcome.timed_out => ToolResult {
                 content: format!(
-                    "Command timed out after {}ms (the shell was interrupted).\nPartial output:\n{}",
+                    "Command timed out after {}ms (the shell was interrupted).\n{}\nPartial output:\n{}",
                     timeout_ms,
+                    COMMAND_TIMEOUT_GUIDANCE,
                     truncate_middle(&outcome.output, TruncationBudget::Bytes(BASH_OUTPUT_MAX_BYTES)),
                 ),
                 is_error: true,
@@ -144,7 +149,10 @@ impl BashTool {
                 images: Vec::new(),
             },
             Err(_) => ToolResult {
-                content: format!("Command timed out after {}ms", timeout_ms),
+                content: format!(
+                    "Command timed out after {}ms\n{}",
+                    timeout_ms, COMMAND_TIMEOUT_GUIDANCE
+                ),
                 is_error: true,
                 images: Vec::new(),
             },
@@ -171,7 +179,8 @@ impl Tool for BashTool {
              - Use PowerShell syntax: Get-ChildItem, Get-Content, Set-Location, $env:NAME, and ';' for sequencing. Run cmd /C \"...\" explicitly only when cmd.exe syntax is required.\n\
              - Use absolute paths to avoid working directory confusion.\n\
              - When issuing multiple independent commands, make parallel tool calls instead of chaining them. Chain commands only when later commands depend on earlier ones.\n\
-             - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
+             - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\
+             - For installs, dependency downloads, builds, migrations, or other long commands, choose a generous explicit timeout or use exec_command/write_stdin so you can poll instead of killing the command. If a command times out or fails, inspect/retry before running dependent commands.\n\n\
              # Git safety\n\
              - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\
              - Prefer creating new commits over amending existing ones."
@@ -186,7 +195,8 @@ impl Tool for BashTool {
              # Instructions\n\
              - Use absolute paths to avoid working directory confusion.\n\
              - When issuing multiple independent commands, make parallel tool calls instead of chaining them. Use `&&` only when commands depend on each other.\n\
-             - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\n\
+             - You may specify an optional timeout in milliseconds (default 120000, max 600000).\n\
+             - For installs, dependency downloads, builds, migrations, or other long commands, choose a generous explicit timeout or use exec_command/write_stdin so you can poll instead of killing the command. If a command times out or fails, inspect/retry before running dependent commands.\n\n\
              # Git safety\n\
              - Never force push, reset --hard, or use --no-verify unless explicitly asked.\n\
              - Prefer creating new commits over amending existing ones."
@@ -285,7 +295,10 @@ impl Tool for BashTool {
                 images: Vec::new(),
             },
             Err(_) => ToolResult {
-                content: format!("Command timed out after {}ms", timeout_ms),
+                content: format!(
+                    "Command timed out after {}ms\n{}",
+                    timeout_ms, COMMAND_TIMEOUT_GUIDANCE
+                ),
                 is_error: true,
                 images: Vec::new(),
             },
