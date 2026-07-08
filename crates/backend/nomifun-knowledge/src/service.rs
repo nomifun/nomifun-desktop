@@ -5,10 +5,9 @@
 //! out-of-band at any time, so file listings/stats are computed on demand
 //! rather than cached in the database.
 
-use std::collections::HashSet;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 
 use futures_util::{StreamExt, stream};
 use nomifun_api_types::{ConnectorCredentialSummary, ConnectorSyncState, KnowledgeMountInfo, KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag, UpdateKnowledgeTagRequest};
@@ -16,6 +15,8 @@ use nomifun_common::{AppError, TimestampMs, generate_prefixed_id, now_ms};
 use nomifun_db::models::{CreateKnowledgeTagParams, KnowledgeBaseRow, KnowledgeBindingRow};
 use nomifun_db::{IConnectorCredentialRepository, IKnowledgeRepository};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use url::Url;
 
 use crate::autogen::{self, KnowledgeCompleter};
@@ -334,6 +335,64 @@ pub struct WriteOutcome {
     pub staged: bool,
 }
 
+/// Inputs for the turn-final write-back trigger. The trigger is deliberately
+/// separate from [`WritebackMode`] / [`WritebackEagerness`] semantics: mode still
+/// selects placement via [`resolve_write_policy`], eagerness only shapes
+/// candidate extraction.
+#[derive(Debug, Clone)]
+pub struct TurnWritebackRequest {
+    pub mounts: Vec<KnowledgeMountInfo>,
+    pub binding: KnowledgeBinding,
+    pub surface: WriteSurface,
+    pub scope: String,
+    pub user_text: String,
+    pub assistant_text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnWritebackStatus {
+    Disabled,
+    NoCompleter,
+    NoCandidate,
+    Written,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct TurnWritebackFailure {
+    pub kb_id: Option<String>,
+    pub rel_path: Option<String>,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TurnWritebackReport {
+    pub status: TurnWritebackStatus,
+    pub candidates: usize,
+    pub written: Vec<WriteOutcome>,
+    pub failures: Vec<TurnWritebackFailure>,
+}
+
+impl TurnWritebackReport {
+    fn status(status: TurnWritebackStatus) -> Self {
+        Self { status, candidates: 0, written: Vec::new(), failures: Vec::new() }
+    }
+
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            status: TurnWritebackStatus::Failed,
+            candidates: 0,
+            written: Vec::new(),
+            failures: vec![TurnWritebackFailure {
+                kb_id: None,
+                rel_path: None,
+                error: error.into(),
+            }],
+        }
+    }
+}
+
 /// Per-surface write policy. Regular chat / terminal honor the binding's
 /// staged|direct choice (staged default); companion always writes direct when
 /// write-back is on; external IM channels are hard-disabled in P1 (the opt-in
@@ -442,6 +501,11 @@ pub struct KnowledgeService {
     /// mtime-keyed content cache for `search_bases` (perf only; see
     /// [`SearchCacheInner`]). Cloned into the search `spawn_blocking` closure.
     search_cache: Arc<RwLock<SearchCacheInner>>,
+    /// Per-document lock for direct turn-final write-back merge+write. Direct
+    /// mode reads the existing document, asks the LLM to merge, then writes the
+    /// whole file; this lock prevents concurrent turns from merging against the
+    /// same stale base body and losing one update.
+    turn_writeback_locks: Arc<StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     /// **P3 connectors**: registered source connectors keyed by `kind()`
     /// (e.g. `"feishu"`). Late-wired at boot (`register_connector`) — same
     /// discipline as [`Self::completer`], since a connector may depend on the
@@ -475,6 +539,7 @@ impl KnowledgeService {
             fetcher: Arc::new(HttpFetcher::default()),
             render_fetcher: RwLock::new(None),
             search_cache: Arc::new(RwLock::new(SearchCacheInner::default())),
+            turn_writeback_locks: Arc::new(StdMutex::new(HashMap::new())),
             connectors: RwLock::new(HashMap::new()),
             cred_repo: RwLock::new(None),
             cred_key: RwLock::new(None),
@@ -1457,7 +1522,16 @@ impl KnowledgeService {
         if matches!(req.policy.mode, WriteMode::Disabled) {
             return Err(AppError::Forbidden("write-back is disabled for this session".into()));
         }
-        let res = self.resolve_write_target(&req.bound_kb_ids, &req.spec).await?;
+        let mut res = self.resolve_write_target(&req.bound_kb_ids, &req.spec).await?;
+        let _direct_guard = if matches!(req.policy.mode, WriteMode::Direct) {
+            let guard = self
+                .acquire_turn_writeback_target_lock(&res.kb_id, &res.canonical_rel_path)
+                .await;
+            res = self.resolve_write_target(&req.bound_kb_ids, &req.spec).await?;
+            Some(guard)
+        } else {
+            None
+        };
         if res.op == WriteOp::Create && !req.policy.allow_create {
             return Err(AppError::Forbidden("creating new knowledge documents is not allowed for this session".into()));
         }
@@ -1471,6 +1545,374 @@ impl KnowledgeService {
         };
         self.write_file(&res.kb_id, &final_rel_path, &req.content).await?;
         Ok(WriteOutcome { kb_id: res.kb_id, final_rel_path, op: res.op, staged })
+    }
+
+    /// Run the turn-final write-back trigger after an assistant answer has been
+    /// produced. This never changes the binding semantics: [`resolve_write_policy`]
+    /// still decides staged/direct/disabled placement, and eagerness is passed only
+    /// to the extractor prompt.
+    pub async fn finalize_turn_writeback(&self, req: TurnWritebackRequest) -> TurnWritebackReport {
+        if req.mounts.is_empty() {
+            return TurnWritebackReport::status(TurnWritebackStatus::Disabled);
+        }
+
+        let policy = resolve_write_policy(req.surface, &req.binding, &req.scope);
+        if matches!(policy.mode, WriteMode::Disabled) {
+            return TurnWritebackReport::status(TurnWritebackStatus::Disabled);
+        }
+
+        if req.user_text.trim().is_empty() && req.assistant_text.trim().is_empty() {
+            return TurnWritebackReport::status(TurnWritebackStatus::NoCandidate);
+        }
+
+        let Some(completer) = self.completer() else {
+            return TurnWritebackReport::status(TurnWritebackStatus::NoCompleter);
+        };
+
+        let redacted_user = nomi_redact::redact_secrets_owned(req.user_text);
+        let redacted_assistant = nomi_redact::redact_secrets_owned(req.assistant_text);
+        let eagerness = crate::context::WritebackEagerness::parse(Some(req.binding.writeback_eagerness.as_str()));
+        let prompt = crate::turn_writeback::build_turn_writeback_prompt(
+            &req.mounts,
+            eagerness,
+            &redacted_user,
+            &redacted_assistant,
+        );
+
+        let mut parsed = None;
+        let mut last_parse_error = None;
+        for _ in 0..2 {
+            let raw = match completer
+                .complete(crate::turn_writeback::TURN_WRITEBACK_SYSTEM, &prompt)
+                .await
+            {
+                Ok(raw) => raw,
+                Err(e) => {
+                    tracing::debug!(error = %e, "turn writeback provider call failed");
+                    return TurnWritebackReport::failed(e.to_string());
+                }
+            };
+
+            match crate::turn_writeback::parse_turn_writeback_output(&raw) {
+                Ok(out) => {
+                    parsed = Some(out);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "turn writeback output unparseable");
+                    last_parse_error = Some(e);
+                }
+            }
+        }
+
+        let Some(out) = parsed else {
+            return TurnWritebackReport::failed(
+                last_parse_error.unwrap_or_else(|| "turn writeback output unparseable".to_owned()),
+            );
+        };
+
+        let candidate_count = out.candidates.len();
+        if candidate_count == 0 {
+            return TurnWritebackReport::status(TurnWritebackStatus::NoCandidate);
+        }
+
+        let mounted_ids: HashSet<String> = req.mounts.iter().map(|m| m.id.clone()).collect();
+        let bound_kb_ids: Vec<String> = req.mounts.iter().map(|m| m.id.clone()).collect();
+        let mut seen = HashSet::new();
+        let mut written = Vec::new();
+        let mut failures = Vec::new();
+
+        for candidate in out.candidates {
+            let kb_id = candidate.kb_id.trim().to_owned();
+            let rel_path = candidate.rel_path.trim().trim_start_matches("./").to_owned();
+            let content = candidate.content.trim();
+
+            if kb_id.is_empty() || rel_path.is_empty() || content.is_empty() {
+                failures.push(TurnWritebackFailure {
+                    kb_id: if kb_id.is_empty() { None } else { Some(kb_id) },
+                    rel_path: if rel_path.is_empty() { None } else { Some(rel_path) },
+                    error: "candidate must include kb_id, rel_path and content".into(),
+                });
+                continue;
+            }
+            if !mounted_ids.contains(&kb_id) {
+                failures.push(TurnWritebackFailure {
+                    kb_id: Some(kb_id),
+                    rel_path: Some(rel_path),
+                    error: "candidate kb_id is not mounted in this session".into(),
+                });
+                continue;
+            }
+            let normalized_rel_path = rel_path.replace('\\', "/");
+            if normalized_rel_path == KB_INBOX_REL_DIR || normalized_rel_path.starts_with("_inbox/") {
+                failures.push(TurnWritebackFailure {
+                    kb_id: Some(kb_id),
+                    rel_path: Some(rel_path),
+                    error: "candidate rel_path must target the base body, not the review inbox".into(),
+                });
+                continue;
+            }
+            if !seen.insert((kb_id.clone(), rel_path.clone())) {
+                continue;
+            }
+
+            let mut content = nomi_redact::redact_secrets_owned(content.to_owned());
+            let spec = WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: rel_path.clone() };
+            if matches!(policy.mode, WriteMode::Direct) {
+                let canonical_lock_path = deconfuse_rel_path(&rel_path);
+                let _direct_guard = self
+                    .acquire_turn_writeback_target_lock(&kb_id, &canonical_lock_path)
+                    .await;
+                let resolution = match self.resolve_write_target(&bound_kb_ids, &spec).await {
+                    Ok(resolution) => resolution,
+                    Err(e) => {
+                        failures.push(TurnWritebackFailure {
+                            kb_id: Some(kb_id),
+                            rel_path: Some(rel_path),
+                            error: e.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if resolution.op == WriteOp::Update {
+                    let existing = match self.read_file(&kb_id, &resolution.canonical_rel_path).await {
+                        Ok(file) => file.content,
+                        Err(e) => {
+                            failures.push(TurnWritebackFailure {
+                                kb_id: Some(kb_id),
+                                rel_path: Some(resolution.canonical_rel_path),
+                                error: e.to_string(),
+                            });
+                            continue;
+                        }
+                    };
+                    if existing.trim() == content.trim() {
+                        continue;
+                    }
+                    match self.merge_direct_turn_writeback(&completer, &existing, &content).await {
+                        Ok(merged) => content = merged,
+                        Err(e) => {
+                            failures.push(TurnWritebackFailure {
+                                kb_id: Some(kb_id),
+                                rel_path: Some(resolution.canonical_rel_path),
+                                error: e,
+                            });
+                            continue;
+                        }
+                    }
+                }
+
+                let final_rel_path = resolution.canonical_rel_path.clone();
+                match self.write_file(&kb_id, &final_rel_path, &content).await {
+                    Ok(()) => written.push(WriteOutcome {
+                        kb_id,
+                        final_rel_path,
+                        op: resolution.op,
+                        staged: false,
+                    }),
+                    Err(e) => failures.push(TurnWritebackFailure {
+                        kb_id: Some(kb_id),
+                        rel_path: Some(final_rel_path),
+                        error: e.to_string(),
+                    }),
+                }
+                continue;
+            }
+
+            let resolution = match self.resolve_write_target(&bound_kb_ids, &spec).await {
+                Ok(resolution) => resolution,
+                Err(e) => {
+                    failures.push(TurnWritebackFailure {
+                        kb_id: Some(kb_id),
+                        rel_path: Some(rel_path),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            let mut write_rel_path = resolution.canonical_rel_path.clone();
+            if let WriteMode::Staged { scope } = &policy.mode {
+                match self
+                    .staged_turn_writeback_candidate_already_present(
+                        &kb_id,
+                        scope,
+                        &resolution.canonical_rel_path,
+                        &content,
+                    )
+                    .await
+                {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        failures.push(TurnWritebackFailure {
+                            kb_id: Some(kb_id),
+                            rel_path: Some(resolution.canonical_rel_path),
+                            error: e,
+                        });
+                        continue;
+                    }
+                }
+                match self
+                    .staged_turn_writeback_rel_path_without_overwrite(
+                        &kb_id,
+                        scope,
+                        &resolution.canonical_rel_path,
+                        &content,
+                    )
+                    .await
+                {
+                    Ok(rel_path) => write_rel_path = rel_path,
+                    Err(e) => {
+                        failures.push(TurnWritebackFailure {
+                            kb_id: Some(kb_id),
+                            rel_path: Some(resolution.canonical_rel_path),
+                            error: e,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            let write = WriteRequest {
+                spec: WriteTargetSpec::Path { kb_id: kb_id.clone(), rel_path: write_rel_path },
+                content,
+                policy: policy.clone(),
+                bound_kb_ids: bound_kb_ids.clone(),
+            };
+            match self.write_document(write).await {
+                Ok(outcome) => written.push(outcome),
+                Err(e) => failures.push(TurnWritebackFailure {
+                    kb_id: Some(kb_id),
+                    rel_path: Some(rel_path),
+                    error: e.to_string(),
+                }),
+            }
+        }
+
+        let status = match (written.is_empty(), failures.is_empty()) {
+            (false, true) => TurnWritebackStatus::Written,
+            (false, false) => TurnWritebackStatus::Partial,
+            (true, true) => TurnWritebackStatus::NoCandidate,
+            (true, false) => TurnWritebackStatus::Failed,
+        };
+
+        TurnWritebackReport { status, candidates: candidate_count, written, failures }
+    }
+
+    async fn acquire_turn_writeback_target_lock(
+        &self,
+        kb_id: &str,
+        rel_path: &str,
+    ) -> OwnedMutexGuard<()> {
+        let key = format!("{kb_id}\0{rel_path}");
+        let lock = {
+            let mut locks = self
+                .turn_writeback_locks
+                .lock()
+                .expect("turn writeback lock map poisoned");
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
+    }
+
+    async fn merge_direct_turn_writeback(
+        &self,
+        completer: &Arc<dyn KnowledgeCompleter>,
+        existing: &str,
+        proposal: &str,
+    ) -> Result<String, String> {
+        if existing.trim() == proposal.trim() {
+            return Ok(proposal.to_owned());
+        }
+
+        let prompt = crate::turn_writeback::build_turn_writeback_merge_prompt(existing, proposal);
+        let raw = completer
+            .complete(crate::turn_writeback::TURN_WRITEBACK_MERGE_SYSTEM, &prompt)
+            .await
+            .map_err(|e| e.to_string())?;
+        let out = crate::turn_writeback::parse_turn_writeback_merge_output(&raw)?;
+        let merged = nomi_redact::redact_secrets_owned(out.content.trim().to_owned());
+        if merged.trim().is_empty() {
+            return Err("turn writeback merge produced empty content".into());
+        }
+        if !existing.trim().is_empty()
+            && existing.trim() != proposal.trim()
+            && merged.trim() == proposal.trim()
+        {
+            return Err("turn writeback merge refused because it would overwrite the existing document".into());
+        }
+        Ok(merged)
+    }
+
+    async fn staged_turn_writeback_candidate_already_present(
+        &self,
+        kb_id: &str,
+        scope: &str,
+        canonical_rel_path: &str,
+        content: &str,
+    ) -> Result<bool, String> {
+        let scope = scope.trim_matches('/');
+        let mut scopes = vec![scope.to_owned()];
+        if let Some((root_scope, _)) = scope.split_once('/') {
+            if !root_scope.is_empty() {
+                scopes.push(root_scope.to_owned());
+            }
+        }
+        scopes.sort();
+        scopes.dedup();
+
+        for scope in scopes {
+            let inbox_rel_path = format!("{KB_INBOX_REL_DIR}/{scope}/{canonical_rel_path}");
+            match self.read_file(kb_id, &inbox_rel_path).await {
+                Ok(existing) if existing.content == content => return Ok(true),
+                Ok(_) | Err(AppError::NotFound(_)) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(false)
+    }
+
+    async fn staged_turn_writeback_rel_path_without_overwrite(
+        &self,
+        kb_id: &str,
+        scope: &str,
+        canonical_rel_path: &str,
+        content: &str,
+    ) -> Result<String, String> {
+        let scope = scope.trim_matches('/');
+        let inbox_rel_path = format!("{KB_INBOX_REL_DIR}/{scope}/{canonical_rel_path}");
+        match self.read_file(kb_id, &inbox_rel_path).await {
+            Ok(existing) if existing.content == content => return Ok(canonical_rel_path.to_owned()),
+            Ok(_) => {}
+            Err(AppError::NotFound(_)) => return Ok(canonical_rel_path.to_owned()),
+            Err(e) => return Err(e.to_string()),
+        }
+
+        let suffix = short_content_hash(content);
+        for attempt in 1..=100 {
+            let candidate_rel_path = if attempt == 1 {
+                append_markdown_path_suffix(canonical_rel_path, &suffix)
+            } else {
+                append_markdown_path_suffix(canonical_rel_path, &format!("{suffix}-{attempt}"))
+            };
+            let candidate_inbox_rel_path = format!("{KB_INBOX_REL_DIR}/{scope}/{candidate_rel_path}");
+            match self.read_file(kb_id, &candidate_inbox_rel_path).await {
+                Ok(existing) if existing.content == content => return Ok(candidate_rel_path),
+                Ok(_) => continue,
+                Err(AppError::NotFound(_)) => return Ok(candidate_rel_path),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+
+        Err("unable to allocate a non-overwriting staged writeback path".into())
     }
 
     pub async fn delete_file(&self, id: &str, rel_path: &str) -> Result<(), AppError> {
@@ -2872,6 +3314,19 @@ pub(crate) fn is_md(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+}
+
+fn short_content_hash(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    hex::encode(digest).chars().take(8).collect()
+}
+
+fn append_markdown_path_suffix(rel_path: &str, suffix: &str) -> String {
+    let normalized = rel_path.replace('\\', "/");
+    match normalized.rsplit_once('.') {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case("md") => format!("{stem}--{suffix}.{ext}"),
+        _ => format!("{normalized}--{suffix}.md"),
+    }
 }
 
 /// True for a directory that is knowledge-base *machinery*, never a source of
@@ -4463,6 +4918,50 @@ mod tests {
             *self.last_override.lock().unwrap() = Some((provider_id.to_owned(), model.to_owned()));
             Ok(self.next_reply())
         }
+    }
+
+    struct ConcurrentDirectMergeCompleter {
+        kb_id: String,
+    }
+
+    impl ConcurrentDirectMergeCompleter {
+        fn new(kb_id: String) -> Arc<Self> {
+            Arc::new(Self { kb_id })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeCompleter for ConcurrentDirectMergeCompleter {
+        async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
+            if system == crate::turn_writeback::TURN_WRITEBACK_SYSTEM {
+                let marker = if user.contains("alpha-user") { "Alpha" } else { "Beta" };
+                return Ok(format!(
+                    r##"{{"candidates":[{{"kb_id":"{}","rel_path":"patterns/shared.md","content":"# {marker}\n\n{marker} durable note."}}]}}"##,
+                    self.kb_id
+                ));
+            }
+
+            if system == crate::turn_writeback::TURN_WRITEBACK_MERGE_SYSTEM {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let existing = extract_tagged_section(user, "existing");
+                let proposal = extract_tagged_section(user, "proposal");
+                return Ok(format!(
+                    r#"{{"content":{}}}"#,
+                    serde_json::to_string(&format!("{existing}\n\n{proposal}")).unwrap()
+                ));
+            }
+
+            Ok(r#"{"candidates":[]}"#.into())
+        }
+    }
+
+    fn extract_tagged_section(prompt: &str, tag: &str) -> String {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        prompt
+            .split_once(&open)
+            .and_then(|(_, rest)| rest.split_once(&close).map(|(body, _)| body.trim().to_owned()))
+            .unwrap_or_default()
     }
 
     /// Explicit `Some((provider_id, model))` must reach the completer via
@@ -6193,6 +6692,328 @@ mod tests {
         assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
         let files = svc.list_files(&kb_id).await.unwrap();
         assert!(!files.iter().any(|f| f.rel_path.contains(".nomi/knowledge")), "no nested mount-path file: {files:?}");
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_staged_aggressive_writes_candidate_to_inbox_after_final_answer() {
+        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
+        let reply = format!(
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/finalizer.md","content":"# 回写触发\n\n知识库回写应在 assistant 最终答复后再检查一次。"}}]}}"##
+        );
+        let completer = ScriptedCompleter::new(&[&reply]);
+        svc.set_completer(completer.clone());
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    description: "项目复用知识".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    toc: vec!["terms.md — 术语表".into()],
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_mode: "staged".into(),
+                    writeback_eagerness: "aggressive".into(),
+                    kb_ids: vec![kb_id.clone()],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final".into(),
+                user_text: "请分析为什么暂存没有产出。".into(),
+                assistant_text: "结论：触发时机应放在最终答复之后。".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::Written);
+        assert_eq!(report.written.len(), 1);
+        assert_eq!(report.written[0].final_rel_path, "_inbox/conv-final/patterns/finalizer.md");
+        assert_eq!(svc.read_file(&kb_id, "terms.md").await.unwrap().content, "ORIGINAL");
+        assert!(
+            svc.read_file(&kb_id, "_inbox/conv-final/patterns/finalizer.md")
+                .await
+                .unwrap()
+                .content
+                .contains("最终答复后再检查一次")
+        );
+        assert_eq!(completer.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            completer.last_user.lock().unwrap().contains("eagerness: aggressive"),
+            "eagerness must shape extraction, not placement"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_disabled_policy_skips_without_calling_completer() {
+        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
+        let completer = ScriptedCompleter::new(&[r#"{"candidates":[]}"#]);
+        svc.set_completer(completer.clone());
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: false,
+                    writeback_mode: "direct".into(),
+                    writeback_eagerness: "aggressive".into(),
+                    kb_ids: vec![kb_id],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final".into(),
+                user_text: "u".into(),
+                assistant_text: "a".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::Disabled);
+        assert_eq!(
+            completer.calls.load(Ordering::SeqCst),
+            0,
+            "disabled write-back must not spend a model call"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_rejects_candidates_that_target_inbox_directly() {
+        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
+        let reply = format!(
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"_inbox/manual.md","content":"# Bad"}}]}}"##
+        );
+        svc.set_completer(ScriptedCompleter::new(&[&reply]));
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_mode: "staged".into(),
+                    kb_ids: vec![kb_id],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final".into(),
+                user_text: "u".into(),
+                assistant_text: "a".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::Failed);
+        assert_eq!(report.written.len(), 0);
+        assert!(report.failures[0].error.contains("not the review inbox"));
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_direct_update_merges_existing_document_instead_of_overwriting() {
+        let (svc, kb_id, _dir) = test_service_with_file(
+            "patterns/safe.md",
+            "# Existing\n\nKeep this established section.",
+        )
+        .await;
+        let candidate = format!(
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/safe.md","content":"# New\n\nAdd this durable lesson."}}]}}"##
+        );
+        let merged = r##"{"content":"# Existing\n\nKeep this established section.\n\n# New\n\nAdd this durable lesson."}"##;
+        let completer = ScriptedCompleter::new(&[&candidate, merged]);
+        svc.set_completer(completer.clone());
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    toc: vec!["patterns/safe.md — Safe".into()],
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_mode: "direct".into(),
+                    writeback_eagerness: "aggressive".into(),
+                    kb_ids: vec![kb_id.clone()],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final".into(),
+                user_text: "请补充这个经验。".into(),
+                assistant_text: "结论：应保留旧内容并追加新经验。".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
+        assert_eq!(report.written[0].final_rel_path, "patterns/safe.md");
+        let body = svc.read_file(&kb_id, "patterns/safe.md").await.unwrap().content;
+        assert!(body.contains("Keep this established section."), "{body}");
+        assert!(body.contains("Add this durable lesson."), "{body}");
+        assert_eq!(completer.calls.load(Ordering::SeqCst), 2, "extract + safe merge");
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_direct_concurrent_updates_preserve_both_merges() {
+        let (svc, kb_id, _dir) = test_service_with_file("patterns/shared.md", "# Existing").await;
+        svc.set_completer(ConcurrentDirectMergeCompleter::new(kb_id.clone()));
+
+        let request = |user_text: &str| TurnWritebackRequest {
+            mounts: vec![KnowledgeMountInfo {
+                id: kb_id.clone(),
+                name: "领域库".into(),
+                rel_path: ".nomi/knowledge/领域库".into(),
+                toc: vec!["patterns/shared.md — Shared".into()],
+                ..Default::default()
+            }],
+            binding: KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_mode: "direct".into(),
+                writeback_eagerness: "aggressive".into(),
+                kb_ids: vec![kb_id.clone()],
+                ..Default::default()
+            },
+            surface: WriteSurface::RegularChat,
+            scope: "conv-final".into(),
+            user_text: user_text.into(),
+            assistant_text: "final durable answer".into(),
+        };
+
+        let (alpha, beta) = tokio::join!(
+            svc.finalize_turn_writeback(request("alpha-user")),
+            svc.finalize_turn_writeback(request("beta-user")),
+        );
+
+        assert!(matches!(
+            alpha.status,
+            TurnWritebackStatus::Written | TurnWritebackStatus::NoCandidate
+        ));
+        assert!(matches!(
+            beta.status,
+            TurnWritebackStatus::Written | TurnWritebackStatus::NoCandidate
+        ));
+        let body = svc.read_file(&kb_id, "patterns/shared.md").await.unwrap().content;
+        assert!(body.contains("Alpha durable note."), "{body}");
+        assert!(body.contains("Beta durable note."), "{body}");
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_staged_collision_does_not_overwrite_existing_proposal() {
+        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
+        svc.write_file(&kb_id, "_inbox/conv-final/patterns/note.md", "FIRST")
+            .await
+            .unwrap();
+        let reply = format!(
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/note.md","content":"SECOND"}}]}}"##
+        );
+        svc.set_completer(ScriptedCompleter::new(&[&reply]));
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_mode: "staged".into(),
+                    kb_ids: vec![kb_id.clone()],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final".into(),
+                user_text: "u".into(),
+                assistant_text: "a".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::Written, "{report:?}");
+        assert_eq!(
+            svc.read_file(&kb_id, "_inbox/conv-final/patterns/note.md")
+                .await
+                .unwrap()
+                .content,
+            "FIRST"
+        );
+        assert_ne!(report.written[0].final_rel_path, "_inbox/conv-final/patterns/note.md");
+        assert!(
+            svc.read_file(&kb_id, &report.written[0].final_rel_path)
+                .await
+                .unwrap()
+                .content
+                .contains("SECOND")
+        );
+    }
+
+    #[test]
+    fn turn_finalizer_staged_collision_suffix_uses_stable_sha256_prefix() {
+        assert_eq!(short_content_hash("SECOND"), "84747dcd");
+        assert_eq!(
+            append_markdown_path_suffix("patterns/note.md", &short_content_hash("SECOND")),
+            "patterns/note--84747dcd.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_staged_skips_candidate_already_written_by_explicit_tool() {
+        let (svc, kb_id, _dir) = test_service_with_file("terms.md", "ORIGINAL").await;
+        svc.write_file(
+            &kb_id,
+            "_inbox/conv-final/patterns/note.md",
+            "# Durable\n\nAlready staged by knowledge_write.",
+        )
+        .await
+        .unwrap();
+        let reply = format!(
+            r##"{{"candidates":[{{"kb_id":"{kb_id}","rel_path":"patterns/note.md","content":"# Durable\n\nAlready staged by knowledge_write."}}]}}"##
+        );
+        svc.set_completer(ScriptedCompleter::new(&[&reply]));
+
+        let report = svc
+            .finalize_turn_writeback(TurnWritebackRequest {
+                mounts: vec![KnowledgeMountInfo {
+                    id: kb_id.clone(),
+                    name: "领域库".into(),
+                    rel_path: ".nomi/knowledge/领域库".into(),
+                    ..Default::default()
+                }],
+                binding: KnowledgeBinding {
+                    enabled: true,
+                    writeback: true,
+                    writeback_mode: "staged".into(),
+                    kb_ids: vec![kb_id.clone()],
+                    ..Default::default()
+                },
+                surface: WriteSurface::RegularChat,
+                scope: "conv-final/msg-1".into(),
+                user_text: "u".into(),
+                assistant_text: "a".into(),
+            })
+            .await;
+
+        assert_eq!(report.status, TurnWritebackStatus::NoCandidate, "{report:?}");
+        assert_eq!(report.written.len(), 0);
+        assert!(
+            svc.read_file(&kb_id, "_inbox/conv-final/msg-1/patterns/note.md")
+                .await
+                .is_err(),
+            "finalizer must not duplicate a same-content explicit knowledge_write proposal"
+        );
     }
 
     /// **P3 connector sync e2e**: register a mock connector + credential store,

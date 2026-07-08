@@ -10,7 +10,7 @@ use nomifun_api_types::{
     ApprovalCheckResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactKind, ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationArtifactStatus, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
-    ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, ListConversationsQuery,
+    ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, KnowledgeMountInfo, ListConversationsQuery,
     ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
     SendMessageRequest, SessionMcpServer, SessionMcpTransport, UpdateConversationArtifactRequest,
     UpdateConversationRequest, WebSocketMessage,
@@ -38,7 +38,7 @@ use crate::convert::{
 };
 use crate::skill_resolver::SkillResolver;
 use crate::skill_snapshot::{backfill_skills_if_missing, compute_initial_skills};
-use crate::stream_relay::StreamRelay;
+use crate::stream_relay::{RelayTerminal, StreamRelay, spawn_turn_writeback_report};
 use std::sync::RwLock;
 
 const MAX_CRON_CONTINUATIONS_PER_TURN: usize = 4;
@@ -1753,6 +1753,7 @@ impl ConversationService {
             let mut turn_claim = turn_claim;
             let build_started_at = now_ms();
             info!(conversation_id = %conv_id, "Agent task build started");
+            let knowledge_extra = build_opts.extra.clone();
             let mut agent = match task_manager.get_or_build_task(&conv_id, build_opts).await {
                 Ok(agent) => agent,
                 Err(err) => {
@@ -1818,6 +1819,11 @@ impl ConversationService {
                 },
                 first_turn_msg_id,
             ));
+            let turn_user_text = pending_send
+                .as_ref()
+                .map(|(send, _)| send.content.clone())
+                .unwrap_or_default();
+            let turn_origin = origin.clone();
             let mut continuation_count = 0usize;
             // Phase 3 (plan D3): bounded count of model-failover switches this
             // turn. The seam stops switching at min(max_switches, queue.len()),
@@ -1829,6 +1835,12 @@ impl ConversationService {
             // to the picker so it advances MONOTONICALLY — never re-tries a
             // candidate it already failed over to (no queue thrash).
             let mut failover_tried: Vec<nomifun_common::ProviderWithModel> = Vec::new();
+            let mut final_turn_writeback: Option<(
+                Arc<nomifun_knowledge::KnowledgeService>,
+                nomifun_knowledge::TurnWritebackRequest,
+                String,
+                String,
+            )> = None;
             // Phase 3 (review #1/#5): resolve the effective failover config ONCE
             // (it does not change mid-turn). Used to build the relay's error
             // suppressor so a pre-response provider fault that WILL be failed over
@@ -1851,6 +1863,7 @@ impl ConversationService {
                     break;
                 }
 
+                let turn_msg_id = msg_id.clone();
                 let mut relay = StreamRelay::new(
                     conv_id.clone(),
                     msg_id,
@@ -2015,6 +2028,21 @@ impl ConversationService {
                 }
 
                 if outcome.system_responses.is_empty() {
+                    if matches!(outcome.terminal, RelayTerminal::Finish)
+                        && let Some(final_text) = outcome.final_text.clone()
+                        && let Some((knowledge_service, request)) = service.build_turn_writeback_request(
+                            &knowledge_extra,
+                            &conv_id,
+                            &turn_msg_id,
+                            &turn_user_text,
+                            turn_origin.as_deref(),
+                            agent.agent_type(),
+                            companion,
+                            channel_platform.as_deref(),
+                        )
+                    {
+                        final_turn_writeback = Some((knowledge_service, request, turn_msg_id, final_text));
+                    }
                     break;
                 }
                 continuation_count += 1;
@@ -2038,6 +2066,16 @@ impl ConversationService {
             service
                 .complete_turn_with_companion_context(&conv_id, companion, companion_id, origin, channel_platform)
                 .await;
+            if let Some((knowledge_service, request, msg_id, final_text)) = final_turn_writeback {
+                spawn_turn_writeback_report(
+                    knowledge_service,
+                    request,
+                    Arc::clone(&broadcaster),
+                    conv_id.clone(),
+                    msg_id,
+                    final_text,
+                );
+            }
         });
 
         info!(
@@ -2688,6 +2726,92 @@ impl ConversationService {
             "knowledge_channel_write_enabled".into(),
             serde_json::Value::Bool(outcome.channel_write_enabled),
         );
+    }
+
+    fn build_turn_writeback_request(
+        &self,
+        extra: &serde_json::Value,
+        conversation_id: &str,
+        msg_id: &str,
+        user_text: &str,
+        origin: Option<&str>,
+        agent_type: AgentType,
+        companion: bool,
+        channel_platform: Option<&str>,
+    ) -> Option<(
+        Arc<nomifun_knowledge::KnowledgeService>,
+        nomifun_knowledge::TurnWritebackRequest,
+    )> {
+        if origin.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+            return None;
+        }
+        if user_text.trim().is_empty() {
+            return None;
+        }
+
+        let service = self.knowledge_service.read().ok().and_then(|guard| guard.clone())?;
+        let mounts: Vec<KnowledgeMountInfo> =
+            serde_json::from_value(extra.get("knowledge_mounts")?.clone()).ok()?;
+        if mounts.is_empty() {
+            return None;
+        }
+
+        let writeback = extra
+            .get("knowledge_writeback")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !writeback {
+            return None;
+        }
+
+        let writeback_mode = extra
+            .get("knowledge_writeback_mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("staged")
+            .to_owned();
+        let writeback_eagerness = extra
+            .get("knowledge_writeback_eagerness")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("conservative")
+            .to_owned();
+        let channel_write_enabled = extra
+            .get("knowledge_channel_write_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let surface = if companion {
+            nomifun_knowledge::WriteSurface::Companion
+        } else if channel_platform.map(str::trim).filter(|s| !s.is_empty()).is_some() {
+            nomifun_knowledge::WriteSurface::ExternalChannel
+        } else if agent_type == AgentType::Acp {
+            nomifun_knowledge::WriteSurface::TerminalAcp
+        } else {
+            nomifun_knowledge::WriteSurface::RegularChat
+        };
+        let conversation_scope = conversation_id.trim_matches('/');
+        let turn_scope = msg_id.trim_matches('/');
+        let scope = if turn_scope.is_empty() {
+            conversation_scope.to_owned()
+        } else {
+            format!("{conversation_scope}/{turn_scope}")
+        };
+        let request = nomifun_knowledge::TurnWritebackRequest {
+            mounts: mounts.clone(),
+            binding: nomifun_knowledge::KnowledgeBinding {
+                enabled: true,
+                writeback,
+                writeback_mode,
+                writeback_eagerness,
+                channel_write_enabled,
+                kb_ids: mounts.iter().map(|m| m.id.clone()).collect(),
+                ..Default::default()
+            },
+            surface,
+            scope,
+            user_text: user_text.to_owned(),
+            assistant_text: String::new(),
+        };
+
+        Some((service, request))
     }
 
     /// Write the resolved workspace back to `conversation.extra.workspace` when

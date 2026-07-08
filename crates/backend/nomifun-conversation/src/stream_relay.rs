@@ -65,6 +65,86 @@ pub struct RelayOutcome {
     /// fire (e.g. the picker found no usable candidate at runtime) — preserving
     /// the "queue-exhausted → ORIGINAL error" invariant. `None` = nothing suppressed.
     pub suppressed_error: Option<AgentStreamEvent>,
+    /// Final visible assistant text after response middleware rewrites. Used by
+    /// turn-final knowledge write-back after the relay has persisted the text and
+    /// completed the turn.
+    pub final_text: Option<String>,
+}
+
+fn turn_writeback_status_label(status: nomifun_knowledge::TurnWritebackStatus) -> &'static str {
+    match status {
+        nomifun_knowledge::TurnWritebackStatus::Disabled => "disabled",
+        nomifun_knowledge::TurnWritebackStatus::NoCompleter => "no_completer",
+        nomifun_knowledge::TurnWritebackStatus::NoCandidate => "no_candidate",
+        nomifun_knowledge::TurnWritebackStatus::Written => "written",
+        nomifun_knowledge::TurnWritebackStatus::Partial => "partial",
+        nomifun_knowledge::TurnWritebackStatus::Failed => "failed",
+    }
+}
+
+pub(crate) fn spawn_turn_writeback_report(
+    service: Arc<nomifun_knowledge::KnowledgeService>,
+    mut request: nomifun_knowledge::TurnWritebackRequest,
+    broadcaster: Arc<dyn EventBroadcaster>,
+    conversation_id: String,
+    msg_id: String,
+    final_text: String,
+) {
+    if final_text.trim().is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        request.assistant_text = final_text;
+        let report = service.finalize_turn_writeback(request).await;
+        let status = turn_writeback_status_label(report.status);
+        let payload = json!({
+            "conversation_id": conversation_id,
+            "msg_id": msg_id,
+            "status": status,
+            "candidates": report.candidates,
+            "written": report.written.iter().map(|w| json!({
+                "kb_id": w.kb_id,
+                "rel_path": w.final_rel_path,
+                "staged": w.staged,
+            })).collect::<Vec<_>>(),
+            "failures": report.failures.iter().map(|f| json!({
+                "kb_id": f.kb_id,
+                "rel_path": f.rel_path,
+                "error": f.error,
+            })).collect::<Vec<_>>(),
+        });
+        match report.status {
+            nomifun_knowledge::TurnWritebackStatus::Written
+            | nomifun_knowledge::TurnWritebackStatus::Partial => {
+                info!(
+                    conversation_id = %conversation_id,
+                    msg_id = %msg_id,
+                    candidates = report.candidates,
+                    written = report.written.len(),
+                    failures = report.failures.len(),
+                    "turn-final knowledge write-back completed"
+                );
+            }
+            nomifun_knowledge::TurnWritebackStatus::Failed => {
+                warn!(
+                    conversation_id = %conversation_id,
+                    msg_id = %msg_id,
+                    candidates = report.candidates,
+                    failures = report.failures.len(),
+                    "turn-final knowledge write-back failed"
+                );
+            }
+            other => {
+                debug!(
+                    conversation_id = %conversation_id,
+                    msg_id = %msg_id,
+                    status = ?other,
+                    "turn-final knowledge write-back skipped"
+                );
+            }
+        }
+        broadcaster.broadcast(WebSocketMessage::new("knowledge.writeback", payload));
+    });
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -791,6 +871,7 @@ impl StreamRelay {
             terminal,
             emitted_response,
             suppressed_error: None,
+            final_text: None,
         };
         let status = match event {
             AgentStreamEvent::Error(_) => "error",
@@ -801,6 +882,9 @@ impl StreamRelay {
             let processed = self.process_final_text(text).await;
             let final_text = processed.message.trim().to_owned();
             let hidden = final_text.is_empty();
+            if !hidden {
+                outcome.final_text = Some(final_text.clone());
+            }
 
             if let Some(primary_segment) = text_segments.first() {
                 if processed.message != text || hidden {

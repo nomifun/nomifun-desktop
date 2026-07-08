@@ -4,7 +4,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nomifun_ai_agent::agent_task::{AgentInstance, IAgentTask, IMockAgent};
 use nomifun_ai_agent::protocol::events::{AgentStreamEvent, ErrorEventData, FinishEventData, TextEventData};
@@ -36,6 +36,7 @@ use tokio::sync::broadcast;
 
 use crate::service::ConversationService;
 use crate::skill_resolver::{FixedSkillResolver, ResolvedAgentSkill, SkillResolver};
+use nomifun_knowledge::{KnowledgeBinding, KnowledgeCompleter, KnowledgeEventEmitter, KnowledgeService};
 
 #[path = "service_test/acp_error_recovery_test.rs"]
 mod acp_error_recovery_test;
@@ -1856,6 +1857,40 @@ impl ICronService for MockCronContinuationService {
     }
 }
 
+struct RecordingKnowledgeCompleter {
+    response: String,
+    prompts: Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingKnowledgeCompleter {
+    fn new(response: String) -> Self {
+        Self {
+            response,
+            prompts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn prompts(&self) -> Vec<(String, String)> {
+        self.prompts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl KnowledgeCompleter for RecordingKnowledgeCompleter {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, AppError> {
+        self.prompts.lock().unwrap().push((system.to_owned(), user.to_owned()));
+        Ok(self.response.clone())
+    }
+}
+
+fn unique_test_dir(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("nomifun-{label}-{}-{nanos}", std::process::id()))
+}
+
 // ── send_message tests ──────────────────────────────────────────
 
 fn make_send_req() -> SendMessageRequest {
@@ -2456,6 +2491,137 @@ async fn send_message_continues_cron_system_responses() {
     assert_eq!(turn_events.len(), 1);
     assert_eq!(turn_events[0].data["runtime"]["is_processing"], false);
     assert_eq!(turn_events[0].data["runtime"]["can_send_message"], true);
+}
+
+#[tokio::test]
+async fn send_message_turn_writeback_runs_after_system_continuation_final_answer() {
+    let (svc, broadcaster, _repo, _default_task_mgr) = make_service();
+    let task_mgr = Arc::new(MockTaskManager::new());
+    let workspace = unique_test_dir("conv-knowledge-workspace");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    let data_dir = unique_test_dir("conv-knowledge-data");
+
+    let knowledge_db = nomifun_db::init_database_memory().await.unwrap();
+    let knowledge_repo: Arc<dyn nomifun_db::IKnowledgeRepository> = Arc::new(
+        nomifun_db::SqliteKnowledgeRepository::new(knowledge_db.pool().clone()),
+    );
+    let knowledge = Arc::new(KnowledgeService::new(
+        knowledge_repo,
+        &data_dir,
+        KnowledgeEventEmitter::new(broadcaster.clone()),
+    ));
+    svc.with_knowledge_service(knowledge.clone());
+
+    let create_req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": { "workspace": workspace }
+    }))
+    .unwrap();
+    let conv = svc.create("user_1", create_req).await.unwrap();
+    let kb = knowledge.create_base("turn-final", "", None, None).await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
+         VALUES (?, 'system_default_user', 'turn-final', 'acp', 'pending', 1, 1)",
+    )
+    .bind(conv.id)
+    .execute(knowledge_db.pool())
+    .await
+    .unwrap();
+    knowledge
+        .set_binding(
+            "conversation",
+            &conv.id.to_string(),
+            KnowledgeBinding {
+                enabled: true,
+                writeback: true,
+                writeback_mode: "staged".into(),
+                writeback_eagerness: "aggressive".into(),
+                kb_ids: vec![kb.id.clone()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let candidate = format!(
+        r##"{{"candidates":[{{"kb_id":"{}","rel_path":"patterns/cron-final.md","content":"# Final scheduling lesson\n\nThe final answer after cron continuation is durable."}}]}}"##,
+        kb.id
+    );
+    let completer = Arc::new(RecordingKnowledgeCompleter::new(candidate));
+    knowledge.set_completer(completer.clone());
+
+    let scripted_agent = Arc::new(ScriptedAgent::new(
+        &conv.id.to_string(),
+        vec![
+            vec![
+                AgentStreamEvent::Text(TextEventData {
+                    content: "I'll check. [CRON_LIST]".into(),
+                }),
+                AgentStreamEvent::Finish(FinishEventData::default()),
+            ],
+            vec![
+                AgentStreamEvent::Text(TextEventData {
+                    content: "Done. The task is scheduled.".into(),
+                }),
+                AgentStreamEvent::Finish(FinishEventData::default()),
+            ],
+        ],
+    ));
+    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent.clone()));
+    svc.with_cron_service(Some(Arc::new(MockCronContinuationService)));
+    broadcaster.take_events();
+
+    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let req: SendMessageRequest = serde_json::from_value(json!({
+        "content": "Create the task now"
+    }))
+    .unwrap();
+
+    svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr_dyn).await.unwrap();
+    wait_for_turn_released(&svc, &conv.id.to_string()).await;
+
+    let mut events = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            events.extend(broadcaster.take_events());
+            if events.iter().any(|evt| evt.name == "knowledge.writeback") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let turn_idx = events
+        .iter()
+        .position(|evt| evt.name == "turn.completed")
+        .expect("turn.completed should be broadcast");
+    let writeback_idx = events
+        .iter()
+        .position(|evt| evt.name == "knowledge.writeback")
+        .expect("knowledge.writeback should be broadcast");
+    assert!(turn_idx < writeback_idx, "writeback must run after turn completion");
+    let writeback = &events[writeback_idx];
+    assert_eq!(writeback.data["status"], "written");
+    let rel_path = writeback.data["written"][0]["rel_path"]
+        .as_str()
+        .expect("written rel_path");
+    assert!(rel_path.starts_with(&format!("_inbox/{}/", conv.id)));
+    assert!(rel_path.ends_with("/patterns/cron-final.md"));
+    let staged = knowledge.read_file(&kb.id, rel_path).await.unwrap();
+    assert!(staged.content.contains("final answer after cron continuation"));
+
+    let prompts = completer.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].1.contains("Create the task now"));
+    assert!(prompts[0].1.contains("Done. The task is scheduled."));
+    assert!(
+        !prompts[0].1.contains("[System: No scheduled tasks]"),
+        "hidden system continuation text must not replace the human turn input"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&workspace).await;
+    let _ = tokio::fs::remove_dir_all(&data_dir).await;
 }
 
 // ── steer_message tests ─────────────────────────────────────────
