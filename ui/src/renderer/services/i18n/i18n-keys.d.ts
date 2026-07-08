@@ -3376,6 +3376,7 @@ export type I18nKey =
   | 'settings.editModel'
   | 'settings.editModelContextLimit'
   | 'settings.editModelDescription'
+  | 'settings.editModelModality'
   | 'settings.edit_preset'
   | 'settings.env'
   | 'settings.envKeyPlaceholder'
