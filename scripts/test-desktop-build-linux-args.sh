@@ -53,7 +53,7 @@ set -euo pipefail
 
 if [[ "${1:-}" == "--exists" ]]; then
   case "${2:-}" in
-    gbm|ayatana-appindicator3-0.1|appindicator3-0.1) exit 0 ;;
+    gbm|librsvg-2.0|ayatana-appindicator3-0.1|appindicator3-0.1) exit 0 ;;
   esac
 fi
 

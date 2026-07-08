@@ -221,11 +221,12 @@ bun run make:latest
 如果发布 Linux，必须在 Linux 机器上执行：
 
 ```bash
-sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev
+sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-`build:linux` 会在构建前检查 `gbm` 与 AppIndicator 的 `pkg-config` 条目，并设置
-`APPIMAGE_EXTRACT_AND_RUN=1`，避免构建机缺 FUSE2 时无法运行 `linuxdeploy` AppImage。
+`build:linux` 会在构建前检查 `gbm`、AppIndicator 与 `librsvg-2.0` 的 `pkg-config`
+条目，并设置 `APPIMAGE_EXTRACT_AND_RUN=1`，避免构建机缺 FUSE2 时无法运行
+`linuxdeploy` AppImage。
 
 ```bash
 export TAURI_SIGNING_PRIVATE_KEY="$(cat apps/desktop/signing/nomifun-updater.key)"
