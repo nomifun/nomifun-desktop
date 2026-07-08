@@ -586,7 +586,7 @@ export const application = {
 // `recommendedAsset` is intentionally absent) — routes the download through
 // `autoUpdate.download`. The modal is shell-gated (About entry + startup check
 // only render under `isDesktopShell()`), and `shellProvider` additionally guards
-// each call with `isTauri()`, so the WebUI browser degrades to the safe fallback.
+// each call with `isTauriRuntime()`, so the WebUI browser degrades to the safe fallback.
 
 /** Releases page shown in the modal's "go to release" affordance. */
 const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
