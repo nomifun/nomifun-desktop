@@ -107,7 +107,7 @@ fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::P
         dirs::home_dir().unwrap_or_else(std::env::temp_dir),
     ];
     // Auto-provisioned per-conversation workspaces live under
-    // `{work_dir}/conversations/{label}-temp-{id}/`. On Windows the
+    // `{work_dir}/conversations/{label}-temp-{token}/`. On Windows the
     // operator may put `work_dir` on a separate drive (e.g. `X:\Nomi`)
     // that's neither under `temp_dir` nor `home_dir`, which previously
     // caused `/api/fs/list` to 403 every Hermes-mode session
