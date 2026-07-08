@@ -1,7 +1,7 @@
 {
   "version": "0.2.13",
   "notes": "- 修复 Linux 桌面交互问题。\n- 新增 Linux 一键发版流程，产出 .deb / .AppImage / .rpm 与 Tauri updater 签名产物。\n- 优化 WebUI 项目目录与文件选择器体验。\n- 支持模型模态能力编辑，并完善技能中心元数据本地化。",
-  "pub_date": "2026-07-08T18:08:45.747Z",
+  "pub_date": "2026-07-08T18:13:47.732Z",
   "platforms": {
     "linux-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODBWMFdrRDZqMlVNKzk5YUpIRERrdFhnKzFmWWNZbFlhd1pVMmgza3VRZ0tIUitEMXpYcmF4YmZuYUcwS3R0TWxoMjR2YTNZSU5IcThGbWNRcXZic2dZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTMzNzY2CWZpbGU6Tm9taUZ1bl8wLjIuMTNfYW1kNjQuQXBwSW1hZ2UKekVGeHdmclhOaW1xK2xidGJEbWJPQ09vU1F3S3ZkcVVSRmViUEN0b3pFQlhXYWtQLzBKc1B1NkhwYUlrQVppUTYyYXBLZ1pkMUhFNDJBUXEzM2FMRFE9PQo=",
@@ -10,6 +10,14 @@
     "windows-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODlhYjBJOVA1cGhFUkROTDZlSmtyTXR2ajhWS2NZZFpZTzZRT1l5aElFek1NYTdmWkNQVXZ6SnpZYVZhNkNSZXBRaVhHU1htc2hGbURQYldxMUVOclFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTMzMjAyCWZpbGU6Tm9taUZ1bl8wLjIuMTNfeDY0LXNldHVwLmV4ZQphb2FHaDB6elpHZ2JNaXNGckgvOEVYQy85dWJtMjE0TWRWTEp2YlAvUWloOXBGbW9HOVdTTTVpdTNZZWFacnlHQkc0REZmMGZJUm5CY1cvQkNYUGtDZz09Cg==",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.13/NomiFun_0.2.13_x64-setup.exe"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVHQUdSVXBwTExTcHdvUWxCeXVieUR6M3NUK0RNbTl4ZnJ0NVNFVkIxUGkyOTdtaEkxb2VMV3RnRzN3UlpFeTFSMFFyU0k0b2I2RlBiak1nTjh1aFFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTMzMTQ1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClF3VXBOblczM09qZEhGL1d2cVpCLzJiRmpWMXZQellwTkJqVE1kczNnaUNKbFQ1OUJzUFVlMElXVnR5dks3TGZXaElzUGQrdjdRVnVQTHFnVFFndkF3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.13/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVHQUdSVXBwTExTcHdvUWxCeXVieUR6M3NUK0RNbTl4ZnJ0NVNFVkIxUGkyOTdtaEkxb2VMV3RnRzN3UlpFeTFSMFFyU0k0b2I2RlBiak1nTjh1aFFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTMzMTQ1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6ClF3VXBOblczM09qZEhGL1d2cVpCLzJiRmpWMXZQellwTkJqVE1kczNnaUNKbFQ1OUJzUFVlMElXVnR5dks3TGZXaElzUGQrdjdRVnVQTHFnVFFndkF3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.13/NomiFun.app.tar.gz"
     }
   }
 }
