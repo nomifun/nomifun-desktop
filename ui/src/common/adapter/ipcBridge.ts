@@ -722,6 +722,8 @@ export const fs = {
     Array<{
       name: string;
       description: string;
+      name_i18n?: Record<string, string>;
+      description_i18n?: Record<string, string>;
       location: string;
       relative_location?: string;
       is_custom: boolean;
@@ -731,9 +733,10 @@ export const fs = {
     }>,
     void
   >('/api/skills'),
-  listBuiltinAutoSkills: httpGet<Array<{ name: string; description: string; location: string }>, void>(
-    '/api/skills/builtin-auto'
-  ),
+  listBuiltinAutoSkills: httpGet<
+    Array<{ name: string; description: string; name_i18n?: Record<string, string>; description_i18n?: Record<string, string>; location: string }>,
+    void
+  >('/api/skills/builtin-auto'),
   materializeSkillsForAgent: httpPost<
     { skills: Array<{ name: string; source_path: string }> },
     { conversation_id: number; skills: string[] }
