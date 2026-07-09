@@ -5108,6 +5108,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "core-foundation 0.10.1",
+ "dispatch2",
  "enigo",
  "image",
  "nomi-a11y",
