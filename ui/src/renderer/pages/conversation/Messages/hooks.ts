@@ -323,9 +323,25 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
     return list.concat(message);
   }
 
-  // plan message: update content and move to end of list
-  if (message.type === 'plan' && message.msg_id) {
-    const existingIdx = index.msgIdIndex.get(message.msg_id);
+  // plan message: update content and move to end of list. Prefer exact msg_id,
+  // then fall back to the plan session id so a later turn can refresh the same
+  // visible checklist even when the backend minted a new message id.
+  if (message.type === 'plan') {
+    let existingIdx = message.msg_id ? index.msgIdIndex.get(message.msg_id) : undefined;
+    if (existingIdx !== undefined && list[existingIdx]?.type !== 'plan') {
+      existingIdx = undefined;
+    }
+    if (existingIdx === undefined) {
+      const sessionId = message.content.session_id;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const candidate = list[i];
+        if (candidate.type === 'plan' && candidate.content.session_id === sessionId) {
+          existingIdx = i;
+          break;
+        }
+      }
+    }
+
     if (existingIdx !== undefined && existingIdx < list.length) {
       const existingMsg = list[existingIdx];
       const newList = list.slice();
@@ -341,7 +357,8 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
       return newList;
     }
     const newIdx = list.length;
-    index.msgIdIndex.set(message.msg_id, newIdx);
+    const msgIndexKey = getMessageIndexKey(message);
+    if (msgIndexKey) index.msgIdIndex.set(msgIndexKey, newIdx);
     return list.concat(message);
   }
 

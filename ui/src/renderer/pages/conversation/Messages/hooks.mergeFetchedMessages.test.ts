@@ -83,6 +83,47 @@ describe('mergeFetchedMessagesForConversation', () => {
 });
 
 describe('composeMessageForTest', () => {
+  test('replaces the current plan by session_id even when the incoming msg_id changes', () => {
+    const oldPlan = baseMessage({
+      id: 'turn-1:plan:update_plan',
+      msg_id: 'turn-1:plan:update_plan',
+      type: 'plan',
+      content: {
+        session_id: 'update_plan',
+        entries: [
+          { content: 'Inspect', status: 'completed' },
+          { content: 'Implement', status: 'in_progress' },
+          { content: 'Verify', status: 'pending' },
+        ],
+      },
+    });
+    const text = baseMessage({
+      id: 'assistant-text',
+      msg_id: 'assistant-text',
+      type: 'text',
+      content: { content: 'Working...' },
+    });
+    const updatedPlan = baseMessage({
+      id: 'turn-2:plan:update_plan',
+      msg_id: 'turn-2:plan:update_plan',
+      type: 'plan',
+      content: {
+        session_id: 'update_plan',
+        entries: [
+          { content: 'Inspect', status: 'completed' },
+          { content: 'Implement', status: 'completed' },
+          { content: 'Verify', status: 'completed' },
+        ],
+      },
+    });
+
+    const merged = composeMessageForTest(updatedPlan, [oldPlan, text]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toEqual(text);
+    expect(merged[1]).toEqual(updatedPlan);
+  });
+
   test('keeps live agent status separate from text sharing the same turn msg_id', () => {
     const text = baseMessage({
       id: 'assistant-turn-1',

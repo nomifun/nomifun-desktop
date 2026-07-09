@@ -7,6 +7,14 @@ use nomi_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
 
+const INCOMPLETE_PLAN_REMINDER: &str = "\
+[progress] Plan updated. Keep the visible checklist synchronized with the real work: \
+after each completed step, call update_plan with the full snapshot before moving to the next step. \
+Before final response, run or record verification and mark every step completed; if verification is missing from the plan, add and complete it before finalizing.\n";
+
+const MISSING_VERIFICATION_REMINDER: &str = "\
+[verification] No explicit verification step is present in the completed plan. If this task changed code, files, data, or user-visible behavior, run the narrowest meaningful verification and update the plan before final response.\n";
+
 /// Single step status. snake_case aligns with codex and the frontend
 /// `entry.status` (`pending`/`in_progress`/`completed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +61,16 @@ impl Default for UpdatePlanTool {
     }
 }
 
+fn step_mentions_verification(step: &str) -> bool {
+    let lower = step.to_lowercase();
+    ["verify", "verification", "test", "typecheck", "build", "compile"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        || ["验证", "测试", "检查", "编译", "构建"]
+            .iter()
+            .any(|needle| step.contains(needle))
+}
+
 #[async_trait]
 impl Tool for UpdatePlanTool {
     fn name(&self) -> &str {
@@ -66,8 +84,12 @@ impl Tool for UpdatePlanTool {
          This is a stateless full snapshot — send the entire current plan every time, not a diff. \
          There should be exactly one in_progress step until all are completed; mark a step \
          completed before starting the next. Use it for non-trivial multi-step work; do not use \
-         it for simple single-step queries, and do not pad with filler steps. After calling it, \
-         do not repeat the full plan in your reply — just note what changed and the next step."
+         it for simple single-step queries, and do not pad with filler steps. Keep the visible \
+         checklist synchronized with actual work: call update_plan after completing each step, \
+         and before the final response send a full snapshot where every real step is completed. \
+         For code/file/user-visible changes, include and complete a verification step before \
+         finalizing. After calling it, do not repeat the full plan in your reply — just note \
+         what changed and the next step."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -159,14 +181,24 @@ impl Tool for UpdatePlanTool {
         let content = serde_json::to_string(&payload)
             .unwrap_or_else(|_| "{\"kind\":\"plan_update\",\"entries\":[]}".to_string());
 
+        let mut prefix = String::new();
         if in_progress > 1 {
-            let warn = format!(
+            prefix.push_str(&format!(
                 "[note] {in_progress} steps are in_progress; convention is exactly one. Plan rendered as submitted.\n"
-            );
-            return ToolResult::text(format!("{warn}{content}"));
+            ));
         }
 
-        ToolResult::text(content)
+        let all_completed = args.plan.iter().all(|p| p.status == StepStatus::Completed);
+        if all_completed {
+            let has_verification = args.plan.iter().any(|p| step_mentions_verification(&p.step));
+            if !has_verification {
+                prefix.push_str(MISSING_VERIFICATION_REMINDER);
+            }
+        } else {
+            prefix.push_str(INCOMPLETE_PLAN_REMINDER);
+        }
+
+        ToolResult::text(format!("{prefix}{content}"))
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -240,6 +272,45 @@ mod tests {
             .await;
         assert!(!r.is_error);
         assert!(!r.content.contains("[note]"));
+    }
+
+    #[tokio::test]
+    async fn execute_incomplete_plan_reminds_model_to_keep_progress_and_verify_before_final() {
+        let r = UpdatePlanTool::new()
+            .execute(json!({
+                "plan": [
+                    { "step": "Inspect", "status": "completed" },
+                    { "step": "Implement", "status": "in_progress" },
+                    { "step": "Verify", "status": "pending" }
+                ]
+            }))
+            .await;
+        assert!(!r.is_error);
+        assert!(r.content.contains("[progress]"));
+        assert!(r.content.contains("call update_plan"));
+        assert!(r.content.contains("Before final response"));
+        assert!(r.content.contains("verification"));
+        let start = r.content.find('{').unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r.content[start..]).unwrap();
+        assert_eq!(v["entries"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn execute_completed_plan_without_verification_warns_before_finalizing() {
+        let r = UpdatePlanTool::new()
+            .execute(json!({
+                "plan": [
+                    { "step": "Inspect", "status": "completed" },
+                    { "step": "Implement", "status": "completed" }
+                ]
+            }))
+            .await;
+        assert!(!r.is_error);
+        assert!(r.content.contains("[verification]"));
+        assert!(r.content.contains("No explicit verification"));
+        let start = r.content.find('{').unwrap();
+        let v: serde_json::Value = serde_json::from_str(&r.content[start..]).unwrap();
+        assert_eq!(v["kind"], "plan_update");
     }
 
     #[tokio::test]
