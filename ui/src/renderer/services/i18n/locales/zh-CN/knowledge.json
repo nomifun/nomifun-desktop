@@ -87,8 +87,14 @@
     "companionLabel": "数字伙伴 {{id}}",
     "conversationLabel": "会话 #{{id}}",
     "disabled": "已停用",
+    "removeConfirmContent": "将从「{{target}}」取消挂载此知识库。知识库内容不会被删除。",
+    "removeConfirmTitle": "取消挂载此知识库？",
+    "removeFailed": "取消挂载失败：{{message}}",
+    "removeMount": "取消挂载",
+    "removeOk": "已取消挂载",
     "summary": "{{count}} 个使用方正在使用此库",
-    "terminalLabel": "终端 #{{id}}"
+    "terminalLabel": "终端 #{{id}}",
+    "workpathRemoveHint": "该工作区下共享此挂载配置的会话都会受影响。"
   },
   "control": {
     "applyNote": "变更会在会话下一次开始任务（发送消息）时生效。",

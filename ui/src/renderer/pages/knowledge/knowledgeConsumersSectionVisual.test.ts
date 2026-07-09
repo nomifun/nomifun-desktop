@@ -11,4 +11,10 @@ describe('Knowledge consumers section visual style', () => {
     expect(consumersSource.includes('border-t border-solid border-border-2')).toBe(false);
     expect(consumersSource.includes('shadow-[inset_0_0_0_1px_rgba(var(--primary-6),0.08)]')).toBe(true);
   });
+
+  test('uses a quiet unmount action instead of a destructive delete control', () => {
+    expect(consumersSource.includes('knowledge-consumers-remove')).toBe(true);
+    expect(consumersSource.includes('Unlink')).toBe(true);
+    expect(consumersSource.includes('Delete')).toBe(false);
+  });
 });

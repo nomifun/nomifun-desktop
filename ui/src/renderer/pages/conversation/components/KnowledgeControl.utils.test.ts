@@ -65,4 +65,13 @@ describe('KnowledgeControl search helpers', () => {
     expect(source.includes('!targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.id)')).toBe(true);
     expect(source.includes("t('knowledge.mount.rootMissing'")).toBe(true);
   });
+
+  test('refreshes the mounted binding when another surface changes the same target', () => {
+    const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
+
+    expect(source.includes('ipcBridge.knowledge.onBindingChanged.on')).toBe(true);
+    expect(source.includes('reloadBinding')).toBe(true);
+    expect(source.includes('event.target_kind')).toBe(true);
+    expect(source.includes('event.target_id')).toBe(true);
+  });
 });

@@ -87,8 +87,14 @@
     "companionLabel": "Companion {{id}}",
     "conversationLabel": "Conversation #{{id}}",
     "disabled": "disabled",
+    "removeConfirmContent": "This will unmount this knowledge base from \"{{target}}\". The knowledge base content will not be deleted.",
+    "removeConfirmTitle": "Unmount this knowledge base?",
+    "removeFailed": "Failed to unmount: {{message}}",
+    "removeMount": "Unmount",
+    "removeOk": "Unmounted",
     "summary": "{{count}} consumer(s) using this base",
-    "terminalLabel": "Terminal #{{id}}"
+    "terminalLabel": "Terminal #{{id}}",
+    "workpathRemoveHint": "Sessions that share this workspace mount configuration will be affected."
   },
   "control": {
     "applyNote": "Changes take effect the next time the session starts a task (sends a message).",
