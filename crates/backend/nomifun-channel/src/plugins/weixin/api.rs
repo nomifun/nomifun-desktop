@@ -312,10 +312,10 @@ impl WeixinApi {
         let ciphertext = aes128_ecb_pkcs7_encrypt(&bytes, &aeskey_bytes);
         let download_param = self.upload_to_cdn(&upload_url, ciphertext).await?;
 
-        // 5. Build the media item and send. NOTE: `media.aes_key` is the base64 of
-        //    the AES key's HEX STRING bytes (not the raw 16 bytes) — replicated
-        //    exactly from the reference SDK; the raw key still rides `aeskey`-derived
-        //    fields the server expects.
+        // 5. Build the media item and send. `media.aes_key` = base64 of the AES
+        //    key's HEX STRING bytes (32 ASCII chars), NOT the raw 16 bytes.
+        //    LIVE-VERIFIED against the real iLink gateway: this encoding renders a
+        //    clean image in WeChat; base64(raw 16 bytes) renders garbled. Keep it.
         let aes_key_field = base64::engine::general_purpose::STANDARD.encode(aeskey_hex.as_bytes());
         let media = SendCdnMedia {
             encrypt_query_param: download_param,
@@ -369,28 +369,40 @@ impl WeixinApi {
     /// taskid) and return the download `x-encrypted-param` used to reference the
     /// file in a message. No gateway auth — the URL is itself the pre-signed
     /// credential. Verified live: POST + octet-stream body → 200 + the header.
+    /// Retries transient failures (a live 5xx was observed and cleared on retry).
     async fn upload_to_cdn(&self, upload_url: &str, ciphertext: Vec<u8>) -> Result<String, ChannelError> {
-        let resp = self
-            .client
-            .post(upload_url)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .timeout(WEIXIN_API_TIMEOUT)
-            .body(ciphertext)
-            .send()
-            .await
-            .map_err(|e| ChannelError::MessageSendFailed(format!("CDN upload request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ChannelError::MessageSendFailed(format!("CDN upload HTTP {status}: {text}")));
+        const MAX_ATTEMPTS: usize = 3;
+        let mut last_err = String::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self
+                .client
+                .post(upload_url)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .timeout(WEIXIN_API_TIMEOUT)
+                .body(ciphertext.clone())
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Some(param) = resp.headers().get("x-encrypted-param").and_then(|v| v.to_str().ok()) {
+                        return Ok(param.to_owned());
+                    }
+                    last_err = "response missing x-encrypted-param".into();
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    last_err = format!("HTTP {status}: {text}");
+                }
+                Err(e) => last_err = format!("request failed: {e}"),
+            }
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            }
         }
-
-        resp.headers()
-            .get("x-encrypted-param")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-            .ok_or_else(|| ChannelError::MessageSendFailed("CDN upload response missing x-encrypted-param".into()))
+        Err(ChannelError::MessageSendFailed(format!(
+            "CDN upload failed after {MAX_ATTEMPTS} attempts: {last_err}"
+        )))
     }
 }
 
