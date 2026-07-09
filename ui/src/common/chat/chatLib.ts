@@ -10,7 +10,7 @@ import type {
   ToolCallContentItem,
   ToolCallUpdate,
 } from '@/common/types/platform/acpTypes';
-import type { IKnowledgeWritebackEvent, IResponseMessage } from '../adapter/ipcBridge';
+import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
 
@@ -1093,6 +1093,30 @@ export const transformKnowledgeWritebackEvent = (event: IKnowledgeWritebackEvent
         written: event.written,
         failures: event.failures,
       },
+    },
+  };
+};
+
+const normalizeMessageStatus = (value: string | undefined): TMessage['status'] => {
+  if (value === 'finish' || value === 'pending' || value === 'error' || value === 'work') return value;
+  return 'finish';
+};
+
+export const transformUserCreatedEvent = (
+  event: IUserMessageCreatedEvent,
+  conversationId: number
+): IMessageText | undefined => {
+  if (event.hidden || event.conversation_id !== conversationId || !event.msg_id) return undefined;
+  return {
+    id: event.msg_id,
+    type: 'text',
+    msg_id: event.msg_id,
+    position: 'right',
+    status: normalizeMessageStatus(event.status),
+    conversation_id: event.conversation_id,
+    created_at: event.created_at,
+    content: {
+      content: event.content,
     },
   };
 };

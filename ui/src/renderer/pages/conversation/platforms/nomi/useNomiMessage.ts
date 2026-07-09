@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import { transformMessage } from '@/common/chat/chatLib';
+import { transformMessage, transformUserCreatedEvent } from '@/common/chat/chatLib';
 import { extractResponseTextChunk, optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import type { IResponseMessage } from '@/common/adapter/ipcBridge';
 import type { TChatConversation, TokenUsageData } from '@/common/config/storage';
@@ -219,6 +219,12 @@ export const useNomiMessage = (
     },
     [addOrUpdateMessage, conversation_id]
   );
+
+  useEffect(() => {
+    return ipcBridge.conversation.userCreated.on((event) => {
+      addOrUpdateMessage(transformUserCreatedEvent(event, conversation_id));
+    });
+  }, [conversation_id, addOrUpdateMessage]);
 
   useEffect(() => {
     return ipcBridge.conversation.responseStream.on((message) => {

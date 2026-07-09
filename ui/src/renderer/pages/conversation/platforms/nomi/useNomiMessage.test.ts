@@ -5,6 +5,8 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { getNomiToolGroupRuntimeState } from './useNomiMessage';
 
 describe('getNomiToolGroupRuntimeState', () => {
@@ -40,5 +42,14 @@ describe('getNomiToolGroupRuntimeState', () => {
       confirmingDescription: '{\n  "file_path": "src/App.tsx"\n}',
       executingDescription: undefined,
     });
+  });
+});
+
+describe('useNomiMessage live event subscriptions', () => {
+  test('subscribes to persisted user messages so IM-channel inbound turns appear without a DB reload', () => {
+    const source = readFileSync(fileURLToPath(import.meta.resolve('./useNomiMessage.ts')), 'utf8');
+
+    expect(source.includes('ipcBridge.conversation.userCreated.on')).toBe(true);
+    expect(source.includes('transformUserCreatedEvent')).toBe(true);
   });
 });
