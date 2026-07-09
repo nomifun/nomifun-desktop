@@ -1,9 +1,17 @@
 # WeChat iLink outbound media-upload — discovery findings (Phase C1)
 
 **Date:** 2026-07-09
-**Status:** ✅ **IMPLEMENTED** (2026-07-09, same branch). The exact contract below was recovered from the reference SDK (`openclaw-weixin`) and ported to `weixin/{types.rs,api.rs,plugin.rs}`. `send_media` uploads AES-128-ECB-encrypted bytes to the WeChat CDN and sends an image/file item. AES-ECB+PKCS7 has offline roundtrip unit tests; the live CDN round-trip is **still unverified** (needs a logged-in bot). See "Implementation notes" at the bottom.
+**Status:** ✅ **IMPLEMENTED & LIVE-VERIFIED** (2026-07-09). A real image was delivered to a live WeChat account and rendered cleanly. Two bugs vs the reverse-engineered reference were found by live probing and fixed; the exact verified protocol is below.
 
-## Original gate note (superseded)
+## Live-verified protocol (corrections to the reference SDK)
+
+Probed against the real `ilinkai.weixin.qq.com` gateway with the user's bot:
+1. `POST /ilink/bot/getuploadurl` (headers `AuthorizationType: ilink_bot_token`, `Authorization: Bearer <bot_token>`, `X-WECHAT-UIN: base64(4 random bytes)`; body `{filekey(hex), media_type(IMAGE=1/FILE=3), to_user_id, rawsize, rawfilemd5(plaintext md5 hex), filesize(ceil((n+1)/16)*16), no_need_thumb:true, aeskey(hex)}`) → **200**, returns **`upload_full_url`** — a ready CDN URL with `encrypted_query_param`+`filekey`+`taskid` embedded. **NOT `upload_param`** (reference SDK field name — bug #1: code read the missing field and bailed).
+2. `POST <upload_full_url>` directly (Content-Type `application/octet-stream`, body = AES-128-ECB/PKCS7 ciphertext) → **200**, response header **`x-encrypted-param`** = download reference. Do NOT reconstruct the URL from a base host (bug #2). A transient 5xx was seen once → retry (3×) added.
+3. `POST /ilink/bot/sendmessage` `{msg:{to_user_id, client_id(uuid), message_type:2, message_state:2, context_token(from a live inbound — REQUIRED), item_list:[{type:2, image_item:{media:{encrypt_query_param:<x-encrypted-param>, aes_key, encrypt_type:1}, mid_size:<ciphertext size>}}]}, base_info:{}}` → **200 `{}`** (= success) → image displays in WeChat.
+   - **`media.aes_key` = base64 of the AES key's HEX STRING bytes** (32 ASCII chars), NOT base64 of the raw 16 key bytes. LIVE-VERIFIED: base64(hex) renders a clean image; base64(raw) renders garbled/gray.
+
+## Original gate note (superseded — now fully verified)
 
 The Phase C1 spike deferred implementation pending the exact field schema. Those schemas were then recovered from the reference SDK source (below), so the track was un-gated and completed.
 
