@@ -17,7 +17,7 @@ slack = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls
 twitch = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:rustls-native-certs"]
 nostr = ["dep:nostr", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:rustls-native-certs", "dep:hex"]
 # qqbot module + factory arm land when the parallel QQ Bot work is integrated.
-qqbot = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:rustls-native-certs"]
+qqbot = ["dep:reqwest", "dep:tokio-tungstenite", "dep:futures-util", "dep:rustls", "dep:rustls-native-certs", "dep:base64"]
 
 [dependencies]
 nomifun-common.workspace = true
