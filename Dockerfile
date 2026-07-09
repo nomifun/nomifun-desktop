@@ -25,10 +25,21 @@ RUN bun run build:ui
 
 # ---- Stage 2: compile nomifun-web ------------------------------------------
 FROM rust:1-bookworm AS rust
-# Native build deps: rusqlite(bundled) needs cc; rustls/aws-lc-rs needs cmake+clang;
-# libgit2-sys needs cmake. If a first build fails on a *-sys crate, add its dep here.
+# Optional Debian mirror to speed up apt fetches (e.g. in CN). Empty = upstream
+# (deb.debian.org). Pass `--build-arg APT_MIRROR=http://mirrors.aliyun.com`.
+# Use an http:// mirror so the same value also works in the slim runtime stage
+# below, which has no ca-certificates until its own apt-get installs them.
+ARG APT_MIRROR=""
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] && sed -i -E "s|https?://deb.debian.org|$APT_MIRROR|g; s|https?://security.debian.org|$APT_MIRROR|g" "$f" || true; \
+      done; \
+    fi
+# Native build deps: rusqlite(bundled) needs cc; rustls/aws-lc-rs needs cmake+clang
+# (+ nasm for its x86_64 assembly); libgit2-sys needs cmake. If a first build fails
+# on a *-sys crate, add its dep here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake clang pkg-config perl git \
+        build-essential cmake clang pkg-config perl git nasm \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
@@ -47,12 +58,20 @@ COPY . .
 # binary is copied OUT of the (ephemeral) target cache mount into a real layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p nomifun-web \
+    cargo build --release --locked -p nomifun-web \
     && cp target/release/nomifun-web /usr/local/bin/nomifun-web
 # -> /usr/local/bin/nomifun-web
 
 # ---- Stage 3: slim runtime --------------------------------------------------
 FROM debian:bookworm-slim
+# Reuse the same optional Debian mirror as stage 2 (http:// so it works before
+# ca-certificates is installed just below).
+ARG APT_MIRROR=""
+RUN if [ -n "$APT_MIRROR" ]; then \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        [ -f "$f" ] && sed -i -E "s|https?://deb.debian.org|$APT_MIRROR|g; s|https?://security.debian.org|$APT_MIRROR|g" "$f" || true; \
+      done; \
+    fi
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
@@ -76,4 +95,9 @@ ENV NOMIFUN_WEB_HOST=0.0.0.0 \
 
 VOLUME /data
 EXPOSE 8787
+# Liveness: once the server is up it answers an unauthenticated GET / with the
+# SPA (200). bun is already in the image, so no extra curl/wget is needed. The
+# start-period covers first-run data-dir + DB init.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD bun -e "fetch('http://127.0.0.1:'+(process.env.NOMIFUN_WEB_PORT||'8787')+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["nomifun-web"]
