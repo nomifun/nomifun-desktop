@@ -1,6 +1,6 @@
 {
   "version": "0.2.14",
-  "notes": "- 优化会话问题定位 UI，并修复计划清单进度同步。",
+  "notes": "- 优化会话问题定位 UI，并修复计划清单进度同步。\n- 修复 IM/Nomi 聊天消息刷新、对话模型选择器、技能标签草稿保存和数据加密密钥持久化。\n- 增强多渠道媒体发送：支持 Telegram、微信 iLink、Discord、Slack、Lark、Matrix、Mattermost、QQ 的图片/文件发送链路。\n- 支持 companion 通过 IM 渠道发送本地文件，并让 Nomi 会话的思考与回复跟随系统语言。\n- 修复 Docker 构建上下文泄漏，并支持国内镜像加速。",
   "pub_date": "2026-07-09T09:13:35.995Z",
   "platforms": {
     "windows-x86_64": {
