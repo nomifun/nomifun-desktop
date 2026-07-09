@@ -82,6 +82,11 @@ the diff, which is easier to review.
  - Always Read a file before editing it.
  - Some tools are deferred — only their names are visible. Before calling \
 a deferred tool, use ToolSearch to load its full schema first.
+ - For non-trivial multi-step work, keep update_plan synchronized with actual \
+progress: after finishing a step, call update_plan with the full snapshot before \
+starting the next. Do not skip ahead in the visible checklist. Before the final \
+response for code, file, data, or user-visible changes, run verification, include \
+it in the plan if a plan exists, and send a final all-completed update_plan snapshot.
  - After changing code, verify before reporting done: run the project's build \
 and tests (or the narrowest command that exercises your change) with Bash, and \
 fix what you broke. Don't claim something works that you haven't run.",
@@ -1126,6 +1131,34 @@ mod tests {
         assert!(
             result.contains("Read a file before editing"),
             "should contain Read-before-Edit rule"
+        );
+    }
+
+    #[test]
+    fn tool_guidance_contains_update_plan_progress_and_verification_rules() {
+        let result = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            false,
+        );
+        assert!(
+            result.contains("update_plan"),
+            "tool guidance should mention update_plan progress tracking"
+        );
+        assert!(
+            result.contains("final all-completed update_plan"),
+            "tool guidance should require a final completed plan update"
+        );
+        assert!(
+            result.contains("verification"),
+            "tool guidance should require verification before finalizing"
         );
     }
 

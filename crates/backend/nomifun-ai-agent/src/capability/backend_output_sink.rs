@@ -278,7 +278,7 @@ impl OutputSink for BackendOutputSink {
         if name == "update_plan" && !is_error {
             if let Some(entries) = parse_plan_entries(content) {
                 let _ = self.event_tx.send(AgentStreamEvent::Plan(PlanEventData {
-                    session_id: None,
+                    session_id: Some("update_plan".to_string()),
                     entries,
                 }));
                 return;
@@ -704,6 +704,7 @@ mod tests {
         sink.emit_tool_result("call_1", "update_plan", false, content);
         match rx.try_recv().unwrap() {
             AgentStreamEvent::Plan(data) => {
+                assert_eq!(data.session_id.as_deref(), Some("update_plan"));
                 assert_eq!(data.entries.len(), 2);
                 assert_eq!(data.entries[1]["status"], "in_progress");
             }
