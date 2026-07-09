@@ -1,15 +1,11 @@
 # WeChat iLink outbound media-upload — discovery findings (Phase C1)
 
 **Date:** 2026-07-09
-**Status:** Characterized at the flow level; NOT implemented. Gated on (a) the exact outbound field schema from a reference SDK and (b) a live WeChat bot to verify. Kept as a follow-up; WeChat's `send_media` stays the graceful default no-op until then.
+**Status:** ✅ **IMPLEMENTED** (2026-07-09, same branch). The exact contract below was recovered from the reference SDK (`openclaw-weixin`) and ported to `weixin/{types.rs,api.rs,plugin.rs}`. `send_media` uploads AES-128-ECB-encrypted bytes to the WeChat CDN and sends an image/file item. AES-ECB+PKCS7 has offline roundtrip unit tests; the live CDN round-trip is **still unverified** (needs a logged-in bot). See "Implementation notes" at the bottom.
 
-## Why gated (decision gate outcome)
+## Original gate note (superseded)
 
-The plan's Phase C1 spike required characterizing the iLink outbound media contract "with confidence." The **flow** is now known from authoritative reverse-engineered community sources, but two things block a responsible implementation right now:
-1. The **exact outbound image `item_list` field names** and the **`getuploadurl` response schema** are only fully specified in third-party SDK source (`demo.mjs` etc.), not in text I could extract here (the doc fetch was blocked as a reverse-engineered-protocol topic).
-2. WeChat media send **cannot be unit-tested** — it needs a live logged-in bot + WeChat CDN round-trip, which isn't available in this environment.
-
-Implementing it blind would mean guessing field names and shipping untested crypto — against the "no placeholders / don't guess" rule. So it is documented and deferred, not faked.
+The Phase C1 spike deferred implementation pending the exact field schema. Those schemas were then recovered from the reference SDK source (below), so the track was un-gated and completed.
 
 ## The contract (flow, confirmed)
 
@@ -40,3 +36,17 @@ Headers already implemented for text send apply (`AuthorizationType: ilink_bot_t
 - x1ah/wechat-ilink-demo (Node `demo.mjs`, independent iLink calls) — https://github.com/x1ah/wechat-ilink-demo
 
 The `demo.mjs` / `weixin-bot-api.md` in those repos carry the exact image `item_list` JSON and `getuploadurl` request/response — read one of them to fill `SendImageItem` field names before implementing.
+
+## Implementation notes (as built)
+
+Recovered the exact schemas from `hao-ji-xing/openclaw-weixin` (`src/cdn/*.ts`, `src/messaging/send.ts`, `src/api/types.ts`) and ported them:
+
+- **`getuploadurl`** (`POST ilink/bot/getuploadurl`, no `base_info`): `{ filekey (16B hex), media_type (IMAGE=1 / FILE=3 — the proto `UploadMediaType`, NOT the item type), to_user_id, rawsize, rawfilemd5 (plaintext md5 hex), filesize (ciphertext padded size), no_need_thumb: true, aeskey (16B hex) }` → `{ upload_param }`.
+- **CDN upload**: `POST https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=<upload_param>&filekey=<filekey>`, `Content-Type: application/octet-stream`, body = AES-128-ECB(PKCS7) ciphertext, **no gateway auth**. The download reference comes back in the **`x-encrypted-param` response header** → goes into `media.encrypt_query_param`.
+- **`sendmessage` item** (`message_type:2`, `message_state:2`, `context_token` required): image → `{ type:2, image_item:{ media:{ encrypt_query_param, aes_key, encrypt_type:1 }, mid_size:<ciphertextSize> } }`; file → `{ type:4, file_item:{ media:{…}, file_name, len:<plaintextSize as string> } }`.
+- **AES**: AES-128-ECB, PKCS7, random 16-byte key; ciphertext size = `ceil((n+1)/16)*16` (a block-aligned plaintext still gets a full padding block).
+- **Quirk replicated exactly**: `media.aes_key` = base64 of the AES key's **hex-string bytes** (32 ASCII chars), not the raw 16 key bytes — this is what the reference SDK sends, so we match it byte-for-byte.
+
+Code: `weixin/types.rs` (`GetUploadUrlRequest`/`Response`, `SendCdnMedia`, `SendImageItem`, `SendFileItem`, extended `SendMessageItem`, `UPLOAD_MEDIA_TYPE_*`); `weixin/api.rs` (`aes128_ecb_pkcs7_encrypt`, `aes_ecb_padded_size`, `get_upload_url` via `authenticated_post`, `upload_to_cdn`, `send_media`); `weixin/plugin.rs` (`send_media` override using the per-chat `context_token`). New deps: `aes`, `md-5` (both already in the lock), `hex` (added to the `weixin` feature).
+
+**Still unverified:** the live CDN round-trip and server acceptance — the AES/PKCS7 has offline roundtrip tests, but no logged-in WeChat bot was available to exercise the full path. Verify on a real bot before relying on it.
