@@ -23,7 +23,7 @@
  * - First-time discoverability hint tooltip
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Button, Input, Message, Popover, Switch, Tooltip } from '@arco-design/web-react';
@@ -214,6 +214,17 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   const [persistedBinding, setPersistedBinding] = useState<IKnowledgeBinding>(defaultKnowledgeBinding);
   const binding = draft ? draft.value : persistedBinding;
   const [searchQuery, setSearchQuery] = useState('');
+  const isDraftMode = !!draft;
+
+  const reloadBinding = useCallback(async () => {
+    if (isDraftMode || !kind || !id) return;
+    try {
+      const next = await ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id });
+      setPersistedBinding(next);
+    } catch {
+      /* ignore — keep current binding */
+    }
+  }, [isDraftMode, kind, id]);
 
   // ─── Discoverability hint ─────────────────────────────────────────────────
   const [hintVisible, setHintVisible] = useState(false);
@@ -249,7 +260,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       try {
         const [list, b] = await Promise.all([
           ipcBridge.knowledge.listBases.invoke(),
-          draft || !kind || !id
+          isDraftMode || !kind || !id
             ? Promise.resolve(null)
             : ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id }),
         ]);
@@ -265,8 +276,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, id, !!draft]);
+  }, [kind, id, isDraftMode]);
 
   // Keep base list fresh
   useEffect(() => {
@@ -283,6 +293,15 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     ];
     return () => unsubs.forEach((u) => u());
   }, []);
+
+  useEffect(() => {
+    if (isDraftMode || !kind || !id) return;
+    const unsub = ipcBridge.knowledge.onBindingChanged.on((event) => {
+      if (event.target_kind !== kind || event.target_id !== id) return;
+      void reloadBinding();
+    });
+    return () => unsub();
+  }, [isDraftMode, kind, id, reloadBinding]);
 
   // ─── Persist ──────────────────────────────────────────────────────────────
   const persist = async (next: IKnowledgeBinding) => {
