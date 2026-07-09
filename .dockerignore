@@ -2,6 +2,10 @@
 # ui/dist and the Rust binary from source, so ship only sources.
 target/
 **/target/
+# Cargo routes intermediate artifacts to build.noindex/ (see .cargo/config.toml);
+# it reaches tens of GB, so it must never enter the build context or the image.
+build.noindex/
+**/build.noindex/
 node_modules/
 **/node_modules/
 ui/dist/

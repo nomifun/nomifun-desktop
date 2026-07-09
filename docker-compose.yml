@@ -11,19 +11,37 @@
 
 services:
   nomifun:
-    build: .
+    build:
+      context: .
+      args:
+        # Optional mirror acceleration (e.g. in CN). Empty by default so non-CN
+        # builds hit upstream registries unchanged. Set via env / a local `.env`
+        # before building, e.g.:
+        #   APT_MIRROR=http://mirrors.aliyun.com \
+        #   CARGO_REGISTRY_MIRROR=https://rsproxy.cn/index/ docker compose build
+        APT_MIRROR: ${APT_MIRROR:-}
+        CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-}
     image: nomifun-web:local
     restart: unless-stopped
     ports:
       - "8787:8787" # LAN / VPN / localhost. Finish setup or pre-seed admin first.
     volumes:
       - nomifun-data:/data # SQLite db, logs, bun runtime cache, agent state.
-    # environment:
-    #   # Pre-seed the admin instead of interactive first-run setup:
-    #   NOMIFUN_ADMIN_USERNAME: admin
-    #   NOMIFUN_ADMIN_PASSWORD: "change-me-to-something-strong"
-    #   # When fronted by the caddy service below (TLS), make cookies Secure:
-    #   NOMIFUN_HTTPS: "true"
+    environment:
+      # Pre-seed the admin to CLOSE the open first-run claim window (recommended
+      # before exposing the port on an untrusted network). Set the value in a
+      # local `.env` file or your shell, e.g.:
+      #   NOMIFUN_ADMIN_USERNAME=admin
+      #   NOMIFUN_ADMIN_PASSWORD=change-me-to-something-strong
+      # The bare (value-less) entries below pass a var through ONLY when it is
+      # set — leaving it unset keeps the interactive first-run claim. Do NOT set
+      # NOMIFUN_ADMIN_PASSWORD to an empty string: an empty password is rejected
+      # and the container would fail to boot.
+      - NOMIFUN_ADMIN_USERNAME
+      - NOMIFUN_ADMIN_PASSWORD
+      # Set NOMIFUN_HTTPS=true (e.g. when fronted by the caddy service below) so
+      # the session cookie gets the Secure flag.
+      - NOMIFUN_HTTPS
 
   # --- Optional: TLS + reverse proxy for internet exposure --------------------
   # To use it: (1) edit Caddyfile with your domain, (2) set NOMIFUN_HTTPS=true
