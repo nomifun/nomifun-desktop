@@ -93,6 +93,9 @@ impl ChannelStreamRelay {
                         has_content = true;
                     }
                     Some(StreamAction::Thinking(_)) => {}
+                    // Media handling is added in the relay's media-flush logic;
+                    // this no-op keeps the match exhaustive until then.
+                    Some(StreamAction::MediaProduced(_)) => {}
                     Some(StreamAction::ToolCall { .. }) if has_content && !text_buffer.trim().is_empty() => {
                         // Strip inline reasoning before flushing buffered text.
                         // If only <think> content has arrived so far, skip the
@@ -234,6 +237,9 @@ impl ChannelStreamRelay {
                         }
                     }
                     Some(StreamAction::Thinking(_)) => {}
+                    // Media handling is added in the relay's media-flush logic;
+                    // this no-op keeps the match exhaustive until then.
+                    Some(StreamAction::MediaProduced(_)) => {}
                     Some(StreamAction::ToolCall { name, .. }) => {
                         // Deliberately no parse mode: the tool name is raw
                         // agent output and is not HTML-escaped here.
