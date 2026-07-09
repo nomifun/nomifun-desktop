@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { transformKnowledgeWritebackEvent, transformMessage } from './chatLib';
+import { transformKnowledgeWritebackEvent, transformMessage, transformUserCreatedEvent } from './chatLib';
 
 const baseWire = (overrides: Record<string, unknown>) =>
   ({
@@ -158,5 +158,45 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content.knowledge_writeback?.status).toBe('failed');
     expect(message.content.knowledge_writeback?.retryable).toBe(true);
     expect(message.content.knowledge_writeback?.failures?.[0]?.error).toBe('disk full');
+  });
+
+  test('converts live user-created events into right-side messages for the active conversation', () => {
+    const message = transformUserCreatedEvent(
+      {
+        conversation_id: 7,
+        msg_id: 'msg-im-1',
+        content: 'from IM',
+        position: 'right',
+        status: 'finish',
+        channel_platform: 'telegram',
+        companion: true,
+        companion_id: 'companion-1',
+        created_at: 1234,
+      },
+      7
+    );
+
+    expect(message?.type).toBe('text');
+    if (message?.type !== 'text') throw new Error('expected text message');
+    expect(message.conversation_id).toBe(7);
+    expect(message.msg_id).toBe('msg-im-1');
+    expect(message.position).toBe('right');
+    expect(message.status).toBe('finish');
+    expect(message.created_at).toBe(1234);
+    expect(message.content.content).toBe('from IM');
+  });
+
+  test('ignores user-created events for other conversations and hidden messages', () => {
+    const baseEvent = {
+      conversation_id: 7,
+      msg_id: 'msg-im-1',
+      content: 'from IM',
+      position: 'right' as const,
+      status: 'finish',
+      created_at: 1234,
+    };
+
+    expect(transformUserCreatedEvent(baseEvent, 8)).toBeUndefined();
+    expect(transformUserCreatedEvent({ ...baseEvent, hidden: true }, 7)).toBeUndefined();
   });
 });
