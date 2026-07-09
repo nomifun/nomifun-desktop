@@ -147,6 +147,14 @@ struct TestExtraConfig {
 #[derive(Deserialize, JsonSchema)]
 struct ListPairingsParams {}
 
+/// Send a local file/image to the user through the IM channel they are on.
+#[derive(Deserialize, JsonSchema)]
+struct SendFileParams {
+    /// Absolute path to the local file to send (e.g. an image you generated or
+    /// found on disk). Images are delivered as photos, other files as documents.
+    path: String,
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct ApprovePairingParams {
     /// The pairing code to approve (from nomi_channel_list_pairings).
@@ -366,6 +374,80 @@ async fn approve_pairing(deps: Arc<GatewayDeps>, p: ApprovePairingParams) -> Val
     match deps.channel_state.pairing_service.approve_pairing(&p.code).await {
         Ok(()) => ok(json!({ "approved": true, "code": p.code })),
         Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
+/// Ingest a local file as a workshop asset and return its id so the channel
+/// relay delivers it to the user via the platform's media-send path — the SAME
+/// pipeline that ships AI-generated images through the channel. Delivery only
+/// happens when the current turn arrived over an IM channel (a relay is running
+/// for it); on a plain desktop turn the asset is prepared but nothing is pushed.
+async fn send_file(deps: Arc<GatewayDeps>, p: SendFileParams) -> Value {
+    use std::path::Path;
+
+    let path = p.path.trim();
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return json!({ "error": format!("cannot access file '{path}': {e}") }),
+    };
+    if !meta.is_file() {
+        return json!({ "error": format!("'{path}' is not a file") });
+    }
+    // Platform media limits vary; 50MB is a generous upper bound.
+    const MAX_BYTES: u64 = 50 * 1024 * 1024;
+    if meta.len() > MAX_BYTES {
+        return json!({ "error": format!("file too large: {} bytes (max {MAX_BYTES})", meta.len()) });
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return json!({ "error": format!("failed to read '{path}': {e}") }),
+    };
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_owned();
+    let mime = mime_for_file_name(&file_name);
+    let origin = json!({ "source": "nomi_channel_send_file", "path": path });
+
+    match deps
+        .workshop_service
+        .ingest_asset_bytes(bytes, mime, &file_name, false, Some(origin))
+        .await
+    {
+        // `result_asset_ids` is the SAME signal the channel relay already keys off
+        // (it resolves the asset bytes by id and uploads them via the plugin's
+        // media-send). The key name must match so the relay's detector picks it up.
+        Ok(row) => json!({
+            "result_asset_ids": [row.id],
+            "file_name": file_name,
+            "delivered": true,
+            "note": "文件已通过当前渠道发送给用户。"
+        }),
+        Err(e) => json!({ "error": format!("failed to prepare file for sending: {e}") }),
+    }
+}
+
+/// Best-effort MIME from a file-name extension — drives image-vs-document
+/// delivery downstream (image/* → photo, else document). Unknown → octet-stream.
+fn mime_for_file_name(name: &str) -> &'static str {
+    match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
     }
 }
 
@@ -609,4 +691,39 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         |deps, _ctx, p| set_companion(deps, p),
     ));
+
+    // 12. Send a local file/image to the user through the current IM channel (write).
+    out.push(Capability::new::<SendFileParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_channel_send_file",
+            "channel",
+            "Send a local file or image to the user you are chatting with, through their IM channel (WeChat/Telegram/etc.). Give an absolute file path; images are delivered as photos, other files as documents. Use THIS when the user asks you to send/deliver a file or picture to them — do NOT try to browse the web, download, or paste a file path as text. Only delivers when the current conversation arrived over an IM channel.",
+            DangerTier::Write,
+        ),
+        |deps, _ctx, p| send_file(deps, p),
+    ));
+}
+
+#[cfg(test)]
+mod send_file_tests {
+    use super::mime_for_file_name;
+    use crate::registry::{Registry, Surface};
+
+    #[test]
+    fn send_file_is_visible_on_channel_and_desktop() {
+        let reg = Registry::global();
+        // Write-tier → allowed on Channel (where delivery happens) and Desktop.
+        assert!(reg.tool_visible(Surface::Channel, "nomi_channel_send_file"));
+        assert!(reg.tool_visible(Surface::Desktop, "nomi_channel_send_file"));
+    }
+
+    #[test]
+    fn mime_mapping_drives_image_vs_document() {
+        assert_eq!(mime_for_file_name("1.png"), "image/png");
+        assert_eq!(mime_for_file_name("cat.JPG"), "image/jpeg");
+        assert_eq!(mime_for_file_name("clip.webp"), "image/webp");
+        assert_eq!(mime_for_file_name("report.pdf"), "application/pdf");
+        assert_eq!(mime_for_file_name("noext"), "application/octet-stream");
+        assert_eq!(mime_for_file_name("archive.ZIP"), "application/zip");
+    }
 }
