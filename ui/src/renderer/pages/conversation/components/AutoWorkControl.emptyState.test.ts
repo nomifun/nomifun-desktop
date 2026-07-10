@@ -53,8 +53,45 @@ describe('AutoWork tag picker empty state', () => {
     expect(source.includes('const handleTagPickerActionKeyDown = (')).toBe(true);
     expect(source.includes('if (!isAutoWorkTagPickerActionKey(event.key)) return;')).toBe(true);
     expect(source.includes('action();')).toBe(true);
-    expect(source.includes('handleTagPickerActionKeyDown(event, () => void refreshTags())')).toBe(true);
+    expect(source.includes('handleTagPickerActionKeyDown(event, retryTags)')).toBe(true);
     expect(source.includes('handleTagPickerActionKeyDown(event, openNewRequirement)')).toBe(true);
     expect(source.split('onKeyDown={(event) => handleTagPickerActionKeyDown').length - 1).toBe(2);
+  });
+
+  test('focuses the Select before retrying through one shared callback', () => {
+    const source = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
+    const retryStart = source.indexOf('const retryTags = () => {');
+    const retryEnd = source.indexOf('\n  };', retryStart);
+    const retrySource = source.slice(retryStart, retryEnd);
+
+    expect(
+      source.includes("import type { SelectHandle } from '@arco-design/web-react/es/Select/interface';")
+    ).toBe(true);
+    expect(source.includes('const tagSelectRef = useRef<SelectHandle>(null);')).toBe(true);
+    expect(source.includes('ref={tagSelectRef}')).toBe(true);
+    expect(retryStart).toBeGreaterThan(-1);
+    expect(retrySource.indexOf('tagSelectRef.current?.focus();')).toBeGreaterThan(-1);
+    expect(retrySource.indexOf('void refreshTags();')).toBeGreaterThan(
+      retrySource.indexOf('tagSelectRef.current?.focus();')
+    );
+    expect(source.includes('onClick={retryTags}')).toBe(true);
+    expect(source.includes('handleTagPickerActionKeyDown(event, retryTags)')).toBe(true);
+  });
+
+  test('announces both loading and error feedback as polite atomic status regions', () => {
+    const source = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
+
+    expect(source.split("role='status'").length - 1).toBe(2);
+    expect(source.split("aria-live='polite'").length - 1).toBe(2);
+    expect(source.split("aria-atomic='true'").length - 1).toBe(2);
+  });
+
+  test('hides cached options outside ready mode without clearing the selected binding', () => {
+    const source = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
+
+    expect(source.includes("const tagOptions = tagPickerMode === 'ready'")).toBe(true);
+    expect(source.includes('options={tagOptions}')).toBe(true);
+    expect(source.includes('value={tag}')).toBe(true);
+    expect(source.includes('disabled={enabled}')).toBe(true);
   });
 });

@@ -9,6 +9,7 @@ import {
 describe('AutoWork tag picker state', () => {
   test('distinguishes loading, ready, failure, and empty results', () => {
     expect(getAutoWorkTagPickerMode(0, true, null)).toBe('loading');
+    expect(getAutoWorkTagPickerMode(2, true, null)).toBe('loading');
     expect(getAutoWorkTagPickerMode(2, false, null)).toBe('ready');
     expect(getAutoWorkTagPickerMode(0, false, 'offline')).toBe('error');
     expect(getAutoWorkTagPickerMode(0, false, null)).toBe('empty');
