@@ -19,7 +19,7 @@ use crate::learner::{Learner, CompanionCompleter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
-use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion};
+use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion, SuggestionPage};
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
@@ -1005,6 +1005,15 @@ impl CompanionService {
 
     pub async fn list_suggestions(&self, status: Option<&str>, limit: i64) -> Result<Vec<CompanionSuggestion>, AppError> {
         self.store.list_suggestions(status, limit).await
+    }
+
+    pub async fn list_suggestion_page(
+        &self,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SuggestionPage, AppError> {
+        self.store.list_suggestion_page(status, limit, offset).await
     }
 
     pub async fn decide_suggestion(&self, id: &str, accept: bool) -> Result<CompanionSuggestion, AppError> {

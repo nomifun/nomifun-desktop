@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
 use crate::service::{CompanionSkillContent, CompanionSkillView, CompanionStatus, CompanionWeeklyDigest, SourceStats};
 use crate::state::CompanionRouterState;
-use crate::store::{MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionSuggestion};
+use crate::store::{MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage};
 
 pub fn companion_routes(state: CompanionRouterState) -> Router {
     Router::new()
@@ -229,18 +229,19 @@ async fn delete_memory(
 struct ListSuggestionsQuery {
     status: Option<String>,
     limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 async fn list_suggestions(
     State(state): State<CompanionRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListSuggestionsQuery>,
-) -> Result<Json<ApiResponse<Vec<CompanionSuggestion>>>, AppError> {
+) -> Result<Json<ApiResponse<SuggestionPage>>, AppError> {
     let status = query.status.filter(|s| !s.is_empty());
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .list_suggestions(status.as_deref(), query.limit.unwrap_or(100))
+            .list_suggestion_page(status.as_deref(), query.limit.unwrap_or(100), query.offset.unwrap_or(0))
             .await?,
     )))
 }

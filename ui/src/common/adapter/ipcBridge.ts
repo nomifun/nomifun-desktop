@@ -3027,6 +3027,11 @@ export interface ICompanionSuggestion {
   decided_at?: number | null;
 }
 
+export interface ICompanionSuggestionPage {
+  items: ICompanionSuggestion[];
+  total: number;
+}
+
 /** A companion's self-evolved skill (registry row + SKILL.md description). snake_case = Rust JSON 1:1. */
 export interface ICompanionSkill {
   skill_name: string;
@@ -3319,10 +3324,11 @@ export const companion = {
     })
   ),
   deleteMemory: httpDelete<void, { id: string }>((p) => `/api/companion/memories/${p.id}`),
-  listSuggestions: httpGet<ICompanionSuggestion[], { status?: string; limit?: number }>((p) => {
+  listSuggestions: httpGet<ICompanionSuggestionPage, { status?: string; limit?: number; offset?: number }>((p) => {
     const params = new URLSearchParams();
     if (p?.status) params.set('status', p.status);
     if (p?.limit) params.set('limit', String(p.limit));
+    if (p?.offset) params.set('offset', String(p.offset));
     const qs = params.toString();
     return `/api/companion/suggestions${qs ? `?${qs}` : ''}`;
   }),

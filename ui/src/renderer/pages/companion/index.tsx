@@ -514,8 +514,8 @@ const CompanionPage: React.FC = () => {
         if (disposed) return;
         setProfile(withStatus);
         setMood((withStatus.status?.mood as RabbitMood) || 'content');
-        setUnread(news.length);
-        setSuggestions(news);
+        setUnread(news.total);
+        setSuggestions(news.items);
         await applyWindowState(withStatus);
         await applyDeskSize(withStatus, { anchor: 'top-left' });
       } catch (e) {
