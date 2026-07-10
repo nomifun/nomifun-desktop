@@ -40,6 +40,13 @@ pub struct CompanionSkillView {
     pub description: String,
 }
 
+/// One page of skill list rows enriched with their SKILL.md descriptions.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompanionSkillViewPage {
+    pub items: Vec<CompanionSkillView>,
+    pub total: i64,
+}
+
 /// A skill registry row + its raw SKILL.md body, for the in-app editor.
 #[derive(Debug, Clone, Serialize)]
 pub struct CompanionSkillContent {
@@ -1090,6 +1097,30 @@ impl CompanionService {
         include_shared: bool,
     ) -> Result<Vec<CompanionSkillView>, AppError> {
         let skills = self.store.list_skills(companion_id, include_shared).await?;
+        Ok(self.skill_views(skills).await)
+    }
+
+    /// List one page of companion skills for the UI. Only skills on the selected page
+    /// have their SKILL.md frontmatter read from disk.
+    pub async fn list_companion_skill_page(
+        &self,
+        companion_id: &str,
+        include_shared: bool,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<CompanionSkillViewPage, AppError> {
+        let page = self
+            .store
+            .list_skill_page(companion_id, include_shared, status, limit, offset)
+            .await?;
+        Ok(CompanionSkillViewPage {
+            items: self.skill_views(page.items).await,
+            total: page.total,
+        })
+    }
+
+    async fn skill_views(&self, skills: Vec<CompanionSkill>) -> Vec<CompanionSkillView> {
         let mut out = Vec::with_capacity(skills.len());
         for skill in skills {
             let scope = scope_for(&skill.scope_companion_id);
@@ -1100,7 +1131,7 @@ impl CompanionService {
             };
             out.push(CompanionSkillView { skill, description });
         }
-        Ok(out)
+        out
     }
 
     /// Read one skill's registry row + raw SKILL.md body for the in-app editor.
@@ -1512,6 +1543,24 @@ mod tests {
         let views = svc.list_companion_skills(&cid, false).await.unwrap();
         assert_eq!(views.iter().find(|v| v.skill.skill_name == "alpha").unwrap().description, "原始描述");
         assert_eq!(views.iter().find(|v| v.skill.skill_name == "beta").unwrap().description, "");
+    }
+
+    #[tokio::test]
+    async fn list_companion_skill_page_enriches_only_current_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = service(dir.path()).await;
+        let cid = svc.registry.create("测试", "ink").await.unwrap().id;
+        seed_draft_skill(&svc, &cid, "alpha").await;
+        seed_draft_skill(&svc, &cid, "beta").await;
+
+        let page = svc
+            .list_companion_skill_page(&cid, false, Some("draft"), 1, 0)
+            .await
+            .unwrap();
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].description, "原始描述");
     }
 
     #[tokio::test]

@@ -2000,6 +2000,13 @@ pub struct CompanionSkill {
     pub signature: String,
 }
 
+/// One page of skills visible to a companion and the number of matching rows.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompanionSkillPage {
+    pub items: Vec<CompanionSkill>,
+    pub total: i64,
+}
+
 fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> CompanionSkill {
     let prov: String = row.get("provenance");
     CompanionSkill {
@@ -2058,12 +2065,60 @@ impl CompanionStore {
     /// List a companion's own skills; with `include_shared`, also the user-scoped (shared) ones.
     pub async fn list_skills(&self, companion_id: &str, include_shared: bool) -> Result<Vec<CompanionSkill>, AppError> {
         let sql = if include_shared {
-            "SELECT * FROM companion_skills WHERE scope_companion_id = ? OR scope_kind = 'user' ORDER BY strength DESC"
+            "SELECT * FROM companion_skills WHERE scope_companion_id = ? OR scope_kind = 'user' \
+             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
         } else {
-            "SELECT * FROM companion_skills WHERE scope_companion_id = ? ORDER BY strength DESC"
+            "SELECT * FROM companion_skills WHERE scope_companion_id = ? \
+             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
         };
         let rows = sqlx::query(sql).bind(companion_id).fetch_all(&self.pool).await.map_err(db_err)?;
         Ok(rows.iter().map(row_to_skill).collect())
+    }
+
+    /// List one page of skills visible to a companion, optionally limited to one lifecycle status.
+    pub async fn list_skill_page(
+        &self,
+        companion_id: &str,
+        include_shared: bool,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<CompanionSkillPage, AppError> {
+        let scope_clause = if include_shared {
+            " WHERE (scope_companion_id = ? OR scope_kind = 'user')"
+        } else {
+            " WHERE scope_companion_id = ?"
+        };
+        let status_clause = if status.is_some() { " AND status = ?" } else { "" };
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0);
+
+        let items_sql = format!(
+            "SELECT * FROM companion_skills{scope_clause}{status_clause} \
+             ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC LIMIT ? OFFSET ?"
+        );
+        let mut items_query = sqlx::query(&items_sql).bind(companion_id);
+        if let Some(status) = status {
+            items_query = items_query.bind(status);
+        }
+        let rows = items_query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+
+        let count_sql = format!("SELECT COUNT(*) AS n FROM companion_skills{scope_clause}{status_clause}");
+        let mut count_query = sqlx::query(&count_sql).bind(companion_id);
+        if let Some(status) = status {
+            count_query = count_query.bind(status);
+        }
+        let total = count_query.fetch_one(&self.pool).await.map_err(db_err)?.get("n");
+
+        Ok(CompanionSkillPage {
+            items: rows.iter().map(row_to_skill).collect(),
+            total,
+        })
     }
 
     pub async fn get_skill(&self, companion_id: &str, name: &str) -> Result<Option<CompanionSkill>, AppError> {
@@ -2393,6 +2448,80 @@ mod tests {
         let after = store.get_skill("c1", "weekly-report").await.unwrap().unwrap();
         assert_eq!(after.usage_count, 1);
         assert_eq!(after.last_used_at, Some(200));
+    }
+
+    #[tokio::test]
+    async fn list_skill_page_filters_counts_and_pages() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        let skill = |name: &str, owner: &str, scope_kind: &str, status: &str, strength: f64| CompanionSkill {
+            skill_name: name.into(),
+            scope_kind: scope_kind.into(),
+            scope_companion_id: owner.into(),
+            status: status.into(),
+            source: "mined".into(),
+            confidence: 0.7,
+            provenance: vec![],
+            strength,
+            version: 1,
+            superseded_by: None,
+            usage_count: 0,
+            last_used_at: None,
+            created_at: 100,
+            updated_at: 100,
+            signature: String::new(),
+        };
+
+        for s in [
+            skill("own-strong", "c1", "companion", "active", 0.9),
+            skill("own-next", "c1", "companion", "active", 0.8),
+            skill("shared", "", "user", "active", 0.7),
+            skill("other", "c2", "companion", "active", 1.0),
+            skill("own-draft", "c1", "companion", "draft", 1.0),
+        ] {
+            store.insert_skill(&s).await.unwrap();
+        }
+
+        let page = store.list_skill_page("c1", true, Some("active"), 2, 1).await.unwrap();
+
+        assert_eq!(page.total, 3);
+        assert_eq!(
+            page.items.iter().map(|s| s.skill_name.as_str()).collect::<Vec<_>>(),
+            vec!["own-next", "shared"]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_skill_page_stably_orders_equal_strength() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        for name in ["zeta", "alpha"] {
+            store
+                .insert_skill(&CompanionSkill {
+                    skill_name: name.into(),
+                    scope_kind: "companion".into(),
+                    scope_companion_id: "c1".into(),
+                    status: "active".into(),
+                    source: "mined".into(),
+                    confidence: 0.7,
+                    provenance: vec![],
+                    strength: 0.8,
+                    version: 1,
+                    superseded_by: None,
+                    usage_count: 0,
+                    last_used_at: None,
+                    created_at: 100,
+                    updated_at: 100,
+                    signature: String::new(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let page = store.list_skill_page("c1", false, Some("active"), 10, 0).await.unwrap();
+
+        assert_eq!(
+            page.items.iter().map(|s| s.skill_name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
     }
 
     #[tokio::test]
