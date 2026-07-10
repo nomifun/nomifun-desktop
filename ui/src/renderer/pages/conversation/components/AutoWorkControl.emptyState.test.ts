@@ -46,4 +46,15 @@ describe('AutoWork tag picker empty state', () => {
     expect(source.includes('tagPickerActionRef.current.contains(event.target as Node)')).toBe(true);
     expect(source.split('ref={setTagPickerActionRef}').length - 1).toBe(2);
   });
+
+  test('activates either focused feedback button before the Select popup handles the key', () => {
+    const source = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
+
+    expect(source.includes('const handleTagPickerActionKeyDown = (')).toBe(true);
+    expect(source.includes('if (!isAutoWorkTagPickerActionKey(event.key)) return;')).toBe(true);
+    expect(source.includes('action();')).toBe(true);
+    expect(source.includes('handleTagPickerActionKeyDown(event, () => void refreshTags())')).toBe(true);
+    expect(source.includes('handleTagPickerActionKeyDown(event, openNewRequirement)')).toBe(true);
+    expect(source.split('onKeyDown={(event) => handleTagPickerActionKeyDown').length - 1).toBe(2);
+  });
 });

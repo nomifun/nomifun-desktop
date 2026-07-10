@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   getAutoWorkTagPickerMode,
+  isAutoWorkTagPickerActionKey,
   isAutoWorkEnableBlocked,
   shouldFocusAutoWorkTagPickerAction,
 } from './AutoWorkControl.model';
@@ -45,5 +46,16 @@ describe('AutoWork tag picker state', () => {
     for (const mode of ['loading', 'error', 'empty', 'ready'] as const) {
       expect(shouldFocusAutoWorkTagPickerAction(mode, 'Tab', true)).toBe(false);
     }
+  });
+
+  test('recognizes Enter and Space as action keys', () => {
+    expect(isAutoWorkTagPickerActionKey('Enter')).toBe(true);
+    expect(isAutoWorkTagPickerActionKey(' ')).toBe(true);
+  });
+
+  test('leaves other keys unchanged for action activation', () => {
+    expect(isAutoWorkTagPickerActionKey('Tab')).toBe(false);
+    expect(isAutoWorkTagPickerActionKey('Escape')).toBe(false);
+    expect(isAutoWorkTagPickerActionKey('a')).toBe(false);
   });
 });

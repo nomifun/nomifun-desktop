@@ -22,3 +22,7 @@ export function shouldFocusAutoWorkTagPickerAction(
 ): boolean {
   return key === 'Tab' && !shiftKey && (mode === 'empty' || mode === 'error');
 }
+
+export function isAutoWorkTagPickerActionKey(key: string): boolean {
+  return key === 'Enter' || key === ' ';
+}
