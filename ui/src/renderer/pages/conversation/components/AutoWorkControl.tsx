@@ -19,6 +19,7 @@ import { useRequirementTags } from '@renderer/pages/requirements/useRequirements
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
 import {
   getAutoWorkTagPickerMode,
+  isAutoWorkTagPickerActionKey,
   isAutoWorkEnableBlocked,
   shouldFocusAutoWorkTagPickerAction,
 } from './AutoWorkControl.model';
@@ -133,6 +134,13 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
     tagPickerActionRef.current?.focus();
   };
 
+  const handleTagPickerActionKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, action: () => void) => {
+    if (!isAutoWorkTagPickerActionKey(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    action();
+  };
+
   const tagPickerFeedback =
     tagPickerMode === 'loading' ? (
       <div className='flex items-center justify-center gap-8px px-16px py-18px text-12px text-t-tertiary'>
@@ -145,7 +153,13 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
         <span className='text-12px leading-16px text-t-tertiary'>
           {t('requirements.autowork.loadErrorDescription')}
         </span>
-        <Button ref={setTagPickerActionRef} size='mini' type='text' onClick={() => void refreshTags()}>
+        <Button
+          ref={setTagPickerActionRef}
+          size='mini'
+          type='text'
+          onClick={() => void refreshTags()}
+          onKeyDown={(event) => handleTagPickerActionKeyDown(event, () => void refreshTags())}
+        >
           {t('requirements.autowork.retry')}
         </Button>
       </div>
@@ -161,7 +175,14 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
         <span className='text-12px leading-16px text-t-tertiary'>
           {t('requirements.autowork.emptyDescription')}
         </span>
-        <Button ref={setTagPickerActionRef} size='mini' type='primary' shape='round' onClick={openNewRequirement}>
+        <Button
+          ref={setTagPickerActionRef}
+          size='mini'
+          type='primary'
+          shape='round'
+          onClick={openNewRequirement}
+          onKeyDown={(event) => handleTagPickerActionKeyDown(event, openNewRequirement)}
+        >
           {t('requirements.autowork.emptyCta')}
         </Button>
       </div>
