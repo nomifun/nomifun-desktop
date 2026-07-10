@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 #[cfg(windows)]
 use windows_sys::Win32::Globalization::{
@@ -23,7 +26,7 @@ struct StoredChunk {
 
 pub struct OutputBuffer {
     limit: usize,
-    inner: Mutex<OutputState>,
+    inner: Mutex<OutputBufferState>,
 }
 
 struct OutputState {
@@ -35,6 +38,18 @@ struct OutputState {
     chunks: VecDeque<StoredChunk>,
     decoders: StreamDecoders,
     base_decoders: StreamDecoders,
+    finalized: bool,
+}
+
+enum OutputBufferState {
+    Live(OutputState),
+    Frozen(Arc<OutputState>),
+    Transition,
+}
+
+#[derive(Clone)]
+pub(crate) struct FrozenOutput {
+    state: Arc<OutputState>,
 }
 
 impl OutputBuffer {
@@ -43,7 +58,7 @@ impl OutputBuffer {
         let base_decoders = decoders.clone();
         Self {
             limit: limit_bytes,
-            inner: Mutex::new(OutputState {
+            inner: Mutex::new(OutputBufferState::Live(OutputState {
                 next_seq: 0,
                 next_offset: 0,
                 base_offset: 0,
@@ -52,15 +67,23 @@ impl OutputBuffer {
                 chunks: VecDeque::new(),
                 decoders,
                 base_decoders,
-            }),
+                finalized: false,
+            })),
         }
     }
 
     pub fn push(&self, stream: OutputStream, bytes: &[u8]) -> Vec<ExecutionEvent> {
-        let mut state = self
+        let mut storage = self
             .inner
             .lock()
             .expect("process output state mutex is poisoned");
+        let state = match &mut *storage {
+            OutputBufferState::Live(state) => state,
+            OutputBufferState::Frozen(_) => return Vec::new(),
+            OutputBufferState::Transition => {
+                unreachable!("output state transition is only visible while its lock is held")
+            }
+        };
         let start = state.next_offset;
         state.next_offset = state
             .next_offset
@@ -95,60 +118,135 @@ impl OutputBuffer {
     }
 
     pub fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
-        let state = self
+        let storage = self
             .inner
             .lock()
             .expect("process output state mutex is poisoned");
-        let start = cursor
-            .offset()
-            .max(state.base_offset)
-            .min(state.next_offset);
-        let mut decoders = state.base_decoders.clone();
-        let mut chunks = Vec::with_capacity(state.chunks.len());
+        match &*storage {
+            OutputBufferState::Live(state) => snapshot_from_state(state, cursor),
+            OutputBufferState::Frozen(state) => snapshot_from_state(state, cursor),
+            OutputBufferState::Transition => {
+                unreachable!("output state transition is only visible while its lock is held")
+            }
+        }
+    }
 
-        for stored in &state.chunks {
-            let end = stored
-                .start
-                .checked_add(byte_count(stored.bytes.len()))
-                .expect("stored output offset overflowed u64");
-            if end <= start {
-                decoders
-                    .for_stream_mut(stored.stream)
-                    .decode(&stored.bytes);
+    pub(crate) fn freeze(&self) -> FrozenOutput {
+        let mut storage = self
+            .inner
+            .lock()
+            .expect("process output state mutex is poisoned");
+        if let OutputBufferState::Frozen(state) = &*storage {
+            return FrozenOutput {
+                state: Arc::clone(state),
+            };
+        }
+
+        let OutputBufferState::Live(mut state) =
+            std::mem::replace(&mut *storage, OutputBufferState::Transition)
+        else {
+            unreachable!("output state transition is only visible while its lock is held")
+        };
+        state.finalize();
+        let state = Arc::new(state);
+        *storage = OutputBufferState::Frozen(Arc::clone(&state));
+        FrozenOutput { state }
+    }
+
+}
+
+impl FrozenOutput {
+    pub(crate) fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
+        snapshot_from_state(&self.state, cursor)
+    }
+
+}
+
+fn snapshot_from_state(state: &OutputState, cursor: OutputCursor) -> OutputSnapshot {
+    let start = cursor
+        .offset()
+        .max(state.base_offset)
+        .min(state.next_offset);
+    let mut decoders = state.base_decoders.clone();
+    let mut chunks = Vec::with_capacity(state.chunks.len());
+
+    for stored in &state.chunks {
+        let end = stored
+            .start
+            .checked_add(byte_count(stored.bytes.len()))
+            .expect("stored output offset overflowed u64");
+        if end <= start {
+            decoders
+                .for_stream_mut(stored.stream)
+                .decode(&stored.bytes);
+            continue;
+        }
+
+        let slice_start = start.saturating_sub(stored.start) as usize;
+        let decoder = decoders.for_stream_mut(stored.stream);
+        if slice_start > 0 {
+            decoder.decode(&stored.bytes[..slice_start]);
+        }
+        let bytes = stored.bytes[slice_start..].to_vec();
+        let chunk_start = stored
+            .start
+            .checked_add(byte_count(slice_start))
+            .expect("snapshot output offset overflowed u64");
+        let text = decoder.decode(&bytes).text;
+        chunks.push(OutputChunk {
+            seq: stored.seq,
+            start: chunk_start,
+            stream: stored.stream,
+            bytes,
+            text,
+        });
+    }
+
+    if state.finalized {
+        for (ordinal, (stream, text)) in decoders.finish().into_iter().enumerate() {
+            if text.is_empty() {
                 continue;
             }
-
-            let slice_start = start.saturating_sub(stored.start) as usize;
-            let decoder = decoders.for_stream_mut(stored.stream);
-            if slice_start > 0 {
-                decoder.decode(&stored.bytes[..slice_start]);
+            if let Some(chunk) = chunks.iter_mut().rev().find(|chunk| chunk.stream == stream) {
+                chunk.text.push_str(&text);
+            } else if state
+                .chunks
+                .iter()
+                .any(|chunk| chunk.stream == stream)
+            {
+                let seq = state
+                    .next_seq
+                    .checked_add(byte_count(ordinal))
+                    .expect("terminal output sequence overflowed u64");
+                chunks.push(OutputChunk {
+                    seq,
+                    start: state.next_offset,
+                    stream,
+                    bytes: Vec::new(),
+                    text,
+                });
             }
-            let bytes = stored.bytes[slice_start..].to_vec();
-            let chunk_start = stored
-                .start
-                .checked_add(byte_count(slice_start))
-                .expect("snapshot output offset overflowed u64");
-            let text = decoder.decode(&bytes).text;
-            chunks.push(OutputChunk {
-                seq: stored.seq,
-                start: chunk_start,
-                stream: stored.stream,
-                bytes,
-                text,
-            });
         }
+    }
 
-        OutputSnapshot {
-            chunks,
-            next_cursor: OutputCursor::new(state.next_offset),
-            retained_bytes: state.retained,
-            dropped_bytes: state.dropped_bytes,
-            encoding: state.decoders.metadata(),
-        }
+    OutputSnapshot {
+        chunks,
+        next_cursor: OutputCursor::new(state.next_offset),
+        retained_bytes: state.retained,
+        dropped_bytes: state.dropped_bytes,
+        encoding: state.decoders.metadata(),
     }
 }
 
 impl OutputState {
+    fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        let _ = self.decoders.finish();
+        self.finalized = true;
+    }
+
     fn take_seq(&mut self) -> u64 {
         let seq = self.next_seq;
         self.next_seq = self
@@ -313,6 +411,14 @@ impl StreamDecoders {
             decode_errors,
         }
     }
+
+    fn finish(&mut self) -> [(OutputStream, String); 3] {
+        [
+            (OutputStream::Stdout, self.stdout.finish().text),
+            (OutputStream::Stderr, self.stderr.finish().text),
+            (OutputStream::Pty, self.pty.finish().text),
+        ]
+    }
 }
 
 struct DecodedDelta {
@@ -408,6 +514,69 @@ impl IncrementalDecoder {
     fn discard_bounded(&mut self, bytes: &[u8]) {
         for chunk in bytes.chunks(DECODE_SCRATCH_BYTES) {
             self.decode(chunk);
+        }
+    }
+
+    fn finish(&mut self) -> DecodedDelta {
+        let errors_before = self.decode_errors;
+        let mut sources = DeltaSources::default();
+
+        #[cfg(windows)]
+        let text = if let Some(decoder) = &mut self.windows {
+            let platform_encoding = decoder.label();
+            sources.platform_encoding = Some(platform_encoding.clone());
+            self.source_encoding = if self.saw_non_ascii_utf8 {
+                "mixed".to_owned()
+            } else {
+                platform_encoding
+            };
+            let (text, errors) = decoder.finish();
+            self.decode_errors = self.decode_errors.saturating_add(errors);
+            text
+        } else if self.utf8_pending.is_empty() {
+            String::new()
+        } else {
+            let pending = std::mem::take(&mut self.utf8_pending);
+            self.decode_errors = self.decode_errors.saturating_add(1);
+            if self.active_code_page == 65001 {
+                "\u{fffd}".to_owned()
+            } else {
+                let mut decoder = WindowsDecoder::new(self.active_code_page);
+                let platform_encoding = decoder.label();
+                sources.platform_encoding = Some(platform_encoding.clone());
+                self.source_encoding = if self.saw_non_ascii_utf8 {
+                    "mixed".to_owned()
+                } else {
+                    platform_encoding
+                };
+                let (mut text, decode_errors) = decoder.decode(&pending);
+                let (suffix, finish_errors) = decoder.finish();
+                text.push_str(&suffix);
+                self.decode_errors = self
+                    .decode_errors
+                    .saturating_add(decode_errors)
+                    .saturating_add(finish_errors);
+                self.windows = Some(decoder);
+                text
+            }
+        };
+
+        #[cfg(not(windows))]
+        let text = if self.utf8_pending.is_empty() {
+            String::new()
+        } else {
+            self.utf8_pending.clear();
+            self.decode_errors = self.decode_errors.saturating_add(1);
+            "\u{fffd}".to_owned()
+        };
+
+        DecodedDelta {
+            text,
+            encoding: EncodingMetadata {
+                source_encoding: sources.label(),
+                decode_errors: self.decode_errors.saturating_sub(errors_before),
+            },
+            sources,
         }
     }
 
@@ -507,6 +676,14 @@ impl WindowsDecoder {
         }
         decode_windows_input(self.code_page, &input)
     }
+
+    fn finish(&mut self) -> (String, u64) {
+        if self.pending.is_empty() {
+            return (String::new(), 0);
+        }
+        self.pending.clear();
+        ("\u{fffd}".to_owned(), 1)
+    }
 }
 
 #[cfg(windows)]
@@ -592,20 +769,50 @@ mod tests {
         thread,
     };
 
-    use super::OutputBuffer;
+    use super::{FrozenOutput, OutputBuffer, OutputBufferState};
     use crate::{ExecutionEvent, OutputCursor, OutputStream};
 
     const MAX_DECODED_TEXT_BYTES_PER_SOURCE_BYTE: usize = 4;
+
+    fn retained_allocation(output: &OutputBuffer) -> Option<(*const u8, usize)> {
+        let storage = output.inner.lock().expect("fresh mutex must lock");
+        let state = match &*storage {
+            OutputBufferState::Live(state) => state,
+            OutputBufferState::Frozen(state) => state,
+            OutputBufferState::Transition => panic!("freeze cannot expose its transition state"),
+        };
+        state
+            .chunks
+            .front()
+            .map(|chunk| (chunk.bytes.as_ptr(), chunk.bytes.len()))
+    }
+
+    fn frozen_allocation(output: &FrozenOutput) -> Option<(*const u8, usize)> {
+        output
+            .state
+            .chunks
+            .front()
+            .map(|chunk| (chunk.bytes.as_ptr(), chunk.bytes.len()))
+    }
+
+    #[cfg(windows)]
+    fn set_code_page(output: &OutputBuffer, stream: OutputStream, code_page: u32) {
+        let mut storage = output.inner.lock().expect("fresh mutex must lock");
+        let OutputBufferState::Live(state) = &mut *storage else {
+            panic!("code page can only be set before output is frozen");
+        };
+        state.decoders.for_stream_mut(stream).active_code_page = code_page;
+        state
+            .base_decoders
+            .for_stream_mut(stream)
+            .active_code_page = code_page;
+    }
 
     #[test]
     fn retained_replacement_expansion_is_complete_and_matches_the_snapshot() {
         let output = OutputBuffer::new(1);
         #[cfg(windows)]
-        {
-            let mut state = output.inner.lock().expect("fresh mutex must lock");
-            state.decoders.stdout.active_code_page = 65001;
-            state.base_decoders.stdout.active_code_page = 65001;
-        }
+        set_code_page(&output, OutputStream::Stdout, 65001);
 
         let events = output.push(OutputStream::Stdout, &[0xff]);
         let ExecutionEvent::Output { bytes, text, .. } = &events[0] else {
@@ -624,6 +831,194 @@ mod tests {
                     .len()
                     .saturating_mul(MAX_DECODED_TEXT_BYTES_PER_SOURCE_BYTE)
         );
+    }
+
+    #[test]
+    fn freeze_migrates_retained_output_once_and_rejects_late_pushes() {
+        let output = OutputBuffer::new(8);
+        output.push(OutputStream::Stdout, b"12345678");
+        let allocation_before =
+            retained_allocation(&output).expect("live output must retain its chunk");
+
+        let frozen = output.freeze();
+        let frozen_clone = frozen.clone();
+        let frozen_again = output.freeze();
+        assert_eq!(
+            frozen_allocation(&frozen),
+            Some(allocation_before),
+            "freeze must migrate the retained allocation instead of copying it"
+        );
+        assert_eq!(
+            frozen_allocation(&frozen_clone),
+            Some(allocation_before),
+            "cloning terminal output must be shallow"
+        );
+        assert_eq!(
+            frozen_allocation(&frozen_again),
+            Some(allocation_before),
+            "repeated freeze must reuse the same terminal allocation"
+        );
+        assert_eq!(
+            retained_allocation(&output),
+            Some(allocation_before),
+            "live and terminal views must share the frozen allocation"
+        );
+
+        let terminal_before = frozen.snapshot_from(OutputCursor::START);
+        let events = output.push(OutputStream::Stdout, b"late");
+        let terminal_after = frozen.snapshot_from(OutputCursor::START);
+        let live_after = output.snapshot_from(OutputCursor::START);
+        assert!(events.is_empty(), "push after freeze must be rejected");
+        assert_eq!(terminal_after, terminal_before);
+        assert_eq!(live_after, terminal_before);
+    }
+
+    #[test]
+    fn freeze_eof_finalizes_pending_utf8_for_all_streams_once() {
+        let output = OutputBuffer::new(3);
+        #[cfg(windows)]
+        for stream in [
+            OutputStream::Stdout,
+            OutputStream::Stderr,
+            OutputStream::Pty,
+        ] {
+            set_code_page(&output, stream, 65001);
+        }
+
+        for stream in [
+            OutputStream::Stdout,
+            OutputStream::Stderr,
+            OutputStream::Pty,
+        ] {
+            output.push(stream, &[0xe4]);
+        }
+        let live = output.snapshot_from(OutputCursor::START);
+        assert_eq!(live.text(), "");
+        assert_eq!(live.encoding.decode_errors, 0);
+
+        let frozen = output.freeze();
+        let terminal = frozen.snapshot_from(OutputCursor::START);
+        let terminal_again = output.freeze().snapshot_from(OutputCursor::START);
+        assert_eq!(terminal.text(), "\u{fffd}\u{fffd}\u{fffd}");
+        assert_eq!(terminal.encoding.decode_errors, 3);
+        assert_eq!(terminal_again, terminal, "EOF finalization must be idempotent");
+        assert_eq!(output.snapshot_from(OutputCursor::START), terminal);
+    }
+
+    #[test]
+    fn terminal_eof_text_survives_a_live_cursor_past_that_stream() {
+        let output = OutputBuffer::new(2);
+        #[cfg(windows)]
+        set_code_page(&output, OutputStream::Stdout, 65001);
+
+        output.push(OutputStream::Stdout, &[0xe4]);
+        let live = output.snapshot_from(OutputCursor::START);
+        assert_eq!(live.raw_bytes(), [0xe4]);
+        assert_eq!(live.text(), "");
+        let live_cursor = live.next_cursor;
+
+        output.push(OutputStream::Stderr, b"x");
+        let frozen = output.freeze();
+        let terminal = frozen.snapshot_from(live_cursor);
+        let terminal_again = frozen.snapshot_from(live_cursor);
+
+        assert_eq!(terminal, terminal_again);
+        assert_eq!(terminal.raw_bytes(), b"x");
+        assert_eq!(terminal.text(), "x\u{fffd}");
+        assert_eq!(terminal.next_cursor, OutputCursor::new(2));
+        assert_eq!(terminal.retained_bytes, 2);
+        assert_eq!(terminal.dropped_bytes, 0);
+        assert_eq!(terminal.chunks.len(), 2);
+        assert_eq!(terminal.chunks[0].stream, OutputStream::Stderr);
+        assert_eq!(terminal.chunks[0].seq, 1);
+        assert_eq!(terminal.chunks[0].start, 1);
+        assert_eq!(terminal.chunks[0].bytes, b"x");
+        assert_eq!(terminal.chunks[1].stream, OutputStream::Stdout);
+        assert_eq!(terminal.chunks[1].seq, 2);
+        assert_eq!(terminal.chunks[1].start, 2);
+        assert!(terminal.chunks[1].bytes.is_empty());
+        assert_eq!(terminal.chunks[1].text, "\u{fffd}");
+    }
+
+    #[test]
+    fn terminal_eof_does_not_reveal_an_incomplete_tail_dropped_by_zero_cap() {
+        let output = OutputBuffer::new(0);
+        #[cfg(windows)]
+        set_code_page(&output, OutputStream::Stdout, 65001);
+
+        output.push(OutputStream::Stdout, &[0xe4]);
+        let frozen = output.freeze();
+        let terminal = frozen.snapshot_from(OutputCursor::START);
+        let terminal_again = frozen.snapshot_from(OutputCursor::START);
+
+        assert_eq!(terminal, terminal_again);
+        assert!(terminal.chunks.is_empty());
+        assert!(terminal.raw_bytes().is_empty());
+        assert_eq!(terminal.text(), "");
+        assert_eq!(terminal.next_cursor, OutputCursor::new(1));
+        assert_eq!(terminal.retained_bytes, 0);
+        assert_eq!(terminal.dropped_bytes, 1);
+        assert_eq!(terminal.encoding.decode_errors, 1);
+    }
+
+    #[test]
+    fn terminal_eof_does_not_reveal_a_tail_evicted_by_another_stream() {
+        let output = OutputBuffer::new(1);
+        #[cfg(windows)]
+        set_code_page(&output, OutputStream::Stdout, 65001);
+
+        output.push(OutputStream::Stdout, &[0xe4]);
+        output.push(OutputStream::Stderr, b"x");
+        let frozen = output.freeze();
+        let terminal = frozen.snapshot_from(OutputCursor::START);
+        let terminal_again = frozen.snapshot_from(OutputCursor::START);
+
+        assert_eq!(terminal, terminal_again);
+        assert_eq!(terminal.chunks.len(), 1);
+        assert_eq!(terminal.chunks[0].stream, OutputStream::Stderr);
+        assert_eq!(terminal.chunks[0].seq, 1);
+        assert_eq!(terminal.chunks[0].start, 1);
+        assert_eq!(terminal.chunks[0].bytes, b"x");
+        assert_eq!(terminal.chunks[0].text, "x");
+        assert_eq!(terminal.raw_bytes(), b"x");
+        assert_eq!(terminal.text(), "x");
+        assert_eq!(terminal.next_cursor, OutputCursor::new(2));
+        assert_eq!(terminal.retained_bytes, 1);
+        assert_eq!(terminal.dropped_bytes, 1);
+        assert_eq!(terminal.encoding.decode_errors, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn freeze_eof_falls_back_to_the_active_code_page_for_utf8_carry() {
+        let output = OutputBuffer::new(1);
+        set_code_page(&output, OutputStream::Stdout, 1252);
+        output.push(OutputStream::Stdout, &[0xe4]);
+        let live = output.snapshot_from(OutputCursor::START);
+        assert_eq!(live.text(), "");
+        assert_eq!(live.encoding.source_encoding, "utf-8");
+        assert_eq!(live.encoding.decode_errors, 0);
+
+        let terminal = output.freeze().snapshot_from(OutputCursor::START);
+        assert_eq!(terminal.chunks[0].bytes, [0xe4]);
+        assert_eq!(terminal.text(), "ä");
+        assert_eq!(terminal.encoding.source_encoding, "windows-1252");
+        assert_eq!(terminal.encoding.decode_errors, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn freeze_eof_finalizes_pending_windows_dbcs_lead_byte() {
+        let output = OutputBuffer::new(1);
+        set_code_page(&output, OutputStream::Stdout, 936);
+        output.push(OutputStream::Stdout, &[0x81]);
+        let live = output.snapshot_from(OutputCursor::START);
+        assert_eq!(live.text(), "");
+
+        let terminal = output.freeze().snapshot_from(OutputCursor::START);
+        assert_eq!(terminal.chunks[0].bytes, [0x81]);
+        assert_eq!(terminal.text(), "\u{fffd}");
+        assert!(terminal.encoding.decode_errors > live.encoding.decode_errors);
     }
 
     #[test]

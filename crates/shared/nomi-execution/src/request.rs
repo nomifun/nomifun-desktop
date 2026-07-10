@@ -9,7 +9,7 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::CapabilityPolicy;
+use crate::{CapabilityPolicy, outcome::SessionId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionRequest {
@@ -102,6 +102,17 @@ pub enum ExecutionError {
     InvalidCommand { reason: String },
     #[error("invalid transport: {reason}")]
     InvalidTransport { reason: String },
+    #[error("execution session {session_id} was not found")]
+    SessionNotFound { session_id: SessionId },
+    #[error("execution session {session_id} belongs to a different owner")]
+    OwnerMismatch { session_id: SessionId },
+    #[error("execution transport failure: {reason}")]
+    Transport { reason: String },
+    #[error("execution I/O failure during {operation}: {reason}")]
+    Io {
+        operation: &'static str,
+        reason: String,
+    },
 }
 
 impl ExecutionError {
@@ -111,6 +122,10 @@ impl ExecutionError {
             Self::CapabilityDenied { .. } => "capability_denied",
             Self::InvalidCommand { .. } => "invalid_command",
             Self::InvalidTransport { .. } => "invalid_transport",
+            Self::SessionNotFound { .. } => "session_not_found",
+            Self::OwnerMismatch { .. } => "owner_mismatch",
+            Self::Transport { .. } => "transport",
+            Self::Io { .. } => "io",
         }
     }
 }

@@ -18,6 +18,7 @@ uuid.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 serial_test.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
