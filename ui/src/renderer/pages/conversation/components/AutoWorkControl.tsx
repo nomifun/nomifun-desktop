@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Message, Popover, Select, Spin, Switch, Tooltip } from '@arco-design/web-react';
+import type { SelectHandle } from '@arco-design/web-react/es/Select/interface';
 import { ListAdd, Robot } from '@icon-park/react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
@@ -66,7 +67,11 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
   const navigate = useNavigate();
   const { tags, loading: tagsLoading, error: tagsError, refresh: refreshTags } = useRequirementTags();
   const tagPickerMode = getAutoWorkTagPickerMode(tags.length, tagsLoading, tagsError);
+  const tagOptions = tagPickerMode === 'ready'
+    ? tags.map((tag) => ({ label: `${tag.tag} (${tag.done}/${tag.total})`, value: tag.tag }))
+    : [];
   const tagPickerActionRef = useRef<HTMLButtonElement | null>(null);
+  const tagSelectRef = useRef<SelectHandle>(null);
   const [state, setState] = useState<IAutoWorkState | null>(null);
   const [persistedTag, setPersistedTag] = useState<string | undefined>();
   const kind = target?.kind;
@@ -117,6 +122,11 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
 
   const openNewRequirement = () => navigate('/requirements?new=1');
 
+  const retryTags = () => {
+    tagSelectRef.current?.focus();
+    void refreshTags();
+  };
+
   const setTagPickerActionRef = (node: unknown) => {
     tagPickerActionRef.current = node as HTMLButtonElement | null;
   };
@@ -143,12 +153,22 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
 
   const tagPickerFeedback =
     tagPickerMode === 'loading' ? (
-      <div className='flex items-center justify-center gap-8px px-16px py-18px text-12px text-t-tertiary'>
+      <div
+        className='flex items-center justify-center gap-8px px-16px py-18px text-12px text-t-tertiary'
+        role='status'
+        aria-live='polite'
+        aria-atomic='true'
+      >
         <Spin size={16} />
         <span>{t('requirements.autowork.loadingTags')}</span>
       </div>
     ) : tagPickerMode === 'error' ? (
-      <div className='flex flex-col items-center gap-6px px-16px py-16px text-center'>
+      <div
+        className='flex flex-col items-center gap-6px px-16px py-16px text-center'
+        role='status'
+        aria-live='polite'
+        aria-atomic='true'
+      >
         <span className='text-13px font-500 text-t-primary'>{t('requirements.autowork.loadErrorTitle')}</span>
         <span className='text-12px leading-16px text-t-tertiary'>
           {t('requirements.autowork.loadErrorDescription')}
@@ -157,8 +177,8 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
           ref={setTagPickerActionRef}
           size='mini'
           type='text'
-          onClick={() => void refreshTags()}
-          onKeyDown={(event) => handleTagPickerActionKeyDown(event, () => void refreshTags())}
+          onClick={retryTags}
+          onKeyDown={(event) => handleTagPickerActionKeyDown(event, retryTags)}
         >
           {t('requirements.autowork.retry')}
         </Button>
@@ -217,13 +237,14 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
         <span className='text-t-secondary text-12px'>{t('requirements.autowork.tagLabel')}</span>
         <Tooltip disabled={!enabled} content={t('requirements.autowork.disableToChangeTag')}>
           <Select
+            ref={tagSelectRef}
             size='small'
             placeholder={t('requirements.autowork.selectTag')}
             value={tag}
             onChange={setTag}
             disabled={enabled}
             notFoundContent={tagPickerFeedback}
-            options={tags.map((tg) => ({ label: `${tg.tag} (${tg.done}/${tg.total})`, value: tg.tag }))}
+            options={tagOptions}
             allowClear
           />
         </Tooltip>
