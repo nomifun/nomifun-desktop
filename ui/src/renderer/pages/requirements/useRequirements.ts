@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import { ipcBridge } from '@/common';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IListRequirementsParams, IRequirement } from '@/common/adapter/ipcBridge';
+import {
+  initialRequirementTagLoadState,
+  reduceRequirementTagLoadState,
+} from './requirementTagLoadState';
 
 export function useRequirements(params: IListRequirementsParams) {
   const [items, setItems] = useState<IRequirement[]>([]);
@@ -50,14 +54,22 @@ export function useRequirements(params: IListRequirementsParams) {
 }
 
 export function useRequirementTags() {
-  const [tags, setTags] = useState<{ tag: string; done: number; total: number }[]>([]);
+  const [state, dispatch] = useReducer(reduceRequirementTagLoadState, initialRequirementTagLoadState);
   const refresh = useCallback(async () => {
+    dispatch({ type: 'start' });
     try {
       const res = await ipcBridge.requirements.tags.invoke();
-      setTags(res.map((t) => ({ tag: t.tag, done: t.done, total: t.total })));
+      dispatch({
+        type: 'success',
+        tags: res.map((tag) => ({ tag: tag.tag, done: tag.done, total: tag.total })),
+      });
     } catch (e) {
-      if (isHandledAuthExpiredHttpError(e)) return;
-      console.error('Failed to load tags', e);
+      if (!isHandledAuthExpiredHttpError(e)) {
+        console.error('Failed to load tags', e);
+        dispatch({ type: 'failure', error: String(e) });
+      }
+    } finally {
+      dispatch({ type: 'finish' });
     }
   }, []);
   useEffect(() => {
@@ -71,5 +83,5 @@ export function useRequirementTags() {
     ];
     return () => unsubs.forEach((u) => u());
   }, [refresh]);
-  return { tags, refresh };
+  return { ...state, refresh };
 }
