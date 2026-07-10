@@ -161,6 +161,31 @@ pub struct MemoryFilter {
     pub offset: i64,
 }
 
+/// One page of memories and the number of rows matching the same filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPage {
+    pub items: Vec<CompanionMemory>,
+    pub total: i64,
+}
+
+fn memory_filter_clause(filter: &MemoryFilter) -> String {
+    let mut sql = String::from(" WHERE 1=1");
+    if filter.kind.is_some() {
+        sql.push_str(" AND kind = ?");
+    }
+    if filter.q.is_some() {
+        sql.push_str(" AND content LIKE ?");
+    }
+    if filter.status.is_some() {
+        sql.push_str(" AND status = ?");
+    }
+    if filter.scope_companion_id.is_some() {
+        // Shared (all companions) + this companion's own private memories.
+        sql.push_str(" AND (scope_kind = 'user' OR scope_companion_id = ?)");
+    }
+    sql
+}
+
 #[derive(Clone)]
 pub struct CompanionStore {
     pool: SqlitePool,
@@ -1024,20 +1049,7 @@ impl CompanionStore {
     }
 
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
-        let mut sql = String::from("SELECT * FROM companion_memories WHERE 1=1");
-        if filter.kind.is_some() {
-            sql.push_str(" AND kind = ?");
-        }
-        if filter.q.is_some() {
-            sql.push_str(" AND content LIKE ?");
-        }
-        if filter.status.is_some() {
-            sql.push_str(" AND status = ?");
-        }
-        if filter.scope_companion_id.is_some() {
-            // Shared (all companions) + this companion's own private memories.
-            sql.push_str(" AND (scope_kind = 'user' OR scope_companion_id = ?)");
-        }
+        let mut sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
         sql.push_str(" ORDER BY pinned DESC, strength DESC, updated_at DESC LIMIT ? OFFSET ?");
         let mut query = sqlx::query(&sql);
         if let Some(kind) = &filter.kind {
@@ -1056,6 +1068,52 @@ impl CompanionStore {
         query = query.bind(limit).bind(filter.offset.max(0));
         let rows = query.fetch_all(&self.pool).await.map_err(db_err)?;
         Ok(rows.iter().map(row_to_memory).collect())
+    }
+
+    pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
+        let mut items_sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
+        items_sql.push_str(" ORDER BY pinned DESC, strength DESC, updated_at DESC LIMIT ? OFFSET ?");
+        let mut items_query = sqlx::query(&items_sql);
+        if let Some(kind) = &filter.kind {
+            items_query = items_query.bind(kind);
+        }
+        if let Some(q) = &filter.q {
+            items_query = items_query.bind(format!("%{q}%"));
+        }
+        if let Some(status) = &filter.status {
+            items_query = items_query.bind(status);
+        }
+        if let Some(cid) = &filter.scope_companion_id {
+            items_query = items_query.bind(cid);
+        }
+        let limit = if filter.limit <= 0 { 100 } else { filter.limit.min(500) };
+        let rows = items_query
+            .bind(limit)
+            .bind(filter.offset.max(0))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+
+        let count_sql = format!("SELECT COUNT(*) AS n FROM companion_memories{}", memory_filter_clause(filter));
+        let mut count_query = sqlx::query(&count_sql);
+        if let Some(kind) = &filter.kind {
+            count_query = count_query.bind(kind);
+        }
+        if let Some(q) = &filter.q {
+            count_query = count_query.bind(format!("%{q}%"));
+        }
+        if let Some(status) = &filter.status {
+            count_query = count_query.bind(status);
+        }
+        if let Some(cid) = &filter.scope_companion_id {
+            count_query = count_query.bind(cid);
+        }
+        let total = count_query.fetch_one(&self.pool).await.map_err(db_err)?.get("n");
+
+        Ok(MemoryPage {
+            items: rows.iter().map(row_to_memory).collect(),
+            total,
+        })
     }
 
     pub async fn count_memories(&self, status: &str) -> Result<i64, AppError> {
@@ -2492,6 +2550,38 @@ mod tests {
         // No scope filter → cross-companion "all" view sees everything.
         let all = store.list_memories(&MemoryFilter::default()).await.unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_memory_page_counts_the_same_filtered_scope() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        store.insert_memory("knowledge", "shared fact", &[], 0.9, "learn").await.unwrap();
+        store
+            .insert_memory_scoped("knowledge", "c1 private one", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .await
+            .unwrap();
+        store
+            .insert_memory_scoped("knowledge", "c1 private two", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .await
+            .unwrap();
+        store
+            .insert_memory_scoped("knowledge", "c2 private", &[], 0.9, "chat", MemoryScope::Companion("c2".into()))
+            .await
+            .unwrap();
+
+        let page = store
+            .list_memory_page(&MemoryFilter {
+                scope_companion_id: Some("c1".into()),
+                limit: 2,
+                offset: 1,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(page.total, 3);
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|m| m.scope_companion_id != "c2"));
     }
 
     #[tokio::test]

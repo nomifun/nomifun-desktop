@@ -19,7 +19,7 @@ use crate::learner::{Learner, CompanionCompleter};
 use crate::profile::{CompanionProfileConfig, SharedCompanionConfig};
 use crate::registry::{CompanionRegistry, json_merge_patch};
 use crate::skill_sink::CompanionSkillStoreSink;
-use crate::store::{CompanionThread, MemoryFilter, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion};
+use crate::store::{CompanionThread, MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionStore, CompanionSuggestion};
 use nomifun_extension::skill_service::{self, SkillPaths, SkillScope};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 
@@ -910,6 +910,10 @@ impl CompanionService {
 
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
         self.store.list_memories(filter).await
+    }
+
+    pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
+        self.store.list_memory_page(filter).await
     }
 
     // ----- session-window day digests (伙伴会话归档回看) -----
