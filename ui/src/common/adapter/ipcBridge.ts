@@ -3011,6 +3011,11 @@ export interface ICompanionMemory {
   scope_companion_id: string;
 }
 
+export interface ICompanionMemoryPage {
+  items: ICompanionMemory[];
+  total: number;
+}
+
 export interface ICompanionSuggestion {
   id: string;
   kind: string;
@@ -3284,7 +3289,7 @@ export interface ICompanionDeletedEvent {
 
 export const companion = {
   listMemories: httpGet<
-    ICompanionMemory[],
+    ICompanionMemoryPage,
     { kind?: string; q?: string; status?: string; scope_companion_id?: string; limit?: number; offset?: number }
   >((p) => {
     const params = new URLSearchParams();
