@@ -93,6 +93,13 @@ pub struct CompanionSuggestion {
     pub decided_at: Option<TimestampMs>,
 }
 
+/// One suggestion page and the number of rows matching the same status filter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionPage {
+    pub items: Vec<CompanionSuggestion>,
+    pub total: i64,
+}
+
 
 /// One registered companion chat thread (a real `type='nomi'` conversation
 /// owned by the main conversation domain; the companion only tracks membership).
@@ -1564,6 +1571,52 @@ impl CompanionStore {
         Ok(rows.iter().map(row_to_suggestion).collect())
     }
 
+    pub async fn list_suggestion_page(
+        &self,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SuggestionPage, AppError> {
+        let limit = limit.clamp(1, 500);
+        let offset = offset.max(0);
+        let (rows, total) = if let Some(status) = status {
+            let rows = sqlx::query(
+                "SELECT * FROM companion_suggestions WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            )
+            .bind(status)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(db_err)?;
+            let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions WHERE status = ?")
+                .bind(status)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(db_err)?
+                .get("n");
+            (rows, total)
+        } else {
+            let rows = sqlx::query("SELECT * FROM companion_suggestions ORDER BY created_at DESC LIMIT ? OFFSET ?")
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(db_err)?;
+            let total: i64 = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(db_err)?
+                .get("n");
+            (rows, total)
+        };
+
+        Ok(SuggestionPage {
+            items: rows.iter().map(row_to_suggestion).collect(),
+            total,
+        })
+    }
+
     pub async fn count_suggestions(&self, status: &str) -> Result<i64, AppError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM companion_suggestions WHERE status = ?")
             .bind(status)
@@ -2762,6 +2815,21 @@ mod tests {
         let after = &store.list_suggestions(None, 10).await.unwrap()[0];
         assert_eq!(after.created_at, decided.created_at);
         assert_eq!(after.status, "accepted");
+    }
+
+    #[tokio::test]
+    async fn list_suggestion_page_counts_the_same_status() {
+        let store = CompanionStore::open_memory().await.unwrap();
+        store.insert_suggestion("insight", "new one", "first pending", None).await.unwrap();
+        store.insert_suggestion("insight", "new two", "second pending", None).await.unwrap();
+        let decided = store.insert_suggestion("insight", "accepted", "already reviewed", None).await.unwrap();
+        store.decide_suggestion(&decided.id, true).await.unwrap();
+
+        let page = store.list_suggestion_page(Some("new"), 1, 1).await.unwrap();
+
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].status, "new");
     }
 
     #[tokio::test]
