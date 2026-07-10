@@ -149,6 +149,7 @@
   "assistantTagModalTitle": "Manage Tags",
   "assistantTagModalDesc": "Organize assistants by audience and skill scenario. Built-in tags are locked; your own tags can be renamed or deleted.",
   "assistantTagAddPlaceholder": "New tag…",
+  "assistantTagAddHint": "Press Enter to finish adding",
   "assistantTagColumnEmpty": "No tags in this group yet.",
   "assistantTagBuiltinLocked": "Built-in tag",
   "assistantTagRenameHint": "Click to rename",

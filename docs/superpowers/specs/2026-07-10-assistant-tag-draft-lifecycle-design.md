@@ -30,12 +30,16 @@ save and blur behavior.
 
 `AssistantEditDrawer` will hold refs to both `AssistantTagPicker` instances and
 use their existing `resetPendingTag()` imperative API. A single drawer-level
-reset/close helper will cover every dismissal path. The save button will clear
-both drafts before delegating to the existing assistant save handler.
+reset/close helper will cover every local dismissal path. A visibility-change
+effect will also clear both refs whenever the parent hides the drawer, covering
+save, deletion, and any future parent-controlled dismissal. The save button
+will clear both drafts before delegating to the existing assistant save handler,
+so validation errors cannot leave an unrelated unfinished tag input open.
 
 The picker will render a localized hint only while its inline input is active.
-No blur handler will be enabled for the assistant drawer, preserving its current
-draft-on-blur behavior.
+The key will be added to English and Simplified Chinese settings locales and
+the generated i18n key union will be refreshed. No blur handler will be enabled
+for the assistant drawer, preserving its current draft-on-blur behavior.
 
 ## Error Handling
 
