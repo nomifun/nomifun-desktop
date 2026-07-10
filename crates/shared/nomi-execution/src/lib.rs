@@ -2,7 +2,9 @@ mod capability;
 mod io;
 mod outcome;
 mod platform;
+mod registry;
 mod request;
+mod supervisor;
 
 pub use capability::{CapabilityPolicy, SandboxPolicy};
 pub use io::OutputBuffer;
@@ -14,3 +16,4 @@ pub use request::{
     CommandSpec, ExecutionError, ExecutionOwner, ExecutionPolicy, ExecutionRequest,
     NormalizedExecutionRequest, ShellKind, Transport, normalize_request,
 };
+pub use supervisor::{ExecutionHandle, PollResult, ProcessSupervisor, SupervisorConfig};
