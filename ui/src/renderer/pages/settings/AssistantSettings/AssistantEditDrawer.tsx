@@ -8,7 +8,8 @@ import type { AssistantTag, CreateAssistantTagRequest } from '@/common/types/age
 import type { ImportedAgentSkill } from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
 import type { AgentSkillImportRow } from '@/renderer/pages/settings/skill/agentSkillImportUtils';
 import AgentSkillImportDrawer from '@/renderer/pages/settings/skill/AgentSkillImportDrawer';
-import AssistantTagPicker from './AssistantTagPicker';
+import AssistantTagPicker, { type AssistantTagPickerHandle } from './AssistantTagPicker';
+import { createAssistantTagDraftLifecycle } from './assistantTagDraftLifecycle';
 import EmojiPicker from '@/renderer/components/chat/EmojiPicker';
 import MarkdownView from '@/renderer/components/Markdown';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
@@ -138,9 +139,22 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
   const { t } = useTranslation();
   const navigate = useNavigate();
   const textareaWrapperRef = useRef<HTMLDivElement>(null);
+  const audiencePickerRef = useRef<AssistantTagPickerHandle>(null);
+  const scenarioPickerRef = useRef<AssistantTagPickerHandle>(null);
   const [drawerWidth, setDrawerWidth] = useState(500);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [agentImportVisible, setAgentImportVisible] = useState(false);
+
+  const { resetPendingTagDrafts, closeDrawer, handleDrawerSave } = useMemo(
+    () => createAssistantTagDraftLifecycle(audiencePickerRef, scenarioPickerRef, setEditVisible, handleSave),
+    [handleSave, setEditVisible]
+  );
+
+  useEffect(() => {
+    if (!editVisible) {
+      resetPendingTagDrafts();
+    }
+  }, [editVisible, resetPendingTagDrafts]);
 
   // Auto focus textarea when drawer opens in edit mode
   useEffect(() => {
@@ -246,7 +260,7 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
           <div
             onClick={(e) => {
               e.stopPropagation();
-              setEditVisible(false);
+              closeDrawer();
             }}
             className='absolute right-4 top-2 cursor-pointer text-t-secondary hover:text-t-primary transition-colors p-1'
             style={{ zIndex: 10, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
@@ -262,9 +276,7 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
       zIndex={1200}
       getPopupContainer={() => document.body}
       autoFocus={false}
-      onCancel={() => {
-        setEditVisible(false);
-      }}
+      onCancel={closeDrawer}
       headerStyle={{ background: 'var(--color-bg-1)' }}
       bodyStyle={{ background: 'var(--color-bg-1)' }}
       footer={
@@ -272,16 +284,14 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
           <div className='flex items-center gap-8px'>
             <Button
               type='primary'
-              onClick={handleSave}
+              onClick={handleDrawerSave}
               data-testid='btn-save-assistant'
               className='w-[100px] rounded-[100px]'
             >
               {isCreating ? t('common.create', { defaultValue: 'Create' }) : t('common.save', { defaultValue: 'Save' })}
             </Button>
             <Button
-              onClick={() => {
-                setEditVisible(false);
-              }}
+              onClick={closeDrawer}
               className='w-[100px] rounded-[100px] bg-fill-2'
             >
               {t('common.cancel', { defaultValue: 'Cancel' })}
@@ -473,6 +483,7 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
           <div className='flex-shrink-0 flex flex-col gap-14px'>
             <Typography.Text bold>{t('settings.assistantTags', { defaultValue: 'Tags' })}</Typography.Text>
             <AssistantTagPicker
+              ref={audiencePickerRef}
               dimension='audience'
               label={t('settings.assistantTagPickAudience', { defaultValue: 'Audience tags' })}
               tags={audienceTags}
@@ -481,8 +492,10 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
               onCreateTag={onCreateTag}
               localeKey={localeKey}
               readOnly={readOnly}
+              showAddHint
             />
             <AssistantTagPicker
+              ref={scenarioPickerRef}
               dimension='scenario'
               label={t('settings.assistantTagPickScenario', { defaultValue: 'Scenario tags' })}
               tags={scenarioTags}
@@ -491,6 +504,7 @@ const AssistantEditDrawer: React.FC<AssistantEditDrawerProps> = ({
               onCreateTag={onCreateTag}
               localeKey={localeKey}
               readOnly={readOnly}
+              showAddHint
             />
           </div>
 

@@ -149,6 +149,7 @@
   "assistantTagModalTitle": "标签管理",
   "assistantTagModalDesc": "按使用人群与技能场景归类助手。内置标签已锁定；你创建的标签可以重命名或删除。",
   "assistantTagAddPlaceholder": "新增标签…",
+  "assistantTagAddHint": "按回车完成添加",
   "assistantTagColumnEmpty": "该分组还没有标签。",
   "assistantTagBuiltinLocked": "内置标签",
   "assistantTagRenameHint": "点击重命名",

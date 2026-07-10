@@ -37,4 +37,9 @@ describe('assistant settings locale coverage', () => {
     expect(zhSettings.assistantSkillsHub.railTitle).toBe('助手与技能');
     expect(zhSettings.assistantSkillsHub.skillsTab).toBe('技能');
   });
+
+  test('localizes the inline assistant-tag Enter hint', () => {
+    expect(enSettings.assistantTagAddHint).toBe('Press Enter to finish adding');
+    expect(zhSettings.assistantTagAddHint).toBe('按回车完成添加');
+  });
 });
