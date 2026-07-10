@@ -14,7 +14,7 @@ use nomifun_common::AppError;
 use serde::Deserialize;
 
 use crate::profile::{HeadBox, CompanionProfileConfig, SharedCompanionConfig};
-use crate::service::{CompanionSkillContent, CompanionSkillView, CompanionStatus, CompanionWeeklyDigest, SourceStats};
+use crate::service::{CompanionSkillContent, CompanionSkillViewPage, CompanionStatus, CompanionWeeklyDigest, SourceStats};
 use crate::state::CompanionRouterState;
 use crate::store::{MemoryFilter, MemoryPage, MemoryScope, CompanionLearnRun, CompanionMemory, CompanionSkill, CompanionSuggestion, SuggestionPage};
 
@@ -264,6 +264,9 @@ async fn decide_suggestion(
 #[derive(Deserialize)]
 struct ListSkillsQuery {
     include_shared: Option<bool>,
+    status: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 async fn list_companion_skills(
@@ -271,12 +274,19 @@ async fn list_companion_skills(
     Extension(_user): Extension<CurrentUser>,
     Path(companion_id): Path<String>,
     Query(q): Query<ListSkillsQuery>,
-) -> Result<Json<ApiResponse<Vec<CompanionSkillView>>>, AppError> {
-    let views = state
+) -> Result<Json<ApiResponse<CompanionSkillViewPage>>, AppError> {
+    let status = q.status.filter(|s| !s.is_empty());
+    let page = state
         .service
-        .list_companion_skills(&companion_id, q.include_shared.unwrap_or(true))
+        .list_companion_skill_page(
+            &companion_id,
+            q.include_shared.unwrap_or(true),
+            status.as_deref(),
+            q.limit.unwrap_or(100),
+            q.offset.unwrap_or(0),
+        )
         .await?;
-    Ok(Json(ApiResponse::ok(views)))
+    Ok(Json(ApiResponse::ok(page)))
 }
 
 #[derive(Deserialize)]

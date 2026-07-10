@@ -3051,6 +3051,11 @@ export interface ICompanionSkill {
   description: string; // from SKILL.md frontmatter (CompanionSkillView)
 }
 
+export interface ICompanionSkillPage {
+  items: ICompanionSkill[];
+  total: number;
+}
+
 export interface ICompanionSkillContent {
   skill: ICompanionSkill;
   content: string;
@@ -3337,10 +3342,18 @@ export const companion = {
     (p) => ({ accept: p.accept })
   ),
   // ── Self-evolved skills (P2: see + edit). Keyed by companion_id + skill_name (no standalone id). ──
-  listSkills: httpGet<ICompanionSkill[], { companion_id: string; include_shared?: boolean }>(
-    (p) =>
-      `/api/companion/companions/${p.companion_id}/skills${p.include_shared === false ? '?include_shared=false' : ''}`
-  ),
+  listSkills: httpGet<
+    ICompanionSkillPage,
+    { companion_id: string; include_shared?: boolean; status?: string; limit?: number; offset?: number }
+  >((p) => {
+    const params = new URLSearchParams();
+    if (p.include_shared === false) params.set('include_shared', 'false');
+    if (p.status) params.set('status', p.status);
+    if (p.limit) params.set('limit', String(p.limit));
+    if (p.offset) params.set('offset', String(p.offset));
+    const qs = params.toString();
+    return `/api/companion/companions/${p.companion_id}/skills${qs ? `?${qs}` : ''}`;
+  }),
   getSkillContent: httpGet<ICompanionSkillContent, { companion_id: string; name: string }>(
     (p) => `/api/companion/companions/${p.companion_id}/skills/${encodeURIComponent(p.name)}`,
     { silentStatuses: [404] }
