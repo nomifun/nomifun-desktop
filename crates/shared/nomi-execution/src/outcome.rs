@@ -79,6 +79,19 @@ pub struct OutputSnapshot {
     pub encoding: EncodingMetadata,
 }
 
+impl OutputSnapshot {
+    pub fn text(&self) -> String {
+        self.chunks.iter().map(|chunk| chunk.text.as_str()).collect()
+    }
+
+    pub fn raw_bytes(&self) -> Vec<u8> {
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.bytes.iter().copied())
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CleanupReport {
     pub interrupt_attempted: bool,
