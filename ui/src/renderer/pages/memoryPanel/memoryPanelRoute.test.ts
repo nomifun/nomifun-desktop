@@ -10,9 +10,17 @@ describe('detached memory panel route', () => {
     expect(routerSource.includes("path='/nomi-memory-panel'")).toBe(true);
     expect(panelSource.includes('onFocusChanged')).toBe(true);
     expect(panelSource.includes("phaseRef.current !== 'open'")).toBe(true);
+    expect(panelSource.includes('activationPendingRef.current')).toBe(true);
+    expect(panelSource.includes('snapshotRef.current = payload')).toBe(true);
+    expect(panelSource.includes("snapshotRef.current?.requestId !== payload.requestId")).toBe(true);
+    expect(panelSource.includes("reason: 'owner-invalid'")).toBe(true);
+    expect(panelSource.includes("sameRequest ? phaseRef.current : 'preparing'")).toBe(true);
+    expect(panelSource.includes("phaseRef.current !== 'opening'")).toBe(true);
     expect(panelSource.includes('MEMORY_PANEL_EVENTS.activate')).toBe(true);
     expect(panelSource.includes("role='dialog'")).toBe(true);
     expect(panelCss.includes('overflow-y: auto')).toBe(true);
+    expect(panelCss.includes('min(320px, 100vh)')).toBe(true);
+    expect(panelCss.includes('min(120px, 100vh)')).toBe(true);
     expect(panelCss.includes('overflow-wrap: anywhere')).toBe(true);
     expect(panelCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(panelCss.includes('-webkit-line-clamp')).toBe(false);
