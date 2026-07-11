@@ -827,10 +827,57 @@ git commit -m "test(companion): harden detached memory panel"
 
 ---
 
+### Task 8: Compact Width and Two-Line Body Preview
+
+**Files:**
+- Modify: `apps/desktop/src/memory_panel_window.rs`
+- Modify: `ui/src/renderer/pages/memoryPanel/memoryPanel.css`
+- Modify: `ui/src/renderer/pages/memoryPanel/memoryPanelRoute.test.ts`
+- Modify: `docs/superpowers/specs/2026-07-11-companion-memory-popover-window-design.md`
+
+**Interfaces:**
+- Consumes: the existing hidden-measurement and detached placement flow.
+- Produces: a 300px default logical width and a two-line body preview without changing title wrapping or lifecycle behavior.
+
+- [x] **Step 1: Write failing source-contract tests**
+
+Assert that the Rust window builder uses `.inner_size(300.0, 320.0)` and the panel body CSS contains `-webkit-line-clamp: 2`, vertical box orientation, and hidden overflow. Remove the obsolete assertion that line clamping is forbidden.
+
+- [x] **Step 2: Run the focused route test and verify RED**
+
+```bash
+cd ui && bun test src/renderer/pages/memoryPanel/memoryPanelRoute.test.ts
+```
+
+Expected: FAIL because the native width is still 340px and the body is not clamped.
+
+- [x] **Step 3: Implement the approved visual contract**
+
+Change the hidden native window's default logical width from 340 to 300. Apply the two-line WebKit box clamp only to `.nomi-memory-panel__body`; leave `.nomi-memory-panel__title` normally wrapped and keep list-level vertical scrolling.
+
+- [x] **Step 4: Align the design specification**
+
+Document the 300px default width, full title wrapping, two-line body preview, and existing list scrolling. Remove statements promising unlimited body text in the desktop preview.
+
+- [x] **Step 5: Run fresh verification**
+
+```bash
+cd ui && bun test src/renderer/pages/companion src/renderer/pages/memoryPanel
+cd ui && bun run typecheck
+cd ui && bun run build
+cargo fmt --all --check
+cargo test -p nomifun-desktop
+git diff --check
+```
+
+Expected: all tests and builds pass; existing unrelated build warnings may remain.
+
+---
+
 ## Plan Self-Review
 
 - **Spec coverage:** Tasks cover the single fixed window, restricted Rust permissions, request-scoped protocol, hidden measurement, physical-pixel placement, workArea versus bounds, blur/Escape/activation semantics, multi-owner races, cleanup, accessibility, scrolling, fallback, and release verification.
 - **No placeholders:** The plan contains no deferred implementation choices. Every new module has exact exported interfaces and focused RED/GREEN commands.
-- **Type consistency:** `requestId`, `ownerCompanionId`, `ownerWindowLabel`, `DetachedMemoryPanelPlacement`, `GeomRect`, and all event names are consistent across Tasks 1–7.
+- **Type consistency:** `requestId`, `ownerCompanionId`, `ownerWindowLabel`, `DetachedMemoryPanelPlacement`, `GeomRect`, and all event names are consistent across Tasks 1–8.
 - **Scope:** Reply bubbles and composer expansion remain unchanged; only memory-panel ownership moves to the independent window.
 - **Commit strategy:** Each task has one independently reviewable commit; no implementation commit mixes unrelated product work.
