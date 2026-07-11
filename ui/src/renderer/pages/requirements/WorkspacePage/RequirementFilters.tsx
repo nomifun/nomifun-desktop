@@ -72,9 +72,7 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
       </span>
       <span className='shrink-0'>{label}</span>
       {value && (
-        <span
-          className={`max-w-160px truncate font-medium ${active ? '!text-primary-6' : 'text-[var(--color-text-1)]'}`}
-        >
+        <span className='ml-2px max-w-160px truncate text-12px font-medium text-[var(--color-text-1)]'>
           {value}
         </span>
       )}
