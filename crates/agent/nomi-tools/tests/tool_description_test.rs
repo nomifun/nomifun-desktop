@@ -18,11 +18,22 @@ fn test_cwd() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn bash_tool() -> BashTool {
+    let cwd = test_cwd();
+    BashTool::new(
+        nomi_execution::ProcessSupervisor::new(
+            nomi_execution::SupervisorConfig::default(),
+        ),
+        cwd.clone(),
+        nomi_execution::CapabilityPolicy::local_owner(cwd),
+    )
+}
+
 // --- TC-4.2-01: Bash tool description contains key guidance ---
 
 #[test]
 fn bash_description_references_dedicated_tools() {
-    let tool = BashTool::new(test_cwd());
+    let tool = bash_tool();
     let desc = tool.description();
     assert!(
         desc.contains("Glob"),
@@ -44,7 +55,7 @@ fn bash_description_references_dedicated_tools() {
 
 #[test]
 fn bash_description_contains_timeout_info() {
-    let tool = BashTool::new(test_cwd());
+    let tool = bash_tool();
     let desc = tool.description();
     assert!(
         desc.contains("120") || desc.to_lowercase().contains("timeout"),
@@ -54,7 +65,7 @@ fn bash_description_contains_timeout_info() {
 
 #[test]
 fn bash_description_contains_parallel_guidance() {
-    let tool = BashTool::new(test_cwd());
+    let tool = bash_tool();
     let desc = tool.description();
     assert!(
         desc.contains("parallel") || desc.contains("&&"),
@@ -234,7 +245,7 @@ fn grep_description_does_not_say_at_most_matches() {
 #[test]
 fn tool_def_description_matches_tool_instance() {
     let mut registry = ToolRegistry::new();
-    registry.register(Box::new(BashTool::new(test_cwd())));
+    registry.register(Box::new(bash_tool()));
     registry.register(Box::new(ReadTool::new(None, None)));
     registry.register(Box::new(EditTool::new(None)));
     registry.register(Box::new(WriteTool::new(None)));

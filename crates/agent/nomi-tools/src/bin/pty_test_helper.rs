@@ -17,11 +17,20 @@
 //!                                  sleep `ms`, print `text` + newline (flushed),
 //!                                  then sleep `keepalive_ms` and exit. Models a
 //!                                  process that emits delayed output then lingers.
+//!   - `write-marker-after <ms> <path>`
+//!                                  sleep `ms`, then atomically publish a marker.
+//!   - `spawn-marker-child <ms> <path> <ready_path> <keepalive_ms>`
+//!                                  spawn `write-marker-after`, print the child's
+//!                                  PID, atomically publish both PIDs, then remain
+//!                                  alive for `keepalive_ms`.
+//!   - `print-unicode`              print the Task 9 encoding sample.
 //!
 //! Kept dependency-free on purpose: it is compiled as part of the crate's normal
 //! build (a `[[bin]]`) so the unit tests can locate it next to the test runner.
 
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 fn main() {
@@ -49,6 +58,46 @@ fn main() {
             let _ = w.flush();
             drop(w);
             std::thread::sleep(Duration::from_millis(keepalive_ms));
+        }
+        "write-marker-after" => {
+            let delay_ms = parse_u64(args.get(1), "write-marker-after <ms> <path>");
+            let marker = PathBuf::from(required_arg(args.get(2), "write-marker-after <ms> <path>"));
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            write_marker_atomically(&marker)
+                .unwrap_or_else(|error| fail_io("publish delayed marker", error));
+        }
+        "spawn-marker-child" => {
+            let usage = "spawn-marker-child <ms> <path> <ready_path> <keepalive_ms>";
+            let delay_ms = parse_u64(args.get(1), usage);
+            let marker = PathBuf::from(required_arg(args.get(2), usage));
+            let ready = PathBuf::from(required_arg(args.get(3), usage));
+            let keepalive_ms = parse_u64(args.get(4), usage);
+            let child = Command::new(std::env::current_exe().unwrap_or_else(|error| {
+                fail_io("resolve helper executable", error)
+            }))
+            .arg("write-marker-after")
+            .arg(delay_ms.to_string())
+            .arg(&marker)
+            .spawn()
+            .unwrap_or_else(|error| fail_io("spawn delayed marker child", error));
+            let stdout = std::io::stdout();
+            let mut w = stdout.lock();
+            let _ = writeln!(w, "grandchild_pid={}", child.id());
+            let _ = w.flush();
+            drop(w);
+            write_text_atomically(
+                &ready,
+                &format!(
+                    "helper_pid={}\ngrandchild_pid={}\n",
+                    std::process::id(),
+                    child.id()
+                ),
+            )
+            .unwrap_or_else(|error| fail_io("publish helper PID marker", error));
+            std::thread::sleep(Duration::from_millis(keepalive_ms));
+        }
+        "print-unicode" => {
+            println!("中文🙂");
         }
         other => {
             eprintln!("pty_test_helper: unknown subcommand {other:?}");
@@ -100,4 +149,33 @@ fn parse_i32(arg: Option<&String>, usage: &str) -> i32 {
             std::process::exit(2);
         }
     }
+}
+
+fn required_arg<'a>(arg: Option<&'a String>, usage: &str) -> &'a str {
+    match arg {
+        Some(value) => value,
+        None => {
+            eprintln!("pty_test_helper: expected {usage}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn write_marker_atomically(marker: &Path) -> std::io::Result<()> {
+    write_text_atomically(marker, &std::process::id().to_string())
+}
+
+fn write_text_atomically(path: &Path, content: &str) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("marker path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".pty-test-helper-{}.tmp", std::process::id()));
+    std::fs::write(&temporary, content)?;
+    std::fs::rename(temporary, path)
+}
+
+fn fail_io(action: &str, error: std::io::Error) -> ! {
+    eprintln!("pty_test_helper: {action}: {error}");
+    std::process::exit(2);
 }

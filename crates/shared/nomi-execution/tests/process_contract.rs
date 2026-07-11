@@ -16,6 +16,10 @@ use nomi_execution::{
     ExecutionPolicy, NormalizedExecutionRequest, OutputCursor, PollResult, ProcessSupervisor,
     SupervisorConfig, Transport,
 };
+#[cfg(target_os = "macos")]
+use nomi_execution::SandboxPolicy;
+#[cfg(windows)]
+use nomi_execution::ShellKind;
 
 fn helper_binary() -> &'static str {
     option_env!("CARGO_BIN_EXE_execution_test_helper")
@@ -106,6 +110,31 @@ async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
 }
 
 #[tokio::test]
+async fn elapsed_execution_deadline_rejects_start_before_user_code_runs() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let marker = directory.path().join("must-not-run.marker");
+    let mut execution = request(
+        helper_binary(),
+        [
+            OsString::from("write-file"),
+            marker.as_os_str().to_owned(),
+        ],
+    );
+    execution.cwd = directory.path().canonicalize().expect("canonical cwd");
+    execution.capability = CapabilityPolicy::local_owner(execution.cwd.clone());
+    execution.policy.deadline = Some(Instant::now());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+
+    let error = supervisor
+        .start(execution)
+        .await
+        .expect_err("elapsed deadline must reject start");
+
+    assert_eq!(error.code(), "spawn_failed");
+    assert!(!marker.exists());
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {
     let mut command = tokio::process::Command::new(low_fd_harness_binary());
@@ -169,6 +198,104 @@ async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
     };
     assert_eq!(code, Some(0));
     assert_eq!(output.raw_bytes(), b"hello\0world\n");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    let workspace = workspace.path().canonicalize().expect("canonical workspace");
+    let outside = outside.path().canonicalize().expect("canonical outside");
+    let inside_marker = workspace.join("inside.marker");
+    let outside_marker = outside.join("outside.marker");
+
+    let mut allowed = request(
+        helper_binary(),
+        [
+            OsString::from("write-file"),
+            inside_marker.as_os_str().to_owned(),
+        ],
+    );
+    allowed.cwd = workspace.clone();
+    allowed.capability = CapabilityPolicy {
+        cwd_roots: vec![workspace.clone()],
+        sandbox: SandboxPolicy::MacSeatbelt {
+            write_roots: vec![workspace.clone()],
+        },
+        allow_hand_off: false,
+    };
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(allowed)
+        .await
+        .expect("in-root sandboxed program should start");
+    let ExecutionOutcome::Exited { code, .. } = wait_for_terminal(&supervisor, &handle).await else {
+        panic!("in-root sandboxed program must exit");
+    };
+    assert_eq!(code, Some(0));
+    assert!(inside_marker.exists());
+
+    let mut denied = request(
+        helper_binary(),
+        [
+            OsString::from("write-file"),
+            outside_marker.as_os_str().to_owned(),
+        ],
+    );
+    denied.cwd = workspace.clone();
+    denied.capability = CapabilityPolicy {
+        cwd_roots: vec![workspace.clone()],
+        sandbox: SandboxPolicy::MacSeatbelt {
+            write_roots: vec![workspace],
+        },
+        allow_hand_off: false,
+    };
+    let handle = supervisor
+        .start(denied)
+        .await
+        .expect("Seatbelt denial is reported by the sandboxed program");
+    let ExecutionOutcome::Exited { code, .. } = wait_for_terminal(&supervisor, &handle).await else {
+        panic!("denied sandboxed program must exit");
+    };
+    assert_ne!(code, Some(0));
+    assert!(!outside_marker.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let workspace = workspace.path().canonicalize().expect("canonical workspace");
+    let marker = workspace.join("must-not-run.marker");
+    let mut execution = request(
+        helper_binary(),
+        [
+            OsString::from("write-file"),
+            marker.as_os_str().to_owned(),
+        ],
+    );
+    execution.cwd = workspace.clone();
+    execution.env.insert(
+        OsString::from("TMPDIR"),
+        OsString::from("/tmp/untrusted-override"),
+    );
+    execution.capability = CapabilityPolicy {
+        cwd_roots: vec![workspace.clone()],
+        sandbox: SandboxPolicy::MacSeatbelt {
+            write_roots: vec![workspace],
+        },
+        allow_hand_off: false,
+    };
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let error = supervisor
+        .start(execution)
+        .await
+        .expect_err("untrusted TMPDIR override must fail before execution");
+
+    assert_eq!(error.code(), "invalid_command");
+    assert!(!marker.exists());
 }
 
 #[tokio::test]
@@ -670,6 +797,34 @@ async fn windows_preserves_complex_unicode_argv_environment_and_cwd() {
         })
         .collect::<String>();
     assert_eq!(output.text(), expected);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_powershell_preserves_final_native_and_pipeline_status() {
+    for (script, expected) in [
+        ("cmd /c exit 7", 7),
+        ("cmd /c exit 7; Write-Output recovered", 0),
+        ("Write-Output before; cmd /c exit 7", 7),
+        ("Get-DefinitelyMissingNomifunCommand", 1),
+        ("Write-Error bad -ErrorAction Continue", 1),
+    ] {
+        let mut execution = request(helper_binary(), Vec::<OsString>::new());
+        execution.command = CommandSpec::Shell {
+            shell: ShellKind::PowerShell,
+            script: script.into(),
+        };
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor
+            .start(execution)
+            .await
+            .unwrap_or_else(|error| panic!("PowerShell script failed to start: {script}: {error}"));
+        let outcome = wait_for_terminal(&supervisor, &handle).await;
+        let ExecutionOutcome::Exited { code, .. } = outcome else {
+            panic!("PowerShell script should exit: {script}: {outcome:?}");
+        };
+        assert_eq!(code, Some(expected), "PowerShell script: {script}");
+    }
 }
 
 #[cfg(windows)]

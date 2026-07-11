@@ -7,7 +7,7 @@ use std::{
     ffi::{OsStr, OsString, c_void},
     io,
     mem,
-    os::windows::ffi::OsStrExt,
+    os::windows::ffi::{OsStrExt, OsStringExt},
     ptr,
     sync::{
         Arc, Mutex, OnceLock,
@@ -39,6 +39,7 @@ use windows_sys::Win32::{
             QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
         },
         Pipes::CreatePipe,
+        SystemInformation::GetWindowsDirectoryW,
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
             CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
@@ -395,8 +396,20 @@ async fn spawn_inner(
 ) -> Result<SpawnedPlatformProcess, ExecutionError> {
     enforce_sandbox(&request)?;
     let prepared = PreparedCommand::new(&request)?;
+    let setup_timeout = request
+        .policy
+        .deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(SETUP_TIMEOUT)
+        .min(SETUP_TIMEOUT);
+    if setup_timeout.is_zero() {
+        return Err(spawn_failed(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "execution deadline elapsed before Windows ownership setup",
+        )));
+    }
     let deadline = Instant::now()
-        .checked_add(SETUP_TIMEOUT)
+        .checked_add(setup_timeout)
         .ok_or_else(|| invalid_command("Windows setup deadline overflowed"))?;
     let runtime = tokio::runtime::Handle::current();
     let mut cancellation = StartCancellationGuard::new();
@@ -1952,13 +1965,15 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Executi
             shell: ShellKind::PowerShell,
             script,
         } => Ok((
-            OsString::from("powershell.exe"),
+            powershell_executable()?,
             vec![
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
+                OsString::from("-ExecutionPolicy"),
+                OsString::from("Bypass"),
                 OsString::from("-Command"),
-                OsString::from(script),
+                OsString::from(powershell_payload(script)),
             ],
         )),
         CommandSpec::Shell {
@@ -1968,6 +1983,75 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Executi
             "POSIX shell text cannot be reinterpreted as PowerShell on Windows",
         )),
     }
+}
+
+fn powershell_executable() -> Result<OsString, ExecutionError> {
+    let mut buffer = vec![0_u16; 32_768];
+    // SAFETY: `buffer` is writable for its declared length and the API writes a
+    // NUL-terminated Windows directory path or returns zero on failure.
+    let length = unsafe {
+        GetWindowsDirectoryW(
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len()).expect("Windows directory buffer fits in u32"),
+        )
+    };
+    if length == 0 {
+        return Err(spawn_failed(io::Error::last_os_error()));
+    }
+    let length = usize::try_from(length)
+        .map_err(|_| invalid_command("Windows directory length did not fit usize"))?;
+    if length >= buffer.len() {
+        return Err(invalid_command(
+            "Windows directory exceeded the fixed command-resolution buffer",
+        ));
+    }
+    buffer.truncate(length);
+    let executable = std::path::PathBuf::from(OsString::from_wide(&buffer))
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !executable.is_file() {
+        return Err(ExecutionError::SpawnFailed {
+            failure: SpawnFailure {
+                code: "powershell_unavailable".to_owned(),
+                message: format!(
+                    "trusted Windows PowerShell executable is unavailable: {}",
+                    executable.display()
+                ),
+            },
+        });
+    }
+    Ok(executable.into_os_string())
+}
+
+fn powershell_payload(script: &str) -> String {
+    format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)\n\
+         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n\
+         $OutputEncoding = [Console]::OutputEncoding\n\
+         $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'\n\
+         $global:LASTEXITCODE = $null\n\
+         try {{\n\
+         & {{\n\
+         {script}\n\
+         $nomifunSucceeded = $?\n\
+         $nomifunLastExitCode = $global:LASTEXITCODE\n\
+         if ($null -ne $nomifunLastExitCode -and -not $nomifunSucceeded) {{ exit $nomifunLastExitCode }}\n\
+         if (-not $nomifunSucceeded) {{ exit 1 }}\n\
+         }}\n\
+         $commandSucceeded = $?\n\
+         if (-not $commandSucceeded) {{\n\
+           if ($null -ne $global:LASTEXITCODE) {{ exit $global:LASTEXITCODE }}\n\
+           exit 1\n\
+         }}\n\
+         exit 0\n\
+         }} catch {{\n\
+         [Console]::Error.WriteLine($_.Exception.Message)\n\
+         exit 1\n\
+         }}"
+    )
 }
 
 fn encode_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, ExecutionError> {
@@ -2056,6 +2140,9 @@ fn encode_environment_from(
 ) -> Result<Vec<u16>, ExecutionError> {
     let mut entries = Vec::<EnvironmentEntry>::new();
     for (key, value) in inherited {
+        if dangerous_inherited_environment(&key) {
+            continue;
+        }
         if let Some(entry) = entries
             .iter_mut()
             .find(|entry| compare_os_case_insensitive(&entry.key, &key) == Ordering::Equal)
@@ -2069,6 +2156,11 @@ fn encode_environment_from(
 
     for (key, value) in overrides {
         validate_environment_override(key, value)?;
+        if dangerous_inherited_environment(key) {
+            return Err(invalid_command(format!(
+                "environment override {key:?} is forbidden at execution boundary"
+            )));
+        }
         if let Some(entry) = entries
             .iter_mut()
             .find(|entry| compare_os_case_insensitive(&entry.key, key) == Ordering::Equal)
@@ -2099,6 +2191,25 @@ fn encode_environment_from(
         block.push(0);
     }
     Ok(block)
+}
+
+fn dangerous_inherited_environment(key: &OsStr) -> bool {
+    [
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "NODE_OPTIONS",
+        "NODE_INSPECT",
+        "NODE_DEBUG",
+        "CLAUDECODE",
+    ]
+    .iter()
+    .any(|candidate| {
+        compare_os_case_insensitive(key, OsStr::new(candidate)) == Ordering::Equal
+    })
 }
 
 fn validate_environment_override(key: &OsStr, value: &OsStr) -> Result<(), ExecutionError> {
@@ -2757,6 +2868,40 @@ mod tests {
             Err(ExecutionError::InvalidCommand { reason })
                 if reason.contains("environment values cannot contain NUL")
         ));
+    }
+
+    #[test]
+    fn environment_strips_inherited_loader_and_node_injection_variables() {
+        let inherited = vec![
+            (OsString::from("PATH"), OsString::from("safe")),
+            (
+                OsString::from("NODE_OPTIONS"),
+                OsString::from("--require malicious.js"),
+            ),
+            (
+                OsString::from("dyld_insert_libraries"),
+                OsString::from("malicious.dll"),
+            ),
+        ];
+        let block = encode_environment_from(inherited, &BTreeMap::new())
+            .expect("safe inherited environment should encode");
+
+        assert_eq!(environment_entries(&block), vec!["PATH=safe"]);
+    }
+
+    #[test]
+    fn environment_rejects_case_insensitive_dangerous_overrides() {
+        for key in ["NODE_OPTIONS", "node_options", "Ld_PrElOaD"] {
+            let overrides = BTreeMap::from([(
+                OsString::from(key),
+                OsString::from("malicious"),
+            )]);
+            assert!(matches!(
+                encode_environment_from(Vec::new(), &overrides),
+                Err(ExecutionError::InvalidCommand { reason })
+                    if reason.contains("forbidden at execution boundary")
+            ));
+        }
     }
 
     fn program_request(program: OsString, args: &[OsString]) -> NormalizedExecutionRequest {

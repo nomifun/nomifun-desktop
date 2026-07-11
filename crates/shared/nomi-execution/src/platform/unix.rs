@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
+    ffi::OsString,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     os::unix::process::CommandExt,
@@ -11,6 +12,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
 };
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "macos")]
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use tokio::{
@@ -1341,9 +1346,21 @@ async fn spawn_inner(
     enforce_sandbox(&request)?;
 
     #[cfg(test)]
-    let setup_timeout = options.setup_timeout.unwrap_or(SETUP_TIMEOUT);
+    let configured_setup_timeout = options.setup_timeout.unwrap_or(SETUP_TIMEOUT);
     #[cfg(not(test))]
-    let setup_timeout = SETUP_TIMEOUT;
+    let configured_setup_timeout = SETUP_TIMEOUT;
+    let setup_timeout = request
+        .policy
+        .deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(configured_setup_timeout)
+        .min(configured_setup_timeout);
+    if setup_timeout.is_zero() {
+        return Err(spawn_failed(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "execution deadline elapsed before Unix ownership setup",
+        )));
+    }
     #[cfg(test)]
     let async_wrap_failure = options.async_wrap_failure;
     #[cfg(test)]
@@ -2506,11 +2523,13 @@ fn spawn_transaction(
     let registration_fd = registration_child.as_raw_fd();
     #[cfg(test)]
     let registration_fault = options.registration_fault;
-    let mut command = std_command_for(&request.command);
-    command
-        .args(command_args(&request.command))
-        .current_dir(&request.cwd)
-        .envs(&request.env);
+    let mut command = std_command_for(&request)?;
+    command.current_dir(&request.cwd);
+    apply_safe_environment_overrides(
+        &mut command,
+        &request.env,
+        &request.capability.sandbox,
+    )?;
     let pty_slave_fd = pty.as_ref().map(PtyPair::slave_fd);
     let pty_master_fd = pty.as_ref().map(PtyPair::master_fd);
     match pty_child_stdio {
@@ -2824,39 +2843,273 @@ fn enforce_sandbox(request: &NormalizedExecutionRequest) -> Result<(), Execution
             path: request.cwd.clone(),
             reason: "execution is denied by the sandbox policy".to_owned(),
         }),
-        SandboxPolicy::MacSeatbelt { .. } => Err(ExecutionError::CapabilityDenied {
-            path: request.cwd.clone(),
-            reason: "macOS Seatbelt execution is pending and cannot run unrestricted".to_owned(),
-        }),
+        SandboxPolicy::MacSeatbelt { .. } => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(ExecutionError::CapabilityDenied {
+                    path: request.cwd.clone(),
+                    reason: "macOS Seatbelt policy is unsupported on this platform".to_owned(),
+                })
+            }
+        }
     }
 }
 
-fn std_command_for(spec: &CommandSpec) -> StdCommand {
-    match spec {
-        CommandSpec::Program { program, .. } => StdCommand::new(program),
-        CommandSpec::Shell { shell: ShellKind::Posix, .. } => StdCommand::new("/bin/sh"),
-        CommandSpec::Shell { shell: ShellKind::PowerShell, .. } => StdCommand::new("pwsh"),
+fn std_command_for(request: &NormalizedExecutionRequest) -> Result<StdCommand, ExecutionError> {
+    #[cfg(target_os = "macos")]
+    if let SandboxPolicy::MacSeatbelt { write_roots } = &request.capability.sandbox {
+        let trusted_temporary = trusted_macos_user_temp(&request.cwd)?;
+        let profile = seatbelt_profile(
+            write_roots,
+            &request.cwd,
+            &request.capability.cwd_roots,
+            &trusted_temporary,
+        )?;
+        let mut command = StdCommand::new("/usr/bin/sandbox-exec");
+        command.arg("-p").arg(profile);
+        let (program, args) = command_argv(&request.command);
+        command.arg(program).args(args);
+        harden_subprocess_environment(&mut command);
+        command.env("TMPDIR", trusted_temporary);
+        return Ok(command);
     }
+    let (program, args) = command_argv(&request.command);
+    let mut command = StdCommand::new(program);
+    command.args(args);
+    harden_subprocess_environment(&mut command);
+    Ok(command)
 }
 
-fn command_args(spec: &CommandSpec) -> Vec<&std::ffi::OsStr> {
+fn command_argv(spec: &CommandSpec) -> (OsString, Vec<OsString>) {
     match spec {
-        CommandSpec::Program { args, .. } => args.iter().map(|arg| arg.as_os_str()).collect(),
+        CommandSpec::Program { program, args } => (program.clone(), args.clone()),
         CommandSpec::Shell {
             shell: ShellKind::Posix,
             script,
-        } => vec![std::ffi::OsStr::new("-c"), script.as_ref()],
+        } => (
+            OsString::from("/bin/sh"),
+            vec![OsString::from("-c"), OsString::from(script)],
+        ),
         CommandSpec::Shell {
             shell: ShellKind::PowerShell,
             script,
-        } => vec![
-            std::ffi::OsStr::new("-NoLogo"),
-            std::ffi::OsStr::new("-NoProfile"),
-            std::ffi::OsStr::new("-NonInteractive"),
-            std::ffi::OsStr::new("-Command"),
-            script.as_ref(),
-        ],
+        } => (
+            OsString::from("pwsh"),
+            vec![
+                OsString::from("-NoLogo"),
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from(script),
+            ],
+        ),
     }
+}
+
+fn harden_subprocess_environment(command: &mut StdCommand) {
+    for variable in [
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "NODE_OPTIONS",
+        "NODE_INSPECT",
+        "NODE_DEBUG",
+        "CLAUDECODE",
+    ] {
+        command.env_remove(variable);
+    }
+}
+
+fn apply_safe_environment_overrides(
+    command: &mut StdCommand,
+    overrides: &BTreeMap<OsString, OsString>,
+    sandbox: &SandboxPolicy,
+) -> Result<(), ExecutionError> {
+    for (key, value) in overrides {
+        if dangerous_environment_key(key)
+            || matches!(sandbox, SandboxPolicy::MacSeatbelt { .. })
+                && key == std::ffi::OsStr::new("TMPDIR")
+        {
+            return Err(ExecutionError::InvalidCommand {
+                reason: format!("environment override {key:?} is forbidden at execution boundary"),
+            });
+        }
+        command.env(key, value);
+    }
+    Ok(())
+}
+
+fn dangerous_environment_key(key: &std::ffi::OsStr) -> bool {
+    [
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "NODE_OPTIONS",
+        "NODE_INSPECT",
+        "NODE_DEBUG",
+        "CLAUDECODE",
+    ]
+    .iter()
+    .any(|candidate| key == std::ffi::OsStr::new(candidate))
+}
+
+#[cfg(target_os = "macos")]
+fn seatbelt_profile(
+    write_roots: &[PathBuf],
+    cwd: &Path,
+    capability_roots: &[PathBuf],
+    trusted_temporary: &Path,
+) -> Result<String, ExecutionError> {
+    let sandbox = Path::new("/usr/bin/sandbox-exec");
+    if !sandbox.is_file() {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: "/usr/bin/sandbox-exec is unavailable".to_owned(),
+        });
+    }
+    let mut allowed = Vec::new();
+    for root in write_roots {
+        let canonical = root.canonicalize().map_err(|error| ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!("could not resolve Seatbelt write root {root:?}: {error}"),
+        })?;
+        if !canonical.is_dir() {
+            return Err(ExecutionError::CapabilityDenied {
+                path: cwd.to_path_buf(),
+                reason: format!("Seatbelt write root is not a directory: {canonical:?}"),
+            });
+        }
+        if !capability_roots
+            .iter()
+            .any(|capability_root| canonical.starts_with(capability_root))
+        {
+            return Err(ExecutionError::CapabilityDenied {
+                path: cwd.to_path_buf(),
+                reason: format!(
+                    "Seatbelt write root is outside the normalized capability roots: {canonical:?}"
+                ),
+            });
+        }
+        allowed.push(canonical);
+    }
+    let system_temporary = PathBuf::from("/private/tmp")
+        .canonicalize()
+        .map_err(|error| ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!("could not resolve Seatbelt system temporary directory: {error}"),
+        })?;
+    allowed.push(system_temporary);
+    if !allowed.iter().any(|path| path == trusted_temporary) {
+        allowed.push(trusted_temporary.to_path_buf());
+    }
+    let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
+    profile.push_str("(allow file-write*\n");
+    for path in allowed {
+        let path = seatbelt_path_literal(&path, cwd)?;
+        profile.push_str("  (subpath \"");
+        profile.push_str(&path);
+        profile.push_str("\")\n");
+    }
+    profile.push_str(
+        "  (literal \"/dev/null\")\n  (literal \"/dev/stdout\")\n  \
+         (literal \"/dev/stderr\")\n  (literal \"/dev/tty\")\n  \
+         (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\")\n)\n",
+    );
+    Ok(profile)
+}
+
+#[cfg(target_os = "macos")]
+fn seatbelt_path_literal(path: &Path, cwd: &Path) -> Result<String, ExecutionError> {
+    let path = path.to_str().ok_or_else(|| ExecutionError::CapabilityDenied {
+        path: cwd.to_path_buf(),
+        reason: format!("Seatbelt write root is not valid UTF-8: {path:?}"),
+    })?;
+    if path.chars().any(char::is_control) {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!("Seatbelt write root contains a control character: {path:?}"),
+        });
+    }
+    Ok(path.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn trusted_macos_user_temp(cwd: &Path) -> Result<PathBuf, ExecutionError> {
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: a null buffer with length zero asks confstr for the required
+    // NUL-terminated buffer length and does not dereference the pointer.
+    let required = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if required == 0 {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: "could not resolve the trusted macOS user temporary directory".to_owned(),
+        });
+    }
+    let mut buffer = vec![0_u8; required];
+    // SAFETY: `buffer` is writable for `required` bytes, as requested above.
+    let written = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    if written == 0 || written > buffer.len() {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: "macOS user temporary directory changed while resolving it".to_owned(),
+        });
+    }
+    buffer.truncate(written);
+    if buffer.pop() != Some(0) || buffer.contains(&0) {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: "macOS user temporary directory was not a single NUL-terminated path"
+                .to_owned(),
+        });
+    }
+    let temporary = PathBuf::from(std::ffi::OsString::from_vec(buffer))
+        .canonicalize()
+        .map_err(|error| ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!("could not canonicalize the macOS user temporary directory: {error}"),
+        })?;
+    let metadata = temporary
+        .metadata()
+        .map_err(|error| ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!("could not inspect the macOS user temporary directory: {error}"),
+        })?;
+    if !temporary.is_absolute()
+        || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(ExecutionError::CapabilityDenied {
+            path: cwd.to_path_buf(),
+            reason: format!(
+                "macOS user temporary directory is not an owned private directory: {temporary:?}"
+            ),
+        });
+    }
+    Ok(temporary)
 }
 
 fn spawn_failed(error: io::Error) -> ExecutionError {
@@ -3689,13 +3942,105 @@ mod tests {
     };
 
     use super::{
-        SpawnOptions, SpawnTransport, TestSpawnAudit, TestSpawnFault, spawn_inner,
-        spawn_pipe_inner,
+        SpawnOptions, SpawnTransport, StdCommand, TestSpawnAudit, TestSpawnFault,
+        apply_safe_environment_overrides, spawn_inner, spawn_pipe_inner,
     };
+    #[cfg(target_os = "macos")]
+    use super::{seatbelt_path_literal, seatbelt_profile, trusted_macos_user_temp};
     use crate::{
         CapabilityPolicy, CommandSpec, ExecutionError, ExecutionOwner, ExecutionPolicy,
-        NormalizedExecutionRequest, OutputBuffer, Transport,
+        NormalizedExecutionRequest, OutputBuffer, SandboxPolicy, Transport,
     };
+
+    #[test]
+    fn dangerous_environment_overrides_are_rejected_at_the_spawn_boundary() {
+        let mut command = StdCommand::new("/usr/bin/env");
+        let overrides = BTreeMap::from([(
+            OsString::from("LD_PRELOAD"),
+            OsString::from("/tmp/never-load.so"),
+        )]);
+
+        let error = apply_safe_environment_overrides(
+            &mut command,
+            &overrides,
+            &SandboxPolicy::UnrestrictedLocalOwner,
+        )
+        .expect_err("loader injection must be rejected");
+
+        assert!(matches!(error, ExecutionError::InvalidCommand { .. }));
+    }
+
+    #[test]
+    fn unrestricted_execution_may_override_tmpdir() {
+        let mut command = StdCommand::new("/usr/bin/env");
+        let overrides =
+            BTreeMap::from([(OsString::from("TMPDIR"), OsString::from("/tmp/custom"))]);
+
+        apply_safe_environment_overrides(
+            &mut command,
+            &overrides,
+            &SandboxPolicy::UnrestrictedLocalOwner,
+        )
+        .expect("TMPDIR is not privileged without Seatbelt");
+    }
+
+    #[test]
+    fn seatbelt_execution_rejects_a_tmpdir_override() {
+        let mut command = StdCommand::new("/usr/bin/env");
+        let overrides =
+            BTreeMap::from([(OsString::from("TMPDIR"), OsString::from("/tmp/untrusted"))]);
+
+        let error = apply_safe_environment_overrides(
+            &mut command,
+            &overrides,
+            &SandboxPolicy::MacSeatbelt {
+                write_roots: Vec::new(),
+            },
+        )
+        .expect_err("Seatbelt must retain its trusted TMPDIR");
+
+        assert!(matches!(error, ExecutionError::InvalidCommand { .. }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_profile_uses_only_canonical_capability_scoped_roots_and_trusted_temp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = workspace.path().canonicalize().expect("canonical workspace");
+        let trusted_temporary =
+            trusted_macos_user_temp(&cwd).expect("trusted user temporary directory");
+
+        let profile = seatbelt_profile(
+            std::slice::from_ref(&cwd),
+            &cwd,
+            std::slice::from_ref(&cwd),
+            &trusted_temporary,
+        )
+        .expect("Seatbelt profile");
+
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains(&seatbelt_path_literal(&cwd, &cwd).unwrap()));
+        assert!(profile.contains(
+            &seatbelt_path_literal(&trusted_temporary, &cwd).unwrap()
+        ));
+        assert!(!profile.contains("(subpath \"/\")"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_macos_temp_is_absolute_private_and_owned() {
+        use std::os::unix::fs::MetadataExt;
+
+        let cwd = std::env::current_dir().expect("current directory");
+        let temporary =
+            trusted_macos_user_temp(&cwd).expect("trusted user temporary directory");
+        let metadata = temporary.metadata().expect("temporary metadata");
+
+        assert!(temporary.is_absolute());
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o022, 0);
+    }
 
     async fn spawn_with_fault(
         request: NormalizedExecutionRequest,

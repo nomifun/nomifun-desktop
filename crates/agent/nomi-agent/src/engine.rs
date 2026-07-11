@@ -196,6 +196,9 @@ pub struct AgentEngine {
     /// restart. `None` (the default) = byte-for-byte previous behaviour.
     /// Mirrors `cancel_token`'s shared-handle pattern.
     steering_inbox: Option<Arc<Mutex<std::collections::VecDeque<String>>>>,
+    /// Owns every supervised command launched by this engine's command tools.
+    /// Bootstrap installs it; direct/test constructors leave it empty.
+    process_supervisor: Option<Arc<nomi_execution::ProcessSupervisor>>,
     /// transcript 长度锚点：最近一个 turn 的用户消息 push 之前的 messages.len()。
     /// 供 rewind_last_turn 把内存历史回退到最后一个用户 turn 之前（编辑最近一条
     /// 用户消息重跑）。压缩会重写整个 messages 使下标失效，故压缩时清空；
@@ -273,6 +276,7 @@ impl AgentEngine {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }
@@ -349,8 +353,26 @@ impl AgentEngine {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
+    }
+
+    pub fn set_process_supervisor(
+        &mut self,
+        supervisor: Arc<nomi_execution::ProcessSupervisor>,
+    ) {
+        assert!(
+            self.process_supervisor.is_none(),
+            "process supervisor may only be installed once"
+        );
+        self.process_supervisor = Some(supervisor);
+    }
+
+    /// Explicitly wind down all command sessions owned by this engine.
+    pub async fn shutdown_processes(&self) -> Option<nomi_execution::ShutdownReport> {
+        let supervisor = self.process_supervisor.as_ref()?;
+        Some(supervisor.shutdown().await)
     }
 
     pub fn compaction_level(&self) -> nomi_compact::CompactionLevel {
@@ -1453,6 +1475,31 @@ impl AgentEngine {
     }
 }
 
+impl Drop for AgentEngine {
+    fn drop(&mut self) {
+        let Some(supervisor) = self.process_supervisor.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = supervisor.shutdown().await;
+            });
+        } else {
+            let _ = std::thread::Builder::new()
+                .name("nomi-engine-process-cleanup".to_owned())
+                .spawn(move || {
+                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        return;
+                    };
+                    let _ = runtime.block_on(supervisor.shutdown());
+                });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // set_config tests — apply_config_update()
 // ---------------------------------------------------------------------------
@@ -1621,6 +1668,7 @@ mod set_config_tests {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }
@@ -2105,6 +2153,7 @@ mod phase6_tests {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }
@@ -2352,6 +2401,7 @@ mod compact_tests {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }
@@ -2758,6 +2808,7 @@ mod plan_mode_tests {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }
@@ -2977,6 +3028,7 @@ mod handle_command_tests {
             stagnation_guard: crate::loop_guard::StagnationGuard::new(crate::engine::STAGNATION_THRESHOLD),
             context_contributors: Vec::new(),
             steering_inbox: None,
+            process_supervisor: None,
             last_turn_start_len: None,
         }
     }

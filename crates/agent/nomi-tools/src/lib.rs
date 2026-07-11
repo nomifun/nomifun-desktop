@@ -13,7 +13,6 @@ pub mod process_store;
 pub mod pty;
 pub mod read;
 pub mod registry;
-pub mod sandbox;
 pub mod tool_search;
 pub mod update_plan;
 pub mod worktree;

@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
 use nomi_config::config::Config;
+use nomi_execution::{CapabilityPolicy, ProcessSupervisor, SupervisorConfig};
 use nomi_providers::LlmProvider;
 use nomi_tools::bash::BashTool;
 use nomi_tools::edit::EditTool;
@@ -37,17 +38,37 @@ pub struct AgentSpawner {
     concurrency: Arc<Semaphore>,
     /// Optional shared token ceiling (opt-in; None = uncapped).
     token_budget: Option<Arc<TokenBudget>>,
+    execution_capability: CapabilityPolicy,
+    write_root: Option<PathBuf>,
+    parent_tool_scope: ToolScope,
 }
 
 impl AgentSpawner {
     pub fn new(provider: Arc<dyn LlmProvider>, config: Config, cwd: PathBuf) -> Self {
+        let parent_tool_scope = ToolScope::from_config(&config.tools.builtin_allowlist);
+        let execution_capability = CapabilityPolicy::local_owner(cwd.clone());
         Self {
             provider,
             base_config: config,
             cwd,
             concurrency: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBAGENTS)),
             token_budget: None,
+            execution_capability,
+            write_root: None,
+            parent_tool_scope,
         }
+    }
+
+    pub fn with_execution_policy(
+        mut self,
+        capability: CapabilityPolicy,
+        write_root: Option<PathBuf>,
+        parent_allowlist: Vec<String>,
+    ) -> Self {
+        self.execution_capability = capability;
+        self.write_root = write_root;
+        self.parent_tool_scope = ToolScope::from_config(&parent_allowlist);
+        self
     }
 
     /// Enable a shared cumulative token ceiling for all sub-agents (§3.4).
@@ -89,23 +110,44 @@ impl AgentSpawner {
             config.system_prompt = Some(sp);
         }
         config.session.enabled = false;
-        config.tools.auto_approve = true;
 
         tracing::info!(target: "nomi_agent", cwd = %self.cwd.display(), "sub-agent spawned with workspace cwd");
 
         let agent_name = sub_config.name.clone();
         let board_arg = board.map(|b| (b, agent_name.as_str()));
-        let tools = build_tool_registry(&sub_config.allowed_tools, &self.cwd, board_arg);
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let role_scope = ToolScope::from_role(&sub_config.allowed_tools);
+        let tools = match build_tool_registry(
+            self.parent_tool_scope.intersect(&role_scope),
+            &self.cwd,
+            &self.execution_capability,
+            self.write_root.as_deref(),
+            Arc::clone(&supervisor),
+            board_arg,
+        ) {
+            Ok(tools) => tools,
+            Err(error) => {
+                return SubAgentResult {
+                    name: sub_config.name,
+                    text: format!("Sub-agent capability denied: {error}"),
+                    usage: TokenUsage::default(),
+                    turns: 0,
+                    is_error: true,
+                };
+            }
+        };
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let engine = AgentEngine::new_with_provider(
+        let mut engine = AgentEngine::new_with_provider(
             self.provider.clone(),
             config,
             tools,
             output,
             self.cwd.clone(),
         );
+        engine.set_process_supervisor(Arc::clone(&supervisor));
 
-        let result = run_subagent(engine, sub_config.name, &sub_config.prompt).await;
+        let result =
+            run_subagent(engine, sub_config.name, &sub_config.prompt, supervisor).await;
         // Charge the shared budget for what this sub-agent actually consumed.
         if let Some(budget) = &self.token_budget {
             budget.record(result.usage.input_tokens + result.usage.output_tokens);
@@ -178,15 +220,59 @@ impl AgentSpawner {
             cwd: self.cwd.clone(),
             concurrency: self.concurrency.clone(),
             token_budget: self.token_budget.clone(),
+            execution_capability: self.execution_capability.clone(),
+            write_root: self.write_root.clone(),
+            parent_tool_scope: self.parent_tool_scope.clone(),
         }
     }
 
-    /// Clone the spawner but rooted at a different cwd (used to run a sub-agent
-    /// inside an isolated worktree).
-    fn clone_with_cwd(&self, cwd: PathBuf) -> Self {
-        let mut c = self.clone_for_spawn();
-        c.cwd = cwd;
-        c
+    /// Delegate the parent's repository-scoped authority to the exact detached
+    /// worktree represented by `worktree`.
+    ///
+    /// The path is accepted only after [`nomi_tools::worktree::Worktree`]
+    /// verifies its live Git registration. Capability and write roots are then
+    /// translated relative to the source workspace instead of granting the
+    /// worktree's parent directory.
+    fn clone_for_isolated_worktree(
+        &self,
+        worktree: &nomi_tools::worktree::Worktree,
+    ) -> Result<Self, String> {
+        let source = self
+            .cwd
+            .canonicalize()
+            .map_err(|error| format!("invalid source workspace {}: {error}", self.cwd.display()))?;
+        if !self.execution_capability.cwd_roots.iter().any(|root| {
+            root.canonicalize()
+                .is_ok_and(|root| source.starts_with(root))
+        }) {
+            return Err(format!(
+                "source workspace {} is outside inherited capability roots",
+                source.display()
+            ));
+        }
+        let cwd = worktree.verified_cwd(&source)?;
+        let mut child = self.clone_for_spawn();
+        child.cwd = cwd.clone();
+        child.execution_capability.cwd_roots = vec![cwd.clone()];
+        child.write_root = Some(match &self.write_root {
+            Some(root) => translate_root_to_worktree(&source, &cwd, root, "write")?,
+            None => cwd.clone(),
+        });
+        if let nomi_execution::SandboxPolicy::MacSeatbelt { write_roots } =
+            &mut child.execution_capability.sandbox
+        {
+            let mut translated = Vec::with_capacity(write_roots.len());
+            for root in write_roots.iter() {
+                translated.push(translate_root_to_worktree(
+                    &source,
+                    &cwd,
+                    root,
+                    "Seatbelt write",
+                )?);
+            }
+            *write_roots = translated;
+        }
+        Ok(child)
     }
 
     /// Like [`Self::spawn_parallel`] but each sub-agent runs in its own detached
@@ -208,7 +294,20 @@ impl AgentSpawner {
                 async move {
                     match nomi_tools::worktree::Worktree::create(&repo) {
                         Ok(wt) => {
-                            let spawner = base.clone_with_cwd(wt.path().to_path_buf());
+                            let spawner = match base.clone_for_isolated_worktree(&wt) {
+                                Ok(spawner) => spawner,
+                                Err(error) => {
+                                    return SubAgentResult {
+                                        name: config.name,
+                                        text: format!(
+                                            "Worktree isolation capability setup failed: {error}"
+                                        ),
+                                        usage: TokenUsage::default(),
+                                        turns: 0,
+                                        is_error: true,
+                                    };
+                                }
+                            };
                             let mut result = spawner.spawn_one(config).await;
                             match wt.capture_diff() {
                                 Ok(diff) if !diff.trim().is_empty() => {
@@ -263,12 +362,31 @@ impl Spawner for AgentSpawner {
             config.system_prompt = Some(sp);
         }
         config.session.enabled = false;
-        config.tools.auto_approve = true;
         if let Some(model) = overrides.model.clone() {
             config.model = model;
         }
 
-        let tools = build_tool_registry(&overrides.allowed_tools, &self.cwd, None);
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let role_scope = ToolScope::from_role(&overrides.allowed_tools);
+        let tools = match build_tool_registry(
+            self.parent_tool_scope.intersect(&role_scope),
+            &self.cwd,
+            &self.execution_capability,
+            self.write_root.as_deref(),
+            Arc::clone(&supervisor),
+            None,
+        ) {
+            Ok(tools) => tools,
+            Err(error) => {
+                return SubAgentResult {
+                    name: sub_config.name,
+                    text: format!("Sub-agent capability denied: {error}"),
+                    usage: TokenUsage::default(),
+                    turns: 0,
+                    is_error: true,
+                };
+            }
+        };
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(
             self.provider.clone(),
@@ -277,9 +395,10 @@ impl Spawner for AgentSpawner {
             output,
             self.cwd.clone(),
         );
+        engine.set_process_supervisor(Arc::clone(&supervisor));
         engine.set_initial_reasoning_effort(overrides.effort.clone());
 
-        run_subagent(engine, sub_config.name, &sub_config.prompt).await
+        run_subagent(engine, sub_config.name, &sub_config.prompt, supervisor).await
     }
 }
 
@@ -414,28 +533,204 @@ fn map_subagent_outcome(
 }
 
 /// Run an engine to completion under a wall-clock timeout, mapping the outcome.
-async fn run_subagent(mut engine: AgentEngine, name: String, prompt: &str) -> SubAgentResult {
+async fn run_subagent(
+    mut engine: AgentEngine,
+    name: String,
+    prompt: &str,
+    supervisor: Arc<ProcessSupervisor>,
+) -> SubAgentResult {
+    let mut shutdown_guard = SupervisorShutdownOnDrop::new(Arc::clone(&supervisor));
     let outcome = tokio::time::timeout(SUBAGENT_TIMEOUT, engine.run(prompt, "")).await;
-    map_subagent_outcome(name, outcome, SUBAGENT_TIMEOUT.as_secs())
+    let mut result = map_subagent_outcome(name, outcome, SUBAGENT_TIMEOUT.as_secs());
+    let shutdown = supervisor.shutdown().await;
+    shutdown_guard.disarm();
+    if shutdown.sessions.is_empty() {
+        result
+    } else {
+        let unresolved = shutdown.sessions.iter().any(|session| {
+            matches!(
+                &session.outcome,
+                nomi_execution::ExecutionOutcome::Lost { cleanup, .. } if !cleanup.reaped
+            )
+        });
+        result.text.push_str(&format!(
+            "\n\nSupervised process cleanup retired {} active session(s).",
+            shutdown.sessions.len()
+        ));
+        if unresolved {
+            result
+                .text
+                .push_str(" At least one process tree could not be proven reaped.");
+            result.is_error = true;
+        }
+        result
+    }
+}
+
+struct SupervisorShutdownOnDrop {
+    supervisor: Arc<ProcessSupervisor>,
+    armed: bool,
+}
+
+impl SupervisorShutdownOnDrop {
+    fn new(supervisor: Arc<ProcessSupervisor>) -> Self {
+        Self {
+            supervisor,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SupervisorShutdownOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        enqueue_supervisor_shutdown(Arc::clone(&self.supervisor));
+    }
+}
+
+fn enqueue_supervisor_shutdown(supervisor: Arc<ProcessSupervisor>) {
+    use std::sync::OnceLock;
+    use tokio::sync::mpsc;
+
+    static CLEANUP_RELAY: OnceLock<mpsc::UnboundedSender<Arc<ProcessSupervisor>>> =
+        OnceLock::new();
+    let relay = CLEANUP_RELAY.get_or_init(|| {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Arc<ProcessSupervisor>>();
+        std::thread::Builder::new()
+            .name("nomi-subagent-process-cleanup".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build sub-agent process cleanup runtime");
+                runtime.block_on(async move {
+                    while let Some(supervisor) = receiver.recv().await {
+                        let _ = supervisor.shutdown().await;
+                    }
+                });
+            })
+            .expect("start sub-agent process cleanup relay");
+        sender
+    });
+    let _ = relay.send(supervisor);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolScope {
+    Unrestricted,
+    Restricted(std::collections::BTreeSet<String>),
+}
+
+impl ToolScope {
+    fn from_config(allowed: &[String]) -> Self {
+        if allowed.is_empty() {
+            Self::Unrestricted
+        } else {
+            Self::Restricted(allowed.iter().cloned().collect())
+        }
+    }
+
+    fn from_role(allowed: &[String]) -> Self {
+        Self::from_config(allowed)
+    }
+
+    fn intersect(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Unrestricted, scope) | (scope, Self::Unrestricted) => scope.clone(),
+            (Self::Restricted(left), Self::Restricted(right)) => {
+                Self::Restricted(left.intersection(right).cloned().collect())
+            }
+        }
+    }
+
+    fn allows(&self, name: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Restricted(allowed) => allowed.contains(name),
+        }
+    }
 }
 
 fn build_tool_registry(
-    allowed: &[String],
+    scope: ToolScope,
     cwd: &Path,
+    parent_capability: &CapabilityPolicy,
+    write_root: Option<&Path>,
+    supervisor: Arc<ProcessSupervisor>,
     board: Option<(Arc<crate::taskboard::TaskBoard>, &str)>,
-) -> ToolRegistry {
+) -> Result<ToolRegistry, String> {
+    let cwd = cwd
+        .canonicalize()
+        .map_err(|error| format!("invalid child cwd {}: {error}", cwd.display()))?;
+    let mut capability = parent_capability.clone();
+    let mut canonical_roots = Vec::with_capacity(capability.cwd_roots.len());
+    for root in &capability.cwd_roots {
+        canonical_roots.push(root.canonicalize().map_err(|error| {
+            format!(
+                "invalid inherited capability root {}: {error}",
+                root.display()
+            )
+        })?);
+    }
+    if !canonical_roots.iter().any(|root| cwd.starts_with(root)) {
+        return Err(format!(
+            "child cwd {} is outside inherited capability roots",
+            cwd.display()
+        ));
+    }
+    capability.cwd_roots = vec![cwd.clone()];
+    let inherited_write_root = match write_root {
+        Some(root) => narrow_root_to_child(&cwd, root, "write")?,
+        None => cwd.clone(),
+    };
+    if let nomi_execution::SandboxPolicy::MacSeatbelt { write_roots } =
+        &mut capability.sandbox
+    {
+        let mut narrowed = Vec::with_capacity(write_roots.len());
+        for root in write_roots.iter() {
+            narrowed.push(narrow_root_to_child(&cwd, root, "Seatbelt write")?);
+        }
+        *write_roots = narrowed;
+    }
     let all_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = vec![
-        ("Read", Box::new(ReadTool::new(None, Some(cwd.to_path_buf())))),
-        ("Write", Box::new(WriteTool::new(None).with_cwd(Some(cwd.to_path_buf())))),
-        ("Edit", Box::new(EditTool::new(None).with_cwd(Some(cwd.to_path_buf())))),
-        ("Bash", Box::new(BashTool::new(cwd.to_path_buf()))),
-        ("Grep", Box::new(GrepTool::new(cwd.to_path_buf()))),
-        ("Glob", Box::new(GlobTool::new(cwd.to_path_buf()))),
+        ("Read", Box::new(ReadTool::new(None, Some(cwd.clone())))),
+        (
+            "Write",
+            Box::new(
+                WriteTool::new(None)
+                    .with_write_root(Some(inherited_write_root.clone()))
+                    .with_cwd(Some(cwd.clone())),
+            ),
+        ),
+        (
+            "Edit",
+            Box::new(
+                EditTool::new(None)
+                    .with_write_root(Some(inherited_write_root))
+                    .with_cwd(Some(cwd.clone())),
+            ),
+        ),
+        (
+            "Bash",
+            Box::new(BashTool::new(
+                supervisor,
+                cwd.clone(),
+                capability,
+            )),
+        ),
+        ("Grep", Box::new(GrepTool::new(cwd.clone()))),
+        ("Glob", Box::new(GlobTool::new(cwd.clone()))),
     ];
 
     let mut registry = ToolRegistry::new();
     for (name, tool) in all_tools {
-        if allowed.is_empty() || allowed.iter().any(|a| a.as_str() == name) {
+        if scope.allows(name) {
             registry.register(tool);
         }
     }
@@ -445,14 +740,112 @@ fn build_tool_registry(
     if let Some((board, agent_name)) = board {
         registry.register(Box::new(crate::taskboard::TaskBoardTool::new(board, agent_name)));
     }
-    registry
+    Ok(registry)
+}
+
+fn narrow_root_to_child(cwd: &Path, root: &Path, label: &str) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("invalid inherited {label} root {}: {error}", root.display()))?;
+    if cwd.starts_with(&root) {
+        Ok(cwd.to_path_buf())
+    } else if root.starts_with(cwd) {
+        Ok(root)
+    } else {
+        Err(format!(
+            "child cwd {} and inherited {label} root {} do not overlap",
+            cwd.display(),
+            root.display()
+        ))
+    }
+}
+
+fn translate_root_to_worktree(
+    source: &Path,
+    worktree: &Path,
+    root: &Path,
+    label: &str,
+) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("invalid inherited {label} root {}: {error}", root.display()))?;
+    if source.starts_with(&root) {
+        return Ok(worktree.to_path_buf());
+    }
+    let relative = root.strip_prefix(source).map_err(|_| {
+        format!(
+            "source workspace {} and inherited {label} root {} do not overlap",
+            source.display(),
+            root.display()
+        )
+    })?;
+    let translated = worktree.join(relative);
+    if translated.is_dir() {
+        Ok(translated)
+    } else {
+        Err(format!(
+            "translated {label} root does not exist in isolated worktree: {}",
+            translated.display()
+        ))
+    }
 }
 
 #[cfg(test)]
 mod phase7_tests {
-    use super::{ForkOverrides, SubAgentConfig, build_tool_registry, map_subagent_outcome};
+    use super::{
+        ForkOverrides, SubAgentConfig, ToolScope, build_tool_registry, map_subagent_outcome,
+    };
     use crate::engine::{AgentError, AgentResult};
+    use async_trait::async_trait;
+    use nomi_execution::{CapabilityPolicy, ProcessSupervisor, SandboxPolicy, SupervisorConfig};
+    use nomi_config::compat::ProviderCompat;
+    use nomi_config::config::{Config, ProviderType};
+    use nomi_providers::{LlmProvider, ProviderError};
+    use nomi_types::llm::{LlmEvent, LlmRequest};
     use nomi_types::message::{StopReason, TokenUsage};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    fn test_registry(
+        scope: ToolScope,
+        cwd: &std::path::Path,
+        capability: CapabilityPolicy,
+    ) -> Result<nomi_tools::registry::ToolRegistry, String> {
+        build_tool_registry(
+            scope,
+            cwd,
+            &capability,
+            Some(cwd),
+            ProcessSupervisor::new(SupervisorConfig::default()),
+            None,
+        )
+    }
+
+    fn test_config() -> Config {
+        Config {
+            provider_label: "openai".into(),
+            provider: ProviderType::OpenAI,
+            api_key: "sk-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "gpt-test-model".into(),
+            max_tokens: 1024,
+            max_turns: Some(5),
+            system_prompt: None,
+            thinking: None,
+            prompt_caching: false,
+            compat: ProviderCompat::openai_defaults(),
+            tools: Default::default(),
+            session: Default::default(),
+            compact: Default::default(),
+            plan: Default::default(),
+            file_cache: Default::default(),
+            hooks: Default::default(),
+            bedrock: None,
+            vertex: None,
+            mcp: Default::default(),
+            logging: Default::default(),
+        }
+    }
 
     #[tokio::test]
     async fn map_subagent_outcome_timeout_is_error() {
@@ -502,7 +895,13 @@ mod phase7_tests {
 
     #[test]
     fn tc_7_40_build_tool_registry_empty_allowed_registers_all() {
-        let registry = build_tool_registry(&[], &std::env::temp_dir(), None);
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let registry = test_registry(
+            ToolScope::Unrestricted,
+            &cwd,
+            CapabilityPolicy::local_owner(cwd.clone()),
+        )
+        .unwrap();
         for name in &["Read", "Write", "Edit", "Bash", "Grep", "Glob"] {
             assert!(
                 registry.get(name).is_some(),
@@ -513,11 +912,247 @@ mod phase7_tests {
 
     #[test]
     fn tc_7_43_build_tool_registry_filters_to_allowed() {
-        let allowed = vec!["Bash".to_string(), "Read".to_string()];
-        let registry = build_tool_registry(&allowed, &std::env::temp_dir(), None);
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let registry = test_registry(
+            ToolScope::Restricted(BTreeSet::from(["Bash".to_string(), "Read".to_string()])),
+            &cwd,
+            CapabilityPolicy::local_owner(cwd.clone()),
+        )
+        .unwrap();
         assert!(registry.get("Bash").is_some());
         assert!(registry.get("Read").is_some());
         assert!(registry.get("Write").is_none());
+    }
+
+    #[test]
+    fn tool_scope_intersection_is_monotonic_and_disjoint_means_deny_all() {
+        let read = ToolScope::Restricted(BTreeSet::from(["Read".to_string()]));
+        let bash = ToolScope::Restricted(BTreeSet::from(["Bash".to_string()]));
+        let unrestricted = ToolScope::Unrestricted;
+
+        assert_eq!(unrestricted.intersect(&read), read);
+        assert_eq!(
+            read.intersect(&bash),
+            ToolScope::Restricted(BTreeSet::new())
+        );
+    }
+
+    #[test]
+    fn disjoint_parent_and_role_scopes_register_no_builtin_tools() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let parent = ToolScope::Restricted(BTreeSet::from(["Read".to_string()]));
+        let role = ToolScope::Restricted(BTreeSet::from(["Bash".to_string()]));
+        let registry = test_registry(
+            parent.intersect(&role),
+            &cwd,
+            CapabilityPolicy::local_owner(cwd.clone()),
+        )
+        .unwrap();
+
+        assert!(registry.tool_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inherited_deny_execution_is_not_downgraded() {
+        let cwd = std::env::temp_dir().canonicalize().unwrap();
+        let capability = CapabilityPolicy {
+            cwd_roots: vec![cwd.clone()],
+            sandbox: SandboxPolicy::DenyExecution,
+            allow_hand_off: false,
+        };
+        let registry = test_registry(
+            ToolScope::Restricted(BTreeSet::from(["Bash".to_string()])),
+            &cwd,
+            capability,
+        )
+        .unwrap();
+        let bash = registry.get("Bash").expect("Bash should be registered");
+        let result = bash
+            .execute(serde_json::json!({"command": "echo must_not_run"}))
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("capability_denied"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn child_registry_inherits_seatbelt_and_cannot_write_outside_child_cwd() {
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let parent_root = parent.path().canonicalize().unwrap();
+        let child_root = child.canonicalize().unwrap();
+        let outside = parent_root.join("outside-child.marker");
+        let registry = build_tool_registry(
+            ToolScope::Restricted(BTreeSet::from(["Bash".to_string()])),
+            &child_root,
+            &CapabilityPolicy {
+                cwd_roots: vec![parent_root.clone()],
+                sandbox: SandboxPolicy::MacSeatbelt {
+                    write_roots: vec![parent_root],
+                },
+                allow_hand_off: false,
+            },
+            None,
+            ProcessSupervisor::new(SupervisorConfig::default()),
+            None,
+        )
+        .expect("child registry");
+        let bash = registry.get("Bash").expect("Bash");
+
+        let inside = child_root.join("inside-child.marker");
+        let allowed = bash
+            .execute(serde_json::json!({
+                "command": format!("printf allowed > '{}'", inside.display())
+            }))
+            .await;
+        assert!(!allowed.is_error, "{}", allowed.content);
+        assert!(inside.exists());
+
+        let denied = bash
+            .execute(serde_json::json!({
+                "command": format!("printf denied > '{}'", outside.display())
+            }))
+            .await;
+        assert!(denied.is_error, "{}", denied.content);
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn child_cwd_outside_inherited_roots_is_rejected() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let capability = CapabilityPolicy::local_owner(
+            parent.path().canonicalize().unwrap(),
+        );
+        let result = test_registry(
+            ToolScope::Unrestricted,
+            outside.path(),
+            capability,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn isolated_worktree_translates_authority_to_the_exact_verified_worktree() {
+        use super::AgentSpawner;
+
+        struct NeverCalledProvider;
+
+        #[async_trait]
+        impl LlmProvider for NeverCalledProvider {
+            async fn stream(
+                &self,
+                _request: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                panic!("isolated capability validation must happen before provider use")
+            }
+        }
+
+        fn git(args: &[&str], cwd: &std::path::Path) {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        git(&["init", "-q"], parent.path());
+        git(&["config", "user.email", "t@t"], parent.path());
+        git(&["config", "user.name", "t"], parent.path());
+        std::fs::write(parent.path().join("tracked.txt"), "tracked\n").unwrap();
+        let nested = parent.path().join("packages").join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("nested.txt"), "nested\n").unwrap();
+        git(&["add", "-A"], parent.path());
+        git(&["commit", "-q", "-m", "init"], parent.path());
+        let nested_root = nested.canonicalize().unwrap();
+        let spawner = AgentSpawner::new(
+            Arc::new(NeverCalledProvider),
+            test_config(),
+            nested_root.clone(),
+        )
+        .with_execution_policy(
+            CapabilityPolicy::local_owner(nested_root.clone()),
+            Some(nested_root),
+            Vec::new(),
+        );
+        let worktree =
+            nomi_tools::worktree::Worktree::create(&nested).expect("create worktree");
+        let expected = worktree.verified_cwd(&nested).expect("verified worktree cwd");
+
+        let isolated = spawner
+            .clone_for_isolated_worktree(&worktree)
+            .expect("trusted Worktree handle may delegate exact authority");
+        assert_eq!(isolated.cwd, expected);
+        assert_eq!(isolated.execution_capability.cwd_roots, vec![expected.clone()]);
+        assert_eq!(isolated.write_root, Some(expected));
+        assert_ne!(
+            isolated.cwd,
+            worktree.verified_path().expect("worktree root"),
+            "nested parent cwd must not delegate the whole repository worktree"
+        );
+    }
+
+    #[test]
+    fn child_cwd_with_disjoint_inherited_write_root_is_rejected() {
+        let capability_root = tempfile::tempdir().unwrap();
+        let child = capability_root.path().join("child");
+        let sibling_write_root = capability_root.path().join("write-only-sibling");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&sibling_write_root).unwrap();
+        let capability =
+            CapabilityPolicy::local_owner(capability_root.path().canonicalize().unwrap());
+        let result = build_tool_registry(
+            ToolScope::Unrestricted,
+            &child,
+            &capability,
+            Some(&sibling_write_root),
+            ProcessSupervisor::new(SupervisorConfig::default()),
+            None,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn ordinary_child_without_parent_write_root_is_still_scoped_to_its_cwd() {
+        let parent = tempfile::tempdir().unwrap();
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let capability =
+            CapabilityPolicy::local_owner(parent.path().canonicalize().unwrap());
+        let registry = build_tool_registry(
+            ToolScope::Restricted(BTreeSet::from(["Write".to_string()])),
+            &child,
+            &capability,
+            None,
+            ProcessSupervisor::new(SupervisorConfig::default()),
+            None,
+        )
+        .expect("child registry");
+        let outside = parent.path().join("outside.txt");
+
+        let result = registry
+            .get("Write")
+            .expect("Write")
+            .execute(serde_json::json!({
+                "file_path": outside.to_string_lossy(),
+                "content": "must not escape"
+            }))
+            .await;
+
+        assert!(result.is_error, "{}", result.content);
+        assert!(!outside.exists());
     }
 
     #[test]
