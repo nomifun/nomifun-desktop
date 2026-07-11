@@ -14,7 +14,7 @@
  */
 import { Button, Checkbox, Dropdown, Input, Menu, Popconfirm, Radio, Select } from '@arco-design/web-react';
 import type { RefInputType } from '@arco-design/web-react/es/Input/interface';
-import { Check, Filter, Search, SortTwo, Tag } from '@icon-park/react';
+import { ArrowDown, ArrowUp, Check, Filter, Search, SortTwo, Tag } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -41,11 +41,13 @@ type FilterTriggerProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'v
   icon: React.ReactNode;
   label: string;
   value?: string;
+  valueIcon?: React.ReactNode;
+  valueIconLabel?: string;
   active?: boolean;
 };
 
 export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerProps>(function FilterTrigger(
-  { icon, label, value, active = false, className, ...buttonProps },
+  { icon, label, value, valueIcon, valueIconLabel, active = false, className, ...buttonProps },
   ref
 ) {
   return (
@@ -53,7 +55,7 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
       {...buttonProps}
       ref={ref}
       type='button'
-      aria-label={value ? `${label}: ${value}` : label}
+      aria-label={value ? `${label}: ${value}${valueIconLabel ? `, ${valueIconLabel}` : ''}` : label}
       aria-pressed={active || undefined}
       className={[
         'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2 focus-visible:outline-[rgb(var(--primary-6))]',
@@ -70,8 +72,13 @@ export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerPr
       </span>
       <span className='shrink-0'>{label}</span>
       {value && (
-        <span className='ml-2px max-w-160px truncate text-12px font-medium text-[var(--color-text-1)]'>
-          {value}
+        <span className='ml-2px inline-flex max-w-160px items-center gap-4px text-12px font-medium text-[var(--color-text-1)]'>
+          <span className='min-w-0 truncate'>{value}</span>
+          {valueIcon && (
+            <span aria-hidden='true' className='inline-flex shrink-0 text-[rgb(var(--primary-6))]'>
+              {valueIcon}
+            </span>
+          )}
         </span>
       )}
     </button>
@@ -253,6 +260,15 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
             icon={<SortTwo theme='outline' size='15' fill='currentColor' />}
             label={sortLabel}
             value={selectedSortLabel}
+            valueIcon={
+              orderBy &&
+              (order === 'asc' ? (
+                <ArrowUp theme='outline' size='12' fill='currentColor' />
+              ) : (
+                <ArrowDown theme='outline' size='12' fill='currentColor' />
+              ))
+            }
+            valueIconLabel={orderBy ? t(`requirements.sort.${order}`) : undefined}
             active={Boolean(orderBy) || openFilter === 'sort'}
           />
         </Dropdown>

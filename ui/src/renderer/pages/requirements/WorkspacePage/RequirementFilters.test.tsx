@@ -50,6 +50,22 @@ describe('RequirementFilters trigger', () => {
     expect(html.includes('ml-2px')).toBe(true);
   });
 
+  test('renders a direction icon and accessible label after the selected sort field', () => {
+    const html = renderToStaticMarkup(
+      <FilterTrigger
+        icon={<span>sort-icon</span>}
+        label='排序'
+        value='ID'
+        valueIcon={<span>direction-icon</span>}
+        valueIconLabel='升序'
+        active
+      />
+    );
+
+    expect(html.includes('direction-icon')).toBe(true);
+    expect(html.includes('aria-label="排序: ID, 升序"')).toBe(true);
+  });
+
   test('keeps select-all controls in the filter row instead of a separate list header', () => {
     expect(filtersSource.includes('requirements.selection.selectAllPage')).toBe(true);
     expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
