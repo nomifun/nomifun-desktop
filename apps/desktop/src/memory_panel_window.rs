@@ -122,7 +122,7 @@ pub async fn prepare_companion_memory_panel(app: tauri::AppHandle, server: tauri
             if app_for_task.get_webview_window(MEMORY_PANEL_LABEL).is_some() { return Ok(()); }
             tauri::WebviewWindowBuilder::new(&app_for_task, MEMORY_PANEL_LABEL, tauri::WebviewUrl::App("index.html#/nomi-memory-panel".into()))
                 .title("NomiFun Memory")
-                .inner_size(340.0, 320.0)
+                .inner_size(300.0, 320.0)
                 .resizable(false)
                 .decorations(false)
                 .transparent(true)
