@@ -4,6 +4,15 @@ use async_trait::async_trait;
 
 use crate::{ExecutionError, NormalizedExecutionRequest, OutputBuffer, Transport};
 
+#[cfg(unix)]
+mod unix;
+#[cfg(target_os = "linux")]
+mod linux_watchdog;
+#[cfg(target_os = "macos")]
+mod macos_watchdog;
+#[cfg(unix)]
+mod unix_protocol;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExitFact {
     pub(crate) code: Option<i32>,
@@ -38,12 +47,19 @@ pub(crate) async fn spawn(
 }
 
 pub(crate) async fn spawn_pipe(
-    _request: NormalizedExecutionRequest,
-    _output: Arc<OutputBuffer>,
+    request: NormalizedExecutionRequest,
+    output: Arc<OutputBuffer>,
 ) -> Result<SpawnedPlatformProcess, ExecutionError> {
-    Err(ExecutionError::Transport {
-        reason: "platform pipe adapter is pending".to_owned(),
-    })
-}
+    #[cfg(unix)]
+    {
+        unix::spawn_pipe(request, output).await
+    }
 
-// Platform-specific process ownership adapters are introduced by later Wave A tasks.
+    #[cfg(not(unix))]
+    {
+        let _ = (request, output);
+        Err(ExecutionError::Transport {
+            reason: "platform pipe adapter is pending".to_owned(),
+        })
+    }
+}

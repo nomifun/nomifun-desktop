@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Write},
     process::{Child, Command, Stdio},
@@ -8,9 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::collections::BTreeMap;
+
+use nomi_execution::SupervisorConfig;
+#[cfg(windows)]
 use nomi_execution::{
     CapabilityPolicy, CommandSpec, ExecutionOwner, ExecutionPolicy, NormalizedExecutionRequest,
-    ProcessSupervisor, SupervisorConfig, Transport,
+    ProcessSupervisor, Transport,
 };
 use tempfile::tempdir;
 
@@ -37,6 +41,7 @@ fn supervisor_defaults_are_stable() {
     assert_eq!(config.reaper_interval, Duration::from_secs(30));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn public_start_reports_the_pending_platform_adapter_as_transport_failure() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
@@ -225,6 +230,7 @@ fn read_pid(path: &std::path::Path) -> u32 {
         .expect("PID marker should contain a decimal PID")
 }
 
+#[cfg(windows)]
 fn normalized_request() -> NormalizedExecutionRequest {
     let cwd = std::env::current_dir().expect("current directory should exist");
     NormalizedExecutionRequest {

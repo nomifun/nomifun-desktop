@@ -1,0 +1,128 @@
+#[cfg(unix)]
+use std::{
+    collections::BTreeMap,
+    env,
+    ffi::OsString,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process,
+    time::Duration,
+};
+
+#[cfg(unix)]
+use nomi_execution::{
+    CapabilityPolicy, CommandSpec, ExecutionOwner, ExecutionPolicy, NormalizedExecutionRequest,
+    ProcessSupervisor, SupervisorConfig, Transport,
+};
+
+#[cfg(unix)]
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("parent-death harness failed: {error}");
+        process::exit(2);
+    }
+    // SAFETY: the harness intentionally bypasses every Rust drop and runtime cleanup path.
+    unsafe { libc::_exit(0) }
+}
+
+#[cfg(not(unix))]
+fn main() {}
+
+#[cfg(unix)]
+async fn run() -> io::Result<()> {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args.len() != 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected helper, leader marker, and grandchild marker paths",
+        ));
+    }
+    let helper = args[0].clone();
+    let leader_marker = PathBuf::from(&args[1]);
+    let grandchild_marker = PathBuf::from(&args[2]);
+    let cwd = env::current_dir()?;
+    let request = NormalizedExecutionRequest {
+        owner: ExecutionOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+        command: CommandSpec::Program {
+            program: helper,
+            args: vec![
+                OsString::from("spawn-grandchild"),
+                grandchild_marker.as_os_str().to_owned(),
+            ],
+        },
+        cwd: cwd.clone(),
+        env: BTreeMap::new(),
+        transport: Transport::Pipe,
+        policy: ExecutionPolicy::default(),
+        capability: CapabilityPolicy::local_owner(cwd),
+    };
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(request)
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let leader = supervisor
+        .status(&handle.owner, &handle.session_id)
+        .await
+        .map_err(|error| io::Error::other(error.to_string()))?
+        .pid;
+    wait_for_pid_marker(&grandchild_marker).await?;
+    write_pid_atomically(&leader_marker, leader)
+}
+
+#[cfg(unix)]
+async fn wait_for_pid_marker(path: &Path) -> io::Result<u32> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(contents) = fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+            {
+                return Ok(pid);
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "grandchild PID marker timed out"))?
+}
+
+#[cfg(unix)]
+fn write_pid_atomically(path: &Path, pid: u32) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "marker has no file name"))?;
+    for attempt in 0..100_u32 {
+        let mut temporary_name = OsString::from(".");
+        temporary_name.push(file_name);
+        temporary_name.push(format!(".{pid}.{attempt}.tmp"));
+        let temporary_path = parent.join(temporary_name);
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)
+        {
+            Ok(mut file) => {
+                let result = (|| {
+                    writeln!(file, "{pid}")?;
+                    file.flush()?;
+                    file.sync_all()?;
+                    drop(file);
+                    fs::rename(&temporary_path, path)
+                })();
+                if result.is_err() {
+                    let _ = fs::remove_file(&temporary_path);
+                }
+                return result;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a temporary PID marker",
+    ))
+}

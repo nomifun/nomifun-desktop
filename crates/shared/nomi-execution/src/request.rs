@@ -9,7 +9,10 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{CapabilityPolicy, outcome::SessionId};
+use crate::{
+    CapabilityPolicy,
+    outcome::{CleanupReport, ProcessSnapshot, SessionId, SpawnFailure},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionRequest {
@@ -113,6 +116,16 @@ pub enum ExecutionError {
         operation: &'static str,
         reason: String,
     },
+    #[error("execution spawn failed: {failure:?}")]
+    SpawnFailed { failure: SpawnFailure },
+    #[error(
+        "execution start ownership was lost: failure={failure:?}, last_known={last_known:?}, cleanup={cleanup:?}"
+    )]
+    StartLost {
+        failure: SpawnFailure,
+        last_known: Option<ProcessSnapshot>,
+        cleanup: CleanupReport,
+    },
 }
 
 impl ExecutionError {
@@ -126,6 +139,8 @@ impl ExecutionError {
             Self::OwnerMismatch { .. } => "owner_mismatch",
             Self::Transport { .. } => "transport",
             Self::Io { .. } => "io",
+            Self::SpawnFailed { .. } => "spawn_failed",
+            Self::StartLost { .. } => "start_lost",
         }
     }
 }

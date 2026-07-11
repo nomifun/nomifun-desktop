@@ -6,8 +6,11 @@ use std::{
     path::{Path, PathBuf},
     process::{self, Command},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 const LONG_SLEEP: Duration = Duration::from_secs(60);
 const UTF8_SAMPLE: &str = "中文🙂";
@@ -48,6 +51,30 @@ fn main() {
             require_len(&args, 2);
             spawn_grandchild(Path::new(&args[1]))
                 .unwrap_or_else(|error| fail_io("spawn grandchild", error));
+        }
+        "spawn-ignore-group" => {
+            require_len(&args, 2);
+            spawn_ignore_group(Path::new(&args[1]))
+                .unwrap_or_else(|error| fail_io("spawn interrupt-ignoring group", error));
+        }
+        "ignore-interrupt-pid" => {
+            require_len(&args, 2);
+            ignore_interrupt().unwrap_or_else(|error| fail_io("ignore interrupt", error));
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write ready PID marker", error));
+            thread::sleep(LONG_SLEEP);
+        }
+        #[cfg(unix)]
+        "leader-first" => {
+            require_len(&args, 2);
+            spawn_surviving_descendant(Path::new(&args[1]), false)
+                .unwrap_or_else(|error| fail_io("spawn leader-first descendant", error));
+        }
+        #[cfg(unix)]
+        "setsid-escape" => {
+            require_len(&args, 2);
+            spawn_surviving_descendant(Path::new(&args[1]), true)
+                .unwrap_or_else(|error| fail_io("spawn setsid descendant", error));
         }
         "ignore-interrupt" => {
             require_len(&args, 1);
@@ -121,6 +148,67 @@ fn spawn_grandchild(marker: &Path) -> io::Result<()> {
     thread::sleep(LONG_SLEEP);
     let _ = grandchild.wait();
     Ok(())
+}
+
+fn spawn_ignore_group(marker: &Path) -> io::Result<()> {
+    ignore_interrupt()?;
+    let executable = env::current_exe()?;
+    let mut grandchild = Command::new(executable)
+        .arg("ignore-interrupt-pid")
+        .arg(marker)
+        .spawn()?;
+    if let Err(error) = wait_for_marker(marker, Duration::from_secs(5)) {
+        let _ = grandchild.kill();
+        let _ = grandchild.wait();
+        return Err(error);
+    }
+    emit_ready()?;
+    thread::sleep(LONG_SLEEP);
+    let _ = grandchild.wait();
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_surviving_descendant(marker: &Path, escape_session: bool) -> io::Result<()> {
+    let executable = env::current_exe()?;
+    let mut command = Command::new(executable);
+    command.args(["sleep", "60000"]);
+    if escape_session {
+        // SAFETY: setsid is async-signal-safe and this closure performs no allocation or I/O.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    let mut descendant = command.spawn()?;
+    if let Err(error) = write_pid_atomically(marker, descendant.id()) {
+        let _ = descendant.kill();
+        let _ = descendant.wait();
+        return Err(error);
+    }
+    drop(descendant);
+    Ok(())
+}
+
+fn wait_for_marker(path: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "PID marker was not published before the deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
 }
 
 fn write_pid_atomically(path: &Path, pid: u32) -> io::Result<()> {

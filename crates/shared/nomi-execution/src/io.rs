@@ -519,7 +519,10 @@ impl IncrementalDecoder {
 
     fn finish(&mut self) -> DecodedDelta {
         let errors_before = self.decode_errors;
+        #[cfg(windows)]
         let mut sources = DeltaSources::default();
+        #[cfg(not(windows))]
+        let sources = DeltaSources::default();
 
         #[cfg(windows)]
         let text = if let Some(decoder) = &mut self.windows {
