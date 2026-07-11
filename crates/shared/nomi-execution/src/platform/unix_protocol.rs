@@ -33,6 +33,7 @@ pub(super) enum FrameKind {
     Committed = 6,
     Quiescing = 7,
     Failure = 8,
+    Registered = 9,
 }
 
 impl FrameKind {
@@ -46,6 +47,7 @@ impl FrameKind {
             6 => Some(Self::Committed),
             7 => Some(Self::Quiescing),
             8 => Some(Self::Failure),
+            9 => Some(Self::Registered),
             _ => None,
         }
     }

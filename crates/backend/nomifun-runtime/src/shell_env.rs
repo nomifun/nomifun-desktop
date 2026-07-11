@@ -36,7 +36,7 @@ pub unsafe fn enhance_process_path() -> String {
     let extras = platform_extra_bins();
     let bun_dir = crate::bun_bin_dir();
 
-    let merged = merge_paths(bun_dir.as_deref(), &extras, &current, login.as_deref());
+    let merged = merge_process_path(bun_dir.as_deref(), &extras, &current, login.as_deref());
 
     if merged == current {
         tracing::warn!("PATH enhancement produced no changes; continuing with inherited PATH");
@@ -60,39 +60,27 @@ pub unsafe fn enhance_process_path() -> String {
 
 // Placeholder helpers — filled in by later tasks.
 
-fn merge_paths(bun_dir: Option<&Path>, extras: &[PathBuf], current: &str, login: Option<&str>) -> String {
+fn merge_process_path(
+    bun_dir: Option<&Path>,
+    extras: &[PathBuf],
+    current: &str,
+    login: Option<&str>,
+) -> String {
     // Order: bun_dir, extras, current, login. First-occurrence wins.
-    // `env::split_paths` and `env::join_paths` honour the OS-specific
-    // separator (':' on Unix, ';' on Windows) and handle quoting.
-    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut parts: Vec<PathBuf> = Vec::new();
-
-    let mut push = |p: PathBuf| {
-        if p.as_os_str().is_empty() {
-            return;
-        }
-        if seen.insert(p.clone()) {
-            parts.push(p);
-        }
-    };
-
+    // Runtime owns source discovery; nomi-execution owns the shared,
+    // platform-correct ordered de-duplication and join.
+    let mut sources = Vec::new();
     if let Some(p) = bun_dir {
-        push(p.to_path_buf());
+        sources.push(p.to_path_buf());
     }
-    for p in extras {
-        push(p.clone());
-    }
-    for p in std::env::split_paths(current) {
-        push(p);
-    }
+    sources.extend(extras.iter().cloned());
+    sources.extend(std::env::split_paths(current));
     if let Some(l) = login {
-        for p in std::env::split_paths(l) {
-            push(p);
-        }
+        sources.extend(std::env::split_paths(l));
     }
 
-    std::env::join_paths(&parts)
-        .map(|os| os.to_string_lossy().into_owned())
+    nomi_execution::merge_process_path(sources)
+        .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
@@ -428,54 +416,54 @@ mod tests {
     }
 
     #[test]
-    fn merge_paths_dedupes_preserve_order() {
+    fn merge_process_path_dedupes_preserve_order() {
         let s = sep();
         let current = format!("/a{s}/b{s}/c");
         let login = format!("/b{s}/d");
         let extras: Vec<PathBuf> = vec![PathBuf::from("/e")];
 
-        let result = merge_paths(None, &extras, &current, Some(&login));
+        let result = merge_process_path(None, &extras, &current, Some(&login));
         let parts: Vec<&str> = result.split(s).collect();
 
         assert_eq!(parts, vec!["/e", "/a", "/b", "/c", "/d"]);
     }
 
     #[test]
-    fn merge_paths_with_bun_dir_at_front() {
+    fn merge_process_path_keeps_bun_dir_at_front() {
         let s = sep();
         let current = format!("/a{s}/b");
         let bun = PathBuf::from("/bun");
 
-        let result = merge_paths(Some(&bun), &[], &current, None);
+        let result = merge_process_path(Some(&bun), &[], &current, None);
         let parts: Vec<&str> = result.split(s).collect();
 
         assert_eq!(parts, vec!["/bun", "/a", "/b"]);
     }
 
     #[test]
-    fn merge_paths_drops_empty_segments() {
+    fn merge_process_path_drops_empty_segments() {
         let s = sep();
         let current = format!("{s}/a{s}{s}/b{s}");
 
-        let result = merge_paths(None, &[], &current, None);
+        let result = merge_process_path(None, &[], &current, None);
         let parts: Vec<&str> = result.split(s).collect();
 
         assert_eq!(parts, vec!["/a", "/b"]);
     }
 
     #[test]
-    fn merge_paths_all_optional_none() {
-        let result = merge_paths(None, &[], "", None);
+    fn merge_process_path_handles_no_sources() {
+        let result = merge_process_path(None, &[], "", None);
         assert_eq!(result, "");
     }
 
     #[test]
-    fn merge_paths_bun_dir_deduplicates_if_already_in_current() {
+    fn merge_process_path_deduplicates_bun_from_inherited_path() {
         let s = sep();
         let current = format!("/bun{s}/a");
         let bun = PathBuf::from("/bun");
 
-        let result = merge_paths(Some(&bun), &[], &current, None);
+        let result = merge_process_path(Some(&bun), &[], &current, None);
         let parts: Vec<&str> = result.split(s).collect();
 
         // /bun appears first (from bun_dir), then /a from current.

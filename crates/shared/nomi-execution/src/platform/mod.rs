@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use crate::{ExecutionError, NormalizedExecutionRequest, OutputBuffer, Transport};
 
 #[cfg(unix)]
-mod unix;
+pub(crate) mod unix;
 #[cfg(unix)]
 mod unix_pty;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 #[cfg(target_os = "linux")]
 mod linux_watchdog;
 #[cfg(target_os = "macos")]

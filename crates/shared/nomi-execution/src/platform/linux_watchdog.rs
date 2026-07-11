@@ -404,6 +404,10 @@ pub(super) unsafe fn run_watchdog(config: WatchdogConfig) -> ! {
         Ok(monitor) if unsafe { monitor_alive(monitor) } => monitor,
         _ => unsafe { exit_watchdog(config, 77) },
     };
+    let registered = Frame::new(FrameKind::Registered, config.nonce, leader, leader);
+    if send_frame(config.control_fd, &registered, config.deadline).is_err() {
+        unsafe { quiesce_and_kill(config, leader, 77) };
+    }
     if !unsafe { monitor_alive(parent_monitor) } {
         unsafe { quiesce_and_kill(config, leader, 78) };
     }

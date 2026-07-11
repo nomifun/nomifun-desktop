@@ -3,13 +3,14 @@ mod handles;
 
 use std::{
     cmp::Ordering,
+    collections::HashMap,
     ffi::{OsStr, OsString, c_void},
     io,
     mem,
     os::windows::ffi::OsStrExt,
     ptr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
         mpsc,
     },
@@ -20,13 +21,17 @@ use async_trait::async_trait;
 use tokio::sync::watch;
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_BROKEN_PIPE, ERROR_NO_DATA, HANDLE, HANDLE_FLAG_INHERIT, WAIT_FAILED,
-        WAIT_OBJECT_0, WAIT_TIMEOUT, SetHandleInformation,
+        DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_NO_DATA, HANDLE,
+        HANDLE_FLAG_INHERIT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, SetHandleInformation,
     },
     Globalization::{CSTR_GREATER_THAN, CSTR_LESS_THAN, CompareStringOrdinal},
     Security::SECURITY_ATTRIBUTES,
     Storage::FileSystem::{ReadFile, WriteFile},
     System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+            Thread32Next,
+        },
         JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -36,9 +41,9 @@ use windows_sys::Win32::{
         Pipes::CreatePipe,
         Threading::{
             CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-            CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-            PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-            TerminateProcess, WaitForSingleObject,
+            CreateProcessW, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
+            OpenThread, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+            STARTUPINFOEXW, THREAD_SUSPEND_RESUME, TerminateProcess, WaitForSingleObject,
         },
     },
 };
@@ -68,6 +73,278 @@ pub(super) async fn spawn_pipe(
     output: Arc<OutputBuffer>,
 ) -> Result<SpawnedPlatformProcess, ExecutionError> {
     spawn_pipe_inner(request, output, Arc::new(SystemWin32)).await
+}
+
+pub(crate) fn spawn_legacy(
+    mut command: tokio::process::Command,
+    hand_off: bool,
+) -> io::Result<tokio::process::Child> {
+    if hand_off {
+        return command.spawn();
+    }
+
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    let job = Arc::new(JobControl::new(create_execution_job()?));
+    let child = command.spawn()?;
+    let pid = child.id().ok_or_else(|| {
+        io::Error::other("legacy child exited before its process Job could be registered")
+    })?;
+    let process = child.raw_handle().ok_or_else(|| {
+        io::Error::other("legacy child handle disappeared before Job assignment")
+    })?;
+    let job_handle = job
+        .raw_handle()
+        .ok_or_else(|| io::Error::other("legacy execution Job closed before assignment"))?;
+    // SAFETY: both handles are live for this call. The process handle remains
+    // owned by tokio::process::Child and the Job is retained by `job`.
+    if unsafe { AssignProcessToJobObject(job_handle, process.cast()) } == 0 {
+        let assignment_error = io::Error::last_os_error();
+        // Assignment failure must not return a live unowned child. The exact
+        // process handle is still valid even though Tokio owns it.
+        let _ = unsafe { TerminateProcess(process.cast(), TERMINATED_BY_HOST_EXIT_CODE) };
+        let _ = unsafe { WaitForSingleObject(process.cast(), 5_000) };
+        return Err(io::Error::new(
+            assignment_error.kind(),
+            format!("assign legacy child to execution Job: {assignment_error}"),
+        ));
+    }
+
+    let process = match duplicate_non_inheritable(process.cast()) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = job.close_for_kill();
+            let _ = unsafe { WaitForSingleObject(process.cast(), 5_000) };
+            return Err(io::Error::new(
+                error.kind(),
+                format!("duplicate legacy child process handle: {error}"),
+            ));
+        }
+    };
+    let execution = Arc::new(LegacyExecution { process, job });
+    if let Err(error) = register_legacy_job(pid, Arc::clone(&execution)) {
+        let _ = execution.job.close_for_kill();
+        let _ = unsafe { WaitForSingleObject(execution.process.as_raw(), 5_000) };
+        return Err(error);
+    }
+    if let Err(error) = resume_legacy_primary_thread(pid) {
+        remove_legacy_job(pid, &execution);
+        let _ = execution.job.close_for_kill();
+        let _ = unsafe { WaitForSingleObject(execution.process.as_raw(), 5_000) };
+        return Err(io::Error::new(
+            error.kind(),
+            format!("resume legacy child primary thread: {error}"),
+        ));
+    }
+    Ok(child)
+}
+
+pub(crate) async fn kill_legacy_process_tree(
+    child: &mut tokio::process::Child,
+) -> io::Result<()> {
+    let Some(pid) = child.id() else {
+        return child.wait().await.map(|_| ());
+    };
+    let Some(execution) = legacy_job(pid)? else {
+        child.kill().await?;
+        return child.wait().await.map(|_| ());
+    };
+
+    execution.job.terminate()?;
+    let cleanup = start_legacy_cleanup(pid, Arc::clone(&execution))?;
+    let child_result = child.wait().await.map(|_| ());
+    let cleanup_result = cleanup
+        .await
+        .map_err(|_| io::Error::other("legacy Job cleanup worker dropped without a result"))?;
+    child_result?;
+    cleanup_result
+}
+
+struct LegacyExecution {
+    process: OwnedHandle,
+    job: Arc<JobControl>,
+}
+
+fn legacy_jobs() -> &'static Mutex<HashMap<u32, Arc<LegacyExecution>>> {
+    static JOBS: OnceLock<Mutex<HashMap<u32, Arc<LegacyExecution>>>> = OnceLock::new();
+    JOBS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_legacy_job(pid: u32, execution: Arc<LegacyExecution>) -> io::Result<()> {
+    let start_gate = Arc::new(std::sync::Barrier::new(2));
+    let worker_gate = Arc::clone(&start_gate);
+    let worker_execution = Arc::clone(&execution);
+    let worker = std::thread::Builder::new()
+        .name(format!("nomi-legacy-job-{pid}"))
+        .spawn(move || {
+            worker_gate.wait();
+            reap_legacy_job(pid, worker_execution);
+        })?;
+
+    let registered = {
+        let mut jobs = match legacy_jobs().lock() {
+            Ok(jobs) => jobs,
+            Err(_) => {
+                let _ = execution.job.close_for_kill();
+                start_gate.wait();
+                let _ = worker.join();
+                return Err(io::Error::other(
+                    "legacy execution Job registry is poisoned",
+                ));
+            }
+        };
+        if jobs.contains_key(&pid) {
+            false
+        } else {
+            jobs.insert(pid, Arc::clone(&execution));
+            true
+        }
+    };
+    start_gate.wait();
+    if !registered {
+        let _ = execution.job.close_for_kill();
+        let _ = worker.join();
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("legacy execution Job already exists for PID {pid}"),
+        ));
+    }
+    drop(worker);
+    Ok(())
+}
+
+fn legacy_job(pid: u32) -> io::Result<Option<Arc<LegacyExecution>>> {
+    legacy_jobs()
+        .lock()
+        .map_err(|_| io::Error::other("legacy execution Job registry is poisoned"))
+        .map(|jobs| jobs.get(&pid).cloned())
+}
+
+fn remove_legacy_job(pid: u32, expected: &Arc<LegacyExecution>) {
+    let Ok(mut jobs) = legacy_jobs().lock() else {
+        return;
+    };
+    if jobs
+        .get(&pid)
+        .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+    {
+        jobs.remove(&pid);
+    }
+}
+
+fn reap_legacy_job(pid: u32, execution: Arc<LegacyExecution>) {
+    let deadline = Instant::now()
+        .checked_add(LIFECYCLE_WAIT_HORIZON)
+        .unwrap_or_else(Instant::now);
+    let result = wait_handle_until(execution.process.as_raw(), deadline).and_then(|()| {
+        if execution.job.active_processes()? != 0 {
+            execution.job.terminate()?;
+        }
+        execution.job.wait_empty_until(deadline)?;
+        execution.job.close_proven_empty()
+    });
+    if let Err(error) = result {
+        tracing::warn!(
+            pid,
+            %error,
+            "legacy execution Job reaper could not prove process-tree cleanup"
+        );
+        let _ = execution.job.close_for_kill();
+    }
+    remove_legacy_job(pid, &execution);
+}
+
+fn start_legacy_cleanup(
+    pid: u32,
+    execution: Arc<LegacyExecution>,
+) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<()>>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name(format!("nomi-legacy-job-cleanup-{pid}"))
+        .spawn(move || {
+            let deadline = Instant::now()
+                .checked_add(CLEANUP_TIMEOUT)
+                .unwrap_or_else(Instant::now);
+            let result = wait_handle_until(execution.process.as_raw(), deadline)
+                .and_then(|()| execution.job.wait_empty_until(deadline))
+                .and_then(|()| execution.job.close_proven_empty());
+            remove_legacy_job(pid, &execution);
+            let _ = sender.send(result);
+        })?;
+    Ok(receiver)
+}
+
+fn duplicate_non_inheritable(handle: HANDLE) -> io::Result<OwnedHandle> {
+    // SAFETY: the current process pseudo-handle and source process handle are
+    // valid; DuplicateHandle writes one fresh non-inheritable handle.
+    let current = unsafe { GetCurrentProcess() };
+    let mut duplicate = ptr::null_mut();
+    if unsafe {
+        DuplicateHandle(
+            current,
+            handle,
+            current,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: DuplicateHandle returned a fresh owned handle.
+    unsafe { OwnedHandle::from_raw(duplicate) }
+}
+
+fn resume_legacy_primary_thread(pid: u32) -> io::Result<()> {
+    // SAFETY: the snapshot flags and process id are plain values.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    // SAFETY: a successful snapshot call returns a fresh owned handle.
+    let snapshot = unsafe { OwnedHandle::from_raw(snapshot)? };
+    let mut entry = THREADENTRY32 {
+        dwSize: u32::try_from(mem::size_of::<THREADENTRY32>())
+            .expect("THREADENTRY32 fits in u32"),
+        ..THREADENTRY32::default()
+    };
+    // SAFETY: snapshot is live and entry is writable storage with dwSize set.
+    if unsafe { Thread32First(snapshot.as_raw(), &mut entry) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut only_thread = None;
+    loop {
+        if entry.th32OwnerProcessID == pid {
+            if only_thread.replace(entry.th32ThreadID).is_some() {
+                return Err(io::Error::other(format!(
+                    "suspended legacy PID {pid} exposed more than one thread before resume"
+                )));
+            }
+        }
+        // SAFETY: snapshot remains live and entry remains writable.
+        if unsafe { Thread32Next(snapshot.as_raw(), &mut entry) } == 0 {
+            break;
+        }
+    }
+    let thread_id = only_thread.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("primary thread for legacy PID {pid} was not found"),
+        )
+    })?;
+    // SAFETY: OpenThread validates the unique thread id discovered for the
+    // still-suspended exact process and returns a fresh handle on success.
+    let raw = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    // SAFETY: a non-null OpenThread result is a fresh owned handle.
+    let thread = unsafe { OwnedHandle::from_raw(raw)? };
+    // SAFETY: CREATE_SUSPENDED prevents user code from creating any other
+    // threads before this call, and the exact process handle remains live.
+    let previous = unsafe { ResumeThread(thread.as_raw()) };
+    match previous {
+        1 => Ok(()),
+        u32::MAX => Err(io::Error::last_os_error()),
+        count => Err(io::Error::other(format!(
+            "legacy primary thread had unexpected suspend count {count}"
+        ))),
+    }
 }
 
 pub(super) async fn spawn_pty(
@@ -1956,10 +2233,7 @@ mod tests {
 
     use serial_test::serial;
     use tempfile::TempDir;
-    use windows_sys::Win32::{
-        Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
-        System::Threading::GetCurrentProcess,
-    };
+    use windows_sys::Win32::Foundation::HANDLE;
 
     use super::*;
     use crate::{CapabilityPolicy, ExecutionOwner, ExecutionPolicy, Transport};
@@ -2527,26 +2801,6 @@ mod tests {
             .take_while(|entry| !entry.is_empty())
             .map(|entry| String::from_utf16(entry).expect("ASCII fixture should remain UTF-16"))
             .collect()
-    }
-
-    fn duplicate_non_inheritable(handle: HANDLE) -> io::Result<OwnedHandle> {
-        let current_process = unsafe { GetCurrentProcess() };
-        let mut duplicate = ptr::null_mut();
-        let duplicated = unsafe {
-            DuplicateHandle(
-                current_process,
-                handle,
-                current_process,
-                &mut duplicate,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        };
-        if duplicated == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        unsafe { OwnedHandle::from_raw(duplicate) }
     }
 
     struct PausedAssignFacade {
