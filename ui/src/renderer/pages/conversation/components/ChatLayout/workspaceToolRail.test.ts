@@ -17,15 +17,18 @@ const rule = (selector: string) => {
 };
 
 describe('workspace tool rail dimensions', () => {
-  test('uses the compact desktop width while preserving control height', () => {
+  test('uses compact square desktop controls', () => {
     const rail = rule('\\.workspace-tool-rail');
     const item = rule('\\.workspace-tool-rail__item');
+    const collapse = rule('\\.workspace-tool-rail__item--collapse');
 
     expect(rail.includes('flex: 0 0 32px;')).toBe(true);
     expect(rail.includes('width: 32px;')).toBe(true);
     expect(rail.includes('min-width: 32px;')).toBe(true);
     expect(item.includes('width: 28px;')).toBe(true);
-    expect(item.includes('height: 48px;')).toBe(true);
+    expect(item.includes('height: 28px;')).toBe(true);
+    expect(item.includes('aspect-ratio: 1 / 1;')).toBe(true);
+    expect(collapse.includes('height: 28px;')).toBe(true);
   });
 
   test('does not change the mobile workspace trigger dimensions', () => {
