@@ -58,9 +58,13 @@ test('keeps desktop table surfaces transparent', () => {
     pageSource.match(/className='hidden items-center gap-16px[^']*md:grid'/)?.[0] ?? '';
   const desktopListClass =
     pageSource.match(/className='grid w-full grid-cols-1 items-start gap-12px[^']*md:divide-\[var\(--color-border-2\)\]'/)?.[0] ?? '';
+  const desktopRowClass =
+    pageSource.match(/className='group flex cursor-pointer flex-col[^']*md:hover:shadow-none'/)?.[0] ?? '';
 
   expect(desktopHeaderClass.includes('bg-fill-2')).toBe(false);
   expect(desktopListClass.includes('md:bg-fill-1')).toBe(false);
+  expect(desktopRowClass.includes('bg-fill-1')).toBe(true);
+  expect(desktopRowClass.includes('md:bg-transparent')).toBe(true);
   expect(desktopHeaderClass.includes('border-b-[var(--color-border-2)]')).toBe(true);
   expect(desktopListClass.includes('md:divide-y')).toBe(true);
 });

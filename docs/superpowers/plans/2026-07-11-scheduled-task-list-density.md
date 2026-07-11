@@ -12,7 +12,7 @@
 
 - Desktop task rows use `md:min-h-48px` and `md:py-8px`, producing an approximately 64px total row height.
 - Desktop header and list have no four-sided perimeter or rounded outer corners.
-- Desktop header and list container have transparent backgrounds.
+- Desktop header, list container, and task rows have transparent backgrounds.
 - The header bottom rule and task-to-task horizontal dividers remain visible.
 - Mobile cards retain their existing border, padding, layout, and behavior.
 - Detail navigation and start/pause callbacks remain unchanged.
@@ -106,9 +106,9 @@ git commit -m "style(ui): compact scheduled task rows"
 
 **Interfaces:**
 - Consumes: the compact borderless desktop markup from Task 1.
-- Produces: transparent desktop header and list surfaces while preserving mobile cards, internal dividers, and hover feedback.
+- Produces: transparent desktop header, list container, and task rows while preserving mobile cards, internal dividers, and hover feedback.
 
-- [ ] **Step 1: Write the failing transparency test**
+- [x] **Step 1: Write the failing transparency test**
 
 Add to `scheduledTaskLayout.test.ts`:
 
@@ -118,39 +118,43 @@ test('keeps desktop table surfaces transparent', () => {
     pageSource.match(/className='hidden items-center gap-16px[^']*md:grid'/)?.[0] ?? '';
   const desktopListClass =
     pageSource.match(/className='grid w-full grid-cols-1 items-start gap-12px[^']*md:divide-\[var\(--color-border-2\)\]'/)?.[0] ?? '';
+  const desktopRowClass =
+    pageSource.match(/className='group flex cursor-pointer flex-col[^']*md:hover:shadow-none'/)?.[0] ?? '';
 
   expect(desktopHeaderClass.includes('bg-fill-2')).toBe(false);
   expect(desktopListClass.includes('md:bg-fill-1')).toBe(false);
+  expect(desktopRowClass.includes('bg-fill-1')).toBe(true);
+  expect(desktopRowClass.includes('md:bg-transparent')).toBe(true);
   expect(desktopHeaderClass.includes('border-b-[var(--color-border-2)]')).toBe(true);
   expect(desktopListClass.includes('md:divide-y')).toBe(true);
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `bun test ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledTaskLayout.test.ts`
 
-Expected: FAIL because the desktop header contains `bg-fill-2` and the desktop list contains `md:bg-fill-1`.
+Expected: FAIL because at least one desktop table surface still has a background, including a mobile row background that is not explicitly cleared at the desktop breakpoint.
 
-- [ ] **Step 3: Remove only the desktop surface backgrounds**
+- [x] **Step 3: Remove only the desktop surface backgrounds**
 
-In `index.tsx`, remove `bg-fill-2` from the desktop-only header class and remove `md:bg-fill-1` from the desktop list class. Keep `border-b-[var(--color-border-2)]`, `md:divide-y`, the row's mobile `bg-fill-1`, and `md:hover:bg-fill-2` unchanged.
+In `index.tsx`, remove `bg-fill-2` from the desktop-only header class, remove `md:bg-fill-1` from the desktop list class, and add `md:bg-transparent` to each task row. Keep `border-b-[var(--color-border-2)]`, `md:divide-y`, the row's mobile `bg-fill-1`, and `md:hover:bg-fill-2` unchanged.
 
-- [ ] **Step 4: Run focused and adjacent tests**
+- [x] **Step 4: Run focused and adjacent tests**
 
 Run: `bun test ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledTaskLayout.test.ts ui/src/renderer/pages/cron/ScheduledTasksPage/cronJobSearch.test.ts ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledCreateTarget.test.ts`
 
 Expected: all tests pass.
 
-- [ ] **Step 5: Run type and production verification**
+- [x] **Step 5: Run type and production verification**
 
 Run: `bun run typecheck && bun run build:ui`
 
 Expected: both commands exit with code 0.
 
-- [ ] **Step 6: Commit the transparency adjustment**
+- [x] **Step 6: Commit the transparency adjustment**
 
 ```bash
 git add ui/src/renderer/pages/cron/ScheduledTasksPage/index.tsx ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledTaskLayout.test.ts docs/superpowers/specs/2026-07-11-scheduled-task-horizontal-list-design.md docs/superpowers/plans/2026-07-11-scheduled-task-list-density.md
-git commit -m "style(ui): make scheduled task list transparent"
+git commit -m "style(ui): clear scheduled task row background"
 ```

@@ -201,7 +201,7 @@ const ScheduledTasksPage: React.FC = () => {
                 return (
                   <div
                     key={job.id}
-                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-16px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-48px md:items-center md:gap-16px md:rounded-0 md:border-0 md:px-18px md:py-8px md:hover:bg-fill-2 md:hover:shadow-none'
+                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-16px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-48px md:items-center md:gap-16px md:rounded-0 md:border-0 md:bg-transparent md:px-18px md:py-8px md:hover:bg-fill-2 md:hover:shadow-none'
                     style={{ gridTemplateColumns: DESKTOP_SCHEDULED_TASK_COLUMNS }}
                     onClick={() => handleGoToDetail(job)}
                   >
