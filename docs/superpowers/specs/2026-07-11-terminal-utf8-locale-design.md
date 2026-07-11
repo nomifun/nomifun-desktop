@@ -30,7 +30,7 @@ The helper will first apply the existing `TERM=xterm-256color` and `COLORTERM=tr
 - macOS: `LANG=en_US.UTF-8` and `LC_CTYPE=UTF-8`.
 - Linux: `LANG=C.UTF-8` and `LC_CTYPE=C.UTF-8`.
 
-`LC_CTYPE` changes character classification/encoding without unnecessarily changing numeric, monetary, collation, date, or message categories. If the inherited process has a non-UTF-8 `LC_ALL`, that higher-precedence value would defeat `LC_CTYPE`; in that case the child receives the platform UTF-8 fallback in `LC_ALL` as well. An inherited UTF-8 `LC_ALL` is left untouched. Empty values and the `C`/`POSIX` locales are treated as non-UTF-8.
+`LC_CTYPE` changes character classification/encoding without unnecessarily changing numeric, monetary, collation, date, or message categories. If the inherited process has a non-UTF-8 `LC_ALL`, that higher-precedence value would defeat `LC_CTYPE`; in that case the child receives the platform UTF-8 fallback in `LC_ALL` as well. An inherited, syntactically complete UTF-8 `LC_ALL` such as `C.UTF-8` or `en_US.UTF-8` is left untouched. Empty values and the `C`/`POSIX` locales are treated as non-UTF-8. A bare `LC_ALL=UTF-8` is also repaired: macOS accepts `UTF-8` as an `LC_CTYPE` alias but silently falls back to `C` when the same bare value is used for `LC_ALL`.
 
 The implementation will make inherited-environment lookup injectable into the pure normalization helper. Tests can therefore cover missing and conflicting inherited variables without mutating the test process environment, which would be unsafe under parallel Rust tests.
 
