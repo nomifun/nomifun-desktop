@@ -1,0 +1,21 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+
+const routerSource = readFileSync(new URL('../../components/layout/Router.tsx', import.meta.url), 'utf8');
+const panelSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
+const panelCss = readFileSync(new URL('./memoryPanel.css', import.meta.url), 'utf8');
+
+describe('detached memory panel route', () => {
+  test('is standalone, focus-aware, semantic and scrollable', () => {
+    expect(routerSource.includes("path='/nomi-memory-panel'")).toBe(true);
+    expect(panelSource.includes('onFocusChanged')).toBe(true);
+    expect(panelSource.includes("phaseRef.current !== 'open'")).toBe(true);
+    expect(panelSource.includes('MEMORY_PANEL_EVENTS.activate')).toBe(true);
+    expect(panelSource.includes("role='dialog'")).toBe(true);
+    expect(panelCss.includes('overflow-y: auto')).toBe(true);
+    expect(panelCss.includes('overflow-wrap: anywhere')).toBe(true);
+    expect(panelCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
+    expect(panelCss.includes('-webkit-line-clamp')).toBe(false);
+    expect(panelCss.includes('backdrop-filter')).toBe(false);
+  });
+});
