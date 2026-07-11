@@ -64,7 +64,7 @@ type ToolRailItemProps = {
 };
 
 const ToolRailItem: React.FC<ToolRailItemProps> = ({ active, label, icon, badge, statusColor, onClick }) => (
-  <Tooltip position='left' content={label}>
+  <Tooltip position='left' content={label} mini className='workspace-tool-rail__tooltip'>
     <button
       type='button'
       className={classNames('workspace-tool-rail__item', {
