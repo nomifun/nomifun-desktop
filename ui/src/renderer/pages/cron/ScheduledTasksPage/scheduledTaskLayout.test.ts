@@ -68,3 +68,16 @@ test('keeps desktop table surfaces transparent', () => {
   expect(desktopHeaderClass.includes('border-b-[var(--color-border-2)]')).toBe(true);
   expect(desktopListClass.includes('md:divide-y')).toBe(true);
 });
+
+test('styles the scheduled task search as a bordered pill', () => {
+  const searchClass =
+    pageSource.match(/<Input\.Search[\s\S]*?className='([^']+)'[\s\S]*?\/>/)?.[1] ?? '';
+  const searchClasses = searchClass.split(/\s+/);
+
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!rounded-full')).toBe(true);
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border')).toBe(true);
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border-solid')).toBe(true);
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper]:!border-[var(--color-border-2)]')).toBe(true);
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)]')).toBe(true);
+  expect(searchClasses.includes('[&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]')).toBe(true);
+});
