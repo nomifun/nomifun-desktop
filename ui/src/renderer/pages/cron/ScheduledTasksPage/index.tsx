@@ -179,7 +179,7 @@ const ScheduledTasksPage: React.FC = () => {
         ) : (
           <div className='w-full'>
             <div
-              className='hidden items-center gap-16px rounded-t-12px border border-solid border-[var(--color-border-2)] bg-fill-2 px-18px py-10px text-12px font-medium leading-18px text-t-tertiary md:grid'
+              className='hidden items-center gap-16px border-b border-b-solid border-b-[var(--color-border-2)] bg-fill-2 px-18px py-10px text-12px font-medium leading-18px text-t-tertiary md:grid'
               style={{ gridTemplateColumns: DESKTOP_SCHEDULED_TASK_COLUMNS }}
             >
               <span>{t('cron.page.list.task')}</span>
@@ -189,7 +189,7 @@ const ScheduledTasksPage: React.FC = () => {
               <span className='text-center'>{t('cron.page.list.action')}</span>
             </div>
 
-            <div className='grid w-full grid-cols-1 items-start gap-12px md:block md:overflow-hidden md:rounded-b-12px md:border md:border-t-0 md:border-solid md:border-[var(--color-border-2)] md:bg-fill-1 md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
+            <div className='grid w-full grid-cols-1 items-start gap-12px md:block md:bg-fill-1 md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
               {filteredJobs.map((job) => {
                 const agentMeta = getJobAgentMeta(job, cliAgents);
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;
@@ -201,7 +201,7 @@ const ScheduledTasksPage: React.FC = () => {
                 return (
                   <div
                     key={job.id}
-                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-16px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-68px md:items-center md:gap-16px md:rounded-0 md:border-0 md:px-18px md:py-14px md:hover:bg-fill-2 md:hover:shadow-none'
+                    className='group flex cursor-pointer flex-col rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 px-16px py-16px transition-colors duration-200 hover:border-[var(--color-border-3)] hover:shadow-sm md:grid md:min-h-48px md:items-center md:gap-16px md:rounded-0 md:border-0 md:px-18px md:py-8px md:hover:bg-fill-2 md:hover:shadow-none'
                     style={{ gridTemplateColumns: DESKTOP_SCHEDULED_TASK_COLUMNS }}
                     onClick={() => handleGoToDetail(job)}
                   >
