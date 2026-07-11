@@ -120,33 +120,27 @@
   box-shadow: 0 6px 16px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
 }
 
-.workspace-tool-rail__item--active::before {
-  content: '';
-  position: absolute;
-  left: -7px;
-  top: 9px;
-  bottom: 9px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: rgb(var(--primary-6));
-}
-
 .workspace-tool-rail__icon {
   display: inline-flex;
   line-height: 0;
 }
 
 .workspace-tool-rail__label {
-  display: block;
-  width: 100%;
-  margin-top: 4px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip: rect(0, 0, 0, 0);
   white-space: nowrap;
-  font-size: 9px;
-  line-height: 11px;
-  font-weight: 600;
-  text-align: center;
+  border: 0;
+}
+
+.workspace-tool-rail__tooltip .arco-tooltip-content {
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .workspace-tool-rail__badge {
