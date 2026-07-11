@@ -100,6 +100,11 @@ fn main() {
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write PID marker", error));
         }
+        "write-file" => {
+            require_len(&args, 2);
+            fs::write(Path::new(&args[1]), b"written by execution_test_helper\n")
+                .unwrap_or_else(|error| fail_io("write file", error));
+        }
         "print-args-env-cwd" => {
             require_len(&args, 5);
             print_args_env_cwd(&args[1], &args[2], &args[3], &args[4])

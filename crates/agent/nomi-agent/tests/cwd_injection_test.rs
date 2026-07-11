@@ -10,13 +10,23 @@ use nomi_tools::grep::GrepTool;
 use serde_json::json;
 use tempfile::tempdir;
 
+fn bash_tool(cwd: std::path::PathBuf) -> BashTool {
+    BashTool::new(
+        nomi_execution::ProcessSupervisor::new(
+            nomi_execution::SupervisorConfig::default(),
+        ),
+        cwd.clone(),
+        nomi_execution::CapabilityPolicy::local_owner(cwd),
+    )
+}
+
 // Windows `cd` outputs 8.3 short names (RUNNER~1) that don't match canonicalized paths;
 // bash_tool_with_file_operations_uses_correct_cwd covers the same behavior reliably.
 #[cfg(not(windows))]
 #[tokio::test]
 async fn bash_tool_executes_in_injected_cwd_not_process_cwd() {
     let workspace = tempdir().unwrap();
-    let tool = BashTool::new(workspace.path().to_path_buf());
+    let tool = bash_tool(workspace.path().to_path_buf());
 
     let result = tool.execute(json!({"command": "pwd"})).await;
 
@@ -76,7 +86,7 @@ async fn bash_tool_with_file_operations_uses_correct_cwd() {
     let workspace = tempdir().unwrap();
     fs::write(workspace.path().join("canary.txt"), "found_it").unwrap();
 
-    let tool = BashTool::new(workspace.path().to_path_buf());
+    let tool = bash_tool(workspace.path().to_path_buf());
     let result = tool.execute(json!({"command": "cat canary.txt"})).await;
 
     assert!(!result.is_error, "unexpected error: {}", result.content);

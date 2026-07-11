@@ -440,7 +440,7 @@ impl AgentBootstrap {
         ));
         registry.register(Box::new(
             nomi_tools::apply_patch::ApplyPatchTool::new(file_cache)
-                .with_write_root(write_root)
+                .with_write_root(write_root.clone())
                 .with_cwd(Some(cwd_path.to_path_buf())),
         ));
         // Experimental `Lsp` code-navigation tool: registered only when at least
@@ -468,46 +468,30 @@ impl AgentBootstrap {
         if let Some(mem_dir) = memory_dir.clone() {
             registry.register(Box::new(crate::memory_tools::RememberTool::new(mem_dir)));
         }
-        // Bash registration, precedence: Seatbelt sandbox (macOS, opt-in) >
-        // persistent shell (Unix, opt-in) > stateless one-shot. The sandbox wins
-        // so no unconfined path coexists with it.
-        #[cfg(target_os = "macos")]
-        let bash_sandbox_on = self.config.tools.bash_sandbox;
-        #[cfg(not(target_os = "macos"))]
-        let bash_sandbox_on = false;
-
-        if bash_sandbox_on {
-            #[cfg(target_os = "macos")]
-            {
-                if self.config.tools.persistent_shell {
-                    tracing::warn!(
-                        target: "nomi_agent",
-                        "bash_sandbox enabled — persistent_shell is disabled under the sandbox so no unconfined shell path coexists"
-                    );
+        let process_supervisor =
+            nomi_execution::ProcessSupervisor::new(nomi_execution::SupervisorConfig::default());
+        let execution_capability = nomi_execution::CapabilityPolicy {
+            cwd_roots: vec![cwd_path.to_path_buf()],
+            sandbox: if self.config.tools.bash_sandbox {
+                nomi_execution::SandboxPolicy::MacSeatbelt {
+                    write_roots: vec![cwd_path.to_path_buf()],
                 }
-                registry.register(Box::new(
-                    nomi_tools::bash::BashTool::new(cwd_path.to_path_buf())
-                        .with_sandbox(Some(vec![cwd_path.to_path_buf()])),
-                ));
-            }
-        } else {
-            #[cfg(unix)]
-            if self.config.tools.persistent_shell {
-                let shell = std::sync::Arc::new(nomi_tools::persistent_shell::PersistentShell::new(
-                    cwd_path.to_string_lossy().into_owned(),
-                ));
-                registry.register(Box::new(nomi_tools::bash::BashTool::with_persistent_shell(
-                    cwd_path.to_path_buf(),
-                    shell,
-                )));
             } else {
-                registry.register(Box::new(nomi_tools::bash::BashTool::new(cwd_path.to_path_buf())));
-            }
-            #[cfg(not(unix))]
-            registry.register(Box::new(nomi_tools::bash::BashTool::new(
-                cwd_path.to_path_buf(),
-            )));
+                nomi_execution::SandboxPolicy::UnrestrictedLocalOwner
+            },
+            allow_hand_off: false,
+        };
+        if self.config.tools.persistent_shell {
+            tracing::warn!(
+                target: "nomi_agent",
+                "tools.persistent_shell is ignored; Bash now always uses supervised one-shot execution"
+            );
         }
+        registry.register(Box::new(nomi_tools::bash::BashTool::new(
+            Arc::clone(&process_supervisor),
+            cwd_path.to_path_buf(),
+            execution_capability.clone(),
+        )));
         registry.register(Box::new(nomi_tools::grep::GrepTool::new(
             cwd_path.to_path_buf(),
         )));
@@ -586,6 +570,11 @@ impl AgentBootstrap {
                     provider.clone(),
                     self.config.clone(),
                     cwd_path.to_path_buf(),
+                )
+                .with_execution_policy(
+                    execution_capability.clone(),
+                    write_root.clone(),
+                    self.config.tools.builtin_allowlist.clone(),
                 )
                 .with_token_budget(
                     self.config
@@ -790,6 +779,7 @@ impl AgentBootstrap {
             )
         };
         engine.set_plan_active_flag(plan_active_flag);
+        engine.set_process_supervisor(Arc::clone(&process_supervisor));
         if let Some(spec) = self.goal {
             engine.set_goal(spec.objective, spec.max_auto_continuations);
         }

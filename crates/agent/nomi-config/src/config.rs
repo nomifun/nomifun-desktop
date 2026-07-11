@@ -194,9 +194,8 @@ pub struct ToolsConfig {
     pub computer: ComputerConfig,
     #[serde(default)]
     pub browser: BrowserConfig,
-    /// Dark-launch (default off): back the `Bash` tool with a long-lived shell
-    /// session so `cd`/`export` persist across calls. Unix-only; ignored on
-    /// Windows. Staged rollout per the overhaul design (§3.3 / §3.6 灰度).
+    /// Deprecated compatibility input. Supervised one-shot execution ignores
+    /// this setting on every platform and emits a warning when it is enabled.
     #[serde(default)]
     pub persistent_shell: bool,
     /// Opt-in (default empty = off): restrict Write/Edit/ApplyPatch to writes
@@ -215,9 +214,9 @@ pub struct ToolsConfig {
     /// runaway multi-agent spend (§3.4 shared token budget).
     #[serde(default)]
     pub subagent_token_budget: Option<u64>,
-    /// Opt-in (default off, macOS only): run `Bash` commands under a Seatbelt
-    /// write-containment sandbox (writes allowed only to the workspace + temp).
-    /// OS-enforced over arbitrary subprocesses; ignored on non-macOS (§3.6).
+    /// Opt-in (default off): request macOS Seatbelt write containment for Bash
+    /// and child-agent execution. The request fails closed on unsupported
+    /// platforms rather than silently running unrestricted (§3.6).
     #[serde(default)]
     pub bash_sandbox: bool,
     /// Opt-in (default off): wind the engine down COOPERATIVELY on stop —

@@ -4998,6 +4998,7 @@ dependencies = [
  "nomi-compact",
  "nomi-computer",
  "nomi-config",
+ "nomi-execution",
  "nomi-mcp",
  "nomi-memory",
  "nomi-protocol",
@@ -5081,6 +5082,7 @@ dependencies = [
  "nomi-agent",
  "nomi-compact",
  "nomi-config",
+ "nomi-execution",
  "nomi-mcp",
  "nomi-memory",
  "nomi-protocol",
@@ -5282,6 +5284,7 @@ dependencies = [
  "libc",
  "lru",
  "nomi-config",
+ "nomi-execution",
  "nomi-protocol",
  "nomi-types",
  "portable-pty",
@@ -5289,7 +5292,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

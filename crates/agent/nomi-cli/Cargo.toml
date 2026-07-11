@@ -22,10 +22,10 @@ nomi-tools.workspace    = true
 nomi-mcp.workspace      = true
 nomi-protocol.workspace = true
 nomi-skills.workspace   = true
+nomi-execution.workspace = true
 
 tokio.workspace              = true
 anyhow.workspace             = true
 clap.workspace               = true
 tracing.workspace            = true
 tracing-subscriber.workspace = true
-

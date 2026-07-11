@@ -295,6 +295,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     engine.run_stop_hooks().await;
+    if let Some(report) = engine.shutdown_processes().await
+        && report.sessions.iter().any(|session| {
+            matches!(
+                &session.outcome,
+                nomi_execution::ExecutionOutcome::Lost { cleanup, .. } if !cleanup.reaped
+            )
+        })
+    {
+        tracing::error!(
+            target: "nomi_cli",
+            "engine shutdown could not prove every command process tree was reaped"
+        );
+    }
 
     for mgr in &result.mcp_managers {
         mgr.shutdown().await;
@@ -726,6 +739,19 @@ async fn run_json_stream_mode(
     }
 
     engine.run_stop_hooks().await;
+    if let Some(report) = engine.shutdown_processes().await
+        && report.sessions.iter().any(|session| {
+            matches!(
+                &session.outcome,
+                nomi_execution::ExecutionOutcome::Lost { cleanup, .. } if !cleanup.reaped
+            )
+        })
+    {
+        tracing::error!(
+            target: "nomi_cli",
+            "engine shutdown could not prove every command process tree was reaped"
+        );
+    }
     for mgr in &result.mcp_managers {
         mgr.shutdown().await;
     }

@@ -17,9 +17,11 @@ path = "src/bin/pty_test_helper.rs"
 nomi-types.workspace    = true
 nomi-protocol.workspace = true
 nomi-config.workspace   = true
+nomi-execution.workspace = true
 
 tracing.workspace     = true
 tokio.workspace       = true
+tokio-util.workspace  = true
 serde.workspace       = true
 serde_json.workspace  = true
 async-trait.workspace = true
@@ -28,6 +30,7 @@ glob.workspace        = true
 lru.workspace         = true
 portable-pty.workspace = true
 libc.workspace        = true
+uuid.workspace        = true
 
 
 [dev-dependencies]

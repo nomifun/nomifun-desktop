@@ -14,6 +14,8 @@ use nomi_execution::{
     ExecutionPolicy, NormalizedExecutionRequest, OutputCursor, OutputStream, PollResult,
     ProcessState, ProcessSupervisor, SupervisorConfig, Transport,
 };
+#[cfg(target_os = "macos")]
+use nomi_execution::SandboxPolicy;
 
 const PTY_COLS: u16 = 80;
 const PTY_ROWS: u16 = 24;
@@ -279,6 +281,45 @@ async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
     assert_eq!(code, Some(0));
     assert_eq!(signal, None);
     assert!(cleanup.reaped);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside");
+    let workspace = workspace.path().canonicalize().expect("canonical workspace");
+    let outside_marker = outside
+        .path()
+        .canonicalize()
+        .expect("canonical outside")
+        .join("outside-pty.marker");
+    let mut execution = helper_request(&[
+        "write-file",
+        outside_marker
+            .to_str()
+            .expect("temporary path should be UTF-8"),
+    ]);
+    execution.cwd = workspace.clone();
+    execution.capability = CapabilityPolicy {
+        cwd_roots: vec![workspace.clone()],
+        sandbox: SandboxPolicy::MacSeatbelt {
+            write_roots: vec![workspace],
+        },
+        allow_hand_off: false,
+    };
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(execution)
+        .await
+        .expect("Seatbelt PTY helper should start");
+    let ExecutionOutcome::Exited { code, .. } = wait_for_terminal(&supervisor, &handle).await else {
+        panic!("Seatbelt PTY helper must exit");
+    };
+
+    assert_ne!(code, Some(0));
+    assert!(!outside_marker.exists());
 }
 
 #[tokio::test]

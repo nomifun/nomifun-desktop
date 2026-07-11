@@ -26,6 +26,7 @@ nomi-skills.workspace    = true
 nomi-memory.workspace    = true
 nomi-compact.workspace   = true
 nomi-redact.workspace    = true
+nomi-execution.workspace = true
 nomi-computer = { workspace = true, optional = true }
 nomi-browser = { workspace = true, optional = true }
 # Used only by the browser-use SessionVisualLocator adapter (base64-encode the
@@ -68,4 +69,3 @@ path = "tests/e2e/mod.rs"
 name = "acceptance"
 path = "tests/acceptance/mod.rs"
 # Acceptance tests for evolution features; run via: cargo nextest run --profile e2e --test acceptance
-
