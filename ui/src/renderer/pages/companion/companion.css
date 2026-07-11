@@ -27,6 +27,32 @@
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
 }
 
+/* The memory panel is an explicit reading mode. Keep in-flight reply/composer
+   state alive, but give the panel the visible surface so transient chrome never
+   competes for the same native-window height. The hidden input row still keeps
+   its desk chrome footprint, so the figure does not jump vertically. */
+.nomi-companion-window.is-memory-panel-open > .nomi-companion-bubble {
+  display: none;
+}
+
+.nomi-companion-window.is-memory-panel-open > .nomi-companion-chatbar {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.nomi-companion-window.is-memory-panel-open > .nomi-companion-composer {
+  height: 30px;
+  min-height: 30px;
+  max-height: 30px;
+  margin-top: 6px;
+  margin-bottom: 10px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* ---- character shell ---- */
 
 .nomi-ch {
@@ -39,9 +65,31 @@
 
 /* Stable bottom-anchored figure island.
    The native window grows upward for chat bubbles, so viewport-anchored chrome
-   would move on screen. Put badge/suggestions on the same stage as the figure:
-   screen Y = window bottom - bottom chrome - figure height, independent of
-   chat-sized window height. */
+   would move on screen. The badge stays on the figure stage; the memory panel
+   is a sibling in the directional shell below, never an overlay. */
+.nomi-companion-stage-shell {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.nomi-companion-stage-shell--above {
+  flex-direction: column;
+  align-items: center;
+}
+
+.nomi-companion-stage-shell--left {
+  flex-direction: row;
+}
+
+.nomi-companion-stage-shell--right {
+  flex-direction: row-reverse;
+}
+
 .nomi-companion-stage {
   position: relative;
   flex: none;
@@ -50,6 +98,10 @@
   justify-content: center;
   max-width: 100%;
   line-height: 0;
+}
+
+.nomi-companion-window.is-memory-panel-open .nomi-companion-stage {
+  transform: translateX(var(--memory-stage-shift-x, 0));
 }
 
 .nomi-companion-figure-hit {
@@ -244,6 +296,7 @@
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
+  border: 0;
   border-radius: 9px;
   background: var(--primary);
   color: #fff;
@@ -255,6 +308,12 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
   cursor: pointer;
   z-index: 3;
+  font-family: inherit;
+}
+
+.nomi-companion-badge:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* ---- quick-input row (mini, appears on hover) ---- */
@@ -532,27 +591,70 @@
   }
 }
 
-/* ---- suggestions popover ---- */
+/* ---- memory / suggestions panel ---- */
 
 .nomi-companion-suggestions {
-  position: absolute;
-  top: 32px;
-  right: 0;
-  width: 220px;
-  max-height: 200px;
+  flex: 0 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: min(100vw, var(--memory-panel-max-width, 340px));
+  max-height: var(--memory-panel-max-height, min(320px, 42vh));
   overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-4) transparent;
+  scrollbar-gutter: stable;
   background: var(--bg-base);
   border: 1px solid var(--border-base);
-  border-radius: 12px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   padding: 6px;
-  z-index: 5;
-  line-height: 1.4;
+  color: var(--text-primary);
+  line-height: 1.55;
+  user-select: text;
+  animation: nomi-bubble-in 0.18s ease-out;
+}
+
+.nomi-companion-stage-shell--above .nomi-companion-suggestions {
+  margin-bottom: 12px;
+}
+
+.nomi-companion-stage-shell--left .nomi-companion-suggestions {
+  margin-right: 12px;
+}
+
+.nomi-companion-stage-shell--right .nomi-companion-suggestions {
+  margin-left: 12px;
+}
+
+.nomi-companion-suggestions::-webkit-scrollbar {
+  width: 6px;
+}
+
+.nomi-companion-suggestions::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.nomi-companion-suggestions::-webkit-scrollbar-thumb {
+  background: var(--bg-4);
+  border-radius: 3px;
+}
+
+.nomi-companion-suggestions::-webkit-scrollbar-thumb:hover {
+  background: var(--bg-5);
 }
 
 .nomi-companion-suggestions__item {
-  padding: 8px;
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -560,20 +662,28 @@
   background: var(--bg-hover);
 }
 
+.nomi-companion-suggestions__item:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
 .nomi-companion-suggestions__title {
+  display: block;
   font-size: 12px;
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 2px;
+  line-height: 1.45;
+  margin-bottom: 3px;
+  overflow-wrap: anywhere;
 }
 
 .nomi-companion-suggestions__body {
-  font-size: 11px;
+  display: block;
+  font-size: 12px;
   color: var(--text-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* ---- web fallback hint ---- */
