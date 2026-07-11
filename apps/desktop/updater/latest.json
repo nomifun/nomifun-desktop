@@ -1,23 +1,15 @@
 {
-  "version": "0.2.14",
-  "notes": "- 优化会话问题定位 UI，并修复计划清单进度同步。\n- 修复 IM/Nomi 聊天消息刷新、对话模型选择器、技能标签草稿保存和数据加密密钥持久化。\n- 增强多渠道媒体发送：支持 Telegram、微信 iLink、Discord、Slack、Lark、Matrix、Mattermost、QQ 的图片/文件发送链路。\n- 支持 companion 通过 IM 渠道发送本地文件，并让 Nomi 会话的思考与回复跟随系统语言。\n- 修复 Docker 构建上下文泄漏，并支持国内镜像加速。",
-  "pub_date": "2026-07-09T09:49:23.466Z",
+  "version": "0.2.15",
+  "notes": "- 新增托管免费模型服务与免费模型页，降低首次配置模型的门槛。\n- 增强 Companion 体验：支持独立记忆面板窗口、记忆/技能/建议分页，并优化记忆气泡布局。\n- 新增会话工作区常驻工具栏，改进能力入口、知识入口与编排面板的可达性。\n- 优化自动工作标签空状态、键盘可访问性和标签刷新顺序。\n- 修复助手标签草稿关闭后的残留、主题按钮对比度、能力激活状态和若干布局细节。",
+  "pub_date": "2026-07-11T04:44:43.945Z",
   "platforms": {
-    "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHhwTlorZkwySkZZNHViTjhPTzRoVjRFbFVVb1krSlpaSGpxQ0lQRDJEMU40Yy9QU0F1aXJ3dHJrWDZnbnRYeEZMTUI0aGFPYy83dnB4ZWNTemR0MGdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTg4NDE1CWZpbGU6Tm9taUZ1bl8wLjIuMTRfeDY0LXNldHVwLmV4ZQoyZGx0VjE5d01BejlkWHdGUDh3a1puMHlhRU5XZGpIL0FTM2NQbzJ5dkVUQ2toZ3grYUM0clowZFlxeU80d1hhSHU3RkdjbTlraDludkwyU2ltNnZEUT09Cg==",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.14/NomiFun_0.2.14_x64-setup.exe"
-    },
-    "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODJFZ1pPSVZGV1grT2YvQ1dSVXRiNmRmRmlZL1EwVFR1YUlLbk1lOUxlVW9tYTMrSkZDVUFJTDgreGRJcmlPRUZ1bXd6VUxXc21JcE42Y0hnM01TdXcwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTg5MTMxCWZpbGU6Tm9taUZ1bl8wLjIuMTRfYW1kNjQuQXBwSW1hZ2UKVUNCajYwVUljckg1d3JjUzJVeDZhcE5KUFkwazkrVGsyaW5RbUpmYmxSTmlyV2JGWGNRT1pyUUxUUmJ4VUg3WjVIREJFTmYwakwwc3cycWIwMWwwRHc9PQo=",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.14/NomiFun_0.2.14_amd64.AppImage"
-    },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpiMnJxczlRY29ST0pBajdrN1FFZXdMOFBMcjMrRE5wMVptZWtRclphWjB0N0RNVWRWWmhjMnd0RGUwYTRzNXVzS09LS0w5enZ1c25sQ0ROR09PS2dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTkwMjczCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnF4VU4xZ3IvZkZ3eXl3MFJvcXoyUlpCWFpINlU4SFphd2tkVTdkRkpTaU9hY0RyaXU2YWtxbXphTzBwajg1RC9ycHMvK2RrbDF1Vmxrd3hmZHlJd0JnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.14/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdyRVh1TFh2RnR3Q2lFa0NrQ1BYbzFHejc4U0FHRnZmMFRIRXZsZlBBdWNWejF4cXpXdG1DSEJ1bm96M1JLcmYvUW5VcncrbUFMeGNFY1AyMmNidXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNzQ0OTg1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ci83UjUzVGtmRDl1eGlQZG5BVnRmWHpMdU04c0NZaVVhLzNtaVpaUkZWbjY5czZrT3d0ajhpcll5VUlscjhrVENOdEJzWmtETTlqbUdqcHFtQTIrM0N3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.15/NomiFun.app.tar.gz"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHpiMnJxczlRY29ST0pBajdrN1FFZXdMOFBMcjMrRE5wMVptZWtRclphWjB0N0RNVWRWWmhjMnd0RGUwYTRzNXVzS09LS0w5enZ1c25sQ0ROR09PS2dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNTkwMjczCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnF4VU4xZ3IvZkZ3eXl3MFJvcXoyUlpCWFpINlU4SFphd2tkVTdkRkpTaU9hY0RyaXU2YWtxbXphTzBwajg1RC9ycHMvK2RrbDF1Vmxrd3hmZHlJd0JnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.14/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdyRVh1TFh2RnR3Q2lFa0NrQ1BYbzFHejc4U0FHRnZmMFRIRXZsZlBBdWNWejF4cXpXdG1DSEJ1bm96M1JLcmYvUW5VcncrbUFMeGNFY1AyMmNidXdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzNzQ0OTg1CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Ci83UjUzVGtmRDl1eGlQZG5BVnRmWHpMdU04c0NZaVVhLzNtaVpaUkZWbjY5czZrT3d0ajhpcll5VUlscjhrVENOdEJzWmtETTlqbUdqcHFtQTIrM0N3PT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.15/NomiFun.app.tar.gz"
     }
   }
 }
