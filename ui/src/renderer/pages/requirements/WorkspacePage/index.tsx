@@ -268,7 +268,7 @@ const WorkspacePage: React.FC = () => {
   );
 
   return (
-    <div className='flex flex-col gap-12px'>
+    <div className='flex flex-col gap-16px'>
       {messageCtx}
 
       {/* Header row: view toggle (left) + 新建 (right) */}
