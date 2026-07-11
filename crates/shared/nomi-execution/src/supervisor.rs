@@ -295,6 +295,36 @@ impl ProcessSupervisor {
         Ok(action.snapshot())
     }
 
+    /// Return a completed outcome only after final output has been frozen,
+    /// without renewing the session lease.
+    ///
+    /// Adapters use this for stale-binding cleanup. A natural exit that has
+    /// merely been observed, but whose final output drain is still in flight,
+    /// remains `None` so the caller cannot discard its last output.
+    pub fn terminal_outcome_if_ready(
+        &self,
+        owner: &ExecutionOwner,
+        session_id: &SessionId,
+        cursor: OutputCursor,
+    ) -> Result<Option<ExecutionOutcome>, ExecutionError> {
+        let session = match self.registry.inspect(session_id, owner) {
+            Ok(session) => session,
+            Err(LookupError::NotFound) => {
+                return Err(ExecutionError::SessionNotFound {
+                    session_id: *session_id,
+                });
+            }
+            Err(LookupError::OwnerMismatch) => {
+                return Err(ExecutionError::OwnerMismatch {
+                    session_id: *session_id,
+                });
+            }
+        };
+        Ok(session
+            .terminal()
+            .map(|terminal| session.outcome(&terminal, cursor)))
+    }
+
     pub async fn poll(
         &self,
         owner: &ExecutionOwner,
@@ -323,6 +353,61 @@ impl ProcessSupervisor {
                 }
                 changed = lifecycle.changed() => {
                     changed.expect("execution lifecycle watch closed while session is alive");
+                }
+                () = &mut yield_timer => break,
+            }
+        }
+        let snapshot = session.snapshot();
+        let output = session.output.snapshot_from(cursor);
+        if let Some(terminal) = session.terminal() {
+            return Ok(PollResult::Finished(session.outcome(&terminal, cursor)));
+        }
+        if let Some(observation) = session.exit_observation() {
+            return Ok(PollResult::Finished(
+                finish_observed_exit(&session, observation, cursor).await,
+            ));
+        }
+        Ok(PollResult::Running { snapshot, output })
+    }
+
+    /// Poll until terminal state, newly available output, or the yield
+    /// deadline. Unlike [`Self::poll`], this is intended for incremental
+    /// interactive adapters and may return `Running` as soon as output advances.
+    pub async fn poll_until_activity(
+        &self,
+        owner: &ExecutionOwner,
+        session_id: &SessionId,
+        cursor: OutputCursor,
+        yield_until: Instant,
+    ) -> Result<PollResult, ExecutionError> {
+        let action = self.session(owner, session_id)?;
+        let session = action.session_arc();
+        let mut exits = session.exit.subscribe();
+        let mut lifecycle = session.lifecycle.subscribe();
+        let mut output_changes = session.output.subscribe_changes();
+        let yield_timer = tokio::time::sleep_until(tokio::time::Instant::from_std(yield_until));
+        tokio::pin!(yield_timer);
+        loop {
+            if let Some(terminal) = session.terminal() {
+                return Ok(PollResult::Finished(session.outcome(&terminal, cursor)));
+            }
+            if let Some(observation) = session.exit_observation() {
+                return Ok(PollResult::Finished(
+                    finish_observed_exit(&session, observation, cursor).await,
+                ));
+            }
+            if session.output.snapshot_from(cursor).next_cursor > cursor {
+                break;
+            }
+            tokio::select! {
+                changed = exits.changed() => {
+                    changed.expect("execution exit watch closed while session is alive");
+                }
+                changed = lifecycle.changed() => {
+                    changed.expect("execution lifecycle watch closed while session is alive");
+                }
+                changed = output_changes.changed() => {
+                    changed.expect("execution output watch closed while session is alive");
                 }
                 () = &mut yield_timer => break,
             }
@@ -2125,6 +2210,92 @@ mod tests {
             "naturally exited sessions are not shutdown cancellations: {:?}",
             report.sessions
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_inspection_does_not_renew_the_session_lease() {
+        let policy = ExecutionPolicy {
+            lease: Duration::from_millis(10),
+            ..ExecutionPolicy::default()
+        };
+        let (supervisor, handle, _fake, _output) = register_fake_with_config(
+            FakeOwner::pending(),
+            policy,
+            SupervisorConfig {
+                max_sessions: 1,
+                reaper_interval: Duration::from_secs(3_600),
+            },
+        )
+        .await;
+        let lease_started_at = supervisor
+            .registry
+            .get(&handle.session_id)
+            .expect("registered session")
+            .snapshot()
+            .last_activity_at;
+
+        for _ in 0..3 {
+            assert!(
+                supervisor
+                    .terminal_outcome_if_ready(
+                        &handle.owner,
+                        &handle.session_id,
+                        OutputCursor::START,
+                    )
+                    .expect("inspection should authenticate")
+                    .is_none()
+            );
+            tokio::time::advance(Duration::from_millis(4)).await;
+        }
+
+        let retirements = supervisor
+            .registry
+            .claim_expired(lease_started_at + Duration::from_millis(12));
+        assert_eq!(
+            retirements.len(),
+            1,
+            "read-only terminal inspection must not renew an idle lease"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_inspection_waits_for_final_output_freeze() {
+        let (supervisor, handle, _fake, output) =
+            register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+        let session = supervisor
+            .registry
+            .get(&handle.session_id)
+            .expect("exit-observed session should remain registered");
+        wait_for_test_condition(|| session.exit_observation().is_some()).await;
+        output.push(OutputStream::Stdout, b"final-drain-output");
+
+        assert!(
+            supervisor
+                .terminal_outcome_if_ready(
+                    &handle.owner,
+                    &handle.session_id,
+                    OutputCursor::START,
+                )
+                .expect("inspection should authenticate")
+                .is_none(),
+            "an observed exit is not terminal until final output has frozen"
+        );
+
+        tokio::time::advance(Duration::from_millis(120)).await;
+        wait_for_test_condition(|| session.terminal().is_some()).await;
+        let outcome = supervisor
+            .terminal_outcome_if_ready(
+                &handle.owner,
+                &handle.session_id,
+                OutputCursor::START,
+            )
+            .expect("terminal inspection should succeed")
+            .expect("terminal outcome should now be ready");
+        let ExecutionOutcome::Exited { output, .. } = outcome else {
+            panic!("natural exit should stay Exited");
+        };
+        assert_eq!(output.raw_bytes(), b"final-drain-output");
     }
 
     #[tokio::test]

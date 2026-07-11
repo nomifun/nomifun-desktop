@@ -1,44 +1,223 @@
-//! `ProcessStore`: a 64-way LRU registry of live interactive PTY sessions shared
-//! by the `exec_command` and `write_stdin` tools, plus the incremental-read
-//! collection loop they share.
+//! Numeric legacy-session adapter shared by `exec_command` and `write_stdin`.
 //!
-//! Ported (de-dependency-ed) from codex `unified_exec::process_manager`:
-//! - 64-way cap, protect the most-recently-used 8, prune exited-then-oldest
-//!   (`process_id_to_prune_from_meta`),
-//! - prune is decided while holding the lock but the victim is `kill()`ed after
-//!   the lock is released (`store_process`),
-//! - `collect_output_until_deadline` minus codex's pause/network machinery.
+//! The shared execution supervisor owns every process and transport. This store
+//! retains only owner-qualified session identities plus incremental output
+//! cursor metadata; it never owns a PTY or OS process.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-use tokio::sync::Mutex;
-use tokio::sync::broadcast::error::RecvError;
-use tokio::time::Instant;
+use nomi_execution::{
+    ExecutionOwner, OutputCursor, OutputSnapshot, SessionId, Transport,
+};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
-use crate::pty::Pty;
-
-/// Upper bound on concurrently retained sessions (codex `MAX_UNIFIED_EXEC_PROCESSES`).
+/// Upper bound on retained legacy numeric session mappings.
+///
+/// This matches the shared supervisor's default capacity. Reaching the cap is
+/// an explicit error: silently evicting a live mapping would leave an owned
+/// process running without any numeric identifier through which the legacy
+/// tools could address it.
 pub const MAX_PROCESSES: usize = 64;
-/// The N most-recently-used sessions are never pruned.
-const PROTECT_RECENT: usize = 8;
 
-/// A live interactive session tracked by the store.
-pub struct ExecSession {
-    pub id: u64,
-    pub pty: Arc<Pty>,
-    /// Absolute byte offset in the PTY backlog consumed by the last tool call.
-    pub read_offset: usize,
-    /// The command line, for display/debugging.
-    pub command: String,
-    pub tty: bool,
-    pub last_used: Instant,
+/// Immutable data installed when a running supervisor session is assigned a
+/// legacy numeric identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacySessionBinding {
+    pub owner: ExecutionOwner,
+    pub session_id: SessionId,
+    pub cursor: OutputCursor,
+    pub dropped_bytes: u64,
+    pub transport: Transport,
 }
 
-/// Registry of live PTY sessions, keyed by a monotonic `u64` session id.
+impl LegacySessionBinding {
+    pub fn new(
+        owner: ExecutionOwner,
+        session_id: SessionId,
+        cursor: OutputCursor,
+        dropped_bytes: u64,
+        transport: Transport,
+    ) -> Self {
+        Self {
+            owner,
+            session_id,
+            cursor,
+            dropped_bytes,
+            transport,
+        }
+    }
+
+    /// Build a binding after the initial `exec_command` poll has already
+    /// delivered `output` to the caller.
+    pub fn after_output(
+        owner: ExecutionOwner,
+        session_id: SessionId,
+        transport: Transport,
+        output: &OutputSnapshot,
+    ) -> Self {
+        Self::new(
+            owner,
+            session_id,
+            output.next_cursor,
+            output.dropped_bytes,
+            transport,
+        )
+    }
+}
+
+/// One owner-qualified supervisor identity behind a legacy numeric id.
+///
+/// `state` is deliberately per-entry. A `write_stdin` call may hold this mutex
+/// across a long poll without blocking lookups or operations on other sessions,
+/// while concurrent calls for the same numeric id cannot race the durable
+/// output cursor backwards.
+#[derive(Debug)]
+pub struct LegacySessionEntry {
+    owner: ExecutionOwner,
+    session_id: SessionId,
+    transport: Transport,
+    state: AsyncMutex<LegacySessionState>,
+}
+
+impl LegacySessionEntry {
+    fn new(binding: LegacySessionBinding) -> Self {
+        Self {
+            owner: binding.owner,
+            session_id: binding.session_id,
+            transport: binding.transport,
+            state: AsyncMutex::new(LegacySessionState {
+                cursor: binding.cursor,
+                dropped_bytes: binding.dropped_bytes,
+            }),
+        }
+    }
+
+    pub fn owner(&self) -> &ExecutionOwner {
+        &self.owner
+    }
+
+    pub const fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub const fn transport(&self) -> Transport {
+        self.transport
+    }
+
+    pub async fn lock_state(&self) -> AsyncMutexGuard<'_, LegacySessionState> {
+        self.state.lock().await
+    }
+}
+
+/// Durable per-call progress for one numeric session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegacySessionState {
+    cursor: OutputCursor,
+    dropped_bytes: u64,
+}
+
+impl LegacySessionState {
+    pub const fn cursor(&self) -> OutputCursor {
+        self.cursor
+    }
+
+    /// Lifetime-cumulative bytes discarded by the supervisor output buffer as
+    /// of the last successfully delivered tool result.
+    pub const fn dropped_bytes(&self) -> u64 {
+        self.dropped_bytes
+    }
+
+    /// Commit a supervisor snapshot after its corresponding tool result is
+    /// ready to be returned.
+    ///
+    /// `OutputSnapshot::dropped_bytes` is lifetime-cumulative and therefore is
+    /// not the number of bytes this caller missed. The exact cursor gap is:
+    ///
+    /// `max(snapshot retained-base - previous cursor, 0)`.
+    ///
+    /// This distinction matters when output already consumed by an earlier call
+    /// is later evicted: cumulative dropped bytes increase, but the caller did
+    /// not lose those already-consumed bytes.
+    pub fn record_output(&mut self, output: &OutputSnapshot) -> OutputObservation {
+        let previous_cursor = self.cursor;
+        let previous_dropped_bytes = self.dropped_bytes;
+        let missed_bytes = missed_bytes(output, previous_cursor);
+
+        // A stale or malformed snapshot must never move durable progress
+        // backwards. Normal supervisor snapshots are strictly monotonic.
+        self.cursor = self.cursor.max(output.next_cursor);
+        self.dropped_bytes = self.dropped_bytes.max(output.dropped_bytes);
+
+        OutputObservation {
+            previous_cursor,
+            next_cursor: self.cursor,
+            missed_bytes,
+            newly_dropped_bytes: self
+                .dropped_bytes
+                .saturating_sub(previous_dropped_bytes),
+            cumulative_dropped_bytes: self.dropped_bytes,
+        }
+    }
+}
+
+pub(crate) fn missed_bytes(
+    output: &OutputSnapshot,
+    previous_cursor: OutputCursor,
+) -> u64 {
+    let retained_bytes = u64::try_from(output.retained_bytes).unwrap_or(u64::MAX);
+    let retained_base = output.next_cursor.offset().saturating_sub(retained_bytes);
+    retained_base.saturating_sub(previous_cursor.offset())
+}
+
+/// Metadata produced while atomically advancing a legacy session cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputObservation {
+    pub previous_cursor: OutputCursor,
+    pub next_cursor: OutputCursor,
+    /// Bytes the caller could not receive because its previous cursor was older
+    /// than the supervisor's retained-output base.
+    pub missed_bytes: u64,
+    /// Increase in the supervisor's lifetime-cumulative drop counter since this
+    /// numeric adapter last committed a result. This is diagnostic metadata and
+    /// is not necessarily equal to `missed_bytes`.
+    pub newly_dropped_bytes: u64,
+    pub cumulative_dropped_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegacySessionStoreError {
+    CapacityExhausted { max_sessions: usize },
+    NumericIdExhausted,
+}
+
+impl fmt::Display for LegacySessionStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapacityExhausted { max_sessions } => write!(
+                formatter,
+                "legacy numeric session capacity is exhausted (max sessions: {max_sessions})"
+            ),
+            Self::NumericIdExhausted => {
+                formatter.write_str("legacy numeric session id space is exhausted")
+            }
+        }
+    }
+}
+
+impl Error for LegacySessionStoreError {}
+
+/// Short-lock adapter from legacy numeric ids to owner-qualified supervisor
+/// sessions.
 pub struct ProcessStore {
-    inner: Mutex<HashMap<u64, ExecSession>>,
+    inner: Mutex<HashMap<u64, Arc<LegacySessionEntry>>>,
     next_id: AtomicU64,
 }
 
@@ -52,309 +231,364 @@ impl ProcessStore {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            // Zero was historically used as a missing/invalid id in tool
+            // descriptions and diagnostics, so valid ids start at one.
             next_id: AtomicU64::new(1),
         }
     }
 
-    /// Insert a new session, pruning first if the store is full. Returns the new
-    /// session id and, if a session was evicted to make room, its `Pty` so the
-    /// caller can `kill()` it **after** releasing the store lock.
-    pub async fn insert(&self, mut s: ExecSession) -> (u64, Option<Arc<Pty>>) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        s.id = id;
-        let mut map = self.inner.lock().await;
-        let pruned = if map.len() >= MAX_PROCESSES {
-            Self::pick_prune(&map)
-                .and_then(|pid| map.remove(&pid))
-                .map(|e| e.pty)
-        } else {
-            None
-        };
-        map.insert(id, s);
-        (id, pruned)
-    }
-
-    /// Fetch a session's `Pty` and refresh its `last_used` timestamp. Returns
-    /// `None` if the id is unknown.
-    pub async fn touch(&self, id: u64) -> Option<Arc<Pty>> {
-        let mut map = self.inner.lock().await;
-        let e = map.get_mut(&id)?;
-        e.last_used = Instant::now();
-        Some(e.pty.clone())
-    }
-
-    /// Fetch a session's `Pty` plus the durable-output cursor and refresh LRU.
-    pub async fn touch_with_offset(&self, id: u64) -> Option<(Arc<Pty>, usize)> {
-        let mut map = self.inner.lock().await;
-        let e = map.get_mut(&id)?;
-        e.last_used = Instant::now();
-        Some((e.pty.clone(), e.read_offset))
-    }
-
-    /// Persist the durable-output cursor after a collection pass.
-    pub async fn update_read_offset(&self, id: u64, read_offset: usize) {
-        let mut map = self.inner.lock().await;
-        if let Some(e) = map.get_mut(&id) {
-            e.read_offset = read_offset;
-            e.last_used = Instant::now();
-        }
-    }
-
-    /// Remove a session from the store, returning it (caller decides whether to
-    /// `kill()` — typically not needed if the child already exited).
-    pub async fn remove(&self, id: u64) -> Option<ExecSession> {
-        self.inner.lock().await.remove(&id)
-    }
-
-    /// Number of currently retained sessions (for tests/metrics).
-    pub async fn len(&self) -> usize {
-        self.inner.lock().await.len()
-    }
-
-    /// True if a session id is currently retained (for tests).
-    pub async fn contains(&self, id: u64) -> bool {
-        self.inner.lock().await.contains_key(&id)
-    }
-
-    /// Pick a session to evict, replicating codex `process_id_to_prune_from_meta`:
-    /// protect the most-recently-used `PROTECT_RECENT`, then evict the oldest
-    /// **exited** unprotected session, else the oldest unprotected session.
-    fn pick_prune(map: &HashMap<u64, ExecSession>) -> Option<u64> {
-        let mut meta: Vec<(u64, Instant, bool)> = map
-            .values()
-            .map(|e| (e.id, e.last_used, e.pty.has_exited()))
-            .collect();
-        if meta.is_empty() {
-            return None;
+    pub fn insert(
+        &self,
+        binding: LegacySessionBinding,
+    ) -> Result<u64, LegacySessionStoreError> {
+        let mut sessions = self
+            .inner
+            .lock()
+            .expect("legacy session store mutex is poisoned");
+        if sessions.len() >= MAX_PROCESSES {
+            return Err(LegacySessionStoreError::CapacityExhausted {
+                max_sessions: MAX_PROCESSES,
+            });
         }
 
-        let mut by_recency = meta.clone();
-        by_recency.sort_by(|a, b| b.1.cmp(&a.1)); // most-recent first
-        let protected: HashSet<u64> = by_recency
+        let id = self
+            .next_available_id(&sessions)
+            .ok_or(LegacySessionStoreError::NumericIdExhausted)?;
+        let replaced = sessions.insert(id, Arc::new(LegacySessionEntry::new(binding)));
+        debug_assert!(replaced.is_none(), "numeric session id was allocated twice");
+        Ok(id)
+    }
+
+    pub fn get(&self, id: u64) -> Option<Arc<LegacySessionEntry>> {
+        self.inner
+            .lock()
+            .expect("legacy session store mutex is poisoned")
+            .get(&id)
+            .cloned()
+    }
+
+    pub fn remove(&self, id: u64) -> Option<Arc<LegacySessionEntry>> {
+        self.inner
+            .lock()
+            .expect("legacy session store mutex is poisoned")
+            .remove(&id)
+    }
+
+    /// Remove `id` only if it still refers to the exact entry previously
+    /// returned by `get`.
+    pub fn remove_if_same(&self, id: u64, expected: &Arc<LegacySessionEntry>) -> bool {
+        let mut sessions = self
+            .inner
+            .lock()
+            .expect("legacy session store mutex is poisoned");
+        let should_remove = sessions
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected));
+        if should_remove {
+            sessions.remove(&id);
+        }
+        should_remove
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("legacy session store mutex is poisoned")
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn contains(&self, id: u64) -> bool {
+        self.inner
+            .lock()
+            .expect("legacy session store mutex is poisoned")
+            .contains_key(&id)
+    }
+
+    pub fn entries(&self) -> Vec<(u64, Arc<LegacySessionEntry>)> {
+        self.inner
+            .lock()
+            .expect("legacy session store mutex is poisoned")
             .iter()
-            .take(PROTECT_RECENT)
-            .map(|x| x.0)
-            .collect();
-
-        meta.sort_by(|a, b| a.1.cmp(&b.1)); // oldest first (LRU)
-        meta.iter()
-            .find(|(id, _, exited)| !protected.contains(id) && *exited)
-            .map(|x| x.0)
-            .or_else(|| {
-                meta.iter()
-                    .find(|(id, _, _)| !protected.contains(id))
-                    .map(|x| x.0)
-            })
+            .map(|(id, entry)| (*id, Arc::clone(entry)))
+            .collect()
     }
 
-    /// Kill every retained session. Intended for engine shutdown so a model that
-    /// spawned a pile of never-exiting REPLs doesn't leak processes.
-    pub async fn terminate_all(&self) {
-        let drained: Vec<ExecSession> = self.inner.lock().await.drain().map(|(_, e)| e).collect();
-        for e in drained {
-            e.pty.kill();
-        }
-    }
-}
-
-impl Drop for ProcessStore {
-    /// Best-effort synchronous cleanup when the last `Arc<ProcessStore>` drops
-    /// (i.e. the engine and its `ToolRegistry` are torn down). PTY children are
-    /// `setsid()`'d into their own process group, so dropping the `Arc<Pty>`
-    /// alone does **not** reap them — we must SIGKILL the group. `get_mut` on the
-    /// `tokio::Mutex` is uncontended here (sole owner), so no async runtime is
-    /// needed.
-    fn drop(&mut self) {
-        let map = self.inner.get_mut();
-        for (_, e) in map.drain() {
-            e.pty.kill();
-        }
-    }
-}
-
-/// Incrementally read PTY output until `deadline`. If the child has exited and
-/// the output stream is closed, finishes early after draining any residue.
-///
-/// This is codex `collect_output_until_deadline` minus pause/network: it is the
-/// engine of "empty polling" — `write_stdin` with `chars=""` writes nothing and
-/// drops straight into this loop to read whatever arrived in `yield_time_ms`.
-pub async fn collect_until_deadline(
-    pty: &Pty,
-    read_offset: usize,
-    deadline: Instant,
-) -> (Vec<u8>, usize) {
-    let (mut rx, snapshot, mut read_offset) = pty.subscribe_from(read_offset);
-    let mut out: Vec<u8> = Vec::with_capacity(4096);
-    out.extend_from_slice(&snapshot);
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            let (snapshot, next_offset) = pty.snapshot_from(read_offset);
-            out.extend_from_slice(&snapshot);
-            read_offset = next_offset;
-            break;
-        }
-        if pty.has_exited() && pty.output_closed() {
-            // Exited and the stream is closed: scoop up any residue and finish.
-            while let Ok(chunk) = rx.try_recv() {
-                read_offset = read_offset.saturating_add(chunk.len());
-                out.extend_from_slice(&chunk);
+    fn next_available_id(
+        &self,
+        sessions: &HashMap<u64, Arc<LegacySessionEntry>>,
+    ) -> Option<u64> {
+        // At most 64 ids are live, so MAX_PROCESSES + 1 probes are enough to
+        // skip zero and any collision after the atomic counter wraps.
+        for _ in 0..=MAX_PROCESSES {
+            let candidate = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if candidate != 0 && !sessions.contains_key(&candidate) {
+                return Some(candidate);
             }
-            let (snapshot, next_offset) = pty.snapshot_from(read_offset);
-            out.extend_from_slice(&snapshot);
-            read_offset = next_offset;
-            break;
         }
-        let remaining = deadline - now;
-        let closed_notify = pty.closed_notify();
-        tokio::select! {
-            r = rx.recv() => match r {
-                Ok(chunk) => {
-                    read_offset = read_offset.saturating_add(chunk.len());
-                    out.extend_from_slice(&chunk);
-                }
-                Err(RecvError::Lagged(_)) => {
-                    let (new_rx, snapshot, next_offset) = pty.subscribe_from(read_offset);
-                    out.extend_from_slice(&snapshot);
-                    read_offset = next_offset;
-                    rx = new_rx;
-                    continue;
-                }
-                Err(RecvError::Closed) => {
-                    let (snapshot, next_offset) = pty.snapshot_from(read_offset);
-                    out.extend_from_slice(&snapshot);
-                    read_offset = next_offset;
-                    break;
-                }
-            },
-            _ = closed_notify.notified() => { /* re-evaluate finish on next loop */ }
-            _ = tokio::time::sleep(remaining) => break,
-        }
+        None
     }
-    (out, read_offset)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pty::PtyParams;
-    use crate::test_support::pty_test_helper_program;
-    use std::collections::HashMap as StdHashMap;
+    use nomi_execution::{EncodingMetadata, OutputChunk, OutputStream};
+    use uuid::Uuid;
 
-    /// Spawn a long-lived child that stays alive ~`secs` seconds via the
-    /// cross-platform helper (replaces the unix-only `sleep`).
-    fn spawn_sleep(secs: &str) -> Arc<Pty> {
-        let ms = secs.parse::<u64>().unwrap_or(30) * 1000;
-        Pty::spawn(PtyParams {
-            program: pty_test_helper_program(),
-            args: vec!["sleep".into(), ms.to_string()],
-            cwd: String::new(),
-            env: StdHashMap::new(),
-            cols: 80,
-            rows: 24,
-        })
-        .expect("spawn helper sleep")
+    fn owner() -> ExecutionOwner {
+        ExecutionOwner::new(Uuid::now_v7(), Uuid::now_v7())
     }
 
-    fn session(pty: Arc<Pty>) -> ExecSession {
-        ExecSession {
-            id: 0,
-            pty,
-            read_offset: 0,
-            command: "sleep".into(),
-            tty: false,
-            last_used: Instant::now(),
+    fn binding(cursor: u64, dropped_bytes: u64, transport: Transport) -> LegacySessionBinding {
+        LegacySessionBinding::new(
+            owner(),
+            SessionId::new(),
+            OutputCursor::new(cursor),
+            dropped_bytes,
+            transport,
+        )
+    }
+
+    fn output(
+        next_cursor: u64,
+        retained_bytes: usize,
+        dropped_bytes: u64,
+    ) -> OutputSnapshot {
+        OutputSnapshot {
+            chunks: Vec::<OutputChunk>::new(),
+            next_cursor: OutputCursor::new(next_cursor),
+            retained_bytes,
+            dropped_bytes,
+            encoding: EncodingMetadata::default(),
         }
     }
 
-    #[tokio::test]
-    async fn ids_are_monotonic_and_lookup_works() {
+    #[test]
+    fn numeric_ids_are_monotonic_and_lookup_preserves_identity() {
         let store = ProcessStore::new();
-        let (id1, p1) = store.insert(session(spawn_sleep("30"))).await;
-        let (id2, p2) = store.insert(session(spawn_sleep("30"))).await;
-        assert!(p1.is_none() && p2.is_none());
-        assert_eq!(id2, id1 + 1);
-        assert!(store.touch(id1).await.is_some());
-        assert!(store.touch(9999).await.is_none());
-        store.terminate_all().await;
+        let first_binding = binding(3, 1, Transport::Pipe);
+        let expected_owner = first_binding.owner.clone();
+        let expected_session = first_binding.session_id;
+        let first = store.insert(first_binding).expect("first insert");
+        let second = store
+            .insert(binding(
+                0,
+                0,
+                Transport::Pty { cols: 120, rows: 30 },
+            ))
+            .expect("second insert");
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        let entry = store.get(first).expect("inserted mapping");
+        assert_eq!(entry.owner(), &expected_owner);
+        assert_eq!(entry.session_id(), expected_session);
+        assert_eq!(entry.transport(), Transport::Pipe);
+        assert_eq!(store.len(), 2);
+        assert!(store.contains(second));
+    }
+
+    #[test]
+    fn binding_after_output_starts_after_the_delivered_snapshot() {
+        let delivered = output(42, 10, 32);
+        let owner = owner();
+        let session_id = SessionId::new();
+        let binding = LegacySessionBinding::after_output(
+            owner.clone(),
+            session_id,
+            Transport::Pipe,
+            &delivered,
+        );
+
+        assert_eq!(binding.owner, owner);
+        assert_eq!(binding.session_id, session_id);
+        assert_eq!(binding.cursor, OutputCursor::new(42));
+        assert_eq!(binding.dropped_bytes, 32);
+        assert_eq!(binding.transport, Transport::Pipe);
     }
 
     #[tokio::test]
-    async fn lru_caps_at_max_and_protects_recent() {
+    async fn record_output_reports_exact_cursor_gap_not_cumulative_drop_delta() {
+        let entry = LegacySessionEntry::new(binding(5, 2, Transport::Pipe));
+        let mut state = entry.lock_state().await;
+
+        // next=10, retained=4 => retained base is 6. Cursor 5 missed one byte,
+        // while the cumulative dropped counter increased by four.
+        let first = state.record_output(&output(10, 4, 6));
+        assert_eq!(first.previous_cursor, OutputCursor::new(5));
+        assert_eq!(first.next_cursor, OutputCursor::new(10));
+        assert_eq!(first.missed_bytes, 1);
+        assert_eq!(first.newly_dropped_bytes, 4);
+        assert_eq!(first.cumulative_dropped_bytes, 6);
+
+        // next=12, retained=4 => base 8, which is behind the committed cursor
+        // 10. Two more lifetime bytes were evicted, but they were already
+        // consumed and therefore this caller missed nothing.
+        let second = state.record_output(&output(12, 4, 8));
+        assert_eq!(second.previous_cursor, OutputCursor::new(10));
+        assert_eq!(second.next_cursor, OutputCursor::new(12));
+        assert_eq!(second.missed_bytes, 0);
+        assert_eq!(second.newly_dropped_bytes, 2);
+        assert_eq!(second.cumulative_dropped_bytes, 8);
+        assert_eq!(state.cursor(), OutputCursor::new(12));
+        assert_eq!(state.dropped_bytes(), 8);
+    }
+
+    #[tokio::test]
+    async fn replaying_the_same_snapshot_does_not_repeat_drop_metadata() {
+        let entry = LegacySessionEntry::new(binding(0, 0, Transport::Pipe));
+        let mut state = entry.lock_state().await;
+        let snapshot = output(10, 4, 6);
+
+        let first = state.record_output(&snapshot);
+        let repeated = state.record_output(&snapshot);
+
+        assert_eq!(first.missed_bytes, 6);
+        assert_eq!(first.newly_dropped_bytes, 6);
+        assert_eq!(repeated.missed_bytes, 0);
+        assert_eq!(repeated.newly_dropped_bytes, 0);
+        assert_eq!(repeated.next_cursor, OutputCursor::new(10));
+    }
+
+    #[tokio::test]
+    async fn stale_snapshot_cannot_move_cursor_or_drop_counter_backwards() {
+        let entry = LegacySessionEntry::new(binding(10, 7, Transport::Pipe));
+        let mut state = entry.lock_state().await;
+
+        let observed = state.record_output(&output(8, 4, 5));
+
+        assert_eq!(observed.previous_cursor, OutputCursor::new(10));
+        assert_eq!(observed.next_cursor, OutputCursor::new(10));
+        assert_eq!(observed.missed_bytes, 0);
+        assert_eq!(observed.newly_dropped_bytes, 0);
+        assert_eq!(observed.cumulative_dropped_bytes, 7);
+        assert_eq!(state.cursor(), OutputCursor::new(10));
+        assert_eq!(state.dropped_bytes(), 7);
+    }
+
+    #[tokio::test]
+    async fn each_entry_serializes_cursor_mutation_independently() {
+        let store = ProcessStore::new();
+        let id = store
+            .insert(binding(0, 0, Transport::Pipe))
+            .expect("insert");
+        let entry = store.get(id).expect("entry");
+        let guard = entry.lock_state().await;
+
+        let contender = Arc::clone(&entry);
+        let (attempted_tx, attempted_rx) = tokio::sync::oneshot::channel();
+        let (acquired_tx, mut acquired_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            attempted_tx.send(()).expect("attempt receiver");
+            let _guard = contender.lock_state().await;
+            acquired_tx.send(()).expect("acquired receiver");
+        });
+
+        attempted_rx.await.expect("contender started");
+        tokio::task::yield_now().await;
+        assert!(
+            matches!(
+                acquired_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "a second call for the same numeric id must wait for the cursor guard"
+        );
+
+        drop(guard);
+        acquired_rx.await.expect("contender acquired after release");
+        worker.await.expect("contender task");
+    }
+
+    #[test]
+    fn capacity_failure_never_evicts_an_existing_mapping() {
         let store = ProcessStore::new();
         let mut ids = Vec::new();
-        // Insert MAX_PROCESSES + 1: the +1 must trigger exactly one eviction.
-        for _ in 0..=MAX_PROCESSES {
-            let (id, pruned) = store.insert(session(spawn_sleep("30"))).await;
-            if let Some(victim) = pruned {
-                victim.kill();
-            }
-            ids.push(id);
-        }
-        assert_eq!(
-            store.len().await,
-            MAX_PROCESSES,
-            "store must cap at MAX_PROCESSES"
-        );
-
-        // The 8 most-recently-inserted ids are protected and must survive.
-        for id in ids.iter().rev().take(PROTECT_RECENT) {
-            assert!(
-                store.contains(*id).await,
-                "recently-used session {id} must not be pruned"
+        for _ in 0..MAX_PROCESSES {
+            ids.push(
+                store
+                    .insert(binding(0, 0, Transport::Pipe))
+                    .expect("mapping below capacity"),
             );
         }
-        // The very first inserted (oldest, unprotected) must have been evicted.
-        assert!(
-            !store.contains(ids[0]).await,
-            "oldest unprotected session should be evicted first"
+
+        let error = store
+            .insert(binding(0, 0, Transport::Pipe))
+            .expect_err("mapping above capacity must fail");
+
+        assert_eq!(
+            error,
+            LegacySessionStoreError::CapacityExhausted {
+                max_sessions: MAX_PROCESSES
+            }
         );
-        store.terminate_all().await;
+        assert_eq!(store.len(), MAX_PROCESSES);
+        assert!(ids.into_iter().all(|id| store.contains(id)));
     }
 
-    #[tokio::test]
-    async fn prune_prefers_exited_sessions() {
-        // Build a meta set by hand to assert the policy without racing on exits.
+    #[test]
+    fn remove_if_same_cannot_remove_a_different_entry() {
         let store = ProcessStore::new();
-        // One short-lived (will exit), several long-lived.
-        let exiting = Pty::spawn(PtyParams {
-            program: pty_test_helper_program(),
-            args: vec!["exit".into(), "0".into()],
-            cwd: String::new(),
-            env: StdHashMap::new(),
-            cols: 80,
-            rows: 24,
-        })
-        .expect("spawn helper exit");
-        let (exited_id, _) = store.insert(session(exiting)).await;
-        // Give the waiter thread time to record exit.
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let first = store
+            .insert(binding(0, 0, Transport::Pipe))
+            .expect("first");
+        let second = store
+            .insert(binding(0, 0, Transport::Pipe))
+            .expect("second");
+        let first_entry = store.get(first).expect("first entry");
+        let second_entry = store.get(second).expect("second entry");
 
-        // Fill to capacity with live sessions so the next insert must prune.
-        let mut last_ids = Vec::new();
-        for _ in 0..(MAX_PROCESSES - 1) {
-            let (id, pruned) = store.insert(session(spawn_sleep("30"))).await;
-            if let Some(v) = pruned {
-                v.kill();
-            }
-            last_ids.push(id);
-        }
-        assert_eq!(store.len().await, MAX_PROCESSES);
-        // Touch the exited session so it is NOT among the oldest, proving the
-        // policy targets "exited" over "oldest". It is old by insertion but we
-        // refresh last_used so recency wouldn't pick it — yet exited should.
-        // (Skip the touch: leave it oldest; either way it should be pruned since
-        // it is both exited and unprotected.)
-        let (_new_id, pruned) = store.insert(session(spawn_sleep("30"))).await;
-        let victim_killed = pruned.is_some();
-        if let Some(v) = pruned {
-            v.kill();
-        }
-        assert!(victim_killed, "insert past cap must evict someone");
-        assert!(
-            !store.contains(exited_id).await,
-            "an exited unprotected session should be the prune target"
+        assert!(!store.remove_if_same(first, &second_entry));
+        assert!(store.contains(first));
+        assert!(store.remove_if_same(first, &first_entry));
+        assert!(!store.contains(first));
+        assert!(store.contains(second));
+    }
+
+    #[test]
+    fn remove_and_empty_queries_are_process_free() {
+        let store = ProcessStore::new();
+        assert!(store.is_empty());
+        let id = store
+            .insert(binding(
+                0,
+                0,
+                Transport::Pty { cols: 80, rows: 24 },
+            ))
+            .expect("insert");
+        let removed = store.remove(id).expect("remove");
+
+        assert_eq!(removed.transport(), Transport::Pty { cols: 80, rows: 24 });
+        assert!(store.is_empty());
+        assert!(store.get(id).is_none());
+    }
+
+    #[test]
+    fn test_snapshot_helper_uses_no_stream_or_process_state() {
+        let snapshot = OutputSnapshot {
+            chunks: vec![OutputChunk {
+                seq: 0,
+                start: 0,
+                stream: OutputStream::Stdout,
+                bytes: b"ignored by adapter".to_vec(),
+                text: "ignored by adapter".to_owned(),
+            }],
+            next_cursor: OutputCursor::new(18),
+            retained_bytes: 18,
+            dropped_bytes: 0,
+            encoding: EncodingMetadata::default(),
+        };
+        let binding = LegacySessionBinding::after_output(
+            owner(),
+            SessionId::new(),
+            Transport::Pipe,
+            &snapshot,
         );
-        store.terminate_all().await;
+
+        assert_eq!(binding.cursor, OutputCursor::new(18));
+        assert_eq!(binding.dropped_bytes, 0);
     }
 }

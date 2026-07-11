@@ -28,6 +28,7 @@ pub struct OutputBuffer {
     limit: usize,
     inner: Mutex<OutputBufferState>,
     activity: Option<Arc<dyn Fn() + Send + Sync>>,
+    changed: tokio::sync::watch::Sender<u64>,
 }
 
 struct OutputState {
@@ -57,6 +58,7 @@ impl OutputBuffer {
     pub fn new(limit_bytes: usize) -> Self {
         let decoders = StreamDecoders::new();
         let base_decoders = decoders.clone();
+        let (changed, _receiver) = tokio::sync::watch::channel(0);
         Self {
             limit: limit_bytes,
             inner: Mutex::new(OutputBufferState::Live(OutputState {
@@ -71,6 +73,7 @@ impl OutputBuffer {
                 finalized: false,
             })),
             activity: None,
+            changed,
         }
     }
 
@@ -131,7 +134,16 @@ impl OutputBuffer {
         {
             activity();
         }
+        if !bytes.is_empty() {
+            self.changed.send_modify(|generation| {
+                *generation = generation.wrapping_add(1);
+            });
+        }
         events
+    }
+
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     pub fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
@@ -167,16 +179,18 @@ impl OutputBuffer {
         state.finalize();
         let state = Arc::new(state);
         *storage = OutputBufferState::Frozen(Arc::clone(&state));
+        drop(storage);
+        self.changed.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
         FrozenOutput { state }
     }
-
 }
 
 impl FrozenOutput {
     pub(crate) fn snapshot_from(&self, cursor: OutputCursor) -> OutputSnapshot {
         snapshot_from_state(&self.state, cursor)
     }
-
 }
 
 fn snapshot_from_state(state: &OutputState, cursor: OutputCursor) -> OutputSnapshot {

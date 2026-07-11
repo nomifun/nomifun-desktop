@@ -203,6 +203,27 @@ impl Registry {
         })
     }
 
+    /// Clone a session for a read-only inspection without renewing its lease or
+    /// incrementing its in-flight action count.
+    pub(crate) fn inspect(
+        &self,
+        session_id: &SessionId,
+        owner: &ExecutionOwner,
+    ) -> Result<Arc<Session>, LookupError> {
+        let state = self
+            .state
+            .lock()
+            .expect("execution registry lock is poisoned");
+        let entry = state
+            .active
+            .get(session_id)
+            .ok_or(LookupError::NotFound)?;
+        if &entry.owner != owner {
+            return Err(LookupError::OwnerMismatch);
+        }
+        Ok(Arc::clone(&entry.session))
+    }
+
     pub(crate) fn heartbeat_run(&self, run_id: Uuid, now: Instant) -> usize {
         let sessions = {
             let mut state = self

@@ -732,17 +732,17 @@ impl AgentBootstrap {
             );
         }
 
-        // Interactive PTY tools: exec_command + write_stdin share one
-        // ProcessStore (session-level, alive for the engine's lifetime via the
-        // tools held in the ToolRegistry). Same stateful-tool pattern as
-        // SpawnTool/BrowserTool. The store's Drop SIGKILLs any lingering PTY
-        // process groups when the engine (and its registry) is torn down.
+        // Legacy interactive schemas share the same supervisor as Bash. The
+        // ProcessStore is only a numeric-id adapter; it owns no OS process.
         let process_store = Arc::new(nomi_tools::process_store::ProcessStore::new());
         registry.register(Box::new(nomi_tools::exec_command::ExecCommandTool::new(
+            Arc::clone(&process_supervisor),
             Arc::clone(&process_store),
             cwd_path.to_path_buf(),
+            execution_capability.clone(),
         )));
         registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
+            Arc::clone(&process_supervisor),
             Arc::clone(&process_store),
         )));
 

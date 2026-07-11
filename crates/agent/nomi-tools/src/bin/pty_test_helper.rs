@@ -17,6 +17,12 @@
 //!                                  sleep `ms`, print `text` + newline (flushed),
 //!                                  then sleep `keepalive_ms` and exit. Models a
 //!                                  process that emits delayed output then lingers.
+//!   - `emit-twice <first_ms> <first> <second_ms> <second> <keepalive_ms>`
+//!                                  emit two flushed lines at independent delays,
+//!                                  then remain alive. Models output arriving
+//!                                  around an adapter settle boundary.
+//!   - `ignore-interrupt`           install an interrupt handler that ignores
+//!                                  Ctrl-C, print `ready`, then remain alive.
 //!   - `write-marker-after <ms> <path>`
 //!                                  sleep `ms`, then atomically publish a marker.
 //!   - `spawn-marker-child <ms> <path> <ready_path> <keepalive_ms>`
@@ -58,6 +64,33 @@ fn main() {
             let _ = w.flush();
             drop(w);
             std::thread::sleep(Duration::from_millis(keepalive_ms));
+        }
+        "emit-twice" => {
+            let usage = "emit-twice <first_ms> <first> <second_ms> <second> <keepalive_ms>";
+            let first_ms = parse_u64(args.get(1), usage);
+            let first = required_arg(args.get(2), usage);
+            let second_ms = parse_u64(args.get(3), usage);
+            let second = required_arg(args.get(4), usage);
+            let keepalive_ms = parse_u64(args.get(5), usage);
+            std::thread::sleep(Duration::from_millis(first_ms));
+            let stdout = std::io::stdout();
+            let mut w = stdout.lock();
+            let _ = writeln!(w, "{first}");
+            let _ = w.flush();
+            std::thread::sleep(Duration::from_millis(second_ms));
+            let _ = writeln!(w, "{second}");
+            let _ = w.flush();
+            drop(w);
+            std::thread::sleep(Duration::from_millis(keepalive_ms));
+        }
+        "ignore-interrupt" => {
+            ignore_interrupt().unwrap_or_else(|error| fail_io("ignore interrupt", error));
+            let stdout = std::io::stdout();
+            let mut w = stdout.lock();
+            let _ = writeln!(w, "ready");
+            let _ = w.flush();
+            drop(w);
+            std::thread::sleep(Duration::from_secs(60));
         }
         "write-marker-after" => {
             let delay_ms = parse_u64(args.get(1), "write-marker-after <ms> <path>");
@@ -178,4 +211,31 @@ fn write_text_atomically(path: &Path, content: &str) -> std::io::Result<()> {
 fn fail_io(action: &str, error: std::io::Error) -> ! {
     eprintln!("pty_test_helper: {action}: {error}");
     std::process::exit(2);
+}
+
+#[cfg(windows)]
+fn ignore_interrupt() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+    unsafe extern "system" fn ignore_control_event(_control_type: u32) -> i32 {
+        1
+    }
+
+    // SAFETY: the handler has the required ABI and remains valid for the
+    // lifetime of this helper process.
+    if unsafe { SetConsoleCtrlHandler(Some(ignore_control_event), 1) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn ignore_interrupt() -> std::io::Result<()> {
+    // SAFETY: installing SIG_IGN changes only this helper's SIGINT disposition.
+    if unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) } == libc::SIG_ERR {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
