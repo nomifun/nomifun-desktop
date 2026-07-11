@@ -187,7 +187,7 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   );
 
   const sortMenu = (
-    <div className='min-w-390px rounded-8px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] p-12px shadow-[0_8px_24px_rgba(0,0,0,0.18)]'>
+    <div className='min-w-390px rounded-8px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-white)] p-12px shadow-[0_8px_24px_rgba(0,0,0,0.18)]'>
       <div className='mb-10px text-13px font-medium text-[var(--color-text-1)]'>{sortLabel}</div>
       <div className='flex items-center gap-10px'>
         <Select

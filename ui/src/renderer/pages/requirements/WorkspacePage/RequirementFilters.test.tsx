@@ -63,6 +63,11 @@ describe('RequirementFilters trigger', () => {
     expect(filtersSource.includes("<Menu.ItemGroup title={t('requirements.sort.direction')}>")).toBe(false);
   });
 
+  test('uses an opaque theme background for the sort popover', () => {
+    expect(filtersSource.includes('bg-[var(--color-bg-white)]')).toBe(true);
+    expect(filtersSource.includes('bg-[var(--color-bg-2)] p-12px shadow')).toBe(false);
+  });
+
   test('separates the filter row from content without adding an outer border', () => {
     expect(workspaceSource.includes("<div className='mt-8px'>")).toBe(true);
     expect(workspaceSource.includes("<div className='mt-10px'>")).toBe(true);
