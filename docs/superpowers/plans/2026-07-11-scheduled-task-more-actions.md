@@ -218,7 +218,9 @@ const ScheduledTaskActions: React.FC<ScheduledTaskActionsProps> = ({
             menuVisible && '!pointer-events-auto !opacity-100'
           )}
           icon={<More theme='outline' size='14' fill='currentColor' className='block leading-none' />}
-          onClick={(event) => event.stopPropagation()}
+          onClick={() => {
+            setMenuVisible(true);
+          }}
         />
       </Dropdown>
     </div>
@@ -374,7 +376,7 @@ git commit -m "style(ui): move scheduled task actions into menu"
 - Consumes: the user-provided desktop screenshot and the implemented `/scheduled` page.
 - Produces: visual evidence that the desktop hover/menu state matches the requested interaction and mobile layout has not changed.
 
-- [ ] **Step 1: Start or reuse the local UI**
+- [x] **Step 1: Start or reuse the local UI**
 
 If port 5173 is not already serving the application, run:
 
@@ -384,7 +386,7 @@ bun run dev:ui -- --host 0.0.0.0 --port 5173 --strictPort
 
 Expected: Vite serves the UI on port 5173 without compilation errors.
 
-- [ ] **Step 2: Inspect the desktop state in the Codex in-app Browser**
+- [x] **Step 2: Inspect the desktop state in the Codex in-app Browser**
 
 Use the in-app Browser and open the scheduled-task page at the same desktop viewport as the reference screenshot. Verify all of the following:
 
@@ -397,7 +399,7 @@ Use the in-app Browser and open the scheduled-task page at the same desktop view
 - Clicking the trigger or menu does not open task detail.
 - Removing requires confirmation; cancel leaves the task unchanged.
 
-- [ ] **Step 3: Inspect the mobile state**
+- [x] **Step 3: Inspect the mobile state**
 
 Set the Browser viewport to 390 × 844 and verify:
 
@@ -406,7 +408,7 @@ Set the Browser viewport to 390 × 844 and verify:
 - Manual-only cards still have no switch.
 - No desktop `More` menu is rendered.
 
-- [ ] **Step 4: Compare captures and write the QA gate**
+- [x] **Step 4: Compare captures and write the QA gate**
 
 Open the reference image and the latest desktop and mobile captures together. Fix any P0/P1/P2 mismatch, recapture, and repeat. When all blocking checks pass, create `design-qa.md` with:
 
@@ -422,7 +424,7 @@ Open the reference image and the latest desktop and mobile captures together. Fi
 final result: passed
 ```
 
-- [ ] **Step 5: Commit QA evidence**
+- [x] **Step 5: Commit QA evidence**
 
 ```bash
 git add design-qa.md docs/superpowers/plans/2026-07-11-scheduled-task-more-actions.md

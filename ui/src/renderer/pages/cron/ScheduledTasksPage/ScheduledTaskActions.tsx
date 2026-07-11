@@ -110,7 +110,9 @@ const ScheduledTaskActions: React.FC<ScheduledTaskActionsProps> = ({
             menuVisible && '!pointer-events-auto !opacity-100'
           )}
           icon={<More theme='outline' size='14' fill='currentColor' className='block leading-none' />}
-          onClick={(event) => event.stopPropagation()}
+          onClick={() => {
+            setMenuVisible(true);
+          }}
         />
       </Dropdown>
     </div>
