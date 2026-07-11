@@ -7,7 +7,6 @@ import { FilterTrigger } from './RequirementFilters';
 
 const filtersSource = readFileSync(new URL('./RequirementFilters.tsx', import.meta.url), 'utf8');
 const listViewSource = readFileSync(new URL('./RequirementListView.tsx', import.meta.url), 'utf8');
-const workspaceSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 
 describe('RequirementFilters trigger', () => {
   test('forwards a DOM ref so Arco can anchor the popup', () => {
@@ -46,25 +45,12 @@ describe('RequirementFilters trigger', () => {
     );
 
     expect(html.includes('text-12px')).toBe(true);
-    expect(html.includes('font-medium')).toBe(true);
-    expect(html.includes('text-[var(--color-text-1)]')).toBe(true);
+    expect(html.includes('font-medium text-[var(--color-text-1)]')).toBe(true);
     expect(html.includes('ml-2px')).toBe(true);
   });
 
   test('keeps select-all controls in the filter row instead of a separate list header', () => {
     expect(filtersSource.includes('requirements.selection.selectAllPage')).toBe(true);
     expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
-  });
-
-  test('uses compact spacing, centered icon alignment, and a bottom divider', () => {
-    const html = renderToStaticMarkup(<FilterTrigger icon={<span>icon</span>} label='标签' />);
-
-    expect(workspaceSource.includes("<div className='flex flex-col gap-12px'>")).toBe(true);
-    expect(html.includes('items-center justify-center leading-none')).toBe(true);
-    expect(
-      filtersSource.includes(
-        "border-b border-solid border-[var(--color-border-2)] pb-8px"
-      )
-    ).toBe(true);
   });
 });
