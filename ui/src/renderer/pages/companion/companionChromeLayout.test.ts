@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 const companionSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 const companionCss = readFileSync(new URL('./companion.css', import.meta.url), 'utf8');
 const controllerSource = readFileSync(new URL('./useDetachedMemoryPanel.ts', import.meta.url), 'utf8');
+const capturePolicySource = readFileSync(new URL('./companionCapturePolicy.ts', import.meta.url), 'utf8');
+const memoryGeometrySource = readFileSync(new URL('./memoryPanelGeometry.ts', import.meta.url), 'utf8');
 
 describe('desktop companion chrome layout', () => {
   test('keeps the unread badge anchored to the figure stage', () => {
@@ -42,5 +44,10 @@ describe('desktop companion chrome layout', () => {
   test('removes the in-window suggestion surface', () => {
     expect(companionCss.includes('.nomi-companion-suggestions')).toBe(false);
     expect(companionCss.includes('is-memory-panel-open')).toBe(false);
+    expect(capturePolicySource.includes('showSuggestions')).toBe(false);
+    expect(memoryGeometrySource.includes('chooseMemoryPanelLayout')).toBe(false);
+    expect(memoryGeometrySource.includes('fitMemoryPanelInAchievedWindow')).toBe(false);
+    expect(memoryGeometrySource.includes('memoryPanelStageShiftX')).toBe(false);
+    expect(memoryGeometrySource.includes('resolveDeskRestoreLayout')).toBe(true);
   });
 });
