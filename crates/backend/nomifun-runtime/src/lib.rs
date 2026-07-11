@@ -8,8 +8,6 @@
 mod cache;
 mod embed;
 mod extract;
-#[cfg(windows)]
-mod job;
 mod resolver;
 mod shell_env;
 

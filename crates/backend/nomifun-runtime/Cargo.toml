@@ -11,6 +11,7 @@ edition.workspace = true
 bun_version = "1.3.13"
 
 [dependencies]
+nomi-execution.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 sha2.workspace = true
@@ -39,18 +40,4 @@ sha2.workspace = true
 hex.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true
 wait-timeout = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-# Job Object–based child-tree cleanup (see src/job.rs). Win32_Security gates
-# CreateJobObjectW (its SECURITY_ATTRIBUTES param); Win32_System_Threading
-# gates JOBOBJECT_EXTENDED_LIMIT_INFORMATION (its IO_COUNTERS field). Do not
-# trim these — they currently also arrive via tokio's feature unification,
-# which would mask the breakage until tokio bumps its windows-sys major.
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_JobObjects",
-    "Win32_System_Threading",
-] }

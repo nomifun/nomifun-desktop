@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     os::unix::process::CommandExt,
@@ -67,6 +67,8 @@ const CLEANUP_ERROR_RETRY_MAX: Duration = Duration::from_secs(30);
 const CLEANUP_RELAY_BATCH: usize = 64;
 static UNIX_SPAWN_GATE: Mutex<()> = Mutex::new(());
 static CLEANUP_RELAY: OnceLock<mpsc::Sender<CleanupJob>> = OnceLock::new();
+static LEGACY_WATCHDOGS: OnceLock<Mutex<HashMap<u32, Arc<LegacyWatchdog>>>> =
+    OnceLock::new();
 
 #[cfg(test)]
 #[derive(Clone, Copy, Default)]
@@ -333,6 +335,972 @@ pub(super) async fn spawn_pipe(
     output: Arc<OutputBuffer>,
 ) -> Result<SpawnedPlatformProcess, ExecutionError> {
     spawn_pipe_inner(request, output, SpawnOptions::default()).await
+}
+
+pub(crate) fn spawn_legacy(
+    mut command: tokio::process::Command,
+    hand_off: bool,
+) -> io::Result<tokio::process::Child> {
+    if hand_off {
+        return command.spawn();
+    }
+    let mut transaction = LegacySpawnTransaction::begin()?;
+    transaction.install(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(transaction.spawn_failed(error)),
+    };
+    let Some(pid) = child.id() else {
+        return Err(transaction.spawn_failed(io::Error::other(
+            "legacy Unix child exited before ownership commit",
+        )));
+    };
+    let watchdog = match transaction.commit(pid) {
+        Ok(watchdog) => watchdog,
+        Err(error) => {
+            wait_tokio_child_reaped(&mut child, Instant::now() + SETUP_TIMEOUT)?;
+            let _ = prove_group_absent(pid as libc::pid_t);
+            return Err(error);
+        }
+    };
+    if let Err(error) = register_legacy_watchdog(Arc::clone(&watchdog)) {
+        watchdog.close_control();
+        let mut cleanup_errors = Vec::new();
+        let deadline = Deadline::after(SETUP_TIMEOUT).map_err(protocol_io_error)?;
+        let mut group_sealed = false;
+        match leader_exit_observed(watchdog.watchdog_pid) {
+            Ok(_) => {
+                // SAFETY: the exact unreaped watchdog anchors this committed
+                // legacy process group until its exact wait below.
+                let killed = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+                if killed == 0
+                    || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    group_sealed = true;
+                } else {
+                    cleanup_errors.push(format!(
+                        "seal legacy group after registry failure: {}",
+                        io::Error::last_os_error()
+                    ));
+                }
+            }
+            Err(anchor_error) if anchor_error.raw_os_error() == Some(libc::ECHILD) => {
+                cleanup_errors.push(
+                    "legacy watchdog exact ownership was lost after registry failure".to_owned(),
+                );
+            }
+            Err(anchor_error) => cleanup_errors.push(format!(
+                "validate legacy watchdog after registry failure: {anchor_error}"
+            )),
+        }
+        if let Err(cleanup_error) = waitpid_exact_setup(watchdog.watchdog_pid, deadline) {
+            cleanup_errors.push(format!("reap legacy watchdog: {cleanup_error}"));
+            defer_legacy_cleanup(
+                None,
+                None,
+                Some(watchdog.watchdog_pid),
+                None,
+                Some(pid as libc::pid_t),
+                group_sealed,
+            );
+        }
+        if let Err(cleanup_error) =
+            wait_tokio_child_reaped(&mut child, Instant::now() + SETUP_TIMEOUT)
+        {
+            cleanup_errors.push(format!("reap legacy Tokio child: {cleanup_error}"));
+        }
+        if let Err(cleanup_error) = prove_group_absent(pid as libc::pid_t) {
+            cleanup_errors.push(format!("prove legacy group absent: {cleanup_error}"));
+        }
+        return Err(if cleanup_errors.is_empty() {
+            error
+        } else {
+            io::Error::new(
+                error.kind(),
+                format!("{error}; fail-closed cleanup: {}", cleanup_errors.join("; ")),
+            )
+        });
+    }
+    Ok(child)
+}
+
+pub(crate) async fn kill_legacy_process_tree(
+    child: &mut tokio::process::Child,
+) -> io::Result<()> {
+    let Some(pid) = child.id() else {
+        return child.wait().await.map(|_| ());
+    };
+    if let Some(watchdog) = legacy_watchdog(pid)? {
+        if let Err(error) = watchdog.signal_group(libc::SIGKILL)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(error);
+        }
+        let cleanup = watchdog.completion();
+        let child_result = child.wait().await.map(|_| ());
+        let cleanup_result = cleanup
+            .wait(Instant::now() + Duration::from_secs(5))
+            .await;
+        child_result?;
+        cleanup_result?;
+        return prove_group_absent(pid as libc::pid_t);
+    }
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            return Err(io::Error::other(
+                "legacy Unix child exact ownership was lost; cached PGID was quarantined",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    // SAFETY: legacy CommandBuilder starts the direct child as its own process
+    // group leader, and try_wait just re-proved the exact unreaped child
+    // identity, so the negative target names only that owned group.
+    let killed = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    if killed != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        return Err(io::Error::last_os_error());
+    }
+    child.wait().await.map(|_| ())
+}
+
+struct LegacySpawnTransaction {
+    spawn_gate: Option<std::sync::MutexGuard<'static, ()>>,
+    watchdog_pid: Option<libc::pid_t>,
+    control: Option<OwnedFd>,
+    registration: Option<OwnedFd>,
+    nonce: Nonce,
+    deadline: Deadline,
+    committed: bool,
+}
+
+impl LegacySpawnTransaction {
+    fn begin() -> io::Result<Self> {
+        let deadline = Deadline::after(SETUP_TIMEOUT).map_err(protocol_io_error)?;
+        let spawn_gate = lock_legacy_spawn_gate(deadline)?;
+        let nonce = Nonce::new(uuid::Uuid::now_v7().into_bytes());
+        let parent_pid = std::process::id() as libc::pid_t;
+        #[cfg(target_os = "linux")]
+        let parent_starttime = capture_starttime(parent_pid)?;
+        #[cfg(target_os = "macos")]
+        let parent_starttime = 0;
+        let watchdog_null = WatchdogNullGuard::open()?;
+        let (control_host, control_watchdog) = SeqPacketPair::new()
+            .map_err(protocol_io_error)?
+            .into_fds();
+        let (registration_child, registration_watchdog) = SeqPacketPair::new()
+            .map_err(protocol_io_error)?
+            .into_fds();
+        #[cfg(target_os = "linux")]
+        let close_upper_exclusive = capture_close_upper_exclusive()?;
+
+        // SAFETY: the child branch immediately enters the raw watchdog.
+        let watchdog_pid = unsafe { libc::fork() };
+        if watchdog_pid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if watchdog_pid == 0 {
+            let config = WatchdogConfig {
+                parent_pid,
+                parent_starttime,
+                control_fd: control_watchdog.as_raw_fd(),
+                registration_fd: registration_watchdog.as_raw_fd(),
+                null_fd: watchdog_null.null_fd(),
+                #[cfg(target_os = "linux")]
+                close_upper_exclusive,
+                external_session: false,
+                nonce,
+                deadline,
+                fault: FAULT_NONE,
+            };
+            // SAFETY: this is the dedicated fork child and never returns.
+            unsafe { run_watchdog(config) };
+        }
+        drop(watchdog_null);
+        drop(control_watchdog);
+        drop(registration_watchdog);
+        let control_fd = control_host.as_raw_fd();
+        if let Err(error) = recv_expected(control_fd, nonce, FrameKind::BootReady, deadline)
+            .and_then(|frame| validate_frame_identity(frame, 0, 0))
+        {
+            drop(control_host);
+            drop(registration_child);
+            match waitpid_exact_setup(watchdog_pid, deadline) {
+                Ok(_) => {}
+                Err(cleanup_error) => {
+                    defer_legacy_cleanup(
+                        None,
+                        None,
+                        Some(watchdog_pid),
+                        None,
+                        None,
+                        false,
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!(
+                            "{}; watchdog cleanup transferred to durable relay: {cleanup_error}",
+                            protocol_io_error(error)
+                        ),
+                    ));
+                }
+            }
+            return Err(protocol_io_error(error));
+        }
+        Ok(Self {
+            spawn_gate: Some(spawn_gate),
+            watchdog_pid: Some(watchdog_pid),
+            control: Some(control_host),
+            registration: Some(registration_child),
+            nonce,
+            deadline,
+            committed: false,
+        })
+    }
+
+    fn install(&self, command: &mut tokio::process::Command) {
+        let control_fd = self
+            .control
+            .as_ref()
+            .expect("legacy control is initialized")
+            .as_raw_fd();
+        let registration_fd = self
+            .registration
+            .as_ref()
+            .expect("legacy registration is initialized")
+            .as_raw_fd();
+        let nonce = self.nonce;
+        let deadline = self.deadline;
+        // SAFETY: child_bootstrap performs only raw protocol/process syscalls.
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                child_bootstrap(
+                    control_fd,
+                    registration_fd,
+                    nonce,
+                    deadline,
+                    None,
+                    None,
+                    #[cfg(test)]
+                    TestRegistrationFault::None,
+                )
+            });
+        }
+    }
+
+    fn commit(mut self, pid: u32) -> io::Result<Arc<LegacyWatchdog>> {
+        let pid = pid as libc::pid_t;
+        self.registration.take();
+        let control_fd = self
+            .control
+            .as_ref()
+            .expect("legacy control is initialized")
+            .as_raw_fd();
+        if let Err(error) = recv_expected(
+            control_fd,
+            self.nonce,
+            FrameKind::Registered,
+            self.deadline,
+        )
+        .and_then(|frame| validate_frame_identity(frame, pid, pid).map(drop))
+        {
+            return Err(self.fail_registered_with_tokio_child(pid, protocol_io_error(error)));
+        }
+        let commit = Frame::new(FrameKind::Commit, self.nonce, pid, pid);
+        if let Err(error) = send_frame(control_fd, &commit, self.deadline)
+            .and_then(|_| {
+                recv_expected(
+                    control_fd,
+                    self.nonce,
+                    FrameKind::Committed,
+                    self.deadline,
+                )
+            })
+            .and_then(|frame| validate_frame_identity(frame, pid, pid).map(drop))
+        {
+            return Err(self.fail_registered_with_tokio_child(pid, protocol_io_error(error)));
+        }
+        let watchdog_pid = self
+            .watchdog_pid
+            .take()
+            .expect("legacy watchdog identity is initialized");
+        let control = self
+            .control
+            .take()
+            .expect("legacy control is initialized");
+        self.spawn_gate.take();
+        self.committed = true;
+        Ok(Arc::new(LegacyWatchdog::new(
+            pid as u32,
+            watchdog_pid,
+            control,
+            pid,
+            self.nonce,
+        )))
+    }
+
+    fn abort(&mut self, error: io::Error) -> io::Error {
+        if let Some(control) = self.control.as_ref() {
+            let abort = Frame::new(FrameKind::Abort, self.nonce, 0, 0);
+            let _ = send_frame(control.as_raw_fd(), &abort, self.deadline);
+        }
+        self.registration.take();
+        self.control.take();
+        if let Some(watchdog_pid) = self.watchdog_pid.take() {
+            if let Err(cleanup_error) = waitpid_exact_setup(watchdog_pid, self.deadline) {
+                defer_legacy_cleanup(
+                    None,
+                    None,
+                    Some(watchdog_pid),
+                    None,
+                    None,
+                    false,
+                );
+                self.spawn_gate.take();
+                return io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{error}; watchdog cleanup transferred to durable relay: {cleanup_error}"
+                    ),
+                );
+            }
+        }
+        self.spawn_gate.take();
+        io::Error::new(error.kind(), error.to_string())
+    }
+
+    fn spawn_failed(&mut self, error: io::Error) -> io::Error {
+        self.registration.take();
+        let registered = self
+            .control
+            .as_ref()
+            .and_then(|control| {
+                Deadline::after(SETUP_TIMEOUT)
+                    .ok()
+                    .and_then(|deadline| {
+                        recv_frame(control.as_raw_fd(), self.nonce, deadline).ok()
+                    })
+            })
+            .filter(|frame| frame.kind() == FrameKind::Registered)
+            .and_then(|frame| {
+                (frame.pid() > 1 && frame.pgid() == frame.pid()).then_some(frame.pid())
+            });
+        match registered {
+            Some(pid) => self.fail_registered_without_tokio_child(pid, error),
+            None => self.abort(error),
+        }
+    }
+
+    fn fail_registered_with_tokio_child(
+        &mut self,
+        pid: libc::pid_t,
+        error: io::Error,
+    ) -> io::Error {
+        self.registration.take();
+        self.control.take();
+        let mut cleanup_errors = Vec::new();
+        let mut group_sealed = false;
+        if let Some(watchdog_pid) = self.watchdog_pid {
+            match leader_exit_observed(watchdog_pid) {
+                Ok(_) => {
+                    // SAFETY: the exact unreaped watchdog still anchors this
+                    // registered process group.
+                    let killed = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                    if killed == 0
+                        || io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    {
+                        group_sealed = true;
+                    } else {
+                        cleanup_errors.push(format!(
+                            "seal legacy group after ownership failure: {}",
+                            io::Error::last_os_error()
+                        ));
+                    }
+                }
+                Err(anchor_error) if anchor_error.raw_os_error() == Some(libc::ECHILD) => {
+                    cleanup_errors.push(
+                        "legacy watchdog exact ownership was lost before cleanup; cached PGID quarantined"
+                            .to_owned(),
+                    );
+                }
+                Err(anchor_error) => {
+                    cleanup_errors.push(format!(
+                        "validate legacy watchdog before cleanup: {anchor_error}"
+                    ));
+                }
+            }
+        }
+        if let Some(watchdog_pid) = self.watchdog_pid.take() {
+            if let Err(cleanup_error) = waitpid_exact_setup(watchdog_pid, self.deadline) {
+                cleanup_errors.push(format!("reap legacy watchdog: {cleanup_error}"));
+                defer_legacy_cleanup(
+                    None,
+                    None,
+                    Some(watchdog_pid),
+                    None,
+                    Some(pid),
+                    group_sealed,
+                );
+            }
+        }
+        self.spawn_gate.take();
+        let message = if cleanup_errors.is_empty() {
+            error.to_string()
+        } else {
+            format!("{error}; fail-closed cleanup: {}", cleanup_errors.join("; "))
+        };
+        io::Error::new(error.kind(), message)
+    }
+
+    fn fail_registered_without_tokio_child(
+        &mut self,
+        pid: libc::pid_t,
+        error: io::Error,
+    ) -> io::Error {
+        let mut result = self.fail_registered_with_tokio_child(pid, error);
+        let mut cleanup_errors = Vec::new();
+        let cleanup_deadline = Deadline::after(SETUP_TIMEOUT);
+        match cleanup_deadline
+            .map_err(protocol_io_error)
+            .and_then(|deadline| waitpid_exact_setup(pid, deadline))
+        {
+            Ok(_) => {
+                if let Err(cleanup_error) = prove_group_absent(pid) {
+                    cleanup_errors.push(format!("prove legacy group absent: {cleanup_error}"));
+                }
+            }
+            Err(cleanup_error) => {
+                cleanup_errors.push(format!("reap legacy child: {cleanup_error}"));
+                defer_legacy_cleanup(
+                    None,
+                    Some(pid),
+                    None,
+                    None,
+                    Some(pid),
+                    true,
+                );
+            }
+        }
+        if !cleanup_errors.is_empty() {
+            result = io::Error::new(
+                result.kind(),
+                format!("{result}; fail-closed cleanup: {}", cleanup_errors.join("; ")),
+            );
+        }
+        result
+    }
+}
+
+fn defer_legacy_cleanup(
+    child: Option<StdChild>,
+    raw_leader_pid: Option<libc::pid_t>,
+    watchdog_pid: Option<libc::pid_t>,
+    control: Option<OwnedFd>,
+    pgid: Option<libc::pid_t>,
+    group_sealed: bool,
+) {
+    let cleanup = CleanupJob {
+        child,
+        raw_leader_pid,
+        watchdog_pid,
+        control,
+        pgid,
+        group_state: match (pgid, group_sealed) {
+            (Some(_), true) => CleanupGroupState::Sealed,
+            (Some(_), false) => CleanupGroupState::Pending,
+            (None, _) => CleanupGroupState::NotRequired,
+        },
+        signal_gate: None,
+        completion: None,
+        failure_context: None,
+        attempts: 0,
+        last_error: None,
+        watchdog_ownership_lost: false,
+        leader_ownership_lost: false,
+        retry_delay: CLEANUP_RETRY_DELAY,
+        next_attempt: Instant::now(),
+        absence_deadline: None,
+        #[cfg(test)]
+        audit: TestSpawnAudit::default(),
+        #[cfg(test)]
+        hold: None,
+    };
+    defer_cleanup_job(cleanup);
+}
+
+fn defer_cleanup_job(job: CleanupJob) {
+    match cleanup_relay_sender() {
+        Ok(relay) => {
+            if let Err(error) = relay.send(job) {
+                let cleanup = Arc::new(Mutex::new(Some(error.0)));
+                let worker_cleanup = Arc::clone(&cleanup);
+                let spawned = std::thread::Builder::new()
+                    .name("nomifun-legacy-unix-emergency-cleanup".to_owned())
+                    .spawn(move || {
+                        let job = match worker_cleanup.lock() {
+                            Ok(mut job) => job.take(),
+                            Err(poisoned) => poisoned.into_inner().take(),
+                        };
+                        if let Some(job) = job {
+                            let _ = job.run_to_completion();
+                        }
+                    });
+                if spawned.is_err() {
+                    let job = match cleanup.lock() {
+                        Ok(mut job) => job.take(),
+                        Err(poisoned) => poisoned.into_inner().take(),
+                    };
+                    if let Some(job) = job {
+                        let _ = job.run_to_completion();
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            let cleanup = Arc::new(Mutex::new(Some(job)));
+            let worker_cleanup = Arc::clone(&cleanup);
+            let spawned = std::thread::Builder::new()
+                .name("nomifun-legacy-unix-emergency-cleanup".to_owned())
+                .spawn(move || {
+                    let job = match worker_cleanup.lock() {
+                        Ok(mut job) => job.take(),
+                        Err(poisoned) => poisoned.into_inner().take(),
+                    };
+                    if let Some(job) = job {
+                        let _ = job.run_to_completion();
+                    }
+                });
+            if spawned.is_err() {
+                let job = match cleanup.lock() {
+                    Ok(mut job) => job.take(),
+                    Err(poisoned) => poisoned.into_inner().take(),
+                };
+                if let Some(job) = job {
+                    let _ = job.run_to_completion();
+                }
+            }
+        }
+    }
+}
+
+impl Drop for LegacySpawnTransaction {
+    fn drop(&mut self) {
+        if !self.committed && self.watchdog_pid.is_some() {
+            let _ = self.abort(io::Error::other(
+                "legacy Unix ownership transaction was dropped",
+            ));
+        }
+    }
+}
+
+struct LegacyWatchdog {
+    pid: u32,
+    watchdog_pid: libc::pid_t,
+    control: Mutex<Option<OwnedFd>>,
+    pgid: libc::pid_t,
+    nonce: Nonce,
+    signal_gate: Mutex<bool>,
+    completion: Arc<LegacyWatchdogCompletion>,
+}
+
+impl LegacyWatchdog {
+    fn new(
+        pid: u32,
+        watchdog_pid: libc::pid_t,
+        control: OwnedFd,
+        pgid: libc::pid_t,
+        nonce: Nonce,
+    ) -> Self {
+        Self {
+            pid,
+            watchdog_pid,
+            control: Mutex::new(Some(control)),
+            pgid,
+            nonce,
+            signal_gate: Mutex::new(true),
+            completion: Arc::new(LegacyWatchdogCompletion::new()),
+        }
+    }
+
+    fn signal_group(&self, signal: libc::c_int) -> io::Result<()> {
+        let open = self
+            .signal_gate
+            .lock()
+            .map_err(|_| io::Error::other("legacy Unix signal gate is poisoned"))?;
+        if !*open {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "legacy Unix process group is already quiescing",
+            ));
+        }
+        // SAFETY: the direct-child watchdog anchors this exact process group.
+        if unsafe { libc::kill(-self.pgid, signal) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn completion(&self) -> Arc<LegacyWatchdogCompletion> {
+        Arc::clone(&self.completion)
+    }
+
+    fn close_control(&self) {
+        if let Ok(mut control) = self.control.lock() {
+            control.take();
+        }
+    }
+}
+
+struct LegacyWatchdogCompletion {
+    result: Mutex<Option<Result<(), LegacyCleanupError>>>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct LegacyCleanupError {
+    kind: io::ErrorKind,
+    message: Arc<str>,
+}
+
+impl LegacyWatchdogCompletion {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn publish(&self, result: io::Result<()>) {
+        let result = result.map_err(|error| LegacyCleanupError {
+            kind: error.kind(),
+            message: Arc::from(error.to_string()),
+        });
+        match self.result.lock() {
+            Ok(mut stored) => *stored = Some(result),
+            Err(poisoned) => *poisoned.into_inner() = Some(result),
+        }
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self, deadline: Instant) -> io::Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            let result = match self.result.lock() {
+                Ok(stored) => stored.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            if let Some(result) = result {
+                return result.map_err(|error| {
+                    io::Error::new(error.kind, error.message.to_string())
+                });
+            }
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                notified,
+            )
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "legacy Unix watchdog cleanup timed out",
+                )
+            })?;
+        }
+    }
+}
+
+fn legacy_watchdogs() -> &'static Mutex<HashMap<u32, Arc<LegacyWatchdog>>> {
+    LEGACY_WATCHDOGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_legacy_watchdog(watchdog: Arc<LegacyWatchdog>) -> io::Result<()> {
+    use std::collections::hash_map::Entry;
+
+    {
+        let mut watchdogs = legacy_watchdogs()
+            .lock()
+            .map_err(|_| io::Error::other("legacy Unix watchdog registry is poisoned"))?;
+        match watchdogs.entry(watchdog.pid) {
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::clone(&watchdog));
+            }
+            Entry::Occupied(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("legacy Unix watchdog already exists for PID {}", watchdog.pid),
+                ));
+            }
+        }
+    }
+    if let Err(error) = std::thread::Builder::new()
+        .name(format!("nomi-legacy-unix-{}", watchdog.pid))
+        .spawn({
+            let worker = Arc::clone(&watchdog);
+            move || run_legacy_watchdog(worker)
+        })
+    {
+        remove_legacy_watchdog(watchdog.pid, &watchdog);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn legacy_watchdog(pid: u32) -> io::Result<Option<Arc<LegacyWatchdog>>> {
+    legacy_watchdogs()
+        .lock()
+        .map_err(|_| io::Error::other("legacy Unix watchdog registry is poisoned"))
+        .map(|watchdogs| watchdogs.get(&pid).cloned())
+}
+
+fn remove_legacy_watchdog(pid: u32, expected: &LegacyWatchdog) {
+    let Ok(mut watchdogs) = legacy_watchdogs().lock() else {
+        return;
+    };
+    if watchdogs
+        .get(&pid)
+        .is_some_and(|registered| std::ptr::eq(registered.as_ref(), expected))
+    {
+        watchdogs.remove(&pid);
+    }
+}
+
+fn run_legacy_watchdog(watchdog: Arc<LegacyWatchdog>) {
+    let mut outcome = run_legacy_watchdog_inner(&watchdog);
+    if outcome.result.is_err() && outcome.anchor == LegacyWatchdogAnchor::Held {
+        watchdog.close_control();
+        if let Err(cleanup_error) = recover_legacy_watchdog(&watchdog) {
+            outcome.result = Err(io::Error::other(format!(
+                "{}; fallback cleanup failed: {cleanup_error}",
+                outcome
+                    .result
+                    .as_ref()
+                    .expect_err("legacy watchdog result is an error")
+            )));
+        }
+    }
+    retire_legacy_signal_gate(&watchdog);
+    watchdog.close_control();
+    remove_legacy_watchdog(watchdog.pid, &watchdog);
+    watchdog.completion.publish(outcome.result);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyWatchdogAnchor {
+    Held,
+    Reaped,
+    Lost,
+}
+
+struct LegacyWatchdogOutcome {
+    result: io::Result<()>,
+    anchor: LegacyWatchdogAnchor,
+}
+
+impl LegacyWatchdogOutcome {
+    fn held(error: io::Error) -> Self {
+        Self {
+            result: Err(error),
+            anchor: LegacyWatchdogAnchor::Held,
+        }
+    }
+
+    fn lost(error: io::Error) -> Self {
+        Self {
+            result: Err(error),
+            anchor: LegacyWatchdogAnchor::Lost,
+        }
+    }
+}
+
+fn run_legacy_watchdog_inner(watchdog: &LegacyWatchdog) -> LegacyWatchdogOutcome {
+    let control = match watchdog.control.lock() {
+        Ok(control) => control,
+        Err(_) => {
+            return LegacyWatchdogOutcome::held(io::Error::other(
+                "legacy Unix control lease is poisoned",
+            ));
+        }
+    };
+    let control_fd = match control.as_ref() {
+        Some(control) => control.as_raw_fd(),
+        None => {
+            return LegacyWatchdogOutcome::held(io::Error::other(
+                "legacy Unix control lease is missing",
+            ));
+        }
+    };
+    drop(control);
+    let mut quiescing_seen = false;
+    let mut lifecycle_error = None;
+    loop {
+        match leader_exit_observed(watchdog.watchdog_pid) {
+            Ok(true) => {
+                if let Err(error) = seal_legacy_group(watchdog) {
+                    return LegacyWatchdogOutcome::held(error);
+                }
+                let status = match waitpid_exact_blocking(watchdog.watchdog_pid) {
+                    Ok(status) => status,
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                        retire_legacy_signal_gate(watchdog);
+                        return LegacyWatchdogOutcome::lost(io::Error::other(
+                            "legacy Unix watchdog exact ownership was lost before reap",
+                        ));
+                    }
+                    Err(error) => return LegacyWatchdogOutcome::held(error),
+                };
+                if !quiescing_seen && !was_killed_by_group_sigkill(status) {
+                    lifecycle_error.get_or_insert_with(|| io::Error::other(format!(
+                        "legacy Unix watchdog required host fallback sealing: status={status:#x}"
+                    )));
+                }
+                return LegacyWatchdogOutcome {
+                    result: lifecycle_error.map_or(Ok(()), Err),
+                    anchor: LegacyWatchdogAnchor::Reaped,
+                };
+            }
+            Ok(false) => {}
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                retire_legacy_signal_gate(watchdog);
+                return LegacyWatchdogOutcome::lost(io::Error::other(
+                    "legacy Unix watchdog exact ownership was lost before group sealing",
+                ));
+            }
+            Err(error) => return LegacyWatchdogOutcome::held(error),
+        }
+        let events = match poll_control(control_fd, 50) {
+            Ok(events) => events,
+            Err(error) => return LegacyWatchdogOutcome::held(error),
+        };
+        if events & libc::POLLIN != 0 {
+            match recv_lifecycle_frame(control_fd, watchdog.nonce, watchdog.pgid) {
+                Ok(FrameKind::Quiescing) => quiescing_seen = true,
+                Ok(FrameKind::Failure) => {
+                    lifecycle_error.get_or_insert_with(|| {
+                        io::Error::other(
+                            "legacy Unix watchdog reported group cleanup failure",
+                        )
+                    });
+                }
+                Ok(kind) => {
+                    lifecycle_error.get_or_insert_with(|| io::Error::other(format!(
+                        "unexpected legacy Unix watchdog frame: {kind:?}"
+                    )));
+                }
+                Err(ProtocolError::PeerClosed) => {
+                    if !quiescing_seen {
+                        // A direct SIGKILL can terminate the group (including
+                        // the watchdog) before its best-effort QUIESCING frame
+                        // is drained. The exact SIGKILL status below remains
+                        // the authoritative seal fact.
+                    }
+                }
+                Err(error) => {
+                    return LegacyWatchdogOutcome::held(protocol_io_error(error));
+                }
+            }
+        }
+    }
+}
+
+fn seal_legacy_group(watchdog: &LegacyWatchdog) -> io::Result<()> {
+    let mut open = match watchdog.signal_gate.lock() {
+        Ok(open) => open,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if !*open {
+        return Ok(());
+    }
+    // SAFETY: waitid(WNOWAIT) just proved the exact unreaped watchdog
+    // identity, which remains an anchor for this owned process group.
+    let result = unsafe { libc::kill(-watchdog.pgid, libc::SIGKILL) };
+    if result != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        return Err(io::Error::last_os_error());
+    }
+    *open = false;
+    Ok(())
+}
+
+fn retire_legacy_signal_gate(watchdog: &LegacyWatchdog) {
+    match watchdog.signal_gate.lock() {
+        Ok(mut open) => *open = false,
+        Err(poisoned) => *poisoned.into_inner() = false,
+    }
+}
+
+fn recover_legacy_watchdog(watchdog: &LegacyWatchdog) -> io::Result<()> {
+    match leader_exit_observed(watchdog.watchdog_pid) {
+        Ok(_) => {}
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            retire_legacy_signal_gate(watchdog);
+            return Err(io::Error::other(
+                "legacy Unix watchdog exact ownership was lost; cached PGID was quarantined",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    {
+        let mut open = match watchdog.signal_gate.lock() {
+            Ok(open) => open,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if *open {
+            // SAFETY: the exact unreaped watchdog still anchors this process group.
+            let result = unsafe { libc::kill(-watchdog.pgid, libc::SIGKILL) };
+            if result != 0
+                && io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(io::Error::last_os_error());
+            }
+            *open = false;
+        }
+    }
+    match waitpid_exact_blocking(watchdog.watchdog_pid) {
+        Ok(_) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => Err(io::Error::other(
+            "legacy Unix watchdog exact ownership was lost during fallback reap",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn lock_legacy_spawn_gate(deadline: Deadline) -> io::Result<std::sync::MutexGuard<'static, ()>> {
+    loop {
+        match UNIX_SPAWN_GATE.try_lock() {
+            Ok(gate) => return Ok(gate),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(io::Error::other("Unix spawn gate is poisoned"));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if deadline.is_expired().map_err(protocol_io_error)? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "legacy Unix spawn gate exceeded the shared setup deadline",
+                    ));
+                }
+                poll_delay(2)?;
+            }
+        }
+    }
+}
+
+fn wait_tokio_child_reaped(
+    child: &mut tokio::process::Child,
+    deadline: Instant,
+) -> io::Result<()> {
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "legacy Tokio child did not reap before the setup deadline",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 pub(super) async fn spawn_pty(
@@ -636,6 +1604,7 @@ impl SpawnTransaction {
         cleanup.force_kill_attempted = signal_group && self.pgid.is_some();
         let job = CleanupJob {
             child: self.child.take(),
+            raw_leader_pid: None,
             watchdog_pid: self.watchdog_pid.take(),
             control: self.control.take(),
             pgid: self.pgid.take(),
@@ -858,6 +1827,7 @@ impl Drop for SpawnTransaction {
 
 struct CleanupJob {
     child: Option<StdChild>,
+    raw_leader_pid: Option<libc::pid_t>,
     watchdog_pid: Option<libc::pid_t>,
     control: Option<OwnedFd>,
     pgid: Option<libc::pid_t>,
@@ -953,6 +1923,18 @@ impl CleanupJob {
                 Err(error) => errors.push(format!("leader anchor validation failed: {error}")),
             }
         }
+        if let Some(raw_leader_pid) = self.raw_leader_pid
+            && !self.leader_ownership_lost
+        {
+            match leader_exit_observed(raw_leader_pid) {
+                Ok(_) => return true,
+                Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                    self.leader_ownership_lost = true;
+                    errors.push("raw leader exact ownership was lost before group sealing".to_owned());
+                }
+                Err(error) => errors.push(format!("raw leader anchor validation failed: {error}")),
+            }
+        }
         if let Some(watchdog_pid) = self.watchdog_pid
             && !self.watchdog_ownership_lost
         {
@@ -986,12 +1968,13 @@ impl CleanupJob {
         let mut errors = Vec::new();
         let before = (
             self.group_state,
-            self.child.is_some(),
+            self.child.is_some() || self.raw_leader_pid.is_some(),
             self.watchdog_pid.is_some(),
         );
         if self.group_state == CleanupGroupState::Pending {
             if !self.validate_group_anchor(&mut errors) {
-                let retryable_anchor = (self.child.is_some() && !self.leader_ownership_lost)
+                let retryable_anchor = ((self.child.is_some() || self.raw_leader_pid.is_some())
+                    && !self.leader_ownership_lost)
                     || (self.watchdog_pid.is_some() && !self.watchdog_ownership_lost);
                 if !retryable_anchor {
                     self.group_state = CleanupGroupState::Unsafe;
@@ -1085,6 +2068,36 @@ impl CleanupJob {
                     Err(error) => errors.push(format!("leader exact reap failed: {error}")),
                 }
             }
+            if let Some(raw_leader_pid) = self.raw_leader_pid
+                && !self.leader_ownership_lost
+            {
+                match try_waitpid_exact(raw_leader_pid) {
+                    Ok(Some(_)) => {
+                        self.raw_leader_pid = None;
+                        #[cfg(test)]
+                        self.audit.record_leader_reap();
+                    }
+                    Ok(None) if self.group_state == CleanupGroupState::NotRequired => {
+                        // SAFETY: waitpid(WNOHANG) just proved this exact direct child.
+                        let killed = unsafe { libc::kill(raw_leader_pid, libc::SIGKILL) };
+                        if killed == -1 {
+                            let error = io::Error::last_os_error();
+                            if error.raw_os_error() != Some(libc::ESRCH) {
+                                errors.push(format!("raw leader SIGKILL failed: {error}"));
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                        self.leader_ownership_lost = true;
+                        errors.push(
+                            "raw leader exact ownership was lost; cached identity quarantined"
+                                .to_owned(),
+                        );
+                    }
+                    Err(error) => errors.push(format!("raw leader exact reap failed: {error}")),
+                }
+            }
         }
         let ownership_lost = self.watchdog_ownership_lost || self.leader_ownership_lost;
         if self.watchdog_ownership_lost {
@@ -1092,9 +2105,13 @@ impl CleanupJob {
         }
         if self.leader_ownership_lost {
             self.child.take();
+            self.raw_leader_pid.take();
         }
         let direct_identities_reaped =
-            self.child.is_none() && self.watchdog_pid.is_none() && !ownership_lost;
+            self.child.is_none()
+                && self.raw_leader_pid.is_none()
+                && self.watchdog_pid.is_none()
+                && !ownership_lost;
         let mut group_absent = self.group_state == CleanupGroupState::NotRequired;
         let mut containment_lost = false;
         if direct_identities_reaped && self.group_state == CleanupGroupState::Sealed {
@@ -1131,6 +2148,7 @@ impl CleanupJob {
         let exact_cleanup = direct_identities_reaped && group_absent;
         let lost_cleanup_terminal = ownership_lost
             && self.child.is_none()
+            && self.raw_leader_pid.is_none()
             && self.watchdog_pid.is_none()
             && self.group_state != CleanupGroupState::Pending;
         let unproven_terminal = lost_cleanup_terminal || containment_lost;
@@ -1196,7 +2214,7 @@ impl CleanupJob {
             });
             let after = (
                 self.group_state,
-                self.child.is_some(),
+                self.child.is_some() || self.raw_leader_pid.is_some(),
                 self.watchdog_pid.is_some(),
             );
             let persistent_error = self.group_state == CleanupGroupState::Unsafe
@@ -1547,6 +2565,14 @@ fn spawn_transaction(
     transaction.pgid = Some(pid);
     transaction.child = Some(child);
     transaction.io = Some(transaction_io);
+    if let Err(error) = recv_expected(control_fd, nonce, FrameKind::Registered, deadline)
+        .and_then(|frame| validate_frame_identity(frame, pid, pid).map(drop))
+    {
+        return Err(transaction.post_exec_failure(
+            "ownership_registration_failed",
+            protocol_io_error(error),
+        ));
+    }
     let commit = Frame::new(FrameKind::Commit, nonce, pid, pid);
     if let Err(error) = send_frame(control_fd, &commit, deadline)
         .and_then(|_| recv_expected(control_fd, nonce, FrameKind::Committed, deadline))
@@ -2288,6 +3314,7 @@ impl Drop for LifecycleJob {
         }
         let job = CleanupJob {
             child: self.child.take(),
+            raw_leader_pid: None,
             watchdog_pid: self.watchdog_pid.take(),
             control: self.control.take(),
             pgid: Some(self.pgid),
@@ -3467,6 +4494,7 @@ mod tests {
         let impossible_child = libc::pid_t::MAX;
         let job = super::CleanupJob {
             child: None,
+            raw_leader_pid: None,
             watchdog_pid: Some(impossible_child),
             control: None,
             pgid: Some(impossible_child),
@@ -3521,6 +4549,7 @@ mod tests {
         let live_group = unsafe { libc::getpgrp() };
         let job = super::CleanupJob {
             child: None,
+            raw_leader_pid: None,
             watchdog_pid: None,
             control: None,
             pgid: Some(live_group),

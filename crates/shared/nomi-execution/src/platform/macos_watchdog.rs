@@ -395,6 +395,21 @@ pub(super) unsafe fn run_watchdog(config: WatchdogConfig) -> ! {
             )
         };
     }
+    let registered = Frame::new(
+        FrameKind::Registered,
+        watchdog.config.nonce,
+        leader,
+        leader,
+    );
+    if send_frame(
+        watchdog.config.control_fd,
+        &registered,
+        watchdog.config.deadline,
+    )
+    .is_err()
+    {
+        unsafe { quiesce_and_kill(watchdog, leader, EXIT_MONITOR_FAILED) };
+    }
 
 
     #[cfg(test)]
