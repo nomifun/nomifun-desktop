@@ -46,14 +46,16 @@ describe('chooseDetachedMemoryPanelLayout', () => {
     expect(result).toMatchObject({ kind: 'placed', monitorId: 'left-150', gap: 18 });
   });
 
-  it.each([1.25, 1.5, 2])('scales gap and minimum readability at %s', (scaleFactor) => {
-    const result = chooseDetachedMemoryPanelLayout({
-      anchor: { x: 800 * scaleFactor, y: 700 * scaleFactor, width: 240 * scaleFactor, height: 214 * scaleFactor },
-      monitors: [{ id: 'scaled', bounds: { x: 0, y: 0, width: 1920 * scaleFactor, height: 1080 * scaleFactor }, workArea: { x: 0, y: 0, width: 1920 * scaleFactor, height: 1080 * scaleFactor }, scaleFactor }],
-      logicalPanel: { width: 340, height: 300 },
+  for (const scaleFactor of [1.25, 1.5, 2]) {
+    it(`scales gap and minimum readability at ${scaleFactor}`, () => {
+      const result = chooseDetachedMemoryPanelLayout({
+        anchor: { x: 800 * scaleFactor, y: 700 * scaleFactor, width: 240 * scaleFactor, height: 214 * scaleFactor },
+        monitors: [{ id: 'scaled', bounds: { x: 0, y: 0, width: 1920 * scaleFactor, height: 1080 * scaleFactor }, workArea: { x: 0, y: 0, width: 1920 * scaleFactor, height: 1080 * scaleFactor }, scaleFactor }],
+        logicalPanel: { width: 340, height: 300 },
+      });
+      expect(result).toMatchObject({ kind: 'placed', gap: Math.round(12 * scaleFactor) });
     });
-    expect(result).toMatchObject({ kind: 'placed', gap: Math.round(12 * scaleFactor) });
-  });
+  }
 
   it('keeps a maximum-size custom companion disjoint', () => {
     const anchor = { x: 700, y: 500, width: 400, height: 464 };
