@@ -22,6 +22,29 @@ describe('chooseDetachedMemoryPanelLayout', () => {
     expect(intersects(result.panelRect, anchor)).toBe(false);
   });
 
+  for (const edge of [
+    { name: 'left Dock', workArea: { x: 200, y: 0, width: 1720, height: 1080 }, anchor: { x: 20, y: 760, width: 240, height: 214 } },
+    { name: 'right Dock', workArea: { x: 0, y: 0, width: 1720, height: 1080 }, anchor: { x: 1660, y: 760, width: 240, height: 214 } },
+    { name: 'top taskbar', workArea: { x: 0, y: 80, width: 1920, height: 1000 }, anchor: { x: 840, y: 8, width: 240, height: 214 } },
+    { name: 'bottom taskbar', workArea: { x: 0, y: 0, width: 1920, height: 980 }, anchor: { x: 840, y: 850, width: 240, height: 214 } },
+  ]) {
+    it(`keeps the panel inside workArea with a companion in the ${edge.name}`, () => {
+      const result = chooseDetachedMemoryPanelLayout({
+        anchor: edge.anchor,
+        monitors: [{ ...monitor, workArea: edge.workArea }],
+        logicalPanel: { width: 340, height: 300 },
+      });
+      expect(result.kind).toBe('placed');
+      if (result.kind !== 'placed') return;
+      expect(result.anchorRect).toEqual(edge.anchor);
+      expect(result.panelRect.x).toBeGreaterThanOrEqual(edge.workArea.x);
+      expect(result.panelRect.y).toBeGreaterThanOrEqual(edge.workArea.y);
+      expect(result.panelRect.x + result.panelRect.width).toBeLessThanOrEqual(edge.workArea.x + edge.workArea.width);
+      expect(result.panelRect.y + result.panelRect.height).toBeLessThanOrEqual(edge.workArea.y + edge.workArea.height);
+      expect(intersects(result.panelRect, edge.anchor)).toBe(false);
+    });
+  }
+
   it('chooses the left side at the top-right edge', () => {
     const result = chooseDetachedMemoryPanelLayout({
       anchor: { x: 1660, y: 8, width: 240, height: 214 },

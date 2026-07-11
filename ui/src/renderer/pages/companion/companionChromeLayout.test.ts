@@ -30,6 +30,14 @@ describe('desktop companion chrome layout', () => {
     expect(controllerSource.includes('chooseDetachedMemoryPanelLayout')).toBe(true);
     expect(controllerSource.includes('monitor.workArea.position')).toBe(true);
     expect(controllerSource.includes('monitor.position.x')).toBe(true);
+    expect(controllerSource.includes('onMoved')).toBe(true);
+    expect(controllerSource.includes("close('owner-invalid')")).toBe(true);
+    expect(controllerSource.includes("current.phase !== 'open'")).toBe(true);
+    expect(controllerSource.includes('MEMORY_PANEL_EVENTS.snapshot')).toBe(true);
+    expect(controllerSource.includes('stateRef.current = memoryPanelReducer')).toBe(true);
+    expect(controllerSource.includes("current.phase !== 'preparing'")).toBe(true);
+    expect(controllerSource.includes("stateRef.current.phase !== 'opening'")).toBe(true);
+    expect(controllerSource.includes('finally')).toBe(true);
     expect(controllerSource.includes('.setSize(')).toBe(false);
     expect(controllerSource.includes('.setPosition(')).toBe(false);
   });

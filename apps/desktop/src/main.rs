@@ -398,10 +398,11 @@ async fn sync_companion_windows(
         .map(|spec| spec.companion_id.clone())
         .collect();
     let hide_memory_panel = memory_panel.invalidate_owner_unless(&enabled_ids);
+    let memory_panel_for_task = memory_panel.inner().clone();
     let app_for_task = app.clone();
     run_on_main_thread_task(
         move |task| app.run_on_main_thread(task).map_err(|e| e.to_string()),
-        move || reconcile_companion_windows(app_for_task, init_script, specs, hide_memory_panel),
+        move || reconcile_companion_windows(app_for_task, init_script, specs, hide_memory_panel, memory_panel_for_task),
     )
     .await
 }
@@ -411,13 +412,15 @@ fn reconcile_companion_windows(
     init_script: String,
     specs: Vec<CompanionWindowSpec>,
     hide_memory_panel: bool,
+    memory_panel: memory_panel_window::MemoryPanelWindowState,
 ) -> Result<(), String> {
     use std::collections::HashSet;
 
     if hide_memory_panel {
-        if let Some(window) = app.get_webview_window(memory_panel_window::MEMORY_PANEL_LABEL) {
-            let _ = window.hide();
-        }
+        memory_panel.run_if_empty(|| {
+            if let Some(window) = app.get_webview_window(memory_panel_window::MEMORY_PANEL_LABEL) { let _ = window.hide(); }
+            Ok(())
+        })?;
     }
 
     let known: HashSet<String> = specs
