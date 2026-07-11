@@ -12,7 +12,7 @@
  *
  * Presentational: all state lives in the parent; this only emits callbacks.
  */
-import { Button, Dropdown, Input, Menu, Popconfirm } from '@arco-design/web-react';
+import { Button, Checkbox, Dropdown, Input, Menu, Popconfirm } from '@arco-design/web-react';
 import type { RefInputType } from '@arco-design/web-react/es/Input/interface';
 import { Check, Filter, Search, SortTwo, Tag } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
@@ -96,6 +96,13 @@ interface RequirementFiltersProps {
   tagOptions: ITagSummary[];
   selectedCount: number;
   onBatchDelete: () => void; // shown only when selectedCount>0, as a stable bar
+  listSelection?: {
+    total: number;
+    pageIds: number[];
+    selectedIds: Set<number>;
+    onToggleSelectAll: (pageIds: number[], checked: boolean) => void;
+    onClearSelection: () => void;
+  };
 }
 
 // Same selected-surface principle as list rows: subtle feedback, readable text.
@@ -119,6 +126,7 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   tagOptions,
   selectedCount,
   onBatchDelete,
+  listSelection,
 }) => {
   const { t } = useTranslation();
   const [searchActive, setSearchActive] = useState(false);
@@ -143,6 +151,11 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
     { label: t('requirements.sort.byStatus'), value: 'status' },
   ];
   const selectedSortLabel = orderBy ? sortOptions.find((option) => option.value === orderBy)?.label : undefined;
+  const selectionPageIds = listSelection?.pageIds ?? [];
+  const selectionIds = listSelection?.selectedIds;
+  const allOnPageSelected =
+    selectionPageIds.length > 0 && selectionIds !== undefined && selectionPageIds.every((id) => selectionIds.has(id));
+  const someOnPageSelected = listSelection?.pageIds.some((id) => listSelection.selectedIds.has(id)) ?? false;
 
   const optionContent = (label: React.ReactNode, selected: boolean) => (
     <span className='flex min-w-140px items-center gap-8px'>
@@ -278,6 +291,33 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
             label={searchLabel}
             onClick={() => setSearchActive(true)}
           />
+        )}
+        {listSelection && (
+          <div className='ml-auto flex flex-wrap items-center gap-12px text-13px text-[var(--color-text-3)]'>
+            <Checkbox
+              checked={allOnPageSelected}
+              indeterminate={someOnPageSelected && !allOnPageSelected}
+              onChange={(checked) => listSelection.onToggleSelectAll(listSelection.pageIds, checked)}
+            >
+              <span className='whitespace-nowrap text-13px text-[var(--color-text-2)]'>
+                {t('requirements.selection.selectAllPage')}
+              </span>
+            </Checkbox>
+            <span className='whitespace-nowrap tabular-nums'>
+              {t('requirements.selection.totalCount', { count: listSelection.total })}
+            </span>
+            {selectedCount > 0 && (
+              <>
+                <span aria-hidden>·</span>
+                <span className='whitespace-nowrap tabular-nums'>
+                  {t('requirements.selection.selectedCount', { count: selectedCount })}
+                </span>
+                <Button type='text' size='mini' onClick={listSelection.onClearSelection}>
+                  {t('requirements.selection.clear')}
+                </Button>
+              </>
+            )}
+          </div>
         )}
       </div>
 
