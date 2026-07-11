@@ -39,27 +39,48 @@ const ALL_STATUSES = '__all_statuses__';
 const SORT_ASC = '__sort_asc__';
 const SORT_DESC = '__sort_desc__';
 
-interface FilterTriggerProps {
+type FilterTriggerProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'value'> & {
   icon: React.ReactNode;
   label: string;
   value?: string;
-  onClick?: React.MouseEventHandler<HTMLButtonElement>;
-}
+  active?: boolean;
+};
 
-export const FilterTrigger: React.FC<FilterTriggerProps> = ({ icon, label, value, onClick }) => (
-  <button
-    type='button'
-    aria-label={value ? `${label}: ${value}` : label}
-    onClick={onClick}
-    className='inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 bg-transparent px-8px text-13px text-[var(--color-text-2)] transition-colors hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)] focus-visible:outline-2 focus-visible:outline-[rgb(var(--primary-6))]'
-  >
-    <span aria-hidden='true' className='inline-flex shrink-0'>
-      {icon}
-    </span>
-    <span className='shrink-0'>{label}</span>
-    {value && <span className='max-w-160px truncate font-medium text-[var(--color-text-1)]'>{value}</span>}
-  </button>
-);
+export const FilterTrigger = React.forwardRef<HTMLButtonElement, FilterTriggerProps>(function FilterTrigger(
+  { icon, label, value, active = false, className, ...buttonProps },
+  ref
+) {
+  return (
+    <button
+      {...buttonProps}
+      ref={ref}
+      type='button'
+      aria-label={value ? `${label}: ${value}` : label}
+      aria-pressed={active || undefined}
+      className={[
+        'inline-flex h-32px max-w-full cursor-pointer items-center gap-6px rounded-6px border-0 px-8px text-13px transition-colors focus-visible:outline-2 focus-visible:outline-[rgb(var(--primary-6))]',
+        active
+          ? '!bg-primary-1 !text-primary-6'
+          : 'bg-transparent text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
+        className,
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <span aria-hidden='true' className='inline-flex shrink-0'>
+        {icon}
+      </span>
+      <span className='shrink-0'>{label}</span>
+      {value && (
+        <span
+          className={`max-w-160px truncate font-medium ${active ? '!text-primary-6' : 'text-[var(--color-text-1)]'}`}
+        >
+          {value}
+        </span>
+      )}
+    </button>
+  );
+});
 
 interface RequirementFiltersProps {
   tag?: string;
@@ -101,6 +122,7 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
 }) => {
   const { t } = useTranslation();
   const [searchActive, setSearchActive] = useState(false);
+  const [openFilter, setOpenFilter] = useState<'tag' | 'status' | 'sort' | null>(null);
   const searchInputRef = useRef<RefInputType | null>(null);
   const searchExpanded = isRequirementSearchExpanded(searchActive, search);
 
@@ -186,25 +208,49 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   return (
     <div className='flex flex-col gap-10px'>
       <div className='flex flex-wrap items-center gap-8px'>
-        <Dropdown droplist={tagMenu} trigger='click' position='bl' getPopupContainer={() => document.body}>
+        <Dropdown
+          droplist={tagMenu}
+          trigger='click'
+          position='bl'
+          popupVisible={openFilter === 'tag'}
+          onVisibleChange={(visible) => setOpenFilter(visible ? 'tag' : null)}
+          getPopupContainer={() => document.body}
+        >
           <FilterTrigger
             icon={<Tag theme='outline' size='15' fill='currentColor' />}
             label={filterLabel}
             value={tag}
+            active={Boolean(tag) || openFilter === 'tag'}
           />
         </Dropdown>
-        <Dropdown droplist={statusMenu} trigger='click' position='bl' getPopupContainer={() => document.body}>
+        <Dropdown
+          droplist={statusMenu}
+          trigger='click'
+          position='bl'
+          popupVisible={openFilter === 'status'}
+          onVisibleChange={(visible) => setOpenFilter(visible ? 'status' : null)}
+          getPopupContainer={() => document.body}
+        >
           <FilterTrigger
             icon={<Filter theme='outline' size='15' fill='currentColor' />}
             label={statusLabel}
             value={selectedStatusLabel}
+            active={Boolean(status) || openFilter === 'status'}
           />
         </Dropdown>
-        <Dropdown droplist={sortMenu} trigger='click' position='bl' getPopupContainer={() => document.body}>
+        <Dropdown
+          droplist={sortMenu}
+          trigger='click'
+          position='bl'
+          popupVisible={openFilter === 'sort'}
+          onVisibleChange={(visible) => setOpenFilter(visible ? 'sort' : null)}
+          getPopupContainer={() => document.body}
+        >
           <FilterTrigger
             icon={<SortTwo theme='outline' size='15' fill='currentColor' />}
             label={sortLabel}
             value={selectedSortLabel}
+            active={Boolean(orderBy) || openFilter === 'sort'}
           />
         </Dropdown>
         {searchExpanded ? (
