@@ -52,14 +52,14 @@ const UTF8_CTYPE: &str = "C.UTF-8";
 /// locale values win. Inherited terminal capabilities are deliberately
 /// replaced because the child talks to xterm.js, not to the app's launcher.
 fn apply_emulator_env_defaults(env: &mut HashMap<String, String>) {
-    apply_emulator_env_defaults_with(env, |key| std::env::var(key).ok());
+    apply_emulator_env_defaults_with(env, |key| std::env::var_os(key));
 }
 
 /// Injectable form used by tests so inherited locale cases can be exercised
 /// without mutating the process environment while Rust tests run in parallel.
 fn apply_emulator_env_defaults_with<F>(env: &mut HashMap<String, String>, inherited: F)
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     env.entry("TERM".to_owned())
         .or_insert_with(|| "xterm-256color".to_owned());
@@ -75,7 +75,7 @@ where
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn apply_utf8_locale_defaults<F>(env: &mut HashMap<String, String>, inherited: F)
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     if EXPLICIT_LOCALE_KEYS.iter().any(|key| env.contains_key(*key)) {
         return;
@@ -89,8 +89,8 @@ where
     // Inherited LC_ALL has higher POSIX precedence than LC_CTYPE. Repair only
     // a non-empty, non-UTF-8 value; a valid UTF-8 LC_ALL is already safe.
     if inherited("LC_ALL")
-        .filter(|value| !value.trim().is_empty())
-        .is_some_and(|value| !is_utf8_lc_all(&value))
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| !is_utf8_lc_all(value.as_os_str()))
     {
         env.insert("LC_ALL".to_owned(), UTF8_LANG.to_owned());
     }
@@ -100,8 +100,16 @@ where
 /// bare `LC_ALL=UTF-8` as invalid and falls back to `C`, even though the same
 /// `UTF-8` token is valid for `LC_CTYPE`.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn is_utf8_lc_all(value: &str) -> bool {
-    let Some((_, codeset_and_modifier)) = value.trim().rsplit_once('.') else {
+fn is_utf8_lc_all(value: &std::ffi::OsStr) -> bool {
+    let Some(value) = value.to_str() else {
+        return false;
+    };
+    // Locale names never allow surrounding whitespace. Trimming for the check
+    // would accept a value the OS itself rejects and silently degrades to `C`.
+    if value.is_empty() || value.trim() != value {
+        return false;
+    }
+    let Some((_, codeset_and_modifier)) = value.rsplit_once('.') else {
         return false;
     };
     codeset_and_modifier
@@ -1639,10 +1647,18 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn emulator_env_defaults_repairs_inherited_non_utf8_lc_all() {
-        for inherited in ["C", "POSIX", "UTF-8", "zh_CN.GB18030"] {
+        for inherited in [
+            "C",
+            "POSIX",
+            "UTF-8",
+            "zh_CN.GB18030",
+            " ",
+            " C.UTF-8",
+            "C.UTF-8 ",
+        ] {
             let mut env = HashMap::new();
             apply_emulator_env_defaults_with(&mut env, |key| {
-                (key == "LC_ALL").then(|| inherited.to_owned())
+                (key == "LC_ALL").then(|| inherited.into())
             });
             assert_eq!(env.get("LC_ALL").map(String::as_str), Some(UTF8_LANG));
         }
@@ -1653,9 +1669,23 @@ mod tests {
     fn emulator_env_defaults_keeps_inherited_utf8_lc_all() {
         let mut env = HashMap::new();
         apply_emulator_env_defaults_with(&mut env, |key| {
-            (key == "LC_ALL").then(|| "C.UTF-8".to_owned())
+            (key == "LC_ALL").then(|| "C.UTF-8".into())
         });
         assert!(!env.contains_key("LC_ALL"));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn emulator_env_defaults_repairs_non_unicode_inherited_lc_all() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_locale = OsString::from_vec(vec![0xff]);
+        let mut env = HashMap::new();
+        apply_emulator_env_defaults_with(&mut env, |key| {
+            (key == "LC_ALL").then(|| invalid_locale.clone())
+        });
+        assert_eq!(env.get("LC_ALL").map(String::as_str), Some(UTF8_LANG));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1664,7 +1694,7 @@ mod tests {
         for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
             let mut env = HashMap::from([(key.to_owned(), "zh_CN.GB18030".to_owned())]);
             apply_emulator_env_defaults_with(&mut env, |name| {
-                (name == "LC_ALL").then(|| "C".to_owned())
+                (name == "LC_ALL").then(|| "C".into())
             });
             assert_eq!(env.get(key).map(String::as_str), Some("zh_CN.GB18030"));
             assert_eq!(
@@ -1681,11 +1711,14 @@ mod tests {
     #[test]
     fn utf8_lc_all_detection_requires_a_complete_locale_name() {
         for value in ["C.UTF-8", "en_US.utf8", "zh_CN.UTF-8@variant"] {
-            assert!(is_utf8_lc_all(value), "expected UTF-8 LC_ALL: {value}");
+            assert!(
+                is_utf8_lc_all(std::ffi::OsStr::new(value)),
+                "expected UTF-8 LC_ALL: {value}"
+            );
         }
         for value in ["", "C", "POSIX", "UTF-8", "utf8", "zh_CN.GB18030"] {
             assert!(
-                !is_utf8_lc_all(value),
+                !is_utf8_lc_all(std::ffi::OsStr::new(value)),
                 "expected invalid/non-UTF-8 LC_ALL: {value}"
             );
         }
@@ -1760,7 +1793,7 @@ mod tests {
 
         let mut env = HashMap::new();
         apply_emulator_env_defaults_with(&mut env, |key| {
-            (key == "LC_ALL").then(|| "C".to_owned())
+            (key == "LC_ALL").then(|| "C".into())
         });
 
         let captured = Arc::new(Mutex::new(Vec::<u8>::new()));

@@ -24,11 +24,15 @@
 
 **Files:**
 - Modify: `crates/backend/nomifun-terminal/src/service.rs`
+- Modify: `crates/backend/nomifun-terminal/src/pty.rs`
 - Test: `crates/backend/nomifun-terminal/src/service.rs`
+- Test: `crates/backend/nomifun-terminal/src/pty.rs`
 
 **Interfaces:**
 - Consumes: per-session `HashMap<String, String>` from `CreateTerminalRequest.env` and inherited process locale variables.
-- Produces: `apply_emulator_env_defaults_with<F>(env: &mut HashMap<String, String>, inherited: F)` where `F: Fn(&str) -> Option<String>`; production uses `std::env::var`, tests inject deterministic values.
+- Produces: `apply_emulator_env_defaults_with<F>(env: &mut HashMap<String, String>, inherited: F)` where `F: Fn(&str) -> Option<OsString>`; production uses `std::env::var_os`, tests inject deterministic values.
+
+**Post-review correction:** The implemented interface returns `Option<OsString>` and production uses `std::env::var_os`, so non-Unicode inherited locale values cannot bypass repair. `PtyHandle::spawn` also calls `remove_inherited_locale_vars_shadowing_overrides` before applying session variables, removing inherited `LC_ALL`/`LC_CTYPE` only when their POSIX precedence would shadow an explicit narrower session override. Whitespace-only and whitespace-padded locale names are invalid and covered by regression tests.
 
 - [ ] **Step 1: Add failing pure environment tests**
 
@@ -48,10 +52,10 @@ fn emulator_env_defaults_add_utf8_locale_when_inherited_locale_is_missing() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn emulator_env_defaults_repairs_inherited_non_utf8_lc_all() {
-    for inherited in ["C", "POSIX", "UTF-8", "zh_CN.GB18030"] {
+    for inherited in ["C", "POSIX", "UTF-8", "zh_CN.GB18030", " ", " C.UTF-8", "C.UTF-8 "] {
         let mut env = HashMap::new();
         apply_emulator_env_defaults_with(&mut env, |key| {
-            (key == "LC_ALL").then(|| inherited.to_owned())
+            (key == "LC_ALL").then(|| inherited.into())
         });
         assert_eq!(env.get("LC_ALL").map(String::as_str), Some(UTF8_LANG));
     }
@@ -62,7 +66,7 @@ fn emulator_env_defaults_repairs_inherited_non_utf8_lc_all() {
 fn emulator_env_defaults_keeps_inherited_utf8_lc_all() {
     let mut env = HashMap::new();
     apply_emulator_env_defaults_with(&mut env, |key| {
-        (key == "LC_ALL").then(|| "C.UTF-8".to_owned())
+        (key == "LC_ALL").then(|| "C.UTF-8".into())
     });
     assert!(!env.contains_key("LC_ALL"));
 }
@@ -73,7 +77,7 @@ fn emulator_env_defaults_preserve_any_explicit_session_locale() {
     for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         let mut env = HashMap::from([(key.to_owned(), "zh_CN.GB18030".to_owned())]);
         apply_emulator_env_defaults_with(&mut env, |name| {
-            (name == "LC_ALL").then(|| "C".to_owned())
+            (name == "LC_ALL").then(|| "C".into())
         });
         assert_eq!(env.get(key).map(String::as_str), Some("zh_CN.GB18030"));
         assert_eq!(
@@ -90,10 +94,10 @@ fn emulator_env_defaults_preserve_any_explicit_session_locale() {
 #[test]
 fn utf8_lc_all_detection_requires_a_complete_locale_name() {
     for value in ["C.UTF-8", "en_US.utf8", "zh_CN.UTF-8@variant"] {
-        assert!(is_utf8_lc_all(value), "expected UTF-8 LC_ALL: {value}");
+        assert!(is_utf8_lc_all(std::ffi::OsStr::new(value)), "expected UTF-8 LC_ALL: {value}");
     }
     for value in ["", "C", "POSIX", "UTF-8", "utf8", "zh_CN.GB18030"] {
-        assert!(!is_utf8_lc_all(value), "expected invalid/non-UTF-8 LC_ALL: {value}");
+        assert!(!is_utf8_lc_all(std::ffi::OsStr::new(value)), "expected invalid/non-UTF-8 LC_ALL: {value}");
     }
 }
 ```
@@ -125,12 +129,12 @@ const UTF8_LANG: &str = "C.UTF-8";
 const UTF8_CTYPE: &str = "C.UTF-8";
 
 fn apply_emulator_env_defaults(env: &mut HashMap<String, String>) {
-    apply_emulator_env_defaults_with(env, |key| std::env::var(key).ok());
+    apply_emulator_env_defaults_with(env, |key| std::env::var_os(key));
 }
 
 fn apply_emulator_env_defaults_with<F>(env: &mut HashMap<String, String>, inherited: F)
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     env.entry("TERM".to_owned())
         .or_insert_with(|| "xterm-256color".to_owned());
@@ -146,7 +150,7 @@ where
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn apply_utf8_locale_defaults<F>(env: &mut HashMap<String, String>, inherited: F)
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<std::ffi::OsString>,
 {
     if EXPLICIT_LOCALE_KEYS.iter().any(|key| env.contains_key(*key)) {
         return;
@@ -156,16 +160,22 @@ where
     env.insert("LC_CTYPE".to_owned(), UTF8_CTYPE.to_owned());
 
     if inherited("LC_ALL")
-        .filter(|value| !value.trim().is_empty())
-        .is_some_and(|value| !is_utf8_lc_all(&value))
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| !is_utf8_lc_all(value.as_os_str()))
     {
         env.insert("LC_ALL".to_owned(), UTF8_LANG.to_owned());
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn is_utf8_lc_all(value: &str) -> bool {
-    let Some((_, codeset_and_modifier)) = value.trim().rsplit_once('.') else {
+fn is_utf8_lc_all(value: &std::ffi::OsStr) -> bool {
+    let Some(value) = value.to_str() else {
+        return false;
+    };
+    if value.is_empty() || value.trim() != value {
+        return false;
+    }
+    let Some((_, codeset_and_modifier)) = value.rsplit_once('.') else {
         return false;
     };
     codeset_and_modifier
@@ -238,7 +248,7 @@ fn pty_child_lists_unicode_filename_under_repaired_locale() {
 
     let mut env = HashMap::new();
     apply_emulator_env_defaults_with(&mut env, |key| {
-        (key == "LC_ALL").then(|| "C".to_owned())
+        (key == "LC_ALL").then(|| "C".into())
     });
 
     let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
