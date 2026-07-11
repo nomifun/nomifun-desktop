@@ -9,6 +9,7 @@
   "newRequirement": "新建需求",
   "empty": "暂无需求",
   "search": "搜索标题、内容或 #编号",
+  "searchLabel": "搜索",
   "allTags": "全部标签",
   "allStatuses": "全部状态",
   "viewList": "列表",
@@ -17,6 +18,7 @@
   "retry": "重试",
   "sort": {
     "label": "排序",
+    "direction": "排序方向",
     "default": "默认顺序",
     "byId": "ID",
     "byCreatedAt": "创建时间",
