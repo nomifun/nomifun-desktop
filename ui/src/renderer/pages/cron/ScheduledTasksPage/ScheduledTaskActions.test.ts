@@ -48,5 +48,7 @@ test('keeps the desktop more trigger visible for row hover, focus, and an open m
   expect(actionSource.includes('focus-visible:opacity-100')).toBe(true);
   expect(actionSource.includes("menuVisible && '!pointer-events-auto !opacity-100'")).toBe(true);
   expect(actionSource.includes('onClick={(event) => event.stopPropagation()}')).toBe(true);
+  expect(actionSource.includes('setMenuVisible((visible) => !visible);')).toBe(false);
+  expect(actionSource.includes('setMenuVisible(true);')).toBe(true);
   expect(actionSource.includes('Modal.confirm({')).toBe(true);
 });
