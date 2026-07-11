@@ -55,8 +55,10 @@ describe('RequirementFilters trigger', () => {
     expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
   });
 
-  test('places sort direction beside the sort field options', () => {
-    expect(filtersSource.includes("className='flex items-start gap-12px'")).toBe(true);
+  test('uses a field dropdown beside the sort direction control', () => {
+    expect(filtersSource.includes("className='flex items-center gap-10px'")).toBe(true);
+    expect(filtersSource.includes('options={sortOptions}')).toBe(true);
+    expect(filtersSource.includes('aria-label={sortLabel}')).toBe(true);
     expect(filtersSource.includes("<Radio.Group type='button' size='small'")).toBe(true);
     expect(filtersSource.includes("<Menu.ItemGroup title={t('requirements.sort.direction')}>")).toBe(false);
   });
