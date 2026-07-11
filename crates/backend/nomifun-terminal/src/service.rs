@@ -1744,6 +1744,64 @@ mod tests {
         );
     }
 
+    /// Regression for the production screenshot: macOS `ls` sanitizes
+    /// non-ASCII filename bytes to `?` when stdout is a TTY under `LC_ALL=C`.
+    /// Prove the environment repair reaches a real PTY child before bytes are
+    /// captured, persisted, Base64-encoded, or decoded by the frontend.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pty_child_lists_unicode_filename_under_repaired_locale() {
+        use crate::pty::{PtyHandle, SpawnParams};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let filename = "中文文件名.md";
+        std::fs::write(dir.path().join(filename), b"content").expect("write unicode file");
+
+        let mut env = HashMap::new();
+        apply_emulator_env_defaults_with(&mut env, |key| {
+            (key == "LC_ALL").then(|| "C".to_owned())
+        });
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let cap = captured.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_cb = done.clone();
+        let _handle = PtyHandle::spawn(
+            SpawnParams {
+                program: "/bin/ls".to_owned(),
+                args: vec!["-1".to_owned()],
+                cwd: dir.path().to_string_lossy().into_owned(),
+                env,
+                cols: 80,
+                rows: 24,
+            },
+            0,
+            move |chunk| cap.lock().unwrap().extend_from_slice(&chunk),
+            move |_code, _sb| done_cb.store(true, Ordering::SeqCst),
+        )
+        .expect("spawn ls");
+
+        for _ in 0..250 {
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+
+        let output =
+            String::from_utf8(captured.lock().unwrap().clone()).expect("UTF-8 PTY output");
+        assert!(
+            output.contains(filename),
+            "unicode filename missing: {output:?}"
+        );
+        assert!(
+            !output.contains("????"),
+            "filename was replaced before transport: {output:?}"
+        );
+    }
+
     // --- In-memory repo --------------------------------------------------
 
     #[derive(Default)]
