@@ -81,3 +81,14 @@ test('styles the scheduled task search as a bordered pill', () => {
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper:hover]:!border-[var(--color-border-3)]')).toBe(true);
   expect(searchClasses.includes('[&_.arco-input-inner-wrapper-focus]:!border-[rgb(var(--primary-6))]')).toBe(true);
 });
+
+test('uses a desktop more menu without changing the mobile switch contract', () => {
+  expect(pageSource.includes("t('cron.page.list.action')")).toBe(false);
+  expect(pageSource.includes("import ScheduledTaskActions from './ScheduledTaskActions'")).toBe(true);
+  expect(pageSource.includes('deleteJob')).toBe(true);
+  expect(pageSource.includes('<ScheduledTaskActions')).toBe(true);
+
+  const mobileSwitchBlock =
+    pageSource.match(/className='shrink-0 md:hidden'[\s\S]*?<Switch[\s\S]*?handleToggleEnabled\(job\)/)?.[0] ?? '';
+  expect(Boolean(mobileSwitchBlock)).toBe(true);
+});

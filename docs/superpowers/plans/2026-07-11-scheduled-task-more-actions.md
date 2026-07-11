@@ -257,7 +257,7 @@ git commit -m "feat(ui): add scheduled task action menu"
 - Consumes: `ScheduledTaskActions`, `deleteJob`, `handleToggleEnabled`, and the existing `isManualOnly` calculation.
 - Produces: desktop hover actions wired to existing callbacks, with the original switch remaining mobile-only.
 
-- [ ] **Step 1: Write the failing integration contract test**
+- [x] **Step 1: Write the failing integration contract test**
 
 Append to `scheduledTaskLayout.test.ts`:
 
@@ -274,7 +274,7 @@ test('uses a desktop more menu without changing the mobile switch contract', () 
 });
 ```
 
-- [ ] **Step 2: Run the layout test and verify RED**
+- [x] **Step 2: Run the layout test and verify RED**
 
 Run:
 
@@ -284,7 +284,7 @@ bun test ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledTaskLayout.test.
 
 Expected: the new test fails because the page still renders the action header and desktop switch and does not import the action component or `deleteJob`.
 
-- [ ] **Step 3: Wire existing pause, resume, and delete callbacks into the new layout**
+- [x] **Step 3: Wire existing pause, resume, and delete callbacks into the new layout**
 
 In `index.tsx`:
 
@@ -334,7 +334,7 @@ const handleRemoveJob = useCallback(
 
 Do not change `handleToggleEnabled`, `handleGoToDetail`, `isManualOnly`, `DESKTOP_SCHEDULED_TASK_COLUMNS`, or any mobile card content.
 
-- [ ] **Step 4: Run focused and adjacent tests**
+- [x] **Step 4: Run focused and adjacent tests**
 
 Run:
 
@@ -344,7 +344,7 @@ bun test ui/src/renderer/pages/cron/ScheduledTasksPage/ScheduledTaskActions.test
 
 Expected: all tests pass with 0 failures.
 
-- [ ] **Step 5: Run static and production verification**
+- [x] **Step 5: Run static and production verification**
 
 Run:
 
@@ -356,7 +356,7 @@ git diff --check
 
 Expected: all commands exit with code 0. Existing Vite chunk-size warnings are allowed; new errors are not.
 
-- [ ] **Step 6: Commit the page integration**
+- [x] **Step 6: Commit the page integration**
 
 ```bash
 git add ui/src/renderer/pages/cron/ScheduledTasksPage/index.tsx ui/src/renderer/pages/cron/ScheduledTasksPage/scheduledTaskLayout.test.ts docs/superpowers/plans/2026-07-11-scheduled-task-more-actions.md

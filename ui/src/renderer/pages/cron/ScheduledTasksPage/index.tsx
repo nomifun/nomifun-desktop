@@ -22,6 +22,7 @@ import { shortSessionId } from '@renderer/utils/ui/shortId';
 import { filterCronJobsByQuery } from './cronJobSearch';
 import { parseScheduledCreateTarget } from './scheduledCreateTarget';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
+import ScheduledTaskActions from './ScheduledTaskActions';
 
 const ScheduledTasksPage: React.FC = () => {
   const layout = useLayoutContext();
@@ -29,7 +30,7 @@ const ScheduledTasksPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { jobs, loading, pauseJob, resumeJob } = useAllCronJobs();
+  const { jobs, loading, pauseJob, resumeJob, deleteJob } = useAllCronJobs();
   const { cliAgents } = useConversationAgents();
   const [createDialogVisible, setCreateDialogVisible] = useState(false);
   const [lockedCreateConversationId, setLockedCreateConversationId] = useState<number | undefined>(undefined);
@@ -92,6 +93,18 @@ const ScheduledTasksPage: React.FC = () => {
       }
     },
     [pauseJob, resumeJob, t]
+  );
+
+  const handleRemoveJob = useCallback(
+    async (job: ICronJob) => {
+      try {
+        await deleteJob(job.id);
+        Message.success(t('cron.deleteSuccess'));
+      } catch (err) {
+        Message.error(String(err));
+      }
+    },
+    [deleteJob, t]
   );
 
   return (
@@ -186,7 +199,6 @@ const ScheduledTasksPage: React.FC = () => {
               <span>{t('cron.nextRun')}</span>
               <span>{t('cron.page.list.status')}</span>
               <span>{t('cron.page.form.executionMode')}</span>
-              <span className='text-center'>{t('cron.page.list.action')}</span>
             </div>
 
             <div className='grid w-full grid-cols-1 items-start gap-12px md:block md:divide-y md:divide-solid md:divide-[var(--color-border-2)]'>
@@ -269,14 +281,18 @@ const ScheduledTasksPage: React.FC = () => {
                         </span>
                       </div>
 
-                      <div
-                        className='shrink-0 md:[grid-column:5] md:[grid-row:1] md:justify-self-center'
-                        onClick={(e) => e.stopPropagation()}
-                      >
+                      <div className='shrink-0 md:hidden' onClick={(event) => event.stopPropagation()}>
                         {!isManualOnly && (
                           <Switch size='small' checked={job.enabled} onChange={() => handleToggleEnabled(job)} />
                         )}
                       </div>
+
+                      <ScheduledTaskActions
+                        enabled={job.enabled}
+                        isManualOnly={isManualOnly}
+                        onToggle={() => handleToggleEnabled(job)}
+                        onRemove={() => handleRemoveJob(job)}
+                      />
                     </div>
                   </div>
                 );
