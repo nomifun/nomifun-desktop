@@ -66,8 +66,8 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 10px 2px;
+  gap: 3px;
+  padding: 8px 2px;
   border-left: 1px solid var(--bg-3);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--bg-2) 78%, transparent), var(--bg-1) 38%),
@@ -78,10 +78,11 @@
 .workspace-tool-rail__item {
   position: relative;
   width: 28px;
-  height: 48px;
+  height: 28px;
+  aspect-ratio: 1 / 1;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 11px;
+  border-radius: 8px;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
@@ -117,7 +118,7 @@
       color-mix(in srgb, rgb(var(--primary-6)) 18%, var(--bg-1)),
       color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--bg-2))
     );
-  box-shadow: 0 6px 16px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
+  box-shadow: 0 4px 10px color-mix(in srgb, rgb(var(--primary-6)) 12%, transparent);
 }
 
 .workspace-tool-rail__icon {
@@ -145,52 +146,52 @@
 
 .workspace-tool-rail__badge {
   position: absolute;
-  top: -4px;
-  right: -5px;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  border: 2px solid var(--bg-1);
+  top: -3px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border: 1px solid var(--bg-1);
   border-radius: 99px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   background: rgb(var(--primary-6));
   color: #fff;
-  font-size: 9px;
+  font-size: 8px;
   line-height: 1;
   font-weight: 700;
 }
 
 .workspace-tool-rail__status {
   position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 7px;
-  height: 7px;
-  border: 2px solid var(--bg-1);
+  right: 3px;
+  bottom: 3px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--bg-1);
   border-radius: 50%;
 }
 
 .workspace-tool-rail__divider {
-  width: 22px;
+  width: 20px;
   height: 1px;
-  margin: 3px 0;
+  margin: 2px 0;
   background: var(--bg-3);
 }
 
 .workspace-tool-rail__footer {
   width: 100%;
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 6px;
   border-top: 1px solid var(--bg-3);
   display: flex;
   justify-content: center;
 }
 
 .workspace-tool-rail__item--collapse {
-  height: 30px;
-  font-size: 20px;
+  height: 28px;
+  font-size: 18px;
   line-height: 1;
   color: var(--text-tertiary);
 }
