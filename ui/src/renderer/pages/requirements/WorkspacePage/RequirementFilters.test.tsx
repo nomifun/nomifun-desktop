@@ -7,6 +7,7 @@ import { FilterTrigger } from './RequirementFilters';
 
 const filtersSource = readFileSync(new URL('./RequirementFilters.tsx', import.meta.url), 'utf8');
 const listViewSource = readFileSync(new URL('./RequirementListView.tsx', import.meta.url), 'utf8');
+const workspaceSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 
 describe('RequirementFilters trigger', () => {
   test('forwards a DOM ref so Arco can anchor the popup', () => {
@@ -52,5 +53,15 @@ describe('RequirementFilters trigger', () => {
   test('keeps select-all controls in the filter row instead of a separate list header', () => {
     expect(filtersSource.includes('requirements.selection.selectAllPage')).toBe(true);
     expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
+  });
+
+  test('moves only the filter region upward and separates it compactly from content', () => {
+    expect(workspaceSource.includes("<div className='mt-8px'>")).toBe(true);
+    expect(workspaceSource.includes("<div className='mt-10px'>")).toBe(true);
+    expect(
+      filtersSource.includes(
+        "border-b border-solid border-[var(--color-border-2)] pb-6px"
+      )
+    ).toBe(true);
   });
 });
