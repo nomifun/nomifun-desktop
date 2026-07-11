@@ -39,6 +39,16 @@ describe('RequirementFilters trigger', () => {
     expect(html.includes('!text-primary-6')).toBe(true);
   });
 
+  test('gives the selected value a smaller neutral text hierarchy', () => {
+    const html = renderToStaticMarkup(
+      <FilterTrigger icon={<span>icon</span>} label='标签' value='五子棋' active />
+    );
+
+    expect(html.includes('text-12px')).toBe(true);
+    expect(html.includes('font-medium text-[var(--color-text-1)]')).toBe(true);
+    expect(html.includes('ml-2px')).toBe(true);
+  });
+
   test('keeps select-all controls in the filter row instead of a separate list header', () => {
     expect(filtersSource.includes('requirements.selection.selectAllPage')).toBe(true);
     expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
