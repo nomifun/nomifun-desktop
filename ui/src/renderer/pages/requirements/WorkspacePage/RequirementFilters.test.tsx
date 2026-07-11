@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { FilterTrigger } from './RequirementFilters';
+
+const filtersSource = readFileSync(new URL('./RequirementFilters.tsx', import.meta.url), 'utf8');
+const listViewSource = readFileSync(new URL('./RequirementListView.tsx', import.meta.url), 'utf8');
 
 describe('RequirementFilters trigger', () => {
   test('forwards a DOM ref so Arco can anchor the popup', () => {
@@ -33,5 +37,10 @@ describe('RequirementFilters trigger', () => {
     expect(html.includes('aria-pressed="true"')).toBe(true);
     expect(html.includes('!bg-primary-1')).toBe(true);
     expect(html.includes('!text-primary-6')).toBe(true);
+  });
+
+  test('keeps select-all controls in the filter row instead of a separate list header', () => {
+    expect(filtersSource.includes('requirements.selection.selectAllPage')).toBe(true);
+    expect(listViewSource.includes('requirements.selection.selectAllPage')).toBe(false);
   });
 });

@@ -284,7 +284,7 @@ const WorkspacePage: React.FC = () => {
         </Button>
       </div>
 
-      {/* Filters + batch bar */}
+      {/* Filters + list selection controls + batch bar */}
       <RequirementFilters
         tag={tag}
         status={status}
@@ -299,6 +299,17 @@ const WorkspacePage: React.FC = () => {
         tagOptions={tagOptions}
         selectedCount={selectedIds.size}
         onBatchDelete={handleBatchDelete}
+        listSelection={
+          view === 'list' && !error && items.length > 0
+            ? {
+                total,
+                pageIds: items.map((item) => item.id),
+                selectedIds,
+                onToggleSelectAll: selectAllOnPage,
+                onClearSelection: clearSelection,
+              }
+            : undefined
+        }
       />
 
       {/* The view */}
@@ -316,8 +327,6 @@ const WorkspacePage: React.FC = () => {
           onRetry={() => void refresh()}
           selectedIds={selectedIds}
           onToggleSelect={toggleSelect}
-          onToggleSelectAll={selectAllOnPage}
-          onClearSelection={clearSelection}
           onOpenDetail={openDetail}
           onStatusChange={handleRowStatusChange}
           onEdit={openEdit}
