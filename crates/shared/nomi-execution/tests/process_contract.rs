@@ -84,6 +84,44 @@ async fn wait_for_terminal(
 }
 
 #[tokio::test]
+async fn output_arrival_wakes_a_running_poll_before_the_yield_deadline() {
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(helper_request(&["echo-stdin"]))
+        .await
+        .expect("echo helper should start");
+    let began = Instant::now();
+    let poll = supervisor.poll_until_activity(
+        &handle.owner,
+        &handle.session_id,
+        OutputCursor::START,
+        Instant::now() + Duration::from_secs(5),
+    );
+    tokio::pin!(poll);
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    supervisor
+        .write(&handle.owner, &handle.session_id, b"wake-on-output\n")
+        .await
+        .expect("stdin write should succeed");
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut poll)
+        .await
+        .expect("output should wake the poll")
+        .expect("poll should succeed");
+    let PollResult::Running { output, .. } = result else {
+        panic!("echo helper should still be running");
+    };
+
+    assert!(began.elapsed() < Duration::from_secs(1));
+    assert_eq!(output.raw_bytes(), b"wake-on-output\n");
+    supervisor
+        .close_stdin(&handle.owner, &handle.session_id)
+        .await
+        .expect("closing stdin should succeed");
+    let _ = wait_for_terminal(&supervisor, &handle).await;
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
     for expected in [0, 7] {
