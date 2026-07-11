@@ -5,9 +5,12 @@
  */
 
 import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import cronEn from '@renderer/services/i18n/locales/en-US/cron.json';
 import cronZh from '@renderer/services/i18n/locales/zh-CN/cron.json';
 import * as scheduledTaskLayout from './scheduledTaskLayout';
+
+const pageSource = readFileSync(new URL('./index.tsx', import.meta.url), 'utf8');
 
 test('keeps responsive utility classes in JSX instead of runtime exports', () => {
   const layout = scheduledTaskLayout as Record<string, unknown>;
@@ -34,4 +37,18 @@ test('provides localized desktop-only column labels', () => {
     status: 'Status',
     action: 'On / off',
   });
+});
+
+test('uses compact desktop task rows', () => {
+  expect(pageSource.includes('md:min-h-48px')).toBe(true);
+  expect(pageSource.includes('md:py-8px')).toBe(true);
+  expect(pageSource.includes('md:min-h-68px')).toBe(false);
+  expect(pageSource.includes('md:py-14px')).toBe(false);
+});
+
+test('removes only the desktop perimeter and keeps internal dividers', () => {
+  expect(pageSource.includes('rounded-t-12px')).toBe(false);
+  expect(pageSource.includes('md:rounded-b-12px')).toBe(false);
+  expect(pageSource.includes('md:divide-y')).toBe(true);
+  expect(pageSource.includes('border-b-[var(--color-border-2)]')).toBe(true);
 });
