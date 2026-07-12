@@ -251,6 +251,11 @@ impl AppServices {
                 );
             }
         }
+        // Local ASR owns an independent lazy cell and state file. Restore it
+        // without starting the text/image services or loopback provider.
+        if let Err(error) = lazy_local_model_runtime.restore_asr_if_opted_in().await {
+            tracing::warn!(error = %error, "Previously enabled local ASR service is unavailable");
+        }
         // Refresh immediately, then about every six hours with jitter. Failed
         // attempts retain the current catalog and use capped exponential
         // backoff. Successful refreshes atomically seed profiles for any newly

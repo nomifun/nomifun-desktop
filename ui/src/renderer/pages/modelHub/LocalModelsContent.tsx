@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Tooltip } from '@arco-design/web-react';
 import { DataServer, Refresh } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import { useSettingsViewMode } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import AsrModelsPanel from './AsrModelsPanel';
 import ImageModelsPanel from './ImageModelsPanel';
 import LocalModelCapabilityTabs from './LocalModelCapabilityTabs';
 import TextModelsPanel from './TextModelsPanel';
@@ -21,15 +23,25 @@ import {
   type ModelTransferPhase,
 } from './localModelCapabilityView';
 import { useLocalImageModels } from './useLocalImageModels';
+import { useLocalAsrModels } from './useLocalAsrModels';
 import { useLocalModels } from './useLocalModels';
 
 const LocalModelsContent: React.FC = () => {
   const { t } = useTranslation();
+  const [searchParams] = useSearchParams();
   const viewMode = useSettingsViewMode();
   const [message, messageContext] = useArcoMessage();
   const [activeCapability, setActiveCapability] = useState<LocalModelCapabilityKey>('text');
   const text = useLocalModels();
   const image = useLocalImageModels();
+  const asr = useLocalAsrModels();
+
+  useEffect(() => {
+    const capability = searchParams.get('capability');
+    if (capability === 'speech_recognition') {
+      setActiveCapability('speech_recognition');
+    }
+  }, [searchParams]);
 
   const activity: Partial<Record<LocalModelCapabilityKey, CapabilityActivity>> = {
     text: capabilityActivity(
@@ -40,9 +52,14 @@ const LocalModelsContent: React.FC = () => {
       (image.status?.models.map((model) => model.installPhase) ?? []) as ModelTransferPhase[],
       Boolean(image.statusError || image.status?.lastError)
     ),
+    speech_recognition: capabilityActivity(
+      (asr.status?.models.map((model) => model.installPhase) ?? []) as ModelTransferPhase[],
+      Boolean(asr.statusError || asr.status?.lastError)
+    ),
   };
 
-  const activeController = activeCapability === 'image' ? image : text;
+  const activeController =
+    activeCapability === 'image' ? image : activeCapability === 'speech_recognition' ? asr : text;
 
   const refreshActiveCapability = (): void => {
     void activeController.refresh().catch((error) => {
@@ -98,6 +115,13 @@ const LocalModelsContent: React.FC = () => {
         </div>
         <div role='tabpanel' aria-label={t('settings.modelHub.local.capabilityCenter.tabs.image')} hidden={activeCapability !== 'image'}>
           <ImageModelsPanel controller={image} />
+        </div>
+        <div
+          role='tabpanel'
+          aria-label={t('settings.modelHub.local.capabilityCenter.tabs.speechRecognition')}
+          hidden={activeCapability !== 'speech_recognition'}
+        >
+          <AsrModelsPanel controller={asr} />
         </div>
       </NomiScrollArea>
     </div>

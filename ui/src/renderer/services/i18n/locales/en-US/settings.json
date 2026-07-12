@@ -402,7 +402,7 @@
   "capabilities": "Capabilities",
   "capabilitiesTab": {
     "skills": "Skills",
-    "tools": "Tools"
+    "tools": "MCP"
   },
   "webui": "WebUI",
   "installed": "Installed",
@@ -666,33 +666,8 @@
   "channels.mediaSendFailed": "Failed to send {{name}}",
   "channels.mediaPathNotAllowed": "Couldn't send {{name}} because the file is outside the allowed send directories",
   "display": "Display",
-  "imageGeneration": "Image Generation",
-  "imageGenerationToggle": "Enable image generation tool",
-  "imageGenerationDescription": "Choose which configured image-capable model the tool should use by default.",
-  "speechToText": "Speech to Text",
-  "speechToTextDescription": "Configure the voice input provider used by the chat box on desktop and WebUI.",
-  "speechToTextProvider": "Provider",
-  "speechToTextProviderOpenAI": "OpenAI Whisper",
-  "speechToTextProviderDeepgram": "Deepgram Nova-2",
-  "speechToTextApiKey": "API Key",
-  "speechToTextBaseUrl": "Base URL",
-  "speechToTextModel": "Model",
-  "speechToTextLanguage": "Default Language",
-  "speechToTextDetectLanguage": "Detect Language Automatically",
-  "speechToTextPunctuate": "Add Punctuation",
-  "speechToTextSmartFormat": "Smart Formatting",
-  "speechToTextRequired": "Required",
-  "speechToTextOptional": "Optional",
   "mcp": "MCP Integration",
-  "imageGenerationModel": "Image Model",
-  "imageGenSupportedTooltipTitle": "Currently supported image models:",
-  "imageGenSupportedTooltipGemini": "Google Gemini / Vertex AI image models (e.g. gemini-2.5-flash-image)",
-  "imageGenSupportedTooltipOpenRouter": "OpenRouter chat-style image models (e.g. nano-banana, gemini-image)",
-  "imageGenSupportedTooltipAntigravity": "AntigravityTools (gemini-3-pro-image)",
-  "imageGenUnsupportedTooltip": "Models like gpt-image-* / dall-e-* / Imagen / FLUX use a different API and are not yet supported.",
-  "imageGenerationGuide": "Image Model Setup Guide",
-  "noAvailable": "No available image models, please configure first.",
-  "mcpSettings": "MCP Tools Configuration",
+  "mcpSettings": "MCP Servers",
   "mcpServerList": "MCP Servers",
   "mcpStatus": "Status",
   "mcpAddServer": "Manual Add",
@@ -730,11 +705,11 @@
   "mcpErrorHttp": "The MCP server returned HTTP {{status}}.",
   "mcpErrorRpc": "The MCP server returned an RPC error while handling {{method}}.",
   "mcpErrorProtocol": "Nomi could not complete the MCP handshake.",
-  "mcpLastCheckedAvailable": "Latest check in Tools settings: Available",
-  "mcpLastCheckedFailed": "Latest check in Tools settings: Failed",
+  "mcpLastCheckedAvailable": "Latest check in MCP management: Available",
+  "mcpLastCheckedFailed": "Latest check in MCP management: Failed",
   "mcpCheckedAt": "Checked at: {{time}}",
   "mcpCheckedAtLabel": "Checked at:",
-  "mcpNeverTested": "Not tested in Tools settings yet",
+  "mcpNeverTested": "Not tested in MCP management yet",
   "mcpCheckJsonHint": "Please review the MCP JSON configuration and test again.",
   "mcpCheckResultLabel": "Manual check:",
   "mcpCheckReasonLabel": "Possible cause:",
@@ -1482,6 +1457,25 @@
           "notFound": "The image model or local file was not found",
           "unknown": "The local image-model operation failed"
         }
+      },
+      "asr": {
+        "title": "Local Speech Recognition",
+        "subtitle": "Download once to dictate into NomiFun input boxes offline. The recommended model handles both English and Chinese well.",
+        "catalogTitle": "Choose a speech recognition model",
+        "loading": "Checking local speech recognition",
+        "loadFailed": "Unable to read local speech-model status",
+        "loadFailedHint": "The local service may still be starting. Refresh again shortly.",
+        "empty": "No installable speech recognition models are available",
+        "emptyHint": "Update NomiFun to obtain the curated speech-model catalog.",
+        "actionFailed": "Speech-model action failed. Please try again.",
+        "installSuccess": "Download started. Voice-to-text will be enabled in input boxes after installation.",
+        "resumeSuccess": "Speech-model download resumed",
+        "cancelSuccess": "Download paused; the partial file was retained",
+        "activateSuccess": "Local speech recognition enabled; input boxes now show the microphone button",
+        "deactivateSuccess": "Local speech recognition stopped",
+        "deleteSuccess": "Local speech-model files deleted",
+        "deleteConfirmTitle": "Delete local speech recognition model?",
+        "deleteConfirmContent": "This deletes the local files for {{model}}. You can download them again later."
       }
     },
     "creation": {
@@ -1498,6 +1492,20 @@
       "empty": "No creation models",
       "emptyHint": "No image/video generation models were detected among your configured models. Add generation models to a platform, or mark one with the buttons above.",
       "emptyNoProviders": "No model providers are configured. Add a provider and model under \"Provider Models\" first."
+    },
+    "sectionSpeech": "Speech to Text",
+    "speech": {
+      "title": "Speech to Text",
+      "subtitle": "Choose a ready local ASR model or a configured cloud speech model.",
+      "local": "Local Models",
+      "cloud": "Cloud Providers",
+      "source": "Default Transcription Model",
+      "defaultLanguage": "Default Language",
+      "languagePlaceholder": "Leave empty for automatic detection, for example zh or en",
+      "enabled": "Enable speech to text in input boxes",
+      "noSources": "No speech-to-text models are available. Enable local ASR or configure a cloud speech model first.",
+      "manageLocal": "Manage Local ASR",
+      "manageProviders": "Manage Provider Models"
     }
   },
   "otherHub": {
@@ -1515,7 +1523,7 @@
   },
   "mcpHub": {
     "title": "MCP",
-    "subtitle": "Manage MCP tool servers and built-in tools.",
+    "subtitle": "Register, import, and manage MCP server configurations.",
     "railTitle": "MCP"
   },
   "openCapabilities": {

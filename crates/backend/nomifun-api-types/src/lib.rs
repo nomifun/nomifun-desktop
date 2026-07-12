@@ -144,7 +144,8 @@ pub use lifecycle::{
     UpdateReleaseInfo, UpdateWorkDirRequest,
 };
 pub use local_model::{
-    LocalModelCatalogEntry, LocalModelErrorKind, LocalModelInstallPhase,
+    AsrModelCatalogEntry, AsrModelServiceStatus, LocalModelCatalogEntry,
+    LocalModelErrorKind, LocalModelInstallPhase,
     LocalModelProgressComponent, LocalModelRuntimeBackend, LocalModelRuntimePhase,
     LocalModelServiceStatus, LocalModelState, LocalModelTransferProgress, LocalRuntimeStatus,
     SetLocalModelActiveRequest,

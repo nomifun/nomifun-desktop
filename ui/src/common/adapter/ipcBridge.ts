@@ -104,6 +104,12 @@ import type {
   ImageModelIdRequest,
   ImageModelServiceStatus,
 } from '../types/provider/imageModelService';
+import type {
+  AsrModelCatalogEntry,
+  AsrModelIdRequest,
+  AsrModelServiceStatus,
+  SetAsrModelActiveRequest,
+} from '../types/provider/asrModelService';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
   TAdjustRunRequest,
@@ -999,6 +1005,25 @@ export const managedModelService = {
       ),
       remove: httpDelete<ImageModelServiceStatus, ImageModelIdRequest>((p) =>
         `/api/model-services/local/image/models/${encodeURIComponent(p.id)}`
+      ),
+    },
+    asr: {
+      catalog: httpGet<AsrModelCatalogEntry[], void>('/api/model-services/local/asr/catalog'),
+      status: httpGet<AsrModelServiceStatus, void>('/api/model-services/local/asr/status'),
+      install: httpPost<AsrModelServiceStatus, AsrModelIdRequest>(
+        (p) => `/api/model-services/local/asr/models/${encodeURIComponent(p.id)}/install`,
+        () => undefined
+      ),
+      cancel: httpPost<AsrModelServiceStatus, AsrModelIdRequest>(
+        (p) => `/api/model-services/local/asr/models/${encodeURIComponent(p.id)}/cancel`,
+        () => undefined
+      ),
+      remove: httpDelete<AsrModelServiceStatus, AsrModelIdRequest>((p) =>
+        `/api/model-services/local/asr/models/${encodeURIComponent(p.id)}`
+      ),
+      setActive: httpPost<AsrModelServiceStatus, SetAsrModelActiveRequest>(
+        (p) => `/api/model-services/local/asr/models/${encodeURIComponent(p.id)}/activate`,
+        (p) => ({ enabled: p.enabled })
       ),
     },
   },

@@ -1,5 +1,6 @@
 //! System services: provider management, model fetching, settings, and version checks.
 pub mod bedrock_probe;
+pub mod asr_model;
 pub mod client_pref;
 pub mod image_model;
 pub mod managed_model;
@@ -17,6 +18,9 @@ pub mod sysinfo;
 pub mod version;
 
 pub use bedrock_probe::{ConnectionTestRouterState, ConnectionTestService, connection_test_routes};
+pub use asr_model::{
+    AsrModelService, LocalAsrTranscription, asr_model_catalog, inactive_asr_model_status,
+};
 pub use client_pref::ClientPrefService;
 pub use image_model::{
     ImageModelService, image_model_catalog, inactive_image_model_status,

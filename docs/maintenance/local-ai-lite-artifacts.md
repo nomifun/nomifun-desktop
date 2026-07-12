@@ -38,6 +38,18 @@ https://huggingface.co/{repository}/resolve/{revision}/{file}
 
 模型来自 Qwen Team 的 Qwen3.5 Apache-2.0 模型；GGUF 转换和量化由 Hugging Face 组织 `unsloth` 发布。固定的 llama.cpp `b9957` runtime 已确认能够识别 `qwen35` 架构。两个 GGUF 的原生上下文元数据为 262K，NomiFun 为控制普通设备上的 KV cache 占用，将运行上下文统一限制为 65,536。固定 revision 的模型卡是来源与归属记录的一部分，不得只保留文件直链。
 
+### Whisper 本地语音识别
+
+语音识别控制面与文本/图片门面独立懒初始化。只有首次安装 ASR 模型或恢复已有 ASR 安装状态时才创建 `local-ai/asr`；`whisper-cli` 每次转写按需启动，完成后退出，不常驻占用模型内存。当前生产 runtime 仅支持 Windows x86_64，其他平台状态必须明确返回 `unsupported_platform`，不得开始下载。
+
+| 制品 | 固定来源 | 大小（bytes） | SHA-256 |
+|---|---|---:|---|
+| whisper.cpp Windows x86_64 runtime | release `v1.9.1`, `whisper-bin-x64.zip` | 7,982,101 | `7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539` |
+| Whisper Small multilingual Q5_1 | `ggerganov/whisper.cpp@5359861c739e955e79d9a303bcbc70fb988958b1`, `ggml-small-q5_1.bin` | 190,085,487 | `ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb` |
+| Whisper Large v3 Turbo Q5_0 | `ggerganov/whisper.cpp@5359861c739e955e79d9a303bcbc70fb988958b1`, `ggml-large-v3-turbo-q5_0.bin` | 574,041,195 | `394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` |
+
+runtime 与 OpenAI Whisper 模型权重均为 MIT。模型 URL 必须使用上述完整 Hugging Face revision，不得改为 `main`。实时浏览器录音在前端解码并重采样为单声道 16 kHz PCM16 WAV 后上传；用户选择的 WAV、MP3、OGG、FLAC 文件保持原格式。其他容器由本地 ASR 明确拒绝（云端 STT 仍保持原有格式支持）。后端 `/api/stt` 单独允许 31 MiB multipart body，模型服务仍将音频净载荷限制为 30 MiB。
+
 ### Z-Image-Turbo 本地生图
 
 运行时固定为 stable-diffusion.cpp `master-775-b5d8120`。当前支持 Windows x86_64 Vulkan、macOS ARM64 Metal 与 Linux x86_64 Vulkan；平台不匹配时不得开始下载。
