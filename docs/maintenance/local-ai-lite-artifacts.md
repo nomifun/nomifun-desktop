@@ -1,6 +1,6 @@
-# Local AI Lite 制品维护
+﻿# Local AI Lite 制品维护
 
-本文记录 Local AI Lite 当前允许下载的固定制品，以及更新 URL、大小和 SHA-256 的最小安全流程。实现中的事实来源为 `nomifun-system/src/local_model.rs`、`nomifun-system/src/ocr_model.rs` 与 `nomifun-creation/src/adapters/local_image.rs`；本文必须与代码同步更新。
+本文记录 Local AI Lite 当前允许下载的固定制品，以及更新 URL、大小和 SHA-256 的最小安全流程。实现中的事实来源为 `nomifun-system/src/local_model.rs` 与 `nomifun-creation/src/adapters/local_image.rs`；本文必须与代码同步更新。
 
 ## 当前固定制品
 
@@ -49,17 +49,6 @@ https://huggingface.co/{repository}/resolve/{revision}/{file}
 | VAE | `Comfy-Org/z_image_turbo@d24c4cf2a0cd98a42f23467e27e3d76ee9438b8e` | 335,304,388 | `afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38` |
 
 三件模型文件合计 5,976,144,612 bytes。VAE 仓库卡未声明许可证，必须保留 NOTICE 与 UI 风险提示，不得随安装包重分发。安装后首次生成会重验全部 SHA，并从已验证 runtime ZIP 原子重建可执行目录。
-
-### PP-OCRv6 Small
-
-| 制品 | repository @ revision | 大小（bytes） | SHA-256 |
-|---|---|---:|---|
-| detector ONNX | `PaddlePaddle/PP-OCRv6_small_det_onnx@28fe5895c24fd108c19eb3e8479f4ab385fbfc62` | 9,880,512 | `d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e` |
-| detector config | 同上，`inference.yml` | 885 | `193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516` |
-| recognizer ONNX | `PaddlePaddle/PP-OCRv6_small_rec_onnx@b8f84f0b80c529de40b4fbb3544b84fa7233a513` | 21,159,378 | `5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634` |
-| recognizer dictionary/config | 同上，`inference.yml` | 150,579 | `ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1` |
-
-OCR 固定制品总计 31,191,354 bytes，均为 Apache-2.0。当前控制面仅在用户选择后下载并校验；在 ONNX 执行器完整接通前，API 必须保持 `inferenceReady=false`，UI 不得宣称可直接识别。
 
 ### 从旧目录迁移
 

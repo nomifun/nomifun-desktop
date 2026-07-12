@@ -11,8 +11,7 @@ use nomifun_api_types::{
     ImageModelServiceStatus, LocalModelCatalogEntry, LocalModelServiceStatus, ManagedModel,
     ManagedModelHealthBatchResult,
     ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
-    ModelProfileUpsertRequest, OcrModelCatalogEntry, OcrModelServiceStatus,
-    ProtocolDetectionResponse, ProviderResponse, ResolveModelsRequest,
+    ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderResponse, ResolveModelsRequest,
     ResolveModelsResponse, SetLocalModelActiveRequest, SetManagedModelEnabledRequest,
     SetManagedModelServiceEnabledRequest, SystemInfoResponse, SystemSettingsResponse, UpdateCheckRequest,
     UpdateCheckResult, UpdateClientPreferencesRequest, UpdateProviderRequest, UpdateSettingsRequest,
@@ -23,10 +22,10 @@ use nomifun_common::AppError;
 use crate::client_pref::ClientPrefService;
 use crate::image_model::ImageModelService;
 use crate::local_model::LocalModelService;
+use crate::local_model_runtime::LazyLocalModelRuntime;
 use crate::managed_model::ManagedModelService;
 use crate::model_fetcher::ModelFetchService;
 use crate::model_profile::ModelProfileService;
-use crate::ocr_model::OcrModelService;
 use crate::protocol::ProtocolDetectionService;
 use crate::provider::ProviderService;
 use crate::settings::SettingsService;
@@ -42,8 +41,8 @@ pub struct SystemRouterState {
     pub model_profile_service: ModelProfileService,
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
     pub local_model_service: Option<std::sync::Arc<LocalModelService>>,
-    pub ocr_model_service: Option<std::sync::Arc<OcrModelService>>,
     pub image_model_service: Option<std::sync::Arc<ImageModelService>>,
+    pub lazy_local_model_runtime: Option<std::sync::Arc<LazyLocalModelRuntime>>,
     pub protocol_detection_service: ProtocolDetectionService,
     pub version_check_service: VersionCheckService,
     /// Data directory root — used to arm a factory reset (write the marker that
@@ -102,30 +101,6 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         )
         .route("/api/model-services/local/catalog", get(get_local_model_catalog))
         .route("/api/model-services/local/status", get(get_local_model_status))
-        .route(
-            "/api/model-services/local/ocr/catalog",
-            get(get_ocr_model_catalog),
-        )
-        .route(
-            "/api/model-services/local/ocr/status",
-            get(get_ocr_model_status),
-        )
-        .route(
-            "/api/model-services/local/ocr/models/{id}/install",
-            post(install_ocr_model),
-        )
-        .route(
-            "/api/model-services/local/ocr/models/{id}/pause",
-            post(pause_ocr_model_install),
-        )
-        .route(
-            "/api/model-services/local/ocr/models/{id}/resume",
-            post(resume_ocr_model_install),
-        )
-        .route(
-            "/api/model-services/local/ocr/models/{id}",
-            delete(delete_ocr_model),
-        )
         .route(
             "/api/model-services/local/image/catalog",
             get(get_image_model_catalog),
@@ -317,24 +292,40 @@ fn managed_service(
     })
 }
 
-fn local_service(state: &SystemRouterState) -> Result<std::sync::Arc<LocalModelService>, AppError> {
-    state.local_model_service.clone().ok_or_else(|| {
+async fn local_service(
+    state: &SystemRouterState,
+    initialize: bool,
+) -> Result<std::sync::Arc<LocalModelService>, AppError> {
+    if let Some(service) = &state.local_model_service {
+        return Ok(service.clone());
+    }
+    let runtime = state.lazy_local_model_runtime.as_ref().ok_or_else(|| {
         AppError::ProviderUnavailable("local model service is not available in this process".into())
-    })
+    })?;
+    if initialize {
+        runtime.local().await
+    } else {
+        runtime.local_existing()
+    }
 }
 
-fn ocr_service(state: &SystemRouterState) -> Result<std::sync::Arc<OcrModelService>, AppError> {
-    state.ocr_model_service.clone().ok_or_else(|| {
-        AppError::ProviderUnavailable("OCR model service is not available in this process".into())
-    })
-}
-
-fn image_service(state: &SystemRouterState) -> Result<std::sync::Arc<ImageModelService>, AppError> {
-    state.image_model_service.clone().ok_or_else(|| {
+async fn image_service(
+    state: &SystemRouterState,
+    initialize: bool,
+) -> Result<std::sync::Arc<ImageModelService>, AppError> {
+    if let Some(service) = &state.image_model_service {
+        return Ok(service.clone());
+    }
+    let runtime = state.lazy_local_model_runtime.as_ref().ok_or_else(|| {
         AppError::ProviderUnavailable(
             "image model service is not available in this process".into(),
         )
-    })
+    })?;
+    if initialize {
+        runtime.image().await
+    } else {
+        runtime.image_existing()
+    }
 }
 
 async fn get_free_model_status(
@@ -438,22 +429,33 @@ async fn set_free_model_enabled(
 async fn get_local_model_status(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<LocalModelServiceStatus>>, AppError> {
-    Ok(Json(ApiResponse::ok(
-        local_service(&state)?.status().await,
-    )))
+    if let Some(service) = &state.local_model_service {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    if let Some(service) = state
+        .lazy_local_model_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.local_if_started())
+    {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::inactive_local_model_status())))
 }
 
 async fn get_local_model_catalog(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<Vec<LocalModelCatalogEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(local_service(&state)?.catalog().await)))
+    if let Some(service) = &state.local_model_service {
+        return Ok(Json(ApiResponse::ok(service.catalog().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::local_model_catalog())))
 }
 
 async fn install_local_model(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<LocalModelServiceStatus>>, AppError> {
-    let service = local_service(&state)?;
+    let service = local_service(&state, true).await?;
     let status = service.install(&id).await?;
     Ok(Json(ApiResponse::ok(status)))
 }
@@ -462,7 +464,7 @@ async fn cancel_local_model_install(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<LocalModelServiceStatus>>, AppError> {
-    let service = local_service(&state)?;
+    let service = local_service(&state, false).await?;
     let status = service.cancel(&id).await?;
     Ok(Json(ApiResponse::ok(status)))
 }
@@ -471,7 +473,7 @@ async fn delete_local_model(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<LocalModelServiceStatus>>, AppError> {
-    let service = local_service(&state)?;
+    let service = local_service(&state, false).await?;
     let status = service.delete(&id).await?;
     Ok(Json(ApiResponse::ok(status)))
 }
@@ -482,72 +484,41 @@ async fn set_local_model_active(
     body: Result<Json<SetLocalModelActiveRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<LocalModelServiceStatus>>, AppError> {
     let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let service = local_service(&state)?;
+    let service = local_service(&state, req.enabled).await?;
     let status = service.set_active(&id, req.enabled).await?;
     Ok(Json(ApiResponse::ok(status)))
-}
-
-async fn get_ocr_model_status(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<OcrModelServiceStatus>>, AppError> {
-    Ok(Json(ApiResponse::ok(ocr_service(&state)?.status().await)))
-}
-
-async fn get_ocr_model_catalog(
-    State(state): State<SystemRouterState>,
-) -> Result<Json<ApiResponse<Vec<OcrModelCatalogEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(ocr_service(&state)?.catalog().await)))
-}
-
-async fn install_ocr_model(
-    State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<OcrModelServiceStatus>>, AppError> {
-    let service = ocr_service(&state)?;
-    Ok(Json(ApiResponse::ok(service.install(&id).await?)))
-}
-
-async fn pause_ocr_model_install(
-    State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<OcrModelServiceStatus>>, AppError> {
-    let service = ocr_service(&state)?;
-    Ok(Json(ApiResponse::ok(service.pause(&id).await?)))
-}
-
-async fn resume_ocr_model_install(
-    State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<OcrModelServiceStatus>>, AppError> {
-    let service = ocr_service(&state)?;
-    Ok(Json(ApiResponse::ok(service.resume(&id).await?)))
-}
-
-async fn delete_ocr_model(
-    State(state): State<SystemRouterState>,
-    Path(id): Path<String>,
-) -> Result<Json<ApiResponse<OcrModelServiceStatus>>, AppError> {
-    let service = ocr_service(&state)?;
-    Ok(Json(ApiResponse::ok(service.delete(&id).await?)))
 }
 
 async fn get_image_model_status(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
-    Ok(Json(ApiResponse::ok(image_service(&state)?.status().await)))
+    if let Some(service) = &state.image_model_service {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    if let Some(service) = state
+        .lazy_local_model_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.image_if_started())
+    {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::inactive_image_model_status())))
 }
 
 async fn get_image_model_catalog(
     State(state): State<SystemRouterState>,
 ) -> Result<Json<ApiResponse<Vec<ImageModelCatalogEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(image_service(&state)?.catalog().await)))
+    if let Some(service) = &state.image_model_service {
+        return Ok(Json(ApiResponse::ok(service.catalog().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::image_model_catalog())))
 }
 
 async fn install_image_model(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
-    let service = image_service(&state)?;
+    let service = image_service(&state, true).await?;
     Ok(Json(ApiResponse::ok(service.install(&id).await?)))
 }
 
@@ -555,7 +526,7 @@ async fn pause_image_model_install(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
-    let service = image_service(&state)?;
+    let service = image_service(&state, false).await?;
     Ok(Json(ApiResponse::ok(service.pause(&id).await?)))
 }
 
@@ -563,7 +534,7 @@ async fn resume_image_model_install(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
-    let service = image_service(&state)?;
+    let service = image_service(&state, true).await?;
     Ok(Json(ApiResponse::ok(service.resume(&id).await?)))
 }
 
@@ -571,7 +542,7 @@ async fn delete_image_model(
     State(state): State<SystemRouterState>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
-    let service = image_service(&state)?;
+    let service = image_service(&state, false).await?;
     Ok(Json(ApiResponse::ok(service.delete(&id).await?)))
 }
 

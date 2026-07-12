@@ -60,7 +60,7 @@ const ModelHubPage: React.FC = () => {
 
   const [section, setSection] = useState<Section>(() => {
     const param = searchParams.get('section');
-    return isSection(param) ? param : 'free';
+    return isSection(param) ? param : 'models';
   });
 
   useEffect(() => {
@@ -102,9 +102,9 @@ const ModelHubPage: React.FC = () => {
 
   const sections: SectionDef[] = useMemo(
     () => [
+      { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
       { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
       { key: 'local', label: t('settings.modelHub.sectionLocal'), icon: <DataServer theme='outline' size='16' strokeWidth={3} /> },
-      { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
       { key: 'agents', label: t('settings.modelHub.sectionAgents'), icon: <Robot theme='outline' size='16' strokeWidth={3} /> },
       { key: 'creation', label: t('settings.modelHub.sectionCreation'), icon: <Platte theme='outline' size='16' strokeWidth={3} /> },
       { key: 'global', label: t('settings.modelHub.sectionGlobal'), icon: <SettingTwo theme='outline' size='16' strokeWidth={3} /> },

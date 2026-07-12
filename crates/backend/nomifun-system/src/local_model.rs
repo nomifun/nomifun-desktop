@@ -2044,6 +2044,51 @@ impl LocalModelService {
     }
 }
 
+/// Curated metadata without constructing the local control plane.
+pub fn local_model_catalog() -> Vec<LocalModelCatalogEntry> {
+    built_in_catalog()
+        .into_iter()
+        .map(|model| model.entry)
+        .collect()
+}
+
+/// Fresh-install status used before the lazy local runtime is initialized.
+pub fn inactive_local_model_status() -> LocalModelServiceStatus {
+    let runtime_artifact = runtime_artifact();
+    LocalModelServiceStatus {
+        kind: ManagedModelServiceKind::Local,
+        protocol_version: MANAGED_MODEL_PROTOCOL_VERSION.to_owned(),
+        provider_id: LOCAL_MODEL_PROVIDER_ID.to_owned(),
+        enabled: false,
+        ready: false,
+        active_model_id: None,
+        runtime: LocalRuntimeStatus {
+            version: runtime_artifact.map(|_| RUNTIME_VERSION.to_owned()),
+            backend: runtime_artifact.map(|asset| asset.backend),
+            phase: LocalModelRuntimePhase::Stopped,
+            error_kind: runtime_artifact
+                .is_none()
+                .then_some(LocalModelErrorKind::UnsupportedPlatform),
+            message: runtime_artifact
+                .is_none()
+                .then_some("当前系统暂不支持一键本地模型运行。".to_owned()),
+        },
+        models: local_model_catalog()
+            .into_iter()
+            .map(|model| LocalModelState {
+                model_id: model.id,
+                install_phase: LocalModelInstallPhase::NotInstalled,
+                progress: None,
+                installed_bytes: 0,
+                runtime_phase: LocalModelRuntimePhase::Stopped,
+                error_kind: None,
+                message: None,
+            })
+            .collect(),
+        last_error: None,
+    }
+}
+
 async fn local_models(State(state): State<LocalFacadeState>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &state.auth_token) {
         return openai_error(

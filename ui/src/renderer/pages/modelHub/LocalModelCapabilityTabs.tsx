@@ -6,7 +6,7 @@
 
 import React from 'react';
 import { Tooltip } from '@arco-design/web-react';
-import { DataServer, FileText, HeadsetOne, Pic, VolumeNotice } from '@icon-park/react';
+import { DataServer, HeadsetOne, Pic, VolumeNotice } from '@icon-park/react';
 import classNames from 'classnames';
 import { useTranslation } from 'react-i18next';
 import {
@@ -29,8 +29,6 @@ const CapabilityIcon: React.FC<{ capability: LocalModelCapabilityKey }> = ({ cap
       return <DataServer {...iconProps} />;
     case 'image':
       return <Pic {...iconProps} />;
-    case 'ocr':
-      return <FileText {...iconProps} />;
     case 'speech_recognition':
       return <HeadsetOne {...iconProps} />;
     case 'speech_synthesis':
@@ -48,7 +46,6 @@ const LocalModelCapabilityTabs: React.FC<LocalModelCapabilityTabsProps> = ({
   const labels: Record<LocalModelCapabilityKey, string> = {
     text: t('settings.modelHub.local.capabilityCenter.tabs.text'),
     image: t('settings.modelHub.local.capabilityCenter.tabs.image'),
-    ocr: t('settings.modelHub.local.capabilityCenter.tabs.ocr'),
     speech_recognition: t('settings.modelHub.local.capabilityCenter.tabs.speechRecognition'),
     speech_synthesis: t('settings.modelHub.local.capabilityCenter.tabs.speechSynthesis'),
   };

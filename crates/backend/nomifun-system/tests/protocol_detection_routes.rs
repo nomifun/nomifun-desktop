@@ -39,9 +39,8 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,
-        ocr_model_service: None,
-        image_model_service: None,
+        local_model_service: None,        image_model_service: None,
+        lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
         data_dir: std::env::temp_dir(),
@@ -226,7 +225,7 @@ async fn detect_gemini_protocol_success() {
 }
 
 // ---------------------------------------------------------------------------
-// All protocols fail â†’ unknown
+// All protocols fail â†?unknown
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -465,7 +464,7 @@ async fn preferred_protocol_tested_first() {
 }
 
 // ---------------------------------------------------------------------------
-// Single key â†’ no multiKeyResult
+// Single key â†?no multiKeyResult
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -493,7 +492,7 @@ async fn single_key_no_multi_key_result() {
 
     assert_eq!(status, StatusCode::OK);
     let data = &json["data"];
-    // Single key â†’ multi_key_result should be null
+    // Single key â†?multi_key_result should be null
     assert!(data["multi_key_result"].is_null());
 }
 

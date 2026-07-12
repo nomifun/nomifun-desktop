@@ -1,4 +1,4 @@
-//! Integration tests for `POST /api/system/work-dir` â€” persisting the user's
+//! Integration tests for `POST /api/system/work-dir` â€?persisting the user's
 //! chosen working directory to the pre-boot dir config that the next boot reads.
 
 use std::sync::Arc;
@@ -38,9 +38,8 @@ async fn setup(data_dir: std::path::PathBuf) -> axum::Router {
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,
-        ocr_model_service: None,
-        image_model_service: None,
+        local_model_service: None,        image_model_service: None,
+        lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "1.0.0".to_owned()),
         data_dir,
@@ -121,7 +120,7 @@ async fn rejects_blank_work_dir() {
 #[tokio::test]
 async fn rejects_work_dir_with_edge_whitespace_segment() {
     let data_dir = unique_data_dir("ws-space");
-    // A path segment that begins/ends with whitespace ("bad ") â€” the repo refuses
+    // A path segment that begins/ends with whitespace ("bad ") â€?the repo refuses
     // these for conversation workspaces (workspace_path_has_edge_whitespace_segment),
     // so the work dir gatekeeper must reject it up front (deterministically, with
     // the dedicated error code) instead of relying on the OS to fail create_dir_all.

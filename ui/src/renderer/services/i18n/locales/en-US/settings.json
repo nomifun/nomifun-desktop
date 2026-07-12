@@ -1196,7 +1196,7 @@
     "title": "Model Management",
     "subtitle": "Choose free, local, or provider models by how you want to use them.",
     "railTitle": "Models & Agents",
-    "sectionAgents": "Agents",
+    "sectionAgents": "Agent ACP/CLI",
     "sectionModels": "Provider Models",
     "sectionFree": "Free Models",
     "sectionLocal": "Local Models",
@@ -1296,7 +1296,6 @@
         "tabs": {
           "text": "Text Understanding",
           "image": "Image Generation",
-          "ocr": "OCR",
           "speechRecognition": "Speech Recognition",
           "speechSynthesis": "Speech Synthesis"
         },
@@ -1392,85 +1391,6 @@
         "busy": "Another local-model operation is in progress",
         "notFound": "The model or local file was not found",
         "unknown": "The local-model operation failed"
-      },
-      "ocr": {
-        "title": "Local OCR (Experimental)",
-        "subtitle": "This version only downloads and manages OCR model files; text recognition is not connected yet.",
-        "refresh": "Refresh status",
-        "refreshHint": "Check OCR model files and inference availability again",
-        "onDemandTitle": "You choose when to download.",
-        "onDemandNotice": "Files download in real time only after you click Download model files. Nothing is preinstalled or downloaded silently. Pausing keeps your checkpoint. Downloaded files cannot run OCR in this version yet.",
-        "loading": "Checking local OCR",
-        "loadFailed": "Unable to read local OCR status",
-        "loadFailedHint": "The local service may still be starting. Refresh again shortly.",
-        "empty": "No installable OCR models are available",
-        "recommended": "Recommended",
-        "catalogDescription": "PP-OCRv6 Small Chinese/English detection and recognition model files. This version manages downloads only; inference and a recognition entry point come later.",
-        "actionFailed": "OCR model action failed. Please try again.",
-        "installSuccess": "OCR model-file download started",
-        "pauseSuccess": "Download paused; the checkpoint was retained",
-        "resumeSuccess": "Download resumed from the saved checkpoint",
-        "deleteSuccess": "OCR model files deleted",
-        "deleteConfirmTitle": "Delete OCR model?",
-        "deleteConfirmContent": "This deletes the local files and download checkpoint for {{model}}. You can download it again later.",
-        "deleteModelLabel": "Delete {{model}}",
-        "readiness": {
-          "artifacts": "Model files",
-          "artifactsReady": "Detection and recognition files are complete",
-          "artifactsMissing": "Not fully downloaded",
-          "ready": "Ready",
-          "notReady": "Not ready",
-          "inference": "OCR inference",
-          "inferenceReady": "Available in NomiFun",
-          "runtimePending": "Inference is not integrated in this version",
-          "installFirst": "Inference is not integrated in this version",
-          "available": "Available",
-          "unavailable": "Unavailable",
-          "runtimePendingHint": "Only model-file management is implemented here. ONNX execution, preprocessing/postprocessing, and a recognition entry point are not connected, so OCR cannot run yet."
-        },
-        "phase": {
-          "notInstalled": "Not installed",
-          "downloading": "Downloading",
-          "verifying": "Verifying",
-          "installed": "Files installed",
-          "paused": "Paused",
-          "failed": "Install failed"
-        },
-        "component": {
-          "detector": "Text detection",
-          "detectorConfig": "Detection config",
-          "recognizer": "Text recognition",
-          "recognizerConfig": "Recognition dictionary and config"
-        },
-        "action": {
-          "install": "Download model files",
-          "pause": "Pause download",
-          "resume": "Resume download",
-          "retry": "Download again",
-          "delete": "Delete"
-        },
-        "metadata": {
-          "download": "Download {{size}}",
-          "memory": "Recommended available memory {{size}}",
-          "source": "Source: {{source}}"
-        },
-        "progress": {
-          "overall": "Overall download",
-          "preparing": "Preparing",
-          "currentComponent": "Current: {{component}}",
-          "verifyingHint": "Verifying file integrity. Keep NomiFun open.",
-          "checkpointSaved": "Download checkpoint retained"
-        },
-        "error": {
-          "network": "Network connection failed; resume from the saved checkpoint",
-          "insufficientSpace": "Not enough free disk space",
-          "checksumMismatch": "File verification failed; download it again",
-          "unsupportedPlatform": "This operating system or processor is not supported yet",
-          "runtimeUnavailable": "The local OCR runtime is unavailable",
-          "busy": "Another local-model operation is in progress",
-          "notFound": "The OCR model or local file was not found",
-          "unknown": "The local OCR operation failed"
-        }
       },
       "image": {
         "title": "Local Image Generation",

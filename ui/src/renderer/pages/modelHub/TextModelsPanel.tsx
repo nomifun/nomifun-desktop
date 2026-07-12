@@ -17,8 +17,6 @@ import type {
 } from '@/common/types/provider/localModelService';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import LocalModelCapabilitySummary from './LocalModelCapabilitySummary';
-import LocalModelDetails from './LocalModelDetails';
-import { detailsForcedOpen } from './localModelCapabilityView';
 import {
   canDeleteLocalModel,
   formatLocalModelBytes,
@@ -371,9 +369,7 @@ const TextModelsPanel: React.FC<TextModelsPanelProps> = ({ controller }) => {
                 </div>
               </div>
 
-              <LocalModelDetails
-                forcedOpen={detailsForcedOpen(state.installPhase, Boolean(state.errorKind))}
-              >
+              <div className='mt-10px'>
                 <div className='flex items-center gap-6px flex-wrap'>
                   {model.tasks.includes('chat') && (
                     <Tag size='small'>{t('settings.modelHub.local.capability.chat')}</Tag>
@@ -421,7 +417,7 @@ const TextModelsPanel: React.FC<TextModelsPanelProps> = ({ controller }) => {
                     {state.message ? ` · ${state.message}` : ''}
                   </div>
                 )}
-              </LocalModelDetails>
+              </div>
             </section>
           );
         })}
