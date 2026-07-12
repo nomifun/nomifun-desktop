@@ -347,6 +347,7 @@ describe('httpBridge WebSocket heartbeat', () => {
     const realSetTimeout = globalThis.setTimeout;
     const realClearTimeout = globalThis.clearTimeout;
     const scheduledReconnects: Array<() => void> = [];
+    const scheduledDelays: number[] = [];
     const clearedHandles: unknown[] = [];
 
     class RecordingWebSocket {
@@ -389,15 +390,17 @@ describe('httpBridge WebSocket heartbeat', () => {
       } as Location,
     });
     globalThis.WebSocket = RecordingWebSocket as unknown as typeof WebSocket;
-    globalThis.setTimeout = ((callback: () => void) => {
+    globalThis.setTimeout = ((callback: () => void, delay?: number) => {
       scheduledReconnects.push(callback);
-      return 101 as unknown as ReturnType<typeof setTimeout>;
+      scheduledDelays.push(delay ?? 0);
+      return scheduledReconnects.length as unknown as ReturnType<typeof setTimeout>;
     }) as typeof setTimeout;
     globalThis.clearTimeout = ((handle: unknown) => {
       clearedHandles.push(handle);
     }) as typeof clearTimeout;
 
     let unsubscribe = () => {};
+    let unsubscribeAgain = () => {};
     try {
       unsubscribe = wsEmitter<unknown>('turn.completed').on(() => {});
       const socket = RecordingWebSocket.instances[0];
@@ -412,8 +415,15 @@ describe('httpBridge WebSocket heartbeat', () => {
 
       scheduledReconnects[0]?.();
       expect(RecordingWebSocket.instances.length).toBe(1);
+
+      unsubscribeAgain = wsEmitter<unknown>('turn.completed').on(() => {});
+      const replacement = RecordingWebSocket.instances[1];
+      if (!replacement) throw new Error('httpBridge did not start a fresh WebSocket lifecycle');
+      replacement.dispatch('close', { code: 1006, reason: 'network lost again' });
+      expect(scheduledDelays.at(-1)).toBe(1000);
     } finally {
       unsubscribe();
+      unsubscribeAgain();
       scheduledReconnects[0]?.();
       for (const socket of RecordingWebSocket.instances) {
         socket.dispatch('close', { code: 1000, reason: 'test cleanup' });
