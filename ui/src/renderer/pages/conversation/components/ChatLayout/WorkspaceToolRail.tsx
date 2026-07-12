@@ -105,11 +105,7 @@ const WorkspaceToolRail: React.FC<WorkspaceToolRailProps> = ({
       active={expanded && activeTab === 'changes'}
       label={t('conversation.workspace.changes.tab')}
       icon={<Change size={18} />}
-      badge={
-        changeCount > 0 ? (
-          <span className='workspace-tool-rail__badge'>{changeCount > 99 ? '99+' : changeCount}</span>
-        ) : undefined
-      }
+      badge={changeCount > 0 ? <span className='workspace-tool-rail__badge' /> : undefined}
       onClick={() => onSelect('changes')}
     />
     {extraTabs?.map((tab) => (
