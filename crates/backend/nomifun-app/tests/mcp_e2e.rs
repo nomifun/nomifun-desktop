@@ -75,6 +75,64 @@ async fn connection_test_unreachable_url() {
     assert!(!json["error"].as_str().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn connection_test_accepts_numeric_saved_server_id_and_persists_failure() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let create = json_with_token(
+        "POST",
+        "/api/mcp/servers",
+        json!({
+            "name": "numeric-id-test",
+            "transport": {
+                "type": "stdio",
+                "command": "nonexistent-mcp-command-numeric-id-test"
+            }
+        }),
+        &token,
+        &csrf,
+    );
+    let created = app.clone().oneshot(create).await.unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_json = body_json(created).await;
+    let server_id = created_json["data"]["id"].as_i64().unwrap();
+
+    let test = json_with_token(
+        "POST",
+        "/api/mcp/test-connection",
+        json!({
+            "id": server_id,
+            "name": "numeric-id-test",
+            "transport": {
+                "type": "stdio",
+                "command": "nonexistent-mcp-command-numeric-id-test"
+            }
+        }),
+        &token,
+        &csrf,
+    );
+    let tested = app.clone().oneshot(test).await.unwrap();
+    assert_eq!(tested.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let tested_json = body_json(tested).await;
+    assert_eq!(tested_json["code"], "MCP_COMMAND_NOT_FOUND");
+
+    let listed = app
+        .clone()
+        .oneshot(get_with_token("/api/mcp/servers", &token))
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_json = body_json(listed).await;
+    let persisted = listed_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["id"].as_i64() == Some(server_id))
+        .unwrap();
+    assert_eq!(persisted["last_test_status"], "error");
+}
+
 // ===========================================================================
 // AS-1: Get agent configs (may return empty in test env)
 // ===========================================================================
