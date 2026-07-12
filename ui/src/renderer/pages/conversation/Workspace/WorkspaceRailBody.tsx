@@ -250,16 +250,21 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
     [openPreview, workspace]
   );
 
-  // Auto-refresh changes when switching to changes tab. Also re-run once the
-  // snapshot finishes initializing: with lazy init (enabled gate), the very
-  // first tab-open fires before `fileSnapshot.init` resolves, so `refreshChanges`
-  // would no-op (initializedRef still false). Depending on `snapshotInfo` makes
-  // the effect re-run after init lands and actually load the comparison.
+  // Load the change count as soon as the snapshot initializes, so the persistent
+  // tool rail can show its red dot before the user opens the Changes panel.
+  useEffect(() => {
+    if (fileChangesHook.snapshotInfo) {
+      fileChangesHook.refreshChanges();
+    }
+  }, [fileChangesHook.refreshChanges, fileChangesHook.snapshotInfo]);
+
+  // Keep the list current when the user opens the Changes tab after the initial
+  // snapshot comparison.
   useEffect(() => {
     if (activeTab === 'changes') {
       fileChangesHook.refreshChanges();
     }
-  }, [activeTab, fileChangesHook.refreshChanges, fileChangesHook.snapshotInfo]);
+  }, [activeTab, fileChangesHook.refreshChanges]);
 
   // Get target folder path for paste confirm modal
   const targetFolderPathForModal = getTargetFolderPath(

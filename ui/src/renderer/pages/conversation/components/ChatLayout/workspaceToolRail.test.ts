@@ -9,6 +9,7 @@ import { describe, expect, test } from 'bun:test';
 
 const stylesheet = readFileSync(new URL('./chat-layout.css', import.meta.url), 'utf8');
 const componentSource = readFileSync(new URL('./WorkspaceToolRail.tsx', import.meta.url), 'utf8');
+const workspaceRailBodySource = readFileSync(new URL('../../Workspace/WorkspaceRailBody.tsx', import.meta.url), 'utf8');
 
 const rule = (selector: string) => {
   const match = stylesheet.match(new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'));
@@ -25,6 +26,10 @@ describe('workspace tool rail dimensions', () => {
     expect(badge.includes('width: 7px;')).toBe(true);
     expect(badge.includes('height: 7px;')).toBe(true);
     expect(badge.includes('background: rgb(var(--danger-6));')).toBe(true);
+  });
+
+  test('loads the change count when the workspace snapshot initializes', () => {
+    expect(workspaceRailBodySource.includes('if (fileChangesHook.snapshotInfo) {\n      fileChangesHook.refreshChanges();')).toBe(true);
   });
 
   test('uses compact square desktop controls', () => {
