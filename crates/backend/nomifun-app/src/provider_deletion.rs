@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use nomifun_common::{AppError, ProviderUsage, ProviderUsageFeature};
 use nomifun_conversation::model_failover::{get_global_failover_config, set_global_failover_config};
-use nomifun_db::{IClientPreferenceRepository, IFleetRepository};
+use nomifun_db::{IClientPreferenceRepository, IConversationRepository, IFleetRepository};
 use nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER;
 use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 
@@ -23,6 +23,7 @@ pub struct AppProviderDeletionCoordinator {
     pub public_agent: Arc<nomifun_public_agent::PublicAgentService>,
     pub client_prefs: Arc<dyn IClientPreferenceRepository>,
     pub fleet_repo: Arc<dyn IFleetRepository>,
+    pub conversation_repo: Arc<dyn IConversationRepository>,
 }
 
 #[async_trait::async_trait]
@@ -77,15 +78,20 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
     }
 
     async fn cleanup_soft_refs(&self, provider_id: &str) -> Result<(), AppError> {
-        // v1 strips ONLY the global model-failover queue. `idmm_backup_*` is a
-        // PROTECTED reference (blocks deletion in `usages`, never reaches cleanup);
-        // channel `assistant.{platform}.defaultModel` is backstopped by component B.
+        // Strip the soft references owned by this coordinator: the global
+        // model-failover queue and every persisted conversation collaborator
+        // range. `idmm_backup_*` is PROTECTED (blocks deletion in `usages`, never
+        // reaches cleanup); channel defaults are backstopped by component B.
         let mut cfg = get_global_failover_config(&self.client_prefs).await;
         let before = cfg.queue.len();
         cfg.queue.retain(|m| m.provider_id != provider_id);
         if cfg.queue.len() != before {
             set_global_failover_config(&self.client_prefs, &cfg).await?;
         }
+        self.conversation_repo
+            .remove_provider_from_orchestrator_model_ranges(provider_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("clean conversation model ranges: {e}")))?;
         Ok(())
     }
 }
@@ -139,12 +145,15 @@ mod tests {
             Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
         let fleet_repo: Arc<dyn IFleetRepository> =
             Arc::new(SqliteFleetRepository::new(db.pool().clone()));
+        let conversation_repo: Arc<dyn IConversationRepository> =
+            Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
         (
             AppProviderDeletionCoordinator {
                 companion,
                 public_agent,
                 client_prefs,
                 fleet_repo,
+                conversation_repo,
             },
             db,
         )
@@ -212,5 +221,54 @@ mod tests {
         let after = get_global_failover_config(&coord.client_prefs).await;
         assert_eq!(after.queue.len(), 1);
         assert_eq!(after.queue[0].provider_id, "prov_keep");
+    }
+
+    #[tokio::test]
+    async fn cleanup_strips_provider_from_persisted_conversation_ranges() {
+        use nomifun_db::{IConversationRepository, SqliteConversationRepository, models::ConversationRow};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, db) = coordinator(dir.path()).await;
+        let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
+        let now = nomifun_common::now_ms();
+        let conversation_id = conversation_repo
+            .create(&ConversationRow {
+                id: 0,
+                user_id: "system_default_user".into(),
+                name: "cleanup target".into(),
+                r#type: "nomi".into(),
+                extra: serde_json::json!({
+                    "workspace": "/keep",
+                    "orchestrator_model_range": {
+                        "mode": "range",
+                        "models": [
+                            { "provider_id": "prov_x", "model": "gone" },
+                            { "provider_id": "prov_keep", "model": "live" }
+                        ]
+                    }
+                })
+                .to_string(),
+                model: None,
+                status: Some("pending".into()),
+                source: Some("nomifun".into()),
+                channel_chat_id: None,
+                pinned: false,
+                pinned_at: None,
+                cron_job_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        coord.cleanup_soft_refs("prov_x").await.unwrap();
+
+        let cleaned = conversation_repo.get(conversation_id).await.unwrap().unwrap();
+        let extra: serde_json::Value = serde_json::from_str(&cleaned.extra).unwrap();
+        assert_eq!(extra["workspace"], "/keep");
+        assert_eq!(
+            extra["orchestrator_model_range"]["models"],
+            serde_json::json!([{ "provider_id": "prov_keep", "model": "live" }])
+        );
     }
 }

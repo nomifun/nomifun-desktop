@@ -35,6 +35,15 @@ describe('Guid composer entry strip polish', () => {
     expect(css.includes('.entryCountBadge')).toBe(true);
   });
 
+  test('keeps the Skills count badge readable when a theme uses a light primary', () => {
+    const css = readSource(new URL('../index.module.css', import.meta.url));
+    const badge = classBlock(css, 'entryCountBadge');
+
+    expect(badge.includes('background: var(--control-selected-bg)')).toBe(true);
+    expect(badge.includes('color: var(--control-selected-fg)')).toBe(true);
+    expect(badge.includes('color: #fff')).toBe(false);
+  });
+
   test('does not advertise an unimplemented quick-switch shortcut', () => {
     const source = readSource(new URL('./ComposerEntryStrip.tsx', import.meta.url));
     const css = readSource(new URL('../index.module.css', import.meta.url));

@@ -9,6 +9,8 @@ export interface NormalizedToolCall {
   status: NormalizedToolStatus;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
+  /** Tool was not executed because an earlier call in the same assistant turn failed. */
+  skipped?: boolean;
   description?: string;
   input?: string;
   output?: string;
@@ -82,6 +84,7 @@ export function normalizeToolGroup(message: IMessageToolGroup): NormalizedToolCa
       key: toDisplayText(call_id),
       name: toDisplayText(name, 'Tool'),
       status: normalizeToolGroupStatus(status),
+      ...(status === 'Error' && confirmationDetails?.type === 'exec' ? { nonFatalFailure: true } : {}),
       description: desc,
       input,
       output: getResultDisplayText(result_display),
@@ -135,10 +138,13 @@ const hasShellCommandInput = (value: unknown): boolean => Boolean(pickShellComma
 
 const isNonFatalAcpToolFailure = (
   update: AcpToolCallUpdateCompat,
-  rawInput: Record<string, unknown> | undefined
+  rawInput: Record<string, unknown> | undefined,
+  output: string | undefined
 ): boolean => {
   if (update.status !== 'failed') return false;
-  if (update.kind === 'read') return true;
+  if (['read', 'glob', 'grep', 'search', 'find'].includes(update.kind)) {
+    return isExplicitProbeMiss(update.kind, output);
+  }
   if (update.kind !== 'execute') return false;
   if (hasShellCommandInput(rawInput)) return true;
   return shellCommandTitles.has(toDisplayText(update.title).trim().toLowerCase());
@@ -218,7 +224,7 @@ export function normalizeAcpToolCall(message: IMessageAcpToolCall): NormalizedTo
     key: toDisplayText(update.tool_call_id),
     name: toDisplayText(update.title, 'Tool'),
     status: normalizeAcpStatus(update.status),
-    ...(isNonFatalAcpToolFailure(update, rawInput) ? { nonFatalFailure: true } : {}),
+    ...(isNonFatalAcpToolFailure(update, rawInput, output) ? { nonFatalFailure: true } : {}),
     description: keyParam || commandText || kind,
     input,
     output,
@@ -243,6 +249,54 @@ function normalizeToolCallStatus(status?: unknown): NormalizedToolStatus {
   }
 }
 
+const isOrdinaryShellExit = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error') return false;
+  if (!shellCommandTitles.has(toDisplayText(name).trim().toLowerCase())) return false;
+
+  const text = toDisplayText(output);
+  const match = /^Exit code:\s*(-?\d+)(?:\r?\n|$)/.exec(text);
+  if (!match) return false;
+
+  const exitCode = Number(match[1]);
+  return (
+    Number.isInteger(exitCode) &&
+    exitCode !== 0 &&
+    exitCode !== -1 &&
+    !/(?:^|\r?\n)Signal:/m.test(text) &&
+    !/(?:^|\r?\n)Cleanup diagnostics:/m.test(text)
+  );
+};
+
+const directProbeToolTitles = new Set(['read', 'glob', 'grep', 'search', 'find']);
+
+const isExplicitProbeMiss = (name: unknown, output: unknown): boolean => {
+  const toolName = toDisplayText(name).trim().toLowerCase();
+  const text = toDisplayText(output).trim();
+  if (!text || text.startsWith('The turn ended before this tool completed:')) return false;
+
+  if (toolName === 'read') {
+    return (
+      /\(os error (?:2|3)\)/i.test(text) ||
+      /no such file or directory/i.test(text) ||
+      /(?:system )?cannot find the (?:file|path)/i.test(text)
+    );
+  }
+
+  if (toolName === 'glob') return /^No files matched the pattern\.?$/i.test(text);
+  return /^(?:No matches found|No files matched the pattern)\.?$/i.test(text);
+};
+
+const isOrdinaryDirectProbeFailure = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error') return false;
+  if (!directProbeToolTitles.has(toDisplayText(name).trim().toLowerCase())) return false;
+  return isExplicitProbeMiss(name, output);
+};
+
+const skippedAfterPriorErrorPrefix = 'Skipped because a previous tool call in this assistant turn failed.';
+
+const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
+  status === 'error' && toDisplayText(output).trimStart().startsWith(skippedAfterPriorErrorPrefix);
+
 export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall | undefined {
   const { call_id, name, status, input, output, args, description } = message.content;
   if (!call_id) return undefined;
@@ -252,11 +306,16 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     : args && Object.keys(args).length > 0
       ? formatValue(args)
       : undefined;
+  const skipped = isSkippedAfterPriorError(status, output);
 
   return {
     key: toDisplayText(call_id),
     name: toDisplayText(name, 'Tool'),
-    status: normalizeToolCallStatus(status),
+    status: skipped ? 'canceled' : normalizeToolCallStatus(status),
+    ...(skipped ? { skipped: true } : {}),
+    ...(isOrdinaryShellExit(name, status, output) || isOrdinaryDirectProbeFailure(name, status, output)
+      ? { nonFatalFailure: true }
+      : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output: output ? toDisplayText(output) : undefined,
