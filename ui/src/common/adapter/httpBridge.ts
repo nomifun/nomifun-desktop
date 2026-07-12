@@ -731,7 +731,7 @@ function ensureWs(): void {
 }
 
 function scheduleWsReconnect(): void {
-  if (wsReconnectTimer) return;
+  if (wsReconnectTimer || wsListeners.size === 0) return;
   const delay = Math.min(1000 * Math.pow(2, wsReconnectAttempt), 30000);
   wsReconnectAttempt++;
   wsReconnectTimer = setTimeout(() => {
@@ -759,7 +759,11 @@ export function wsEmitter<Params = undefined>(eventName: string): EmitterLike<Pa
       const cb = callback as WsCallback;
       wsListeners.get(eventName)!.add(cb);
       return () => {
-        wsListeners.get(eventName)?.delete(cb);
+        const listeners = wsListeners.get(eventName);
+        listeners?.delete(cb);
+        if (listeners?.size === 0) {
+          wsListeners.delete(eventName);
+        }
       };
     },
     emit: (() => {}) as EmitterLike<Params>['emit'],

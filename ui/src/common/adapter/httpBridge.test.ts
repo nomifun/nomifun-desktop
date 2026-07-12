@@ -42,6 +42,14 @@ function restoreBrowserGlobals() {
   }
 }
 
+function restoreWebSocketGlobal() {
+  if (realWebSocket === undefined) {
+    delete (globalThis as { WebSocket?: typeof WebSocket }).WebSocket;
+  } else {
+    globalThis.WebSocket = realWebSocket;
+  }
+}
+
 describe('httpRequest client deadline + network-failure diagnosis', () => {
   test('aborts and throws a legible timeout error when the request exceeds timeoutMs', async () => {
     // A fetch that never resolves on its own but honors the abort signal —
@@ -175,6 +183,8 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
 
 describe('httpBridge WebSocket heartbeat', () => {
   test('handles application heartbeat internally', () => {
+    const realSetTimeout = globalThis.setTimeout;
+    const scheduledReconnects: Array<() => void> = [];
     class FakeWebSocket {
       static readonly CONNECTING = 0;
       static readonly OPEN = 1;
@@ -220,6 +230,10 @@ describe('httpBridge WebSocket heartbeat', () => {
       } as Location,
     });
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    globalThis.setTimeout = ((callback: () => void) => {
+      scheduledReconnects.push(callback);
+      return scheduledReconnects.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
 
     let unsubscribe = () => {};
     let socket: FakeWebSocket | undefined;
@@ -238,10 +252,16 @@ describe('httpBridge WebSocket heartbeat', () => {
       expect(pong.name).toBe('pong');
       expect(typeof pong.data.timestamp).toBe('number');
       expect(dispatched.length).toBe(0);
+
+      unsubscribe();
+      unsubscribe = () => {};
+      socket.dispatch('close', { code: 1000, reason: 'test cleanup' });
+      expect(scheduledReconnects.length).toBe(0);
     } finally {
       unsubscribe();
       socket?.close();
-      globalThis.WebSocket = realWebSocket;
+      globalThis.setTimeout = realSetTimeout;
+      restoreWebSocketGlobal();
       restoreBrowserGlobals();
     }
   });
