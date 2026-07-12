@@ -736,12 +736,12 @@ button.guidResourceCard:focus-visible {
   justify-content: center;
   padding: 0 7px;
   border-radius: 999px;
-  color: #fff;
-  background: rgb(var(--primary-6));
+  color: var(--control-selected-fg);
+  background: var(--control-selected-bg);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
-  box-shadow: 0 4px 10px rgba(var(--primary-6), 0.18);
+  box-shadow: 0 4px 10px var(--control-focus-ring);
 }
 
 .entrySkillControl {
@@ -764,8 +764,8 @@ button.guidResourceCard:focus-visible {
 .entrySkillCountTrigger:hover,
 .entrySkillCountTrigger:focus-visible {
   transform: translateY(-1px);
-  background: rgb(var(--primary-5));
-  box-shadow: 0 6px 14px rgba(var(--primary-6), 0.24);
+  background: var(--control-selected-bg);
+  box-shadow: 0 6px 14px var(--control-focus-ring);
   outline: none;
 }
 
@@ -977,6 +977,10 @@ button.guidResourceCard:focus-visible {
 }
 
 .drawerSurface {
+  /* Selection states in the Skill drawer deliberately use one quiet, high
+     contrast black-and-white language instead of a theme-coloured glow. */
+  --skill-selection-bg: #151515;
+  --skill-selection-fg: #ffffff;
   --drawer-surface-bg:
     radial-gradient(circle at 18% 0%, color-mix(in srgb, rgb(var(--primary-6)) 13%, transparent), transparent 30%),
     linear-gradient(180deg, color-mix(in srgb, var(--color-bg-1) 78%, var(--color-bg-2)) 0%, var(--color-bg-2) 100%);
@@ -1055,11 +1059,9 @@ button.guidResourceCard:focus-visible {
 }
 
 .drawerSegmentActive {
-  color: rgb(var(--primary-6));
-  background: var(--drawer-accent-panel);
-  box-shadow:
-    0 8px 18px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent),
-    inset 0 0 0 1px color-mix(in srgb, rgb(var(--primary-6)) 12%, transparent);
+  color: var(--skill-selection-fg);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
 }
 
 .drawerCloseButton {
@@ -1208,17 +1210,15 @@ button.guidResourceCard:focus-visible {
 }
 
 .drawerCard:hover::before,
-.drawerCard:focus-visible::before,
-.drawerCardSelected::before {
+.drawerCard:focus-visible::before {
   background: color-mix(in srgb, rgb(var(--primary-6)) 48%, transparent);
 }
 
 .drawerCardSelected {
-  border-color: var(--drawer-accent-border);
-  background: var(--drawer-panel-selected-bg);
-  box-shadow:
-    inset 0 1px 0 var(--drawer-inner-highlight),
-    0 18px 38px color-mix(in srgb, rgb(var(--primary-6)) 14%, transparent);
+  color: var(--skill-selection-fg);
+  border-color: var(--skill-selection-fg);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
 }
 
 .drawerCardStatus {
@@ -1237,10 +1237,23 @@ button.guidResourceCard:focus-visible {
 }
 
 .drawerCardStatusSelected {
-  color: #fff;
-  border-color: rgb(var(--primary-6));
-  background: rgb(var(--primary-6));
-  box-shadow: 0 8px 18px rgba(var(--primary-6), 0.18);
+  color: var(--skill-selection-fg);
+  border-color: var(--skill-selection-fg);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
+}
+
+.drawerCardSelected .drawerCardTitle,
+.drawerCardSelected .drawerDescription,
+.drawerCardSelected .drawerTagChip,
+.drawerCardSelected .drawerBadgeMuted {
+  color: var(--skill-selection-fg);
+}
+
+.drawerCardSelected .drawerTagChip,
+.drawerCardSelected .drawerBadgeMuted {
+  border-color: color-mix(in srgb, var(--skill-selection-fg) 52%, transparent);
+  background: color-mix(in srgb, var(--skill-selection-fg) 10%, transparent);
 }
 
 .drawerIconTile {
@@ -1459,16 +1472,16 @@ button.guidResourceCard:focus-visible {
 
 .drawerPrimaryButton {
   margin-left: auto;
-  color: #fff;
-  border-color: rgba(var(--primary-6), 0.22);
-  background: rgb(var(--primary-6));
-  box-shadow: 0 12px 24px rgba(var(--primary-6), 0.2);
+  color: var(--skill-selection-fg);
+  border-color: var(--skill-selection-fg);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
 }
 
 .drawerPrimaryButton:hover,
 .drawerPrimaryButton:focus-visible {
-  background: rgba(var(--primary-6), 0.92);
-  box-shadow: 0 14px 28px rgba(var(--primary-6), 0.24);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
   outline: none;
   transform: translateY(-1px);
 }

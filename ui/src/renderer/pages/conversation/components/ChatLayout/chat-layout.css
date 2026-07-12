@@ -146,21 +146,13 @@
 
 .workspace-tool-rail__badge {
   position: absolute;
-  top: -3px;
-  right: -3px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
   border: 1px solid var(--bg-1);
-  border-radius: 99px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: rgb(var(--primary-6));
-  color: #fff;
-  font-size: 8px;
-  line-height: 1;
-  font-weight: 700;
+  border-radius: 50%;
+  background: rgb(var(--danger-6));
 }
 
 .workspace-tool-rail__status {

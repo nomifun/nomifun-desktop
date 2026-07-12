@@ -139,7 +139,7 @@ const AssistantTagPicker = forwardRef<AssistantTagPickerHandle, AssistantTagPick
                 'border border-solid transition-all duration-150 whitespace-nowrap',
                 readOnly ? 'cursor-default' : 'cursor-pointer',
                 active
-                  ? 'bg-[var(--color-primary-light-1)] text-[rgb(var(--primary-6))] border-[var(--color-primary-light-3)] font-medium'
+                  ? 'bg-[var(--control-selected-bg)] text-[var(--control-selected-fg)] border-[var(--control-selected-bg)] font-medium'
                   : 'bg-[var(--color-fill-2)] text-[var(--color-text-2)] border-[var(--color-border-2)] ' +
                     (readOnly ? '' : 'hover:bg-[var(--color-fill-3)] hover:text-[var(--color-text-1)]'),
               ].join(' ')}

@@ -5,6 +5,7 @@
  */
 
 import { processCustomCss } from '@renderer/utils/theme/customCssProcessor';
+import { ensureThemeControlContract } from '@renderer/utils/theme/themeControlContract';
 
 /**
  * Inject the active ambiance-preset CSS into a STANDALONE window that does not
@@ -40,6 +41,7 @@ export function injectCompanionCustomCss(css: string): void {
   const existing = document.getElementById(STYLE_ID);
   if (!css || !css.trim()) {
     existing?.remove();
+    ensureThemeControlContract();
     return;
   }
 
@@ -58,4 +60,5 @@ export function injectCompanionCustomCss(css: string): void {
   styleEl.type = 'text/css';
   styleEl.textContent = content;
   document.head.appendChild(styleEl);
+  ensureThemeControlContract();
 }

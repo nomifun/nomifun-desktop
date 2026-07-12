@@ -68,6 +68,15 @@ const APP_VARS = [
   'color-guid-agent-bar',
   'terminal-surface-bg',
   'terminal-border',
+  // Accessible interactive-control palette. Kept separate from the brand
+  // primary because Arco renders selected indicators with a fixed foreground.
+  'control-selected-bg',
+  'control-selected-fg',
+  'control-idle-bg',
+  'control-idle-border',
+  'control-hover-bg',
+  'control-disabled-selected-bg',
+  'control-focus-ring',
 ];
 
 /** 契约 B 表：Arco token（必须打在含 body 的选择器组） / Contract table B: Arco tokens */
