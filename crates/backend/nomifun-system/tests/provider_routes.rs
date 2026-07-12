@@ -38,9 +38,8 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,
-        ocr_model_service: None,
-        image_model_service: None,
+        local_model_service: None,        image_model_service: None,
+        lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
         data_dir: std::env::temp_dir(),
@@ -102,7 +101,7 @@ async fn create_one(db: &nomifun_db::Database) -> (serde_json::Value, String) {
 }
 
 // ===========================================================================
-// GET /api/providers â€” list
+// GET /api/providers â€?list
 // ===========================================================================
 
 #[tokio::test]
@@ -249,7 +248,7 @@ async fn provider_sort_order_rejects_negative_values() {
 }
 
 // ===========================================================================
-// POST /api/providers â€” create
+// POST /api/providers â€?create
 // ===========================================================================
 
 #[tokio::test]
@@ -433,7 +432,7 @@ async fn create_provider_invalid_url() {
 }
 
 // ===========================================================================
-// PUT /api/providers/{id} â€” update
+// PUT /api/providers/{id} â€?update
 // ===========================================================================
 
 #[tokio::test]
@@ -545,7 +544,7 @@ async fn full_crud_flow() {
     let (create_json, id) = create_one(&db).await;
     assert_eq!(create_json["data"]["platform"], "anthropic");
 
-    // 2. List â€” should contain one
+    // 2. List â€?should contain one
     let app2 = system_routes(build_state(&db));
     let resp = app2.oneshot(get_request("/api/providers")).await.unwrap();
     let list_json = body_json(resp).await;

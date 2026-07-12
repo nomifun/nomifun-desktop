@@ -21,17 +21,23 @@ const LocalModelDetails: React.FC<LocalModelDetailsProps> = ({ forcedOpen = fals
   const open = manualOpen || forcedOpen;
 
   return (
-    <div className={classNames('mt-10px border-t border-solid border-[var(--color-border-2)] pt-8px', className)}>
+    <div className={classNames('mt-9px', className)}>
       <button
         type='button'
         aria-expanded={open}
         aria-disabled={forcedOpen}
         onClick={() => !forcedOpen && setManualOpen((current) => !current)}
         className={classNames(
-          'h-28px w-full border-none bg-transparent px-1px flex items-center justify-between gap-8px text-11px font-500 text-t-secondary transition-colors',
-          forcedOpen ? 'cursor-default' : 'cursor-pointer hover:text-t-primary'
+          'h-28px border-none rd-7px px-8px inline-flex items-center gap-5px text-11px font-500 transition-colors',
+          open ? 'bg-[var(--color-fill-2)] text-t-primary' : 'bg-transparent text-t-secondary',
+          forcedOpen ? 'cursor-default' : 'cursor-pointer hover:bg-[var(--color-fill-2)] hover:text-t-primary'
         )}
       >
+        <Down
+          theme='outline'
+          size='12'
+          className={classNames('transition-transform duration-180', open ? 'rotate-180' : '-rotate-90')}
+        />
         <span>
           {t(
             open
@@ -39,13 +45,8 @@ const LocalModelDetails: React.FC<LocalModelDetailsProps> = ({ forcedOpen = fals
               : 'settings.modelHub.local.capabilityCenter.details'
           )}
         </span>
-        <Down
-          theme='outline'
-          size='13'
-          className={classNames('transition-transform duration-180', open && 'rotate-180')}
-        />
       </button>
-      {open && <div className='pt-7px'>{children}</div>}
+      {open && <div className='mt-8px px-2px'>{children}</div>}
     </div>
   );
 };

@@ -7,7 +7,6 @@
 export type LocalModelCapabilityKey =
   | 'text'
   | 'image'
-  | 'ocr'
   | 'speech_recognition'
   | 'speech_synthesis';
 
@@ -19,7 +18,6 @@ export interface LocalModelCapabilityDefinition {
 export const LOCAL_MODEL_CAPABILITIES: readonly LocalModelCapabilityDefinition[] = [
   { key: 'text', implemented: true },
   { key: 'image', implemented: true },
-  { key: 'ocr', implemented: true },
   { key: 'speech_recognition', implemented: false },
   { key: 'speech_synthesis', implemented: false },
 ];

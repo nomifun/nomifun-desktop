@@ -83,13 +83,6 @@ Z-Image VAE artifact
   qualification before the user chooses to download it. Re-check upstream
   provenance and terms before any redistribution.
 
-PP-OCRv6 Small ONNX exports
-  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/tree/28fe5895c24fd108c19eb3e8479f4ab385fbfc62
-  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/tree/b8f84f0b80c529de40b4fbb3544b84fa7233a513
-  Developed by PaddlePaddle contributors and licensed under Apache-2.0.
-  NomiFun optionally downloads the detector, recognizer, preprocessing
-  configuration, and recognition dictionary only after user confirmation.
-
 These attributions do not imply endorsement by the upstream authors.
 
 Our sincere thanks to the maintainers and communities of the open-source

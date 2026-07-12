@@ -16,7 +16,6 @@ describe('local model capability center view state', () => {
     expect(LOCAL_MODEL_CAPABILITIES.map(({ key, implemented }) => [key, implemented])).toEqual([
       ['text', true],
       ['image', true],
-      ['ocr', true],
       ['speech_recognition', false],
       ['speech_synthesis', false],
     ]);

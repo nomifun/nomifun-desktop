@@ -13,7 +13,6 @@ import { useSettingsViewMode } from '@/renderer/components/settings/SettingsModa
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import ImageModelsPanel from './ImageModelsPanel';
 import LocalModelCapabilityTabs from './LocalModelCapabilityTabs';
-import OcrModelsPanel from './OcrModelsPanel';
 import TextModelsPanel from './TextModelsPanel';
 import {
   capabilityActivity,
@@ -23,7 +22,6 @@ import {
 } from './localModelCapabilityView';
 import { useLocalImageModels } from './useLocalImageModels';
 import { useLocalModels } from './useLocalModels';
-import { useLocalOcrModels } from './useLocalOcrModels';
 
 const LocalModelsContent: React.FC = () => {
   const { t } = useTranslation();
@@ -32,7 +30,6 @@ const LocalModelsContent: React.FC = () => {
   const [activeCapability, setActiveCapability] = useState<LocalModelCapabilityKey>('text');
   const text = useLocalModels();
   const image = useLocalImageModels();
-  const ocr = useLocalOcrModels();
 
   const activity: Partial<Record<LocalModelCapabilityKey, CapabilityActivity>> = {
     text: capabilityActivity(
@@ -43,13 +40,9 @@ const LocalModelsContent: React.FC = () => {
       (image.status?.models.map((model) => model.installPhase) ?? []) as ModelTransferPhase[],
       Boolean(image.statusError || image.status?.lastError)
     ),
-    ocr: capabilityActivity(
-      (ocr.status?.models.map((model) => model.installPhase) ?? []) as ModelTransferPhase[],
-      Boolean(ocr.statusError || ocr.status?.lastError)
-    ),
   };
 
-  const activeController = activeCapability === 'image' ? image : activeCapability === 'ocr' ? ocr : text;
+  const activeController = activeCapability === 'image' ? image : text;
 
   const refreshActiveCapability = (): void => {
     void activeController.refresh().catch((error) => {
@@ -105,9 +98,6 @@ const LocalModelsContent: React.FC = () => {
         </div>
         <div role='tabpanel' aria-label={t('settings.modelHub.local.capabilityCenter.tabs.image')} hidden={activeCapability !== 'image'}>
           <ImageModelsPanel controller={image} />
-        </div>
-        <div role='tabpanel' aria-label={t('settings.modelHub.local.capabilityCenter.tabs.ocr')} hidden={activeCapability !== 'ocr'}>
-          <OcrModelsPanel controller={ocr} />
         </div>
       </NomiScrollArea>
     </div>

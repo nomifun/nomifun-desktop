@@ -1297,7 +1297,6 @@
         "tabs": {
           "text": "文本理解",
           "image": "图片生成",
-          "ocr": "OCR",
           "speechRecognition": "语音识别",
           "speechSynthesis": "语音合成"
         },
@@ -1393,85 +1392,6 @@
         "busy": "另一个本地模型操作正在进行",
         "notFound": "模型或本地文件不存在",
         "unknown": "本地模型操作失败"
-      },
-      "ocr": {
-        "title": "本地 OCR（实验性）",
-        "subtitle": "当前仅提供 OCR 模型文件的按需下载与管理，尚未接入文字识别。",
-        "refresh": "刷新状态",
-        "refreshHint": "重新检查 OCR 模型文件和推理可用状态",
-        "onDemandTitle": "由你决定何时下载。",
-        "onDemandNotice": "只有点击“下载模型文件”后才会联网实时下载；不会预装或静默下载。暂停会保留断点。当前版本下载完成后仍不能执行 OCR 识别。",
-        "loading": "正在检查本地 OCR",
-        "loadFailed": "暂时无法读取本地 OCR 状态",
-        "loadFailedHint": "本地服务可能仍在启动，请稍后刷新。",
-        "empty": "暂时没有可安装的 OCR 模型",
-        "recommended": "推荐",
-        "catalogDescription": "PP-OCRv6 Small 中英文检测与识别模型文件。当前版本只管理下载，后续接入推理运行组件和识别入口。",
-        "actionFailed": "OCR 模型操作失败，请稍后重试",
-        "installSuccess": "已开始实时下载 OCR 模型文件",
-        "pauseSuccess": "下载已暂停，断点已保留",
-        "resumeSuccess": "已从断点继续下载",
-        "deleteSuccess": "OCR 模型文件已删除",
-        "deleteConfirmTitle": "删除 OCR 模型？",
-        "deleteConfirmContent": "将删除 {{model}} 的本地文件和下载断点；以后仍可重新下载。",
-        "deleteModelLabel": "删除 {{model}}",
-        "readiness": {
-          "artifacts": "模型文件",
-          "artifactsReady": "检测与识别文件完整",
-          "artifactsMissing": "尚未完整下载",
-          "ready": "已就绪",
-          "notReady": "未就绪",
-          "inference": "OCR 推理",
-          "inferenceReady": "可以在 NomiFun 中使用",
-          "runtimePending": "当前版本尚未接入推理",
-          "installFirst": "当前版本尚未接入推理",
-          "available": "可使用",
-          "unavailable": "暂不可用",
-          "runtimePendingHint": "这里只完成了模型文件管理；ONNX 推理、预处理/后处理和识别入口尚未接入，因此当前不能执行 OCR。"
-        },
-        "phase": {
-          "notInstalled": "未安装",
-          "downloading": "下载中",
-          "verifying": "校验中",
-          "installed": "文件已安装",
-          "paused": "已暂停",
-          "failed": "安装失败"
-        },
-        "component": {
-          "detector": "文字检测",
-          "detectorConfig": "检测配置",
-          "recognizer": "文字识别",
-          "recognizerConfig": "识别字典与配置"
-        },
-        "action": {
-          "install": "下载模型文件",
-          "pause": "暂停下载",
-          "resume": "继续下载",
-          "retry": "重新下载",
-          "delete": "删除"
-        },
-        "metadata": {
-          "download": "下载 {{size}}",
-          "memory": "建议可用内存 {{size}}",
-          "source": "来源：{{source}}"
-        },
-        "progress": {
-          "overall": "总下载进度",
-          "preparing": "准备中",
-          "currentComponent": "当前：{{component}}",
-          "verifyingHint": "正在校验文件完整性，请保持 NomiFun 打开。",
-          "checkpointSaved": "下载断点已保留"
-        },
-        "error": {
-          "network": "网络连接失败，可从断点继续",
-          "insufficientSpace": "磁盘可用空间不足",
-          "checksumMismatch": "文件校验失败，请重新下载",
-          "unsupportedPlatform": "当前系统或处理器暂不受支持",
-          "runtimeUnavailable": "本地 OCR 运行组件不可用",
-          "busy": "另一个本地模型操作正在进行",
-          "notFound": "OCR 模型或本地文件不存在",
-          "unknown": "本地 OCR 操作失败"
-        }
       },
       "image": {
         "title": "本地图片生成",

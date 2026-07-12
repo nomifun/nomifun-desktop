@@ -27,7 +27,6 @@ pub mod model_capability;
 pub mod model_catalog;
 pub mod model_task;
 mod office;
-mod ocr_model;
 mod orchestrator;
 mod provider;
 mod remote_agent;
@@ -177,10 +176,6 @@ pub use office::{
     PreviewHistoryTargetDto, PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent,
     PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse,
     StartPreviewRequest, StopPreviewRequest,
-};
-pub use ocr_model::{
-    OcrModelCatalogEntry, OcrModelComponent, OcrModelServiceStatus, OcrModelState,
-    OcrModelTransferProgress,
 };
 pub use orchestrator::{
     Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,

@@ -1171,6 +1171,46 @@ impl ImageModelService {
     }
 }
 
+/// Curated image metadata without creating directories or downloader state.
+pub fn image_model_catalog() -> Vec<ImageModelCatalogEntry> {
+    let (artifacts, _) = production_artifacts();
+    vec![catalog_entry(&artifacts)]
+}
+
+/// Fresh-install status used before the lazy local runtime is initialized.
+pub fn inactive_image_model_status() -> ImageModelServiceStatus {
+    let (_, supported) = production_artifacts();
+    let model = ImageModelState {
+        model_id: Z_IMAGE_TURBO_MODEL_ID.into(),
+        install_phase: ImageModelInstallPhase::NotInstalled,
+        component_progress: component_order()
+            .iter()
+            .copied()
+            .map(|component| ImageModelComponentProgress {
+                component,
+                install_phase: ImageModelInstallPhase::NotInstalled,
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                installed_bytes: 0,
+                bytes_per_second: 0,
+                error_kind: None,
+                message: None,
+            })
+            .collect(),
+        installed_bytes: 0,
+        error_kind: (!supported).then_some(LocalModelErrorKind::UnsupportedPlatform),
+        message: None,
+    };
+    ImageModelServiceStatus {
+        protocol_version: IMAGE_PROTOCOL_VERSION.into(),
+        artifacts_ready: false,
+        inference_ready: false,
+        runtime_phase: ImageModelRuntimePhase::Unavailable,
+        models: vec![model],
+        last_error: None,
+    }
+}
+
 fn production_artifacts() -> (Vec<ImageArtifact>, bool) {
     let mut artifacts = Vec::with_capacity(4);
     let supported = if let Some(runtime) = current_sd_cpp_runtime_artifact() {
