@@ -48,6 +48,7 @@ describe('Guid agent cluster controls', () => {
   test('reconciles persisted collaborators before rendering or creating a range', () => {
     const pageSource = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const selectorSource = readSource(new URL('./components/GuidCollaboratorSelector.tsx', import.meta.url));
+    const providerHookSource = readSource(new URL('../../hooks/agent/useModelProviderList.ts', import.meta.url));
 
     expect(pageSource.includes("import { reconcileModelRefs, sameModelRefs }")).toBe(true);
     expect(pageSource.includes('const activeCollaborators = collaboratorReconciliation?.active ?? []')).toBe(true);
@@ -59,5 +60,6 @@ describe('Guid agent cluster controls', () => {
     expect(selectorSource.includes('const availableKeys = useMemo(')).toBe(true);
     expect(selectorSource.includes('availableKeys.has(encodedMain)')).toBe(true);
     expect(selectorSource.includes('disabled={isLoading}')).toBe(true);
+    expect(providerHookSource.includes('!Array.isArray(modelConfig)')).toBe(true);
   });
 });
