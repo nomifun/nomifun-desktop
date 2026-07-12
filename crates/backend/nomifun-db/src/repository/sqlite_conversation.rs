@@ -274,6 +274,40 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
+    async fn remove_provider_from_orchestrator_model_ranges(
+        &self,
+        provider_id: &str,
+    ) -> Result<u64, DbError> {
+        let result = sqlx::query(
+            "UPDATE conversations AS c \
+             SET extra = json_set( \
+                 c.extra, \
+                 '$.orchestrator_model_range.models', \
+                 COALESCE( \
+                     (SELECT json_group_array(json(item.value)) \
+                      FROM json_each(c.extra, '$.orchestrator_model_range.models') AS item \
+                      WHERE json_extract(item.value, '$.provider_id') IS NULL \
+                         OR json_extract(item.value, '$.provider_id') != ?), \
+                     json('[]') \
+                 ) \
+             ) \
+             WHERE json_valid(c.extra) \
+               AND json_extract(c.extra, '$.orchestrator_model_range.mode') = 'range' \
+               AND json_type(c.extra, '$.orchestrator_model_range.models') = 'array' \
+               AND EXISTS ( \
+                   SELECT 1 \
+                   FROM json_each(c.extra, '$.orchestrator_model_range.models') AS target \
+                   WHERE json_extract(target.value, '$.provider_id') = ? \
+               )",
+        )
+        .bind(provider_id)
+        .bind(provider_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     // ── Message operations ──────────────────────────────────────────
 
     async fn get_messages(
@@ -945,6 +979,64 @@ mod tests {
         assert_eq!(found.r#type, "gemini");
         assert_eq!(found.status.as_deref(), Some("pending"));
         assert!(!found.pinned);
+    }
+
+    #[tokio::test]
+    async fn remove_provider_from_orchestrator_model_ranges_preserves_other_extra_and_order() {
+        let (repo, _db) = setup().await;
+
+        let mut target = sample_conversation(SYSTEM_USER_ID);
+        target.extra = serde_json::json!({
+            "workspace": "/keep",
+            "unrelated": { "enabled": true },
+            "orchestrator_model_range": {
+                "mode": "range",
+                "models": [
+                    { "provider_id": "gone", "model": "g1" },
+                    { "provider_id": "keep", "model": "k2" },
+                    { "provider_id": "gone", "model": "g2" },
+                    { "provider_id": "keep", "model": "k1" }
+                ]
+            }
+        })
+        .to_string();
+        let target_id = repo.create(&target).await.unwrap();
+
+        let mut unrelated = sample_conversation(SYSTEM_USER_ID);
+        unrelated.extra = serde_json::json!({
+            "workspace": "/untouched",
+            "orchestrator_model_range": {
+                "mode": "range",
+                "models": [{ "provider_id": "keep", "model": "k3" }]
+            }
+        })
+        .to_string();
+        let unrelated_extra = unrelated.extra.clone();
+        let unrelated_id = repo.create(&unrelated).await.unwrap();
+
+        let mut malformed = sample_conversation(SYSTEM_USER_ID);
+        malformed.extra = "{not-json".to_string();
+        let malformed_id = repo.create(&malformed).await.unwrap();
+
+        let changed = repo
+            .remove_provider_from_orchestrator_model_ranges("gone")
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+
+        let cleaned: serde_json::Value =
+            serde_json::from_str(&repo.get(target_id).await.unwrap().unwrap().extra).unwrap();
+        assert_eq!(cleaned["workspace"], "/keep");
+        assert_eq!(cleaned["unrelated"], serde_json::json!({ "enabled": true }));
+        assert_eq!(
+            cleaned["orchestrator_model_range"]["models"],
+            serde_json::json!([
+                { "provider_id": "keep", "model": "k2" },
+                { "provider_id": "keep", "model": "k1" }
+            ])
+        );
+        assert_eq!(repo.get(unrelated_id).await.unwrap().unwrap().extra, unrelated_extra);
+        assert_eq!(repo.get(malformed_id).await.unwrap().unwrap().extra, "{not-json");
     }
 
     #[tokio::test]

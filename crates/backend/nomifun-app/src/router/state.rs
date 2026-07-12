@@ -316,6 +316,7 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
         public_agent: services.public_agent_service.clone(),
         client_prefs: client_pref_repo,
         fleet_repo,
+        conversation_repo: services.conversation_repo.clone(),
     });
 
     SystemRouterState {
