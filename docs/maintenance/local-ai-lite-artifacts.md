@@ -1,6 +1,6 @@
 # Local AI Lite 制品维护
 
-本文记录 Local AI Lite 当前允许下载的固定制品，以及更新 URL、大小和 SHA-256 的最小安全流程。实现中的唯一事实来源是 `crates/backend/nomifun-system/src/local_model.rs`；本文必须与其中的 `RUNTIME_VERSION`、`runtime_artifact()` 和 `built_in_catalog()` 同步更新。
+本文记录 Local AI Lite 当前允许下载的固定制品，以及更新 URL、大小和 SHA-256 的最小安全流程。实现中的事实来源为 `nomifun-system/src/local_model.rs`、`nomifun-system/src/ocr_model.rs` 与 `nomifun-creation/src/adapters/local_image.rs`；本文必须与代码同步更新。
 
 ## 当前固定制品
 
@@ -33,8 +33,33 @@ https://huggingface.co/{repository}/resolve/{revision}/{file}
 |---|---|---|---:|---|
 | Qwen3.5 4B Q4_K_M | `unsloth/Qwen3.5-4B-GGUF@e87f176479d0855a907a41277aca2f8ee7a09523` | `Qwen3.5-4B-Q4_K_M.gguf` | 2,740,937,888 | `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4` |
 | Qwen3.5 9B Q4_K_M | `unsloth/Qwen3.5-9B-GGUF@3885219b6810b007914f3a7950a8d1b469d598a5` | `Qwen3.5-9B-Q4_K_M.gguf` | 5,680,522,464 | `03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8` |
+| Qwen3.5 4B 视觉投影器 | `unsloth/Qwen3.5-4B-GGUF@e87f176479d0855a907a41277aca2f8ee7a09523` | `mmproj-F16.gguf` | 672,423,616 | `cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864` |
+| Qwen3.5 9B 视觉投影器 | `unsloth/Qwen3.5-9B-GGUF@3885219b6810b007914f3a7950a8d1b469d598a5` | `mmproj-F16.gguf` | 918,166,080 | `f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f` |
 
 模型来自 Qwen Team 的 Qwen3.5 Apache-2.0 模型；GGUF 转换和量化由 Hugging Face 组织 `unsloth` 发布。固定的 llama.cpp `b9957` runtime 已确认能够识别 `qwen35` 架构。两个 GGUF 的原生上下文元数据为 262K，NomiFun 为控制普通设备上的 KV cache 占用，将运行上下文统一限制为 65,536。固定 revision 的模型卡是来源与归属记录的一部分，不得只保留文件直链。
+
+### Z-Image-Turbo 本地生图
+
+运行时固定为 stable-diffusion.cpp `master-775-b5d8120`。当前支持 Windows x86_64 Vulkan、macOS ARM64 Metal 与 Linux x86_64 Vulkan；平台不匹配时不得开始下载。
+
+| 制品 | repository/release | 大小（bytes） | SHA-256 |
+|---|---|---:|---|
+| Z-Image-Turbo Q3_K | `leejet/Z-Image-Turbo-GGUF@c61c0e422dc8b541b7548cf33a4ef8302b0f8085` | 3,143,559,104 | `4b44bdaa7814f20d7cf144e3939bd93aa32f50660204dd0c2aea5c5376232980` |
+| Qwen3-4B 文本编码器 Q4_K_M | `unsloth/Qwen3-4B-Instruct-2507-GGUF@a06e946bb6b655725eafa393f4a9745d460374c9` | 2,497,281,120 | `3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597` |
+| VAE | `Comfy-Org/z_image_turbo@d24c4cf2a0cd98a42f23467e27e3d76ee9438b8e` | 335,304,388 | `afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38` |
+
+三件模型文件合计 5,976,144,612 bytes。VAE 仓库卡未声明许可证，必须保留 NOTICE 与 UI 风险提示，不得随安装包重分发。安装后首次生成会重验全部 SHA，并从已验证 runtime ZIP 原子重建可执行目录。
+
+### PP-OCRv6 Small
+
+| 制品 | repository @ revision | 大小（bytes） | SHA-256 |
+|---|---|---:|---|
+| detector ONNX | `PaddlePaddle/PP-OCRv6_small_det_onnx@28fe5895c24fd108c19eb3e8479f4ab385fbfc62` | 9,880,512 | `d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e` |
+| detector config | 同上，`inference.yml` | 885 | `193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516` |
+| recognizer ONNX | `PaddlePaddle/PP-OCRv6_small_rec_onnx@b8f84f0b80c529de40b4fbb3544b84fa7233a513` | 21,159,378 | `5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634` |
+| recognizer dictionary/config | 同上，`inference.yml` | 150,579 | `ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1` |
+
+OCR 固定制品总计 31,191,354 bytes，均为 Apache-2.0。当前控制面仅在用户选择后下载并校验；在 ONNX 执行器完整接通前，API 必须保持 `inferenceReady=false`，UI 不得宣称可直接识别。
 
 ### 从旧目录迁移
 
@@ -75,7 +100,7 @@ https://huggingface.co/{repository}/resolve/{revision}/{file}
 
 8. **做干净机器冒烟测试。** 每个受支持的 OS/架构至少验证一次：首次下载、断点续传、取消后继续、错误 SHA 拒绝、安装后启动、`/v1/models`、流式对话、切换模型、停止和删除。退出 NomiFun 后不得残留 `llama-server`。
 
-   4B 的真实安装与流式推理测试默认忽略（会下载约 2.8 GB），可显式运行：
+   4B 的真实安装与流式推理测试默认忽略（含视觉投影器约 3.42 GB），可显式运行：
 
    ```powershell
    cargo test -p nomifun-system real_qwen_3_5_4b_install_and_streaming_smoke_test --lib -- --ignored --nocapture

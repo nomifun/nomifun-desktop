@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -28,6 +28,7 @@ use nomifun_api_types::{
     LocalModelProgressComponent, LocalModelRuntimeBackend, LocalModelRuntimePhase,
     LocalModelServiceStatus, LocalModelState, LocalModelTransferProgress,
     LocalRuntimeStatus, ManagedModelServiceKind, ModelTask,
+    ModelTrait,
 };
 use nomifun_common::{encrypt_string, AppError};
 use nomifun_db::{
@@ -56,6 +57,9 @@ const DISK_SAFETY_BYTES: u64 = 64 * 1024 * 1024;
 const RESTART_BACKOFF_BASE_SECS: u64 = 2;
 const RESTART_BACKOFF_MAX_SECS: u64 = 60;
 const DOWNLOAD_ATTEMPTS_PER_SOURCE: usize = 3;
+/// Four sanitized 1.5 MiB images expand to roughly 8 MiB as base64. Keep the
+/// loopback facade explicit and bounded while leaving room for JSON and text.
+const LOCAL_CHAT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 const RETIRED_MODEL_ARTIFACTS: [(&str, &str); 3] = [
     ("qwen3-0.6b-q4-k-m", "qwen3-0.6b-q4-k-m.gguf"),
     ("qwen3-1.7b-q4-k-m", "qwen3-1.7b-q4-k-m.gguf"),
@@ -65,9 +69,22 @@ const RETIRED_MODEL_ARTIFACTS: [(&str, &str); 3] = [
 #[derive(Clone)]
 struct ModelArtifact {
     entry: LocalModelCatalogEntry,
+    /// Size of the language-model GGUF. `entry.download_size_bytes` is the
+    /// aggregate user-visible download size including optional components.
+    model_size_bytes: u64,
     file_name: &'static str,
     url: &'static str,
     sha256: &'static str,
+    vision_projector: Option<ComponentArtifact>,
+}
+
+#[derive(Clone, Copy)]
+struct ComponentArtifact {
+    file_name: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    size: u64,
+    progress_component: LocalModelProgressComponent,
 }
 
 #[derive(Clone, Copy)]
@@ -177,6 +194,12 @@ struct ProviderProjection {
     encrypted_token: String,
 }
 
+#[derive(Debug, Clone)]
+struct AuxiliaryProjectionModel {
+    id: String,
+    description: String,
+}
+
 #[derive(Debug)]
 struct LocalFailure {
     kind: LocalModelErrorKind,
@@ -233,6 +256,10 @@ pub struct LocalModelService {
     start_lock: Mutex<()>,
     inference_gate: Arc<Semaphore>,
     projection: RwLock<Option<ProviderProjection>>,
+    auxiliary_projection_models: RwLock<HashMap<String, AuxiliaryProjectionModel>>,
+    /// Serializes projections owned by the chat and image control planes so a
+    /// slower stale write cannot erase a model installed by the other plane.
+    projection_sync_lock: Mutex<()>,
 }
 
 impl LocalModelService {
@@ -273,17 +300,22 @@ impl LocalModelService {
         let mut models = HashMap::new();
         for model in &catalog {
             let final_path = model_path_at(&root, model);
-            let partial_path = partial_path(&final_path);
+            let model_partial_path = partial_path(&final_path);
             prepare_managed_file(&root, &final_path)
-                .and_then(|_| prepare_managed_file(&root, &partial_path))
+                .and_then(|_| prepare_managed_file(&root, &model_partial_path))
                 .map_err(|e| AppError::Internal(format!("validate local model path: {e}")))?;
-            let final_len = file_len(&final_path).await;
+            if let Some(component) = model.vision_projector {
+                let component_path = component_path_at(&root, model, &component);
+                prepare_managed_file(&root, &component_path)
+                    .and_then(|_| prepare_managed_file(&root, &partial_path(&component_path)))
+                    .map_err(|e| AppError::Internal(format!("validate local model component path: {e}")))?;
+            }
             let installed = persisted.installed_model_ids.iter().any(|id| id == &model.entry.id)
-                && final_len == model.entry.download_size_bytes;
-            let paused_bytes = file_len(&partial_path).await;
+                && artifact_files_installed(&root, model).await;
+            let downloaded_bytes = downloaded_artifact_bytes(&root, model).await;
             let install_phase = if installed {
                 LocalModelInstallPhase::Installed
-            } else if paused_bytes > 0 {
+            } else if downloaded_bytes > 0 {
                 LocalModelInstallPhase::Paused
             } else {
                 LocalModelInstallPhase::NotInstalled
@@ -299,7 +331,7 @@ impl LocalModelService {
                     model_id: model.entry.id.clone(),
                     install_phase,
                     progress: None,
-                    installed_bytes: if installed { final_len } else { paused_bytes },
+                    installed_bytes: downloaded_bytes,
                     runtime_phase: LocalModelRuntimePhase::Stopped,
                     error_kind: None,
                     message: None,
@@ -345,6 +377,8 @@ impl LocalModelService {
             start_lock: Mutex::new(()),
             inference_gate: Arc::new(Semaphore::new(1)),
             projection: RwLock::new(None),
+            auxiliary_projection_models: RwLock::new(HashMap::new()),
+            projection_sync_lock: Mutex::new(()),
         }))
     }
 
@@ -394,6 +428,46 @@ impl LocalModelService {
             .clone()
             .try_acquire_owned()
             .map_err(|_| AppError::Conflict("本地模型正在生成内容，请稍后再切换。".into()))
+    }
+
+    /// Shared one-at-a-time gate for heavyweight local GPU/RAM workloads.
+    /// The image-generation adapter uses this same permit as chat inference.
+    pub fn workload_gate(&self) -> Arc<Semaphore> {
+        self.inference_gate.clone()
+    }
+
+    /// Add or remove an installed non-chat model from the managed provider.
+    /// Installation services call this only after all pinned artifacts have
+    /// passed verification; partial downloads never become selectable.
+    pub async fn set_auxiliary_model_projection(
+        &self,
+        model_id: &str,
+        description: &str,
+        installed: bool,
+    ) -> Result<(), AppError> {
+        let model_id = model_id.trim();
+        if model_id.is_empty()
+            || self.catalog.iter().any(|artifact| artifact.entry.id == model_id)
+        {
+            return Err(AppError::BadRequest(
+                "辅助本地模型 ID 为空或与语言模型冲突。".into(),
+            ));
+        }
+        {
+            let mut models = self.auxiliary_projection_models.write().await;
+            if installed {
+                models.insert(
+                    model_id.to_owned(),
+                    AuxiliaryProjectionModel {
+                        id: model_id.to_owned(),
+                        description: description.trim().to_owned(),
+                    },
+                );
+            } else {
+                models.remove(model_id);
+            }
+        }
+        self.sync_provider_projection().await
     }
 
     /// Start or resume a model install. The transfer runs in the background;
@@ -507,6 +581,17 @@ impl LocalModelService {
             })?;
         remove_file_if_exists(&final_path).await?;
         remove_file_if_exists(&part_path).await?;
+        if let Some(component) = artifact.vision_projector {
+            let component_path = component_path_at(&self.root, &artifact, &component);
+            let component_part_path = partial_path(&component_path);
+            prepare_managed_file(&self.root, &component_path)
+                .and_then(|_| prepare_managed_file(&self.root, &component_part_path))
+                .map_err(|error| {
+                    AppError::Internal(format!("validate local model component deletion path: {error}"))
+                })?;
+            remove_file_if_exists(&component_path).await?;
+            remove_file_if_exists(&component_part_path).await?;
+        }
         if let Some(parent) = final_path.parent() {
             let _ = tokio::fs::remove_dir(parent).await;
         }
@@ -585,13 +670,29 @@ impl LocalModelService {
         self.download_verified(
             artifact.url,
             artifact.sha256,
-            artifact.entry.download_size_bytes,
+            artifact.model_size_bytes,
             &destination,
             &artifact.entry.id,
             LocalModelProgressComponent::Model,
             &cancel,
         )
         .await?;
+        if cancel.is_cancelled() {
+            return Err(LocalFailure::cancelled());
+        }
+        if let Some(component) = artifact.vision_projector {
+            let destination = component_path_at(&self.root, artifact, &component);
+            self.download_verified(
+                component.url,
+                component.sha256,
+                component.size,
+                &destination,
+                &artifact.entry.id,
+                component.progress_component,
+                &cancel,
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -641,12 +742,12 @@ impl LocalModelService {
                 }
             }
             Err(failure) if failure.detail == "download cancelled by user" => {
-                let part_len = file_len(&partial_path(&model_path_at(&self.root, artifact))).await;
+                let downloaded_bytes = downloaded_artifact_bytes(&self.root, artifact).await;
                 let mut state = self.state.lock().await;
                 if let Some(model) = state.models.get_mut(&artifact.entry.id) {
                     model.install_phase = LocalModelInstallPhase::Paused;
                     model.progress = None;
-                    model.installed_bytes = part_len;
+                    model.installed_bytes = downloaded_bytes;
                     model.error_kind = None;
                     model.message = Some(failure.safe_message.into());
                 }
@@ -679,6 +780,15 @@ impl LocalModelService {
         total_bytes: u64,
         bytes_per_second: u64,
     ) {
+        let completed_model_bytes = if component == LocalModelProgressComponent::VisionProjector {
+            self.catalog
+                .iter()
+                .find(|artifact| artifact.entry.id == model_id)
+                .map(|artifact| artifact.model_size_bytes)
+                .unwrap_or_default()
+        } else {
+            0
+        };
         let mut state = self.state.lock().await;
         if let Some(model) = state.models.get_mut(model_id) {
             model.install_phase = LocalModelInstallPhase::Downloading;
@@ -688,7 +798,7 @@ impl LocalModelService {
                 total_bytes,
                 bytes_per_second,
             });
-            model.installed_bytes = downloaded_bytes;
+            model.installed_bytes = completed_model_bytes.saturating_add(downloaded_bytes);
         }
     }
 
@@ -1571,13 +1681,33 @@ impl LocalModelService {
                 error.to_string(),
             )
         })?;
-        if file_len(&model_path).await != artifact.entry.download_size_bytes {
+        if file_len(&model_path).await != artifact.model_size_bytes {
             return Err(LocalFailure::new(
                 LocalModelErrorKind::NotFound,
                 "本地模型文件缺失，请重新安装。",
                 "installed model file missing or wrong size",
             ));
         }
+        let projector_path = if let Some(projector) = artifact.vision_projector {
+            let path = component_path_at(&self.root, &artifact, &projector);
+            prepare_managed_file(&self.root, &path).map_err(|error| {
+                LocalFailure::new(
+                    LocalModelErrorKind::NotFound,
+                    "本地视觉组件未通过安全校验，请重新安装。",
+                    error.to_string(),
+                )
+            })?;
+            if file_len(&path).await != projector.size {
+                return Err(LocalFailure::new(
+                    LocalModelErrorKind::NotFound,
+                    "本地视觉组件缺失，请重新安装。",
+                    "installed vision projector missing or wrong size",
+                ));
+            }
+            Some((projector, path))
+        } else {
+            None
+        };
         {
             let _verification_guard = self.verification_lock.lock().await;
             let verified = self
@@ -1597,6 +1727,19 @@ impl LocalModelService {
                             artifact.sha256
                         ),
                     ));
+                }
+                if let Some((projector, path)) = &projector_path {
+                    let actual = hash_file(path).await?;
+                    if actual != projector.sha256 {
+                        return Err(LocalFailure::new(
+                            LocalModelErrorKind::ChecksumMismatch,
+                            "本地视觉组件完整性校验失败，请重新安装。",
+                            format!(
+                                "installed vision projector SHA-256 mismatch: expected {}, got {actual}",
+                                projector.sha256
+                            ),
+                        ));
+                    }
                 }
                 self.state
                     .lock()
@@ -1725,6 +1868,9 @@ impl LocalModelService {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some((_, projector_path)) = &projector_path {
+            command.arg("--mmproj").arg(projector_path);
+        }
         if let Some(dir) = executable.parent() {
             command.current_dir(dir);
         }
@@ -2577,9 +2723,11 @@ mod tests {
                 tasks: vec![ModelTask::Chat],
                 traits: vec![],
             },
+            model_size_bytes: 0,
             file_name: "model.gguf",
             url: "https://example.invalid/model.gguf",
             sha256: "00",
+            vision_projector: None,
         }];
         let models = HashMap::from([(
             "test-model".into(),
@@ -2627,6 +2775,8 @@ mod tests {
             start_lock: Mutex::new(()),
             inference_gate: Arc::new(Semaphore::new(1)),
             projection: RwLock::new(None),
+            auxiliary_projection_models: RwLock::new(HashMap::new()),
+            projection_sync_lock: Mutex::new(()),
         })
     }
 
@@ -2646,12 +2796,65 @@ mod tests {
                 .parse::<f32>()
                 .unwrap();
             assert!(parameter_billions >= 4.0);
-            assert!(model.entry.download_size_bytes <= 6_000_000_000);
+            assert!(model.entry.download_size_bytes <= 7_000_000_000);
             assert_eq!(model.entry.context_window, 65_536);
             assert_eq!(model.entry.quantization, "Q4_K_M");
+            assert_eq!(model.entry.traits, vec![ModelTrait::VisionInput]);
             assert_eq!(model.sha256.len(), 64);
+            let projector = model.vision_projector.expect("vision projector");
+            assert_eq!(projector.sha256.len(), 64);
+            assert_eq!(
+                model.entry.download_size_bytes,
+                model.model_size_bytes + projector.size
+            );
             assert!(model.url.contains("/resolve/"));
         }
+    }
+
+    #[tokio::test]
+    async fn auxiliary_projection_is_selectable_only_while_installed() {
+        let temp = TempDir::new().unwrap();
+        let service = test_service(&temp).await;
+        service
+            .set_projection("http://127.0.0.1:1/v1".into(), "encrypted".into())
+            .await;
+
+        service
+            .set_auxiliary_model_projection(
+                "z-image-turbo-q3-k",
+                "Local text-to-image generation",
+                true,
+            )
+            .await
+            .unwrap();
+        let installed = service
+            .provider_repo
+            .find_by_id(LOCAL_MODEL_PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(installed.enabled);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&installed.models).unwrap(),
+            vec!["z-image-turbo-q3-k"]
+        );
+
+        service
+            .set_auxiliary_model_projection(
+                "z-image-turbo-q3-k",
+                "Local text-to-image generation",
+                false,
+            )
+            .await
+            .unwrap();
+        let removed = service
+            .provider_repo
+            .find_by_id(LOCAL_MODEL_PROVIDER_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!removed.enabled);
+        assert_eq!(removed.models, "[]");
     }
 
     #[tokio::test]
@@ -3242,7 +3445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "downloads about 2.78 GB and starts the real llama-server runtime"]
+    #[ignore = "downloads about 3.42 GB and starts the real multimodal llama-server runtime"]
     async fn real_qwen_3_5_4b_install_and_streaming_smoke_test() {
         let temp = TempDir::new().unwrap();
         let db = init_database_memory().await.unwrap();
@@ -3346,18 +3549,26 @@ fn built_in_catalog() -> Vec<ModelArtifact> {
                 description: "本地问答的最低推荐档，适合中文对话、总结和轻量任务。".into(),
                 parameter_size: "4B".into(),
                 quantization: "Q4_K_M".into(),
-                download_size_bytes: 2_740_937_888,
+                download_size_bytes: 3_413_361_504,
                 required_memory_bytes: 8 * 1024 * 1024 * 1024,
                 context_window: 65_536,
                 license: "Apache-2.0".into(),
                 source: "Qwen3.5 / Unsloth GGUF".into(),
                 recommended: true,
                 tasks: vec![ModelTask::Chat],
-                traits: vec![],
+                traits: vec![ModelTrait::VisionInput],
             },
+            model_size_bytes: 2_740_937_888,
             file_name: "qwen3-5-4b-q4-k-m.gguf",
             url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
             sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+            vision_projector: Some(ComponentArtifact {
+                file_name: "qwen3-5-4b-mmproj-f16.gguf",
+                url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/e87f176479d0855a907a41277aca2f8ee7a09523/mmproj-F16.gguf",
+                sha256: "cd88edcf8d031894960bb0c9c5b9b7e1fea6ebee02b9f7ce925a00d12891f864",
+                size: 672_423_616,
+                progress_component: LocalModelProgressComponent::VisionProjector,
+            }),
         },
         ModelArtifact {
             entry: LocalModelCatalogEntry {
@@ -3366,18 +3577,26 @@ fn built_in_catalog() -> Vec<ModelArtifact> {
                 description: "复杂指令和长对话更稳定，适合内存较充足的设备。".into(),
                 parameter_size: "9B".into(),
                 quantization: "Q4_K_M".into(),
-                download_size_bytes: 5_680_522_464,
+                download_size_bytes: 6_598_688_544,
                 required_memory_bytes: 12 * 1024 * 1024 * 1024,
                 context_window: 65_536,
                 license: "Apache-2.0".into(),
                 source: "Qwen3.5 / Unsloth GGUF".into(),
                 recommended: false,
                 tasks: vec![ModelTask::Chat],
-                traits: vec![],
+                traits: vec![ModelTrait::VisionInput],
             },
+            model_size_bytes: 5_680_522_464,
             file_name: "qwen3-5-9b-q4-k-m.gguf",
             url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/Qwen3.5-9B-Q4_K_M.gguf",
             sha256: "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8",
+            vision_projector: Some(ComponentArtifact {
+                file_name: "qwen3-5-9b-mmproj-f16.gguf",
+                url: "https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/3885219b6810b007914f3a7950a8d1b469d598a5/mmproj-F16.gguf",
+                sha256: "f70dc3509053962b0d0d3ee8a7eacebf5d60aa560cad78254ae8698516ae029f",
+                size: 918_166_080,
+                progress_component: LocalModelProgressComponent::VisionProjector,
+            }),
         },
     ]
 }
@@ -3463,6 +3682,41 @@ fn model_path_at(root: &Path, model: &ModelArtifact) -> PathBuf {
     root.join("models")
         .join(&model.entry.id)
         .join(model.file_name)
+}
+
+fn component_path_at(root: &Path, model: &ModelArtifact, component: &ComponentArtifact) -> PathBuf {
+    root.join("models")
+        .join(&model.entry.id)
+        .join(component.file_name)
+}
+
+async fn downloaded_artifact_bytes(root: &Path, model: &ModelArtifact) -> u64 {
+    async fn downloaded(path: &Path, expected: u64) -> u64 {
+        let complete = file_len(path).await;
+        if complete == expected {
+            expected
+        } else {
+            file_len(&partial_path(path)).await.min(expected)
+        }
+    }
+
+    let mut total = downloaded(&model_path_at(root, model), model.model_size_bytes).await;
+    if let Some(component) = model.vision_projector {
+        total = total.saturating_add(
+            downloaded(&component_path_at(root, model, &component), component.size).await,
+        );
+    }
+    total
+}
+
+async fn artifact_files_installed(root: &Path, model: &ModelArtifact) -> bool {
+    if file_len(&model_path_at(root, model)).await != model.model_size_bytes {
+        return false;
+    }
+    if let Some(component) = model.vision_projector {
+        return file_len(&component_path_at(root, model, &component)).await == component.size;
+    }
+    true
 }
 
 /// Best-effort, idempotent cleanup for artifacts downloaded by catalogs that
@@ -3759,6 +4013,7 @@ impl LocalModelService {
     }
 
     async fn provision_provider(&self) -> Result<(), AppError> {
+        let _projection_sync_guard = self.projection_sync_lock.lock().await;
         let rows = self.provider_repo.list().await?;
         if let Some(alias) = rows.iter().find(|row| {
             row.id != LOCAL_MODEL_PROVIDER_ID && row.platform == LOCAL_MODEL_PROVIDER_ID
@@ -3783,48 +4038,61 @@ impl LocalModelService {
             .await
             .clone()
             .ok_or_else(|| AppError::Internal("local model facade is not initialized".into()))?;
-        let state = self.state.lock().await;
-        let active = state.persisted.active_model_id.clone();
-        let active_valid = active.as_deref().is_some_and(|id| {
-            state.models.get(id).is_some_and(|model| {
-                model.install_phase == LocalModelInstallPhase::Installed
+        let active = {
+            let state = self.state.lock().await;
+            state.persisted.active_model_id.clone().filter(|id| {
+                state.models.get(id).is_some_and(|model| {
+                    model.install_phase == LocalModelInstallPhase::Installed
+                })
             })
-        });
-        drop(state);
+        };
+        let mut auxiliary = self
+            .auxiliary_projection_models
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        auxiliary.sort_by(|left, right| left.id.cmp(&right.id));
         let active_context_limit = active
             .as_deref()
             .and_then(|id| self.catalog.iter().find(|model| model.entry.id == id))
             .map(|model| i64::from(model.entry.context_window));
 
-        let models_json = serde_json::to_string(&active.as_deref().into_iter().collect::<Vec<_>>())
+        let mut projected_ids = Vec::with_capacity(usize::from(active.is_some()) + auxiliary.len());
+        if let Some(id) = &active {
+            projected_ids.push(id.clone());
+        }
+        projected_ids.extend(auxiliary.iter().map(|model| model.id.clone()));
+        let models_json = serde_json::to_string(&projected_ids)
             .map_err(|e| AppError::Internal(format!("serialize local provider models: {e}")))?;
-        let enabled_json = active.as_deref()
-            .map(|id| serde_json::to_string(&HashMap::from([(id, true)])))
-            .transpose()
-            .map_err(|e| AppError::Internal(format!("serialize local model flags: {e}")))?
-            .unwrap_or_else(|| "{}".to_owned());
-        let descriptions_json = active.as_deref()
-            .and_then(|id| self.catalog.iter().find(|m| m.entry.id == id))
-            .map(|model| {
-                serde_json::to_string(&HashMap::from([(
-                    model.entry.id.as_str(),
-                    model.entry.description.as_str(),
-                )]))
-            })
-            .transpose()
-            .map_err(|e| AppError::Internal(format!("serialize local model description: {e}")))?
-            .unwrap_or_else(|| "{}".to_owned());
-        let context_limits_json = active.as_deref()
-            .and_then(|id| self.catalog.iter().find(|m| m.entry.id == id))
-            .map(|model| {
-                serde_json::to_string(&HashMap::from([(
-                    model.entry.id.as_str(),
-                    model.entry.context_window,
-                )]))
-            })
-            .transpose()
-            .map_err(|e| AppError::Internal(format!("serialize local context limit: {e}")))?
-            .unwrap_or_else(|| "{}".to_owned());
+        let enabled_json = serde_json::to_string(
+            &projected_ids
+                .iter()
+                .map(|id| (id.clone(), true))
+                .collect::<HashMap<_, _>>(),
+        )
+        .map_err(|e| AppError::Internal(format!("serialize local model flags: {e}")))?;
+        let mut descriptions = auxiliary
+            .iter()
+            .map(|model| (model.id.clone(), model.description.clone()))
+            .collect::<HashMap<_, _>>();
+        if let Some(model) = active
+            .as_deref()
+            .and_then(|id| self.catalog.iter().find(|model| model.entry.id == id))
+        {
+            descriptions.insert(model.entry.id.clone(), model.entry.description.clone());
+        }
+        let descriptions_json = serde_json::to_string(&descriptions)
+            .map_err(|e| AppError::Internal(format!("serialize local model description: {e}")))?;
+        let context_limits = active
+            .as_deref()
+            .and_then(|id| self.catalog.iter().find(|model| model.entry.id == id))
+            .map(|model| HashMap::from([(model.entry.id.clone(), model.entry.context_window)]))
+            .unwrap_or_default();
+        let context_limits_json = serde_json::to_string(&context_limits)
+            .map_err(|e| AppError::Internal(format!("serialize local context limit: {e}")))?;
+        let provider_enabled = !projected_ids.is_empty();
 
         match existing {
             Some(_) => {
@@ -3837,7 +4105,7 @@ impl LocalModelService {
                             base_url: Some(&projection.base_url),
                             api_key_encrypted: Some(&projection.encrypted_token),
                             models: Some(&models_json),
-                            enabled: Some(active_valid),
+                            enabled: Some(provider_enabled),
                             capabilities: Some("[]"),
                             context_limit: Some(active_context_limit),
                             model_context_limits: Some(Some(&context_limits_json)),
@@ -3860,7 +4128,7 @@ impl LocalModelService {
                         base_url: &projection.base_url,
                         api_key_encrypted: &projection.encrypted_token,
                         models: &models_json,
-                        enabled: active_valid,
+                        enabled: provider_enabled,
                         capabilities: "[]",
                         context_limit: active_context_limit,
                         model_context_limits: Some(&context_limits_json),
@@ -3963,6 +4231,7 @@ impl LocalModelServer {
         let app = Router::new()
             .route("/v1/models", get(local_models))
             .route("/v1/chat/completions", post(local_chat))
+            .layer(DefaultBodyLimit::max(LOCAL_CHAT_BODY_LIMIT))
             .with_state(LocalFacadeState {
                 service,
                 auth_token: auth_token.clone(),

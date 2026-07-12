@@ -52,6 +52,8 @@ pub enum LocalModelRuntimePhase {
 pub enum LocalModelProgressComponent {
     Runtime,
     Model,
+    /// Vision encoder/projector paired with a multimodal GGUF.
+    VisionProjector,
 }
 
 /// Stable, non-sensitive category suitable for localized UI errors.

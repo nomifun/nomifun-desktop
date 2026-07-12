@@ -51,6 +51,45 @@ Qwen3.5 GGUF Q4_K_M quantizations
   repository cards and the upstream Qwen3.5 Apache-2.0 terms before
   redistribution.
 
+Qwen3.5 multimodal projectors
+  The optional `mmproj-F16.gguf` files are downloaded from the same pinned
+  Unsloth Qwen3.5 GGUF revisions above and are used only for local image
+  understanding. They remain subject to the corresponding Qwen3.5 and
+  conversion-repository terms.
+
+stable-diffusion.cpp / sd-cli runtime
+  https://github.com/leejet/stable-diffusion.cpp
+  Pinned release: master-775-b5d8120
+  Copyright (c) stable-diffusion.cpp contributors
+  Licensed under the MIT License.
+  License text: https://github.com/leejet/stable-diffusion.cpp/blob/master-775-b5d8120/LICENSE
+
+Z-Image-Turbo GGUF
+  https://huggingface.co/leejet/Z-Image-Turbo-GGUF/tree/c61c0e422dc8b541b7548cf33a4ef8302b0f8085
+  Optional Q3_K quantization used for local text-to-image generation.
+  The repository identifies Z-Image-Turbo as the upstream model and declares
+  the Apache License, Version 2.0.
+
+Qwen3-4B-Instruct-2507 GGUF text encoder
+  https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/tree/a06e946bb6b655725eafa393f4a9745d460374c9
+  Optional Q4_K_M text encoder used by the pinned Z-Image recipe.
+  The upstream Qwen model is licensed under Apache-2.0.
+
+Z-Image VAE artifact
+  https://huggingface.co/Comfy-Org/z_image_turbo/tree/d24c4cf2a0cd98a42f23467e27e3d76ee9438b8e
+  Optional file: split_files/vae/ae.safetensors
+  The pinned repository card did not declare a license when this catalog was
+  prepared. NomiFun does not redistribute this file; the UI discloses this
+  qualification before the user chooses to download it. Re-check upstream
+  provenance and terms before any redistribution.
+
+PP-OCRv6 Small ONNX exports
+  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/tree/28fe5895c24fd108c19eb3e8479f4ab385fbfc62
+  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/tree/b8f84f0b80c529de40b4fbb3544b84fa7233a513
+  Developed by PaddlePaddle contributors and licensed under Apache-2.0.
+  NomiFun optionally downloads the detector, recognizer, preprocessing
+  configuration, and recognition dictionary only after user confirmation.
+
 These attributions do not imply endorsement by the upstream authors.
 
 Our sincere thanks to the maintainers and communities of the open-source

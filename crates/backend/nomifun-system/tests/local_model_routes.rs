@@ -46,6 +46,8 @@ async fn setup() -> (
         )),
         managed_model_service: None,
         local_model_service: Some(local),
+        ocr_model_service: None,
+        image_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http.clone()),
         version_check_service: VersionCheckService::new(http, "0.1.0".into()),
         data_dir: temp.path().to_path_buf(),

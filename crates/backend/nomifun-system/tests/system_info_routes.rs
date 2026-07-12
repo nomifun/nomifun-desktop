@@ -47,6 +47,8 @@ fn build_state(db: &nomifun_db::Database, version_check_service: VersionCheckSer
         )),
         managed_model_service: None,
         local_model_service: None,
+        ocr_model_service: None,
+        image_model_service: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client),
         version_check_service,
         data_dir: std::env::temp_dir(),
