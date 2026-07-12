@@ -106,7 +106,11 @@ export const useModelProviderList = (): ModelProviderListResult => {
   return {
     providers,
     configuredProviders,
-    isLoading: isProvidersLoading || isGoogleAuthLoading,
+    // SWR clears `isLoading` after an error while `data` stays undefined. Keep
+    // the catalog unresolved in that state so consumers never reinterpret a
+    // failed provider request as an authoritative empty catalog and purge every
+    // persisted model reference.
+    isLoading: isProvidersLoading || isGoogleAuthLoading || !Array.isArray(modelConfig),
     getAvailableModels,
     formatModelLabel,
   };
