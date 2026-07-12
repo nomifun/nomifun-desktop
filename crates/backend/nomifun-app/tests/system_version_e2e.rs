@@ -210,7 +210,18 @@ async fn full_system_flow_e2e() {
         .await
         .unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"].as_array().unwrap().len(), 1);
+    let providers = json["data"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    assert!(
+        providers
+            .iter()
+            .any(|provider| provider["id"] == "nomifun-free-model")
+    );
+    assert!(
+        providers
+            .iter()
+            .any(|provider| provider["id"].as_str() == Some(provider_id.as_str()))
+    );
 
     // 8. Delete provider
     let resp = app
