@@ -1354,6 +1354,7 @@
       "progress": {
         "runtime": "正在准备推理运行时",
         "model": "正在下载模型",
+        "asrAuxiliary": "正在下载语音切分组件",
         "visionProjector": "正在下载图片理解组件",
         "preparing": "准备中",
         "verifyingHint": "正在校验文件完整性，请勿退出 NomiFun。"
@@ -1461,7 +1462,8 @@
       },
       "asr": {
         "title": "本地语音识别",
-        "subtitle": "下载后即可在 NomiFun 的输入框中离线录音转文字；推荐模型兼顾中文与英文。",
+        "subtitle": "下载后即可在 NomiFun 输入框中离线录音转文字；中文优先推荐 Paraformer，通用多语言仍可选择 Whisper。",
+        "chineseRecommended": "中文推荐",
         "catalogTitle": "选择语音识别模型",
         "loading": "正在检查本地语音识别能力",
         "loadFailed": "无法读取本地语音识别模型状态",

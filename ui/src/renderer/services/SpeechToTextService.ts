@@ -79,7 +79,15 @@ export async function transcribeAudioBlob(blob: Blob, languageHint?: string): Pr
   return new Promise<SpeechToTextResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${getBaseUrl()}/api/stt`);
-    xhr.withCredentials = true;
+    // Desktop dev is cross-origin (`http://localhost:5173` ->
+    // `http://127.0.0.1:<backend-port>`). Setting `withCredentials` here makes
+    // the browser require `Access-Control-Allow-Credentials: true` plus a
+    // non-wildcard origin, while the trusted desktop backend intentionally uses
+    // wildcard CORS and authenticates with `x-nomi-local-trust`. The browser
+    // then reports a generic XHR network error before `/api/stt` is reached.
+    //
+    // WebUI requests are same-origin and already send cookies by default, so
+    // explicit credential mode is unnecessary in both environments.
     for (const [name, value] of Object.entries(buildBackendAuthHeaders('POST'))) {
       xhr.setRequestHeader(name, value);
     }

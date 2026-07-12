@@ -31,6 +31,8 @@ describe('local ASR UI integration', () => {
     const panel = readSource(new URL('./AsrModelsPanel.tsx', import.meta.url));
     expect(panel.includes('{model.description}')).toBe(true);
     expect(panel.includes('{model.modelSize}')).toBe(true);
+    expect(panel.includes('asrEngineLabel(model.engine)')).toBe(true);
+    expect(panel.includes("model.engine === 'fun_asr_llama_cpp'")).toBe(true);
     expect(panel.includes('LocalModelDetails')).toBe(false);
     expect(panel.includes('<details')).toBe(false);
   });
@@ -40,7 +42,7 @@ describe('local ASR UI integration', () => {
     expect(hook.includes('onSuccess: observeStatus')).toBe(true);
 
     const baseStatus = {
-      protocolVersion: '1',
+      protocolVersion: '2',
       enabled: false,
       ready: false,
       activeModelId: null,

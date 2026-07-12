@@ -33,7 +33,11 @@ export type LocalModelInstallPhase =
 
 export type LocalModelRuntimePhase = 'stopped' | 'starting' | 'ready' | 'stopping' | 'failed';
 
-export type LocalModelProgressComponent = 'runtime' | 'model' | 'vision_projector';
+export type LocalModelProgressComponent =
+  | 'runtime'
+  | 'model'
+  | 'asr_auxiliary'
+  | 'vision_projector';
 
 export type LocalModelErrorKind =
   | 'network'

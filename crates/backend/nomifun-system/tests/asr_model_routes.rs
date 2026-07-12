@@ -71,7 +71,9 @@ async fn fresh_catalog_and_status_are_side_effect_free() {
         .unwrap();
     assert_eq!(catalog.status(), StatusCode::OK);
     let catalog = json(catalog).await;
-    assert_eq!(catalog["data"].as_array().unwrap().len(), 2);
+    assert_eq!(catalog["data"].as_array().unwrap().len(), 3);
+    assert_eq!(catalog["data"][0]["id"], "funasr-paraformer-zh-q8");
+    assert_eq!(catalog["data"][0]["engine"], "fun_asr_llama_cpp");
     assert!(catalog["data"][0].get("downloadUrl").is_none());
 
     let status = app
