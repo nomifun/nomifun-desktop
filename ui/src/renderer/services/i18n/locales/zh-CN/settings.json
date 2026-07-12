@@ -1292,6 +1292,26 @@
     "local": {
       "title": "本地模型",
       "providerId": "由 NomiFun 自动下载安装，无需另装 Ollama。",
+      "capabilityCenter": {
+        "subtitle": "本地隐私运行，仅在你选择时下载",
+        "tabs": {
+          "text": "文本理解",
+          "image": "图片生成",
+          "ocr": "OCR",
+          "speechRecognition": "语音识别",
+          "speechSynthesis": "语音合成"
+        },
+        "planned": "规划中",
+        "plannedHint": "该本地能力正在规划中，当前版本暂不可用。",
+        "availableModels": "{{count}} 个可用模型",
+        "installedModels": "已安装 {{count}} 个",
+        "runtimeReady": "运行环境已就绪",
+        "runtimeOnDemand": "使用时启动",
+        "details": "模型详情",
+        "collapseDetails": "收起详情",
+        "backgroundRunning": "正在后台下载",
+        "needsAttention": "需要处理"
+      },
       "privacyTitle": "对话数据留在本机",
       "privacyNotice": "提示词和回复只在此设备处理；首次使用时需要联网下载模型和运行组件。",
       "scopeNotice": "适合日常问答和轻量任务；复杂推理、长任务或高可靠工具调用，建议使用供应商模型。",

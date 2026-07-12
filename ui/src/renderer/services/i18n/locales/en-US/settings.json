@@ -1291,6 +1291,26 @@
     "local": {
       "title": "Local Models",
       "providerId": "NomiFun downloads and runs everything for you—no separate Ollama install.",
+      "capabilityCenter": {
+        "subtitle": "Private local AI, downloaded only when you choose",
+        "tabs": {
+          "text": "Text Understanding",
+          "image": "Image Generation",
+          "ocr": "OCR",
+          "speechRecognition": "Speech Recognition",
+          "speechSynthesis": "Speech Synthesis"
+        },
+        "planned": "Planned",
+        "plannedHint": "This local capability is planned and is not available in the current version.",
+        "availableModels": "{{count}} available models",
+        "installedModels": "{{count}} installed",
+        "runtimeReady": "Runtime ready",
+        "runtimeOnDemand": "Starts on demand",
+        "details": "Model details",
+        "collapseDetails": "Hide details",
+        "backgroundRunning": "Download in progress",
+        "needsAttention": "Needs attention"
+      },
       "privacyTitle": "Your conversations stay on this device",
       "privacyNotice": "Prompts and responses are processed locally. An internet connection is needed only for the initial model and runtime download.",
       "scopeNotice": "Best for everyday chat and lightweight tasks. Use a provider model for complex reasoning, long-running work, or highly reliable tool use.",
