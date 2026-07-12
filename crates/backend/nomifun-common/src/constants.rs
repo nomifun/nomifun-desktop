@@ -12,9 +12,10 @@ pub const WS_CLOSE_POLICY_VIOLATION: u16 = 1008;
 
 // --- Authentication ---
 
-pub const SESSION_EXPIRY: &str = "24h";
+pub const SESSION_EXPIRY: &str = "30d";
 pub const COOKIE_NAME: &str = "nomifun-session";
 pub const COOKIE_MAX_AGE_DAYS: u32 = 30;
+pub const SESSION_MAX_AGE_SECONDS: u64 = COOKIE_MAX_AGE_DAYS as u64 * 24 * 60 * 60;
 pub const CSRF_COOKIE_NAME: &str = "nomifun-csrf-token";
 pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 
