@@ -38,7 +38,7 @@ const SourceCard: React.FC<SourceCardProps> = ({ icon, name, description, status
         size='small'
         bordered={false}
         className='!flex-shrink-0 !text-10px !leading-14px !px-6px !py-0 !rounded-6px'
-        style={{ background: 'rgb(var(--primary-6))', color: 'var(--text-white)' }}
+        style={{ background: 'var(--control-selected-bg)', color: 'var(--control-selected-fg)' }}
       >
         {t('requirements.source.status.active')}
       </Tag>

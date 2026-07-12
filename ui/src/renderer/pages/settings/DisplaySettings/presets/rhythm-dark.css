@@ -135,6 +135,14 @@ body {
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
 
+  --control-selected-bg: #e8174a;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #ffffff;
+  --control-idle-border: #9e9ea5;
+  --control-hover-bg: #fff0f3;
+  --control-disabled-selected-bg: #eaa0b1;
+  --control-focus-ring: rgba(232, 23, 74, 0.26);
+
   /* Semantic Colors - 语义色（info 走深青保对比度；danger 走橙红
      与主玫红拉开色相，#d4380d 白底 4.8:1） */
   --success: #00b42a;
@@ -267,6 +275,14 @@ body {
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
+
+  --control-selected-bg: #c91f45;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #1f1f1f;
+  --control-idle-border: #77777d;
+  --control-hover-bg: #2a2023;
+  --control-disabled-selected-bg: #7d3d4d;
+  --control-focus-ring: rgba(254, 44, 85, 0.3);
 
   /* Semantic Colors - 语义色（info = 电光青） */
   --success: #2ed573;

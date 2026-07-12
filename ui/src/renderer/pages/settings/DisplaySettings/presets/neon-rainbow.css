@@ -131,6 +131,14 @@ body {
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
 
+  --control-selected-bg: #8f2dd6;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #ffffff;
+  --control-idle-border: #9b9baa;
+  --control-hover-bg: #f8efff;
+  --control-disabled-selected-bg: #c19ae2;
+  --control-focus-ring: rgba(143, 45, 214, 0.28);
+
   /* Semantic Colors - 语义色（成功翠、警告橙、危险红、信息青，标准语义槽） */
   --success: #16a34a;
   --warning: #ea7a00;
@@ -262,6 +270,14 @@ body {
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
+
+  --control-selected-bg: #9b36e8;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #14141c;
+  --control-idle-border: #77778d;
+  --control-hover-bg: #21182b;
+  --control-disabled-selected-bg: #643890;
+  --control-focus-ring: rgba(177, 75, 255, 0.32);
 
   /* Semantic Colors - 语义色（暗底上提亮，标准语义槽） */
   --success: #3ddc84;

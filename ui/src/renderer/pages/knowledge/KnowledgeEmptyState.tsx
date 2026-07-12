@@ -88,7 +88,7 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
     <div className='flex w-full flex-col items-center gap-32px px-16px py-56px'>
       {/* Hero icon + headline */}
       <div className='flex flex-col items-center gap-12px text-center'>
-        <div className='flex size-72px items-center justify-center rounded-full bg-[var(--color-primary-light-1)] text-[rgb(var(--primary-6))]'>
+        <div className='flex size-72px items-center justify-center rounded-full bg-[var(--control-selected-bg)] text-[var(--control-selected-fg)]'>
           <BookOne theme='outline' size='36' fill='currentColor' />
         </div>
         <h2 className='m-0 text-22px font-bold text-[var(--color-text-1)]'>
@@ -110,7 +110,7 @@ const KnowledgeEmptyState: React.FC<KnowledgeEmptyStateProps> = ({ onCreate, onI
           >
             {/* Step number badge + title */}
             <div className='flex items-center gap-10px'>
-              <span className='flex size-28px items-center justify-center rounded-8px bg-[var(--color-primary-light-1)] text-[rgb(var(--primary-6))] text-12px font-bold'>
+              <span className='flex size-28px items-center justify-center rounded-8px bg-[var(--control-selected-bg)] text-[var(--control-selected-fg)] text-12px font-bold'>
                 {s.num}
               </span>
               <span className='flex items-center gap-6px text-14px font-semibold text-[var(--color-text-1)]'>
