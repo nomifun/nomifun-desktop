@@ -33,6 +33,15 @@ use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStop
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{NomiResolvedConfig, SendMessageData};
 
+fn apply_provider_context_budget(config: &mut Config, context_limit: Option<u64>) {
+    config.compact.context_window = nomi_config::compact::resolve_context_window(
+        context_limit,
+        config.compact.context_window,
+    );
+    config.max_tokens =
+        nomi_config::compact::fit_context_budget(&mut config.compact, config.max_tokens);
+}
+
 pub struct NomiAgentManager {
     runtime: AgentRuntime,
     backend_output_sink: Arc<BackendOutputSink>,
@@ -251,10 +260,7 @@ impl NomiAgentManager {
         // Make the engine compact against the provider's declared context
         // window when set (else keep the resolved default). Same value the
         // context-usage gauge reports as the denominator.
-        config.compact.context_window = nomi_config::compact::resolve_context_window(
-            config_extra.context_limit,
-            config.compact.context_window,
-        );
+        apply_provider_context_budget(&mut config, config_extra.context_limit);
 
         if !config_extra.extra_mcp_servers.is_empty() {
             config.mcp.servers.extend(config_extra.extra_mcp_servers.clone());
@@ -1212,6 +1218,20 @@ mod tests {
         .expect("test config should resolve");
         config.session.enabled = false;
         config
+    }
+
+    #[test]
+    fn provider_context_budget_is_applied_before_engine_bootstrap() {
+        let mut config = make_test_engine_config();
+        config.max_tokens = 8192;
+
+        apply_provider_context_budget(&mut config, Some(4096));
+
+        assert_eq!(config.compact.context_window, 4096);
+        assert_eq!(config.max_tokens, 1024);
+        assert_eq!(config.compact.output_reserve, 1024);
+        assert_eq!(config.compact.autocompact_buffer, 512);
+        assert_eq!(config.compact.emergency_buffer, 256);
     }
 
     fn make_agent_with_provider(provider: Arc<dyn LlmProvider>) -> NomiAgentManager {
