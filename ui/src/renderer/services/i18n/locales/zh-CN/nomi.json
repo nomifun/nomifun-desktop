@@ -50,7 +50,17 @@
     "source_mined": "重复挖掘",
     "source_reflected": "任务反思",
     "source_demonstrated": "示范教学",
-    "source_manual": "手动"
+    "source_manual": "手动",
+    "configuredTitle": "已配置能力",
+    "configuredHint": "从全局 Skill 库授予这个伙伴能力；伙伴自己学习的专精技能在下方管理。",
+    "configSearch": "搜索 Skill",
+    "configEmpty": "没有可配置的 Skill",
+    "configDefault": "默认能力",
+    "configOptional": "额外能力",
+    "configSaved": "技能配置已保存，将在下一条消息生效",
+    "learnedTitle": "伙伴专精",
+    "configMissing": "未安装",
+    "configMissingHint": "这个 Skill 当前未安装；重新安装后会自动恢复。"
   },
   "secrets": {
     "title": "浏览器凭据",

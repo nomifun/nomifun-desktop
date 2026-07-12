@@ -3232,6 +3232,11 @@ export type IFigureUpdatePatch = {
 };
 
 /** One companion's profile — `companions/{companion_id}/config.json`. */
+export interface ICompanionSkillConfig {
+  enabled: string[];
+  disabled_auto: string[];
+}
+
 export interface ICompanionProfile {
   id: string;
   name: string;
@@ -3239,6 +3244,7 @@ export interface ICompanionProfile {
   character: string;
   persona: ICompanionPersona;
   model: ICompanionModelRef;
+  skills: ICompanionSkillConfig;
   appearance: ICompanionWindowConfig;
   created_at: number;
 }
@@ -3288,6 +3294,7 @@ export type ICompanionProfilePatch = {
   character?: string;
   persona?: Partial<ICompanionPersona>;
   model?: Partial<ICompanionModelRef>;
+  skills?: Partial<ICompanionSkillConfig>;
   appearance?: Partial<ICompanionWindowConfig>;
 };
 

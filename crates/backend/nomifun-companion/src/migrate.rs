@@ -246,6 +246,7 @@ pub fn migrate_legacy_layout(data_dir: &Path) -> std::io::Result<Option<String>>
         character: old.appearance.character.clone(),
         persona: old.persona.clone(),
         model: old.model.clone(),
+        skills: Default::default(),
         appearance: CompanionWindowConfig {
             companion_enabled: old.appearance.companion_enabled,
             companion_x: old.appearance.companion_x,
