@@ -1,0 +1,122 @@
+/*
+ * Theme control readability contract.
+ *
+ * Presets are injected at runtime with !important declarations. This sheet is
+ * deliberately injected immediately after the preset so these component-state
+ * rules retain a predictable, accessible foreground/background pairing.
+ */
+
+.arco-checkbox-mask {
+  background-color: var(--control-idle-bg, var(--color-bg-2)) !important;
+  border-color: var(--control-idle-border, var(--color-border-3)) !important;
+}
+
+.arco-checkbox:hover .arco-checkbox-mask {
+  background-color: var(--control-hover-bg, var(--color-fill-2)) !important;
+  border-color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-checkbox-checked .arco-checkbox-mask,
+.arco-checkbox-indeterminate .arco-checkbox-mask {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+  border-color: transparent !important;
+}
+
+.arco-checkbox-checked .arco-checkbox-mask-icon,
+.arco-checkbox-indeterminate .arco-checkbox-mask::after {
+  color: var(--control-selected-fg, var(--color-white)) !important;
+  background-color: var(--control-selected-fg, var(--color-white)) !important;
+}
+
+.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
+.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
+  background-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
+}
+
+.arco-radio-mask {
+  border-color: var(--control-idle-border, var(--color-border-3)) !important;
+}
+
+.arco-radio-mask::after {
+  background-color: var(--control-idle-bg, var(--color-bg-2)) !important;
+}
+
+.arco-radio:hover .arco-radio-mask {
+  border-color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-radio-checked .arco-radio-mask {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+  border-color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-radio-checked .arco-radio-mask::after {
+  background-color: var(--control-selected-fg, var(--color-white)) !important;
+}
+
+.arco-radio-checked.arco-radio-disabled .arco-radio-mask {
+  background-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
+}
+
+.arco-switch {
+  background-color: var(--control-idle-border, var(--color-fill-4)) !important;
+  box-shadow: inset 0 0 0 1px var(--control-idle-border, var(--color-border-3)) !important;
+}
+
+.arco-switch .arco-switch-dot {
+  background-color: var(--control-idle-bg, var(--color-bg-white)) !important;
+  color: var(--control-idle-border, var(--color-neutral-3)) !important;
+}
+
+.arco-switch-checked {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+  box-shadow: none !important;
+}
+
+.arco-switch-checked .arco-switch-dot {
+  background-color: var(--control-selected-fg, var(--color-bg-white)) !important;
+  color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-switch-checked .arco-switch-text {
+  color: var(--control-selected-fg, var(--color-white)) !important;
+}
+
+.arco-switch[disabled].arco-switch-checked,
+.arco-switch.arco-switch-loading.arco-switch-checked {
+  background-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
+}
+
+.arco-tag-checkable.arco-tag-checked,
+.arco-tag-checkable.arco-tag-checked:hover {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+  border-color: transparent !important;
+  color: var(--control-selected-fg, var(--color-white)) !important;
+}
+
+.arco-tag-checkable.arco-tag-checked .arco-tag-icon,
+.arco-tag-checkable.arco-tag-checked .arco-tag-close-icon {
+  color: inherit !important;
+}
+
+.arco-tabs-nav-tab:hover,
+.arco-tabs-header-title:hover {
+  color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-tabs-nav-tab-active,
+.arco-tabs-header-title-active {
+  color: var(--control-selected-bg, var(--color-primary)) !important;
+  font-weight: 600 !important;
+}
+
+.arco-tabs-nav-ink,
+.arco-tabs-header-ink {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+}
+
+.arco-checkbox > input[type='checkbox']:focus-visible + .arco-checkbox-icon-hover::before,
+.arco-radio > input[type='radio']:focus-visible + .arco-radio-icon-hover::before,
+.arco-switch:focus-visible {
+  box-shadow: 0 0 0 3px var(--control-focus-ring, var(--color-primary-light-3)) !important;
+}
