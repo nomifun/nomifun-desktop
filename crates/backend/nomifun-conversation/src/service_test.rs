@@ -3086,6 +3086,45 @@ async fn steer_message_unsupported_propagates_and_persists_nothing() {
 }
 
 #[tokio::test]
+async fn steer_message_with_attachments_is_queued_by_the_client_instead_of_dropped() {
+    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
+    let task_mgr = Arc::new(MockTaskManager::new());
+    let conv = svc.create("user_1", make_create_req()).await.unwrap();
+    let conv_id = conv.id.to_string();
+    let agent = Arc::new(SteerableAgent::new(
+        &conv_id,
+        Some(ConversationStatus::Running),
+        true,
+    ));
+    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+
+    let req: SendMessageRequest = serde_json::from_value(json!({
+        "content": "look at this",
+        "files": ["C:\\images\\sample.png"]
+    }))
+    .unwrap();
+    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr;
+    let err = svc
+        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .await
+        .expect_err("live steering must not silently discard attachments");
+
+    assert!(matches!(
+        err,
+        AppError::BadRequest(ref message) if message.contains("steer_unsupported")
+    ));
+    assert!(agent.steered().is_empty());
+    assert!(agent.sent_contents().is_empty());
+    assert!(repo.messages.lock().unwrap().is_empty());
+    assert!(
+        !broadcaster
+            .take_events()
+            .iter()
+            .any(|event| event.name == "message.userCreated")
+    );
+}
+
+#[tokio::test]
 async fn send_message_keeps_acp_task_after_normal_finish() {
     let (svc, _broadcaster, _repo, _default_task_mgr) = make_service();
     let task_mgr = Arc::new(MockTaskManager::new());

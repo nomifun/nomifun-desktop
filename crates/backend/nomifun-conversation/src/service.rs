@@ -2134,6 +2134,16 @@ impl ConversationService {
             return self.send_message(user_id, conversation_id, req, task_manager).await;
         }
 
+        // The steering inbox is text-only. Silently dropping attachments here
+        // loses the user's explicit selection (and, for images, defeats the
+        // multimodal turn). Surface the existing steer_unsupported marker so
+        // the desktop queues the complete payload as the next normal turn.
+        if !req.files.is_empty() {
+            return Err(AppError::BadRequest(
+                "steer_unsupported: attachments must be sent as a new turn".into(),
+            ));
+        }
+
         // Push into the running turn's steering inbox FIRST, so we persist the
         // transcript row exactly once on the path that actually steers:
         //  - Ok(true):  steered into the live turn → persist + broadcast below.
