@@ -78,9 +78,10 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
     }
 
     async fn cleanup_soft_refs(&self, provider_id: &str) -> Result<(), AppError> {
-        // v1 strips ONLY the global model-failover queue. `idmm_backup_*` is a
-        // PROTECTED reference (blocks deletion in `usages`, never reaches cleanup);
-        // channel `assistant.{platform}.defaultModel` is backstopped by component B.
+        // Strip the soft references owned by this coordinator: the global
+        // model-failover queue and every persisted conversation collaborator
+        // range. `idmm_backup_*` is PROTECTED (blocks deletion in `usages`, never
+        // reaches cleanup); channel defaults are backstopped by component B.
         let mut cfg = get_global_failover_config(&self.client_prefs).await;
         let before = cfg.queue.len();
         cfg.queue.retain(|m| m.provider_id != provider_id);
