@@ -1194,20 +1194,28 @@
   },
   "modelHub": {
     "title": "Model Management",
-    "subtitle": "Manage your agents and models in one place.",
-    "railTitle": "Model & Agent",
+    "subtitle": "Choose free, local, or provider models by how you want to use them.",
+    "railTitle": "Models & Agents",
     "sectionAgents": "Agents",
-    "sectionModels": "Models",
+    "sectionModels": "Provider Models",
     "sectionFree": "Free Models",
-    "sectionCreation": "Creation Models",
-    "sectionGlobal": "Global Model Config",
+    "sectionLocal": "Local Models",
+    "sectionCreation": "Creation Capabilities",
+    "sectionGlobal": "Global Model Settings",
     "globalConfigTip": "Global default model settings for IDMM, the bypass model, memory summarization, and companion chat.",
     "idmmTab": "IDMM Defaults",
     "failoverTab": "Failover Queue",
     "activityTab": "Decision Activity",
+    "provider": {
+      "title": "Provider Models",
+      "subtitle": "Connect cloud model providers with your own API key.",
+      "noticeTitle": "Conversations are sent to the model provider",
+      "note": "Provider models run in the cloud, so avoid sending sensitive information. Custom provider models are currently available to Nomi only."
+    },
     "free": {
       "title": "Free Models",
-      "providerId": "Unified endpoint: {{id}}",
+      "providerId": "No API key required. Enabled models appear in model selectors.",
+      "privacyTitle": "Free models use third-party online services",
       "serviceEnabled": "Enable free models",
       "statusReady": "Model list updated",
       "statusUnverified": "Model list unverified",
@@ -1237,7 +1245,7 @@
       "refreshHint": "Fetch the latest free models from the trusted public source",
       "refreshSuccess": "Free-model list updated",
       "refreshDegraded": "Model-list update failed; the current models remain active",
-      "privacyNotice": "Free models are provided by third-party public services. Conversation content is sent to the selected upstream and may be subject to rate limits, temporary outages, or terms changes. Do not send sensitive information.",
+      "privacyNotice": "Conversations are sent to the corresponding service and may be affected by rate limits, temporary outages, or policy changes. Do not send sensitive information.",
       "catalogTitle": "Free model list",
       "freeBadge": "Free",
       "protocolVersion": "Unified protocol v{{version}}",
@@ -1259,13 +1267,6 @@
       "degradedHint": "The online model list is temporarily unavailable, but cached or built-in free models remain usable.",
       "empty": "No free models found",
       "emptyHint": "Check your connection and refresh the model list. Built-in models are retained so first launch is never left without a model.",
-      "local": {
-        "title": "Local Models",
-        "planned": "Planned",
-        "loading": "Checking",
-        "unavailable": "Not available yet",
-        "description": "A future service will reuse the same unified protocol to download open-source models in one click, select a runtime for this device, and expose them to the platform as nomifun-local-model."
-      },
       "upstreamWarningHint": "The model-list update encountered a problem. Current models remain available; try again later.",
       "health": {
         "checkAll": "Check availability",
@@ -1287,8 +1288,92 @@
         "failed": "Model availability check failed. Please try again later."
       }
     },
+    "local": {
+      "title": "Local Models",
+      "providerId": "NomiFun downloads and runs everything for you—no separate Ollama install.",
+      "privacyTitle": "Your conversations stay on this device",
+      "privacyNotice": "Prompts and responses are processed locally. An internet connection is needed only for the initial model and runtime download.",
+      "scopeNotice": "Best for everyday chat and lightweight tasks. Use a provider model for complex reasoning, long-running work, or highly reliable tool use.",
+      "refresh": "Refresh status",
+      "refreshHint": "Check downloaded models and local runtime status again",
+      "loading": "Checking local models",
+      "loadFailed": "Local models are temporarily unavailable",
+      "loadFailedHint": "The local service may still be starting, or this device may not be supported. Try again shortly.",
+      "empty": "No installable models are available",
+      "emptyHint": "The built-in catalog is empty. Update NomiFun and try again.",
+      "catalogTitle": "Choose a model to install",
+      "singleModelHint": "Start with the recommended option. Only one model is active at a time; switching stops the current model automatically.",
+      "modelCount": "{{count}} models",
+      "recommended": "Recommended",
+      "active": "Active",
+      "activeModel": "Active: {{model}}",
+      "actionFailed": "Action failed. Please try again.",
+      "installSuccess": "Download started. The model will be enabled and added to model selectors when ready.",
+      "resumeSuccess": "Download resumed",
+      "cancelSuccess": "Download paused; the partial file was retained",
+      "activateSuccess": "Local model enabled",
+      "deactivateSuccess": "Local model stopped",
+      "deleteSuccess": "Local model files deleted",
+      "deleteConfirmTitle": "Delete local model?",
+      "deleteConfirmContent": "This deletes the local files for {{model}}. You can download it again later.",
+      "deleteModelLabel": "Delete {{model}}",
+      "phase": {
+        "notInstalled": "Not installed",
+        "downloading": "Downloading",
+        "verifying": "Verifying",
+        "installed": "Installed",
+        "paused": "Paused",
+        "failed": "Install failed"
+      },
+      "runtime": {
+        "title": "Local model engine",
+        "auto": "Matched to this device",
+        "onDemand": "Downloads on first use",
+        "checking": "Checking",
+        "stopped": "Stopped",
+        "starting": "Starting",
+        "ready": "Running",
+        "stopping": "Stopping",
+        "failed": "Runtime error"
+      },
+      "action": {
+        "install": "Download & install",
+        "cancel": "Pause download",
+        "resume": "Resume download",
+        "retry": "Retry",
+        "activate": "Enable",
+        "deactivate": "Stop",
+        "delete": "Delete"
+      },
+      "metadata": {
+        "download": "Model file {{size}}",
+        "memory": "Recommended available memory {{size}}",
+        "context": "Context limit {{tokens}} tokens",
+        "source": "Model source: {{source}}"
+      },
+      "capability": {
+        "chat": "Chat supported",
+        "functionCalling": "Tool calling"
+      },
+      "progress": {
+        "runtime": "Preparing inference runtime",
+        "model": "Downloading model",
+        "preparing": "Preparing",
+        "verifyingHint": "Verifying file integrity. Keep NomiFun open."
+      },
+      "error": {
+        "network": "Network connection failed; retry from the saved checkpoint",
+        "insufficientSpace": "Not enough free disk space",
+        "checksumMismatch": "File verification failed; download it again",
+        "unsupportedPlatform": "This operating system or processor is not supported yet",
+        "runtimeUnavailable": "The local inference runtime is unavailable",
+        "busy": "Another local-model operation is in progress",
+        "notFound": "The model or local file was not found",
+        "unknown": "The local-model operation failed"
+      }
+    },
     "creation": {
-      "title": "Creation Models",
+      "title": "Creation Capabilities",
       "note": "The Creative Workshop detects image/video generation from the model name as a suggested default. If a platform's model isn't recognized, mark the whole platform with the capability below.",
       "filterAll": "All",
       "filterImage": "Image",
@@ -1300,7 +1385,7 @@
       "markHint": "Mark every enabled model under this platform as having this generation capability (overrides auto-detection).",
       "empty": "No creation models",
       "emptyHint": "No image/video generation models were detected among your configured models. Add generation models to a platform, or mark one with the buttons above.",
-      "emptyNoProviders": "No model platforms configured yet. Add a platform and models under \"Models\" first."
+      "emptyNoProviders": "No model providers are configured. Add a provider and model under \"Provider Models\" first."
     }
   },
   "otherHub": {

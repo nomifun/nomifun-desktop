@@ -15,5 +15,43 @@ applicable:
   Copyright iOfficeAI
   Licensed under the Apache License, Version 2.0.
 
+----------------------------------------------------------------------
+Optional Local AI Lite downloads
+----------------------------------------------------------------------
+
+NomiFun does not bundle the following runtime or model artifacts in its
+installer. When a user explicitly installs a local model, NomiFun downloads
+the pinned artifacts directly from the upstream locations identified below.
+
+llama.cpp / llama-server runtime
+  https://github.com/ggml-org/llama.cpp
+  Pinned release: b9957
+  Copyright (c) 2023-2026 The ggml authors
+  Licensed under the MIT License.
+  License text: https://github.com/ggml-org/llama.cpp/blob/b9957/LICENSE
+
+Qwen3.5 models (4B and 9B)
+  https://huggingface.co/Qwen
+  Developed by the Qwen Team at Alibaba Cloud.
+  The corresponding upstream model repositories declare the Apache License,
+  Version 2.0 (SPDX: Apache-2.0).
+
+  https://huggingface.co/Qwen/Qwen3.5-4B
+  https://huggingface.co/Qwen/Qwen3.5-9B
+
+Qwen3.5 GGUF Q4_K_M quantizations
+  Produced and published by the Hugging Face organization "unsloth" as
+  quantized derivatives of the corresponding Qwen3.5 models:
+
+  https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/tree/e87f176479d0855a907a41277aca2f8ee7a09523
+  https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/tree/3885219b6810b007914f3a7950a8d1b469d598a5
+
+  These repository cards identify Unsloth's GGUF conversion and the Qwen
+  repositories as the base models. Review both the pinned quantization
+  repository cards and the upstream Qwen3.5 Apache-2.0 terms before
+  redistribution.
+
+These attributions do not imply endorsement by the upstream authors.
+
 Our sincere thanks to the maintainers and communities of the open-source
 projects NomiFun uses.

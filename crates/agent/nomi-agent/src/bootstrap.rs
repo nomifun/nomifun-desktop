@@ -541,7 +541,7 @@ impl AgentBootstrap {
             cwd,
             &self.config.model,
             &skills,
-            None,
+            Some(self.config.compact.context_window),
             memory_dir.as_deref(),
             false,
             self.config.compact.toon,
