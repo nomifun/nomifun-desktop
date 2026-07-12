@@ -8,7 +8,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Button, Modal, Progress, Tag, Tooltip } from '@arco-design/web-react';
-import { Delete, Download, FileText, Info, Loading, Pause, PlayOne, Refresh } from '@icon-park/react';
+import { Delete, Download, Loading, Pause, PlayOne } from '@icon-park/react';
 import type {
   OcrModelCatalogEntry,
   OcrModelComponent,
@@ -17,12 +17,16 @@ import type {
 } from '@/common/types/provider/ocrModelService';
 import type { LocalModelErrorKind, LocalModelInstallPhase } from '@/common/types/provider/localModelService';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import LocalModelCapabilitySummary from './LocalModelCapabilitySummary';
+import LocalModelDetails from './LocalModelDetails';
+import { detailsForcedOpen } from './localModelCapabilityView';
 import { formatLocalModelBytes, formatLocalModelRate } from './localModelView';
 import { useLocalOcrModels } from './useLocalOcrModels';
 
 type OcrPrimaryAction = 'install' | 'pause' | 'resume' | 'retry' | 'none';
 
 export interface OcrModelsPanelProps {
+  controller: ReturnType<typeof useLocalOcrModels>;
   className?: string;
 }
 
@@ -67,7 +71,7 @@ const phaseColor = (phase: LocalModelInstallPhase): string | undefined => {
   return undefined;
 };
 
-const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
+const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ controller, className }) => {
   const { t, i18n } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const {
@@ -77,12 +81,11 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
     statusError,
     isLoading,
     pendingAction,
-    refresh,
     install,
     pause,
     resume,
     remove,
-  } = useLocalOcrModels();
+  } = controller;
   const locale = i18n.resolvedLanguage ?? i18n.language;
 
   const phaseLabel = (phase: LocalModelInstallPhase): string => {
@@ -262,97 +265,33 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
   };
 
   const loadFailed = (catalogError || statusError) && !catalog && !status;
+  const installedCount = status?.models.filter((model) => model.installPhase === 'installed').length ?? 0;
 
   return (
-    <section
-      className={classNames(
-        'rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-14px py-13px',
-        className
-      )}
-    >
+    <div className={classNames('space-y-12px', className)}>
       {messageContext}
-
-      <div className='flex items-start justify-between gap-12px flex-wrap'>
-        <div className='flex items-start gap-9px min-w-0'>
-          <span className='size-30px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>
-            <FileText theme='outline' size='18' strokeWidth={3} />
-          </span>
-          <div className='min-w-0'>
-            <div className='text-16px font-600 leading-22px text-t-primary'>
-              {t('settings.modelHub.local.ocr.title')}
-            </div>
-            <div className='mt-2px text-12px leading-18px text-t-secondary'>
-              {t('settings.modelHub.local.ocr.subtitle')}
-            </div>
-          </div>
-        </div>
-        <Tooltip content={t('settings.modelHub.local.ocr.refreshHint')}>
-          <Button
-            size='small'
-            type='secondary'
-            icon={<Refresh theme='outline' size='14' />}
-            loading={isLoading}
-            disabled={pendingAction != null}
-            onClick={() => {
-              void refresh().catch((error) => {
-                console.error('Local OCR refresh failed:', error);
-                message.error(t('settings.modelHub.local.ocr.loadFailed'));
-              });
-            }}
-          >
-            {t('settings.modelHub.local.ocr.refresh')}
-          </Button>
-        </Tooltip>
-      </div>
-
-      <div
-        className='mt-11px rd-9px px-11px py-9px border border-solid flex items-start gap-8px'
-        style={{
-          borderColor: 'rgba(var(--primary-6),0.24)',
-          backgroundColor: 'rgba(var(--primary-6),0.06)',
-        }}
-      >
-        <Info theme='outline' size='15' className='shrink-0 mt-1px text-[rgb(var(--primary-6))]' />
-        <div className='text-12px leading-18px text-t-secondary'>
-          <span className='font-600 text-t-primary'>{t('settings.modelHub.local.ocr.onDemandTitle')}</span>{' '}
-          {t('settings.modelHub.local.ocr.onDemandNotice')}
-        </div>
-      </div>
-
-      <div className='mt-10px grid grid-cols-1 gap-8px md:grid-cols-2'>
-        <div className='rd-9px bg-[var(--fill-0)] px-11px py-9px flex items-center justify-between gap-8px'>
-          <div>
-            <div className='text-11px text-t-secondary'>{t('settings.modelHub.local.ocr.readiness.artifacts')}</div>
-            <div className='mt-2px text-12px font-500 text-t-primary'>
-              {status?.artifactsReady
-                ? t('settings.modelHub.local.ocr.readiness.artifactsReady')
-                : t('settings.modelHub.local.ocr.readiness.artifactsMissing')}
-            </div>
-          </div>
-          <Tag size='small' color={status?.artifactsReady ? 'green' : undefined}>
-            {status?.artifactsReady
-              ? t('settings.modelHub.local.ocr.readiness.ready')
-              : t('settings.modelHub.local.ocr.readiness.notReady')}
-          </Tag>
-        </div>
-        <div className='rd-9px bg-[var(--fill-0)] px-11px py-9px flex items-center justify-between gap-8px'>
-          <div>
-            <div className='text-11px text-t-secondary'>{t('settings.modelHub.local.ocr.readiness.inference')}</div>
-            <div className='mt-2px text-12px font-500 text-t-primary'>
-              {status?.inferenceReady
-                ? t('settings.modelHub.local.ocr.readiness.inferenceReady')
-                : status?.artifactsReady
-                  ? t('settings.modelHub.local.ocr.readiness.runtimePending')
-                  : t('settings.modelHub.local.ocr.readiness.installFirst')}
-            </div>
-          </div>
-          <Tag size='small' color={status?.inferenceReady ? 'green' : status?.artifactsReady ? 'orange' : undefined}>
-            {status?.inferenceReady
-              ? t('settings.modelHub.local.ocr.readiness.available')
-              : t('settings.modelHub.local.ocr.readiness.unavailable')}
-          </Tag>
-        </div>
-      </div>
+      <LocalModelCapabilitySummary
+        items={[
+          {
+            label: t('settings.modelHub.local.ocr.title'),
+            value: t('settings.modelHub.local.capabilityCenter.availableModels', { count: catalog?.length ?? 0 }),
+          },
+          {
+            label: t('settings.modelHub.local.ocr.readiness.artifacts'),
+            value: t('settings.modelHub.local.capabilityCenter.installedModels', { count: installedCount }),
+            tone: status?.artifactsReady ? 'success' : 'neutral',
+          },
+          {
+            label: t('settings.modelHub.local.ocr.readiness.inference'),
+            value: status?.inferenceReady
+              ? t('settings.modelHub.local.ocr.readiness.inferenceReady')
+              : status?.artifactsReady
+                ? t('settings.modelHub.local.ocr.readiness.runtimePending')
+                : t('settings.modelHub.local.ocr.readiness.installFirst'),
+            tone: status?.inferenceReady ? 'success' : status?.artifactsReady ? 'warning' : 'neutral',
+          },
+        ]}
+      />
 
       {status?.artifactsReady && !status.inferenceReady && (
         <div className='mt-8px text-11px leading-17px text-[rgb(var(--warning-6))]'>
@@ -360,7 +299,7 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
         </div>
       )}
 
-      <div className='mt-13px border-t border-solid border-[var(--color-border-2)] pt-12px'>
+      <div>
         {isLoading && !catalog ? (
           <div className='flex items-center justify-center gap-7px py-24px text-12px text-t-secondary'>
             <Loading theme='outline' size='16' className='animate-spin' />
@@ -389,7 +328,7 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
               const savedPercent = percentOf(state.installedBytes, model.downloadSizeBytes);
 
               return (
-                <article key={model.id} className='rd-10px border border-solid border-[var(--color-border-2)] px-12px py-11px'>
+                <article key={model.id} className='rd-11px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-13px py-12px shadow-[0_5px_18px_rgba(0,0,0,0.025)]'>
                   <div className='flex items-start justify-between gap-12px flex-wrap'>
                     <div className='min-w-0 flex-1'>
                       <div className='flex items-center gap-6px flex-wrap'>
@@ -420,34 +359,10 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
                             size: formatLocalModelBytes(model.requiredMemoryBytes, locale),
                           })}
                         </span>
-                        <span>{model.license}</span>
-                      </div>
-                      <div className='mt-7px flex items-center gap-6px flex-wrap'>
-                        {model.components.map((component) => (
-                          <Tag key={component} size='small'>
-                            {componentLabel(component)}
-                          </Tag>
-                        ))}
-                        <span className='text-11px text-t-secondary'>
-                          {t('settings.modelHub.local.ocr.metadata.source', { source: model.source })}
-                        </span>
                       </div>
                     </div>
 
                     <div className='flex items-center gap-7px shrink-0'>
-                      {deleteAllowed && (
-                        <Tooltip content={t('settings.modelHub.local.ocr.action.delete')}>
-                          <Button
-                            size='small'
-                            type='secondary'
-                            status='danger'
-                            icon={<Delete theme='outline' size='14' />}
-                            disabled={pendingAction != null || Boolean(statusError)}
-                            onClick={() => confirmRemove(model)}
-                            aria-label={t('settings.modelHub.local.ocr.deleteModelLabel', { model: model.name })}
-                          />
-                        </Tooltip>
-                      )}
                       {action !== 'none' && (
                         <Button
                           size='small'
@@ -463,37 +378,67 @@ const OcrModelsPanel: React.FC<OcrModelsPanelProps> = ({ className }) => {
                     </div>
                   </div>
 
-                  {state.progress && renderProgress(state, state.progress)}
-                  {state.installPhase === 'verifying' && !state.progress && (
-                    <div className='mt-9px flex items-center gap-6px text-12px text-t-secondary'>
-                      <Loading theme='outline' size='13' className='animate-spin' />
-                      {t('settings.modelHub.local.ocr.progress.verifyingHint')}
+                  <LocalModelDetails
+                    forcedOpen={detailsForcedOpen(state.installPhase, Boolean(state.errorKind))}
+                  >
+                    <div className='flex items-center gap-6px flex-wrap'>
+                      {model.components.map((component) => (
+                        <Tag key={component} size='small'>
+                          {componentLabel(component)}
+                        </Tag>
+                      ))}
+                      <span className='text-11px text-t-secondary'>{model.license}</span>
+                      <span className='text-11px text-t-secondary'>
+                        {t('settings.modelHub.local.ocr.metadata.source', { source: model.source })}
+                      </span>
+                      {deleteAllowed && (
+                        <Tooltip content={t('settings.modelHub.local.ocr.action.delete')}>
+                          <Button
+                            size='mini'
+                            type='text'
+                            status='danger'
+                            icon={<Delete theme='outline' size='13' />}
+                            disabled={pendingAction != null || Boolean(statusError)}
+                            onClick={() => confirmRemove(model)}
+                            aria-label={t('settings.modelHub.local.ocr.deleteModelLabel', { model: model.name })}
+                          >
+                            {t('settings.modelHub.local.ocr.action.delete')}
+                          </Button>
+                        </Tooltip>
+                      )}
                     </div>
-                  )}
-                  {state.installPhase === 'paused' && savedPercent != null && (
-                    <div className='mt-10px rd-8px bg-[var(--fill-0)] px-10px py-8px'>
-                      <div className='mb-5px flex items-center justify-between gap-8px text-11px text-t-secondary'>
-                        <span>{t('settings.modelHub.local.ocr.progress.checkpointSaved')}</span>
-                        <span>
-                          {formatLocalModelBytes(state.installedBytes, locale)} /{' '}
-                          {formatLocalModelBytes(model.downloadSizeBytes, locale)}
-                        </span>
+                    {state.progress && renderProgress(state, state.progress)}
+                    {state.installPhase === 'verifying' && !state.progress && (
+                      <div className='mt-9px flex items-center gap-6px text-12px text-t-secondary'>
+                        <Loading theme='outline' size='13' className='animate-spin' />
+                        {t('settings.modelHub.local.ocr.progress.verifyingHint')}
                       </div>
-                      <Progress percent={savedPercent} showText={false} strokeWidth={4} color='rgb(var(--warning-6))' />
-                    </div>
-                  )}
-                  {state.errorKind && (
-                    <div className='mt-9px rd-7px bg-[rgba(var(--danger-6),0.07)] px-9px py-7px text-12px text-[rgb(var(--danger-6))]'>
-                      {errorLabel(state.errorKind)}
-                    </div>
-                  )}
+                    )}
+                    {state.installPhase === 'paused' && savedPercent != null && (
+                      <div className='mt-10px rd-8px bg-[var(--fill-0)] px-10px py-8px'>
+                        <div className='mb-5px flex items-center justify-between gap-8px text-11px text-t-secondary'>
+                          <span>{t('settings.modelHub.local.ocr.progress.checkpointSaved')}</span>
+                          <span>
+                            {formatLocalModelBytes(state.installedBytes, locale)} /{' '}
+                            {formatLocalModelBytes(model.downloadSizeBytes, locale)}
+                          </span>
+                        </div>
+                        <Progress percent={savedPercent} showText={false} strokeWidth={4} color='rgb(var(--warning-6))' />
+                      </div>
+                    )}
+                    {state.errorKind && (
+                      <div className='mt-9px rd-7px bg-[rgba(var(--danger-6),0.07)] px-9px py-7px text-12px text-[rgb(var(--danger-6))]'>
+                        {errorLabel(state.errorKind)}
+                      </div>
+                    )}
+                  </LocalModelDetails>
                 </article>
               );
             })}
           </div>
         )}
       </div>
-    </section>
+    </div>
   );
 };
 
