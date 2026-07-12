@@ -54,6 +54,17 @@ pub trait IConversationRepository: Send + Sync {
     /// The conversation identified by `conversation_id` is excluded.
     async fn list_associated(&self, user_id: &str, conversation_id: i64) -> Result<Vec<ConversationRow>, DbError>;
 
+    /// Removes every model reference owned by `provider_id` from persisted
+    /// conversation-native orchestrator ranges. Returns the number of changed
+    /// conversations. Default no-op keeps lightweight test repositories source
+    /// compatible; SQLite provides the durable implementation.
+    async fn remove_provider_from_orchestrator_model_ranges(
+        &self,
+        _provider_id: &str,
+    ) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
     // ── conversation_mcp_servers junction ───────────────────────────
 
     /// Returns the MCP server IDs selected for a conversation, ordered by

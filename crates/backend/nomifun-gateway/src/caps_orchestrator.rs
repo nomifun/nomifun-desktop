@@ -41,9 +41,11 @@
 //! [`load_provider_summaries`](crate::tools_provider::load_provider_summaries),
 //! already filtered to enabled providers × enabled models). So we expand `Auto`
 //! → a concrete `Range` of every enabled `(provider, model)` pair HERE, in the
-//! caps layer, before calling `create_adhoc`. `Single`/`Range` pass through
-//! verbatim.
+//! caps layer, before calling `create_adhoc`. `Single`/`Range` are checked
+//! against that same live catalog so stale provider/model references never
+//! become fleet members.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use nomifun_api_types::{
@@ -220,8 +222,17 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     // 1. Resolve the explicit model range. Omitted ⇒ `Auto`; a present value is
     //    parsed from the tagged JSON (a malformed tag is a clean error, not a
     //    panic — mirrors the old lead-extra tolerant parse).
+    let has_explicit_model_range = p.model_range.is_some();
     let model_range = match resolve_model_range(p.model_range) {
         Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    // Load the live provider catalog before accepting any persisted or explicit
+    // model reference. The same summaries are reused for Auto expansion and role
+    // member enrichment below.
+    let summaries = match load_provider_summaries(&deps).await {
+        Ok(s) => s,
         Err(e) => return e,
     };
 
@@ -233,12 +244,15 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     //     conversation / no usable model falls through to Auto (every enabled model).
     //     This is what stops a conversation-native run from spreading nodes across
     //     models the user never selected.
-    let model_range = if matches!(model_range, ModelRange::Auto) {
-        read_conversation_model_range(&deps, &user, &ctx.conversation_id)
+    let model_range = if has_explicit_model_range {
+        match validate_explicit_model_range(model_range, &summaries) {
+            Ok(range) => range,
+            Err(error) => return error,
+        }
+    } else {
+        read_conversation_model_range(&deps, &user, &ctx.conversation_id, &summaries)
             .await
             .unwrap_or(model_range)
-    } else {
-        model_range
     };
 
     // The 主模型 = the FIRST model of the curated/explicit range; it becomes the
@@ -249,15 +263,6 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
         ModelRange::Single { model } => Some(model.clone()),
         ModelRange::Range { models } => models.first().cloned(),
         ModelRange::Auto => None,
-    };
-
-    // 2. Load provider summaries once: needed to (a) expand `Auto` to a concrete
-    //    `Range`, (b) map an assistant's preferred model NAME → a (provider_id,
-    //    model) within the run's range, and (c) fill `description` on both the
-    //    assistant-backed AND the bare model members. (Cheap: one provider list.)
-    let summaries = match load_provider_summaries(&deps).await {
-        Ok(s) => s,
-        Err(e) => return e,
     };
 
     // Expand `Auto` to a concrete `Range` (RunService::create_adhoc rejects an
@@ -440,6 +445,81 @@ fn resolve_model_range(model_range: Option<Value>) -> Result<ModelRange, Value> 
     }
 }
 
+fn available_model_pair_keys(summaries: &[ProviderSummary]) -> HashSet<String> {
+    summaries
+        .iter()
+        .filter(|provider| provider.enabled)
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .map(move |model| format!("{}\0{model}", provider.id))
+        })
+        .collect()
+}
+
+fn model_ref_key(model: &ModelRef) -> String {
+    format!("{}\0{}", model.provider_id, model.model)
+}
+
+/// Persisted conversation ranges are soft references: stale or disabled pairs
+/// are removed, duplicates collapse to their first occurrence, and an empty
+/// result asks the caller to fall back to the conversation main model or Auto.
+fn filter_persisted_model_range(
+    range: ModelRange,
+    summaries: &[ProviderSummary],
+) -> Option<ModelRange> {
+    let available = available_model_pair_keys(summaries);
+    match range {
+        ModelRange::Auto => Some(ModelRange::Auto),
+        ModelRange::Single { model } => available
+            .contains(&model_ref_key(&model))
+            .then_some(ModelRange::Single { model }),
+        ModelRange::Range { models } => {
+            let mut seen = HashSet::new();
+            let models: Vec<ModelRef> = models
+                .into_iter()
+                .filter(|model| {
+                    let key = model_ref_key(model);
+                    available.contains(&key) && seen.insert(key)
+                })
+                .collect();
+            (!models.is_empty()).then_some(ModelRange::Range { models })
+        }
+    }
+}
+
+/// Explicit tool arguments are commands, not soft preferences. Reject an
+/// unavailable pair instead of silently changing the caller's requested fleet.
+fn validate_explicit_model_range(
+    range: ModelRange,
+    summaries: &[ProviderSummary],
+) -> Result<ModelRange, Value> {
+    let available = available_model_pair_keys(summaries);
+    let invalid: Vec<String> = match &range {
+        ModelRange::Auto => Vec::new(),
+        ModelRange::Single { model } => (!available.contains(&model_ref_key(model)))
+            .then(|| format!("{}/{}", model.provider_id, model.model))
+            .into_iter()
+            .collect(),
+        ModelRange::Range { models } => models
+            .iter()
+            .filter(|model| !available.contains(&model_ref_key(model)))
+            .map(|model| format!("{}/{}", model.provider_id, model.model))
+            .collect(),
+    };
+    if invalid.is_empty() {
+        Ok(range)
+    } else {
+        Err(json!({
+            "error": format!(
+                "model_range contains unavailable provider/model pairs: {}",
+                invalid.join(", ")
+            )
+        }))
+    }
+}
+
 /// Resolve the model range for a CONVERSATION-native run from the calling
 /// conversation, deterministically (never relayed through the LLM), in priority
 /// order:
@@ -457,12 +537,13 @@ fn resolve_model_range(model_range: Option<Value>) -> Result<ModelRange, Value> 
 ///
 /// Returns `None` ONLY when there is no usable signal at all — no calling
 /// conversation (MCP / no-session caller), an unreadable conversation, or a
-/// conversation with no valid main model — in which case the caller's `Auto`
-/// ("every enabled model") default is the only sensible option.
+/// conversation with no currently available main model — in which case the
+/// caller's `Auto` ("every enabled model") default is the only sensible option.
 async fn read_conversation_model_range(
     deps: &Arc<GatewayDeps>,
     user_id: &str,
     conversation_id: &str,
+    summaries: &[ProviderSummary],
 ) -> Option<ModelRange> {
     if conversation_id.is_empty() {
         return None;
@@ -475,7 +556,15 @@ async fn read_conversation_model_range(
     // 1. The curated range from the composer's 主模型/协作模型 selector, when present.
     if let Some(raw) = conv.extra.get("orchestrator_model_range") {
         match serde_json::from_value::<ModelRange>(raw.clone()) {
-            Ok(range) => return Some(range),
+            Ok(range) => {
+                if let Some(filtered) = filter_persisted_model_range(range, summaries) {
+                    return Some(filtered);
+                }
+                tracing::warn!(
+                    conversation_id,
+                    "orchestrator_model_range contains no currently available model; falling back to the conversation's main model"
+                );
+            }
             Err(e) => {
                 tracing::warn!(
                     conversation_id,
@@ -490,6 +579,7 @@ async fn read_conversation_model_range(
     //    (NOT Auto). `None` only when the conversation has no usable model, so the
     //    caller's Auto default applies just for a genuinely-unknown run.
     main_model_range(conv.model.as_ref())
+        .and_then(|range| filter_persisted_model_range(range, summaries))
 }
 
 /// Build a single-model [`ModelRange`] from a conversation's 主模型
@@ -1176,7 +1266,16 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
     // ── 否则新建 run（原 create+link 路径，行为不变）──
     // 模型解析：会话策展的「主模型+协作模型」优先，其次回退到会话当前主模型(单模型)；
     // 仅无会话/无可用模型时才 Auto 全量展开（与 create 一致，避免节点用到用户没选的模型）。
-    let model_range = read_conversation_model_range(&deps, &user, &ctx.conversation_id)
+    let summaries = match load_provider_summaries(&deps).await {
+        Ok(summaries) => summaries,
+        Err(error) => return error,
+    };
+    let model_range = read_conversation_model_range(
+        &deps,
+        &user,
+        &ctx.conversation_id,
+        &summaries,
+    )
         .await
         .unwrap_or(ModelRange::Auto);
     let lead_model: Option<ModelRef> = match &model_range {
@@ -1185,10 +1284,6 @@ async fn spawn(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: SpawnPara
         ModelRange::Auto => None,
     };
     let model_range = if matches!(model_range, ModelRange::Auto) {
-        let summaries = match load_provider_summaries(&deps).await {
-            Ok(s) => s,
-            Err(e) => return e,
-        };
         match expand_auto_range(&summaries) {
             Ok(r) => r,
             Err(e) => return e,
@@ -1685,6 +1780,74 @@ mod tests {
             models: models.iter().map(|m| m.to_string()).collect(),
             model_descriptions: std::collections::HashMap::new(),
         }
+    }
+
+    fn range_ref(provider_id: &str, model: &str) -> ModelRef {
+        ModelRef {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+        }
+    }
+
+    #[test]
+    fn persisted_range_drops_deleted_and_disabled_pairs_preserving_order() {
+        let providers = vec![
+            summary("keep", true, &["k1", "k2"]),
+            summary("disabled", false, &["d1"]),
+        ];
+        let range = ModelRange::Range {
+            models: vec![
+                range_ref("gone", "g1"),
+                range_ref("keep", "k2"),
+                range_ref("disabled", "d1"),
+                range_ref("keep", "k1"),
+                range_ref("keep", "k2"),
+            ],
+        };
+
+        let filtered = filter_persisted_model_range(range, &providers).expect("two live pairs");
+        let ModelRange::Range { models } = filtered else {
+            panic!("expected range")
+        };
+        let pairs: Vec<(&str, &str)> = models
+            .iter()
+            .map(|item| (item.provider_id.as_str(), item.model.as_str()))
+            .collect();
+        assert_eq!(pairs, vec![("keep", "k2"), ("keep", "k1")]);
+    }
+
+    #[test]
+    fn persisted_range_returns_none_when_no_pair_survives() {
+        let range = ModelRange::Single {
+            model: range_ref("gone", "g1"),
+        };
+        assert!(
+            filter_persisted_model_range(range, &[summary("keep", true, &["k1"])]).is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_range_rejects_any_unavailable_pair() {
+        let range = ModelRange::Range {
+            models: vec![range_ref("keep", "k1"), range_ref("gone", "g1")],
+        };
+        let error = validate_explicit_model_range(range, &[summary("keep", true, &["k1"])]).unwrap_err();
+        let message = error["error"].as_str().unwrap_or_default();
+        assert!(message.contains("gone/g1"), "got: {message}");
+    }
+
+    #[test]
+    fn filtered_range_lead_is_first_surviving_pair() {
+        let range = ModelRange::Range {
+            models: vec![range_ref("gone", "g1"), range_ref("keep", "k2")],
+        };
+        let filtered = filter_persisted_model_range(range, &[summary("keep", true, &["k2"])])
+            .expect("one live pair");
+        let ModelRange::Range { models } = filtered else {
+            panic!("expected range")
+        };
+        assert_eq!(models.first().map(|item| item.provider_id.as_str()), Some("keep"));
+        assert_eq!(models.first().map(|item| item.model.as_str()), Some("k2"));
     }
 
     // ── resolve_model_range: explicit arg → ModelRange (omitted ⇒ Auto) ──────

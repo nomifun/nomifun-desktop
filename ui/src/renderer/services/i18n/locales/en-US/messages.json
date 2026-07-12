@@ -9,7 +9,8 @@
     "waiting": "Waiting to confirm {{target}}",
     "completed": "Ran {{target}}",
     "failed": "Failed {{target}}",
-    "canceled": "Canceled {{target}}"
+    "canceled": "Canceled {{target}}",
+    "skipped": "Skipped {{target}}"
   },
   "processReceipt": {
     "tools": "{{count}} tools",
@@ -68,8 +69,8 @@
     "disabled": "Knowledge write-back is disabled",
     "interrupted": "Knowledge write-back was interrupted"
   },
-  "planTodoList": "To do list",
-  "planProgress": "{{done}}/{{total}} done",
+  "planTodoList": "Task queue",
+  "planProgress": "{{done}}/{{total}}",
   "fileChanges": "File Changes",
   "fileChangesCount": "{{count}} File Changes",
   "conversationInProgress": "A conversation is currently in progress...",

@@ -19,6 +19,22 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('does not classify update_plan as a file edit', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [tool({ key: 'plan-1', name: 'update_plan', status: 'completed' })],
+      'completed'
+    );
+
+    expect(parts).toEqual([
+      {
+        action: 'generic',
+        count: 1,
+        state: 'completed',
+        target: 'update_plan',
+      },
+    ]);
+  });
+
   test('summarizes mixed file reads and commands as separate receipt parts', () => {
     const parts = buildToolReceiptSummaryParts(
       [
@@ -124,6 +140,31 @@ describe('buildToolReceiptSummaryParts', () => {
 
     expect(parts).toEqual([
       { action: 'run_commands', count: 1, state: 'completed', target: 'grep -rn "missing" .' },
+    ]);
+  });
+
+  test('summarizes prior-error barrier commands as skipped instead of failed', () => {
+    const parts = buildToolReceiptSummaryParts(
+      [
+        tool({
+          key: 'bash-skipped',
+          name: 'Bash',
+          status: 'canceled',
+          skipped: true,
+          input: '{"command":"find /workspace -maxdepth 2 -type d"}',
+        }),
+      ],
+      'canceled'
+    );
+
+    expect(parts).toEqual([
+      {
+        action: 'run_commands',
+        count: 1,
+        state: 'canceled',
+        target: 'find /workspace -maxdepth 2 -type d',
+        skipped: true,
+      },
     ]);
   });
 
@@ -306,6 +347,30 @@ describe('buildToolReceiptDetailRows', () => {
         title: 'Bash',
         target: 'grep -rn "missing" .',
         output: 'exit code 1',
+      },
+    ]);
+  });
+
+  test('keeps skipped command details distinct from user cancellation', () => {
+    const rows = buildToolReceiptDetailRows([
+      tool({
+        key: 'bash-skipped',
+        name: 'Bash',
+        status: 'canceled',
+        skipped: true,
+        input: '{"command":"find /workspace -maxdepth 2 -type d"}',
+      }),
+    ]);
+
+    expect(rows).toEqual([
+      {
+        key: 'bash-skipped',
+        action: 'run_commands',
+        state: 'canceled',
+        title: 'Bash',
+        target: 'find /workspace -maxdepth 2 -type d',
+        input: '{"command":"find /workspace -maxdepth 2 -type d"}',
+        skipped: true,
       },
     ]);
   });

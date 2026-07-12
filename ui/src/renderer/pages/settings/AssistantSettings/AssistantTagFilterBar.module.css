@@ -93,10 +93,10 @@
 }
 
 .drawerFilterChipActive {
-  color: rgb(var(--primary-6));
-  border-color: var(--drawer-filter-hairline-strong);
-  background: var(--drawer-filter-chip-active-bg);
-  box-shadow: 0 4px 10px color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent);
+  color: var(--skill-selection-fg);
+  border-color: var(--skill-selection-fg);
+  background: var(--skill-selection-bg);
+  box-shadow: none;
 }
 
 .drawerManageChip {

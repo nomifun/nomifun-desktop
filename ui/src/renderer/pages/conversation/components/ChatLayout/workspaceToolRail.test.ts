@@ -9,6 +9,8 @@ import { describe, expect, test } from 'bun:test';
 
 const stylesheet = readFileSync(new URL('./chat-layout.css', import.meta.url), 'utf8');
 const componentSource = readFileSync(new URL('./WorkspaceToolRail.tsx', import.meta.url), 'utf8');
+const workspaceRailBodySource = readFileSync(new URL('../../Workspace/WorkspaceRailBody.tsx', import.meta.url), 'utf8');
+const workspaceEventsSource = readFileSync(new URL('../../Workspace/hooks/useWorkspaceEvents.ts', import.meta.url), 'utf8');
 
 const rule = (selector: string) => {
   const match = stylesheet.match(new RegExp(`${selector}\\s*\\{([\\s\\S]*?)\\n\\}`, 'm'));
@@ -17,6 +19,21 @@ const rule = (selector: string) => {
 };
 
 describe('workspace tool rail dimensions', () => {
+  test('uses a text-free red dot when workspace changes are pending', () => {
+    const badge = rule('\\.workspace-tool-rail__badge');
+
+    expect(componentSource.includes("changeCount > 0 ? <span className='workspace-tool-rail__badge' /> : undefined")).toBe(true);
+    expect(componentSource.includes("changeCount > 99 ? '99+' : changeCount")).toBe(false);
+    expect(badge.includes('width: 7px;')).toBe(true);
+    expect(badge.includes('height: 7px;')).toBe(true);
+    expect(badge.includes('background: rgb(var(--danger-6));')).toBe(true);
+  });
+
+  test('refreshes the change count from the existing agent workspace refresh signal', () => {
+    expect(workspaceRailBodySource.includes('refreshChanges: fileChangesHook.refreshChanges,')).toBe(true);
+    expect(workspaceEventsSource.includes('refreshChangesRef.current();')).toBe(true);
+  });
+
   test('uses compact square desktop controls', () => {
     const rail = rule('\\.workspace-tool-rail');
     const item = rule('\\.workspace-tool-rail__item');
