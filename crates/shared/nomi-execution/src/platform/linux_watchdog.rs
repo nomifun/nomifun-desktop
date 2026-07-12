@@ -252,8 +252,8 @@ pub(super) fn capture_close_upper_exclusive() -> io::Result<RawFd> {
         );
     }
 
-    let soft_limit = limits.rlim_cur as u64;
-    let hard_limit = limits.rlim_max as u64;
+    let soft_limit = limits.rlim_cur;
+    let hard_limit = limits.rlim_max;
     let kernel_upper_exclusive = if hard_limit == libc::RLIM_INFINITY {
         let bytes = fs::read("/proc/sys/fs/nr_open")?;
         parse_u64_raw(trim_ascii_whitespace(&bytes)).ok_or_else(|| {
@@ -632,25 +632,23 @@ unsafe fn close_unknown_fds(
                 0_u32,
             )
         };
-        if close_range_needs_fallback(result) {
-            if let Some(range) = attempt.fallback {
-                if let Err(errno) = unsafe { close_fd_range_fallback(range) } {
-                    if first_error == 0 {
-                        first_error = errno;
-                    }
-                }
-            }
-        }
-    }
-    if let Err(errno) = unsafe { require_open_fd(control_fd) } {
-        if first_error == 0 {
+        if close_range_needs_fallback(result)
+            && let Some(range) = attempt.fallback
+            && let Err(errno) = unsafe { close_fd_range_fallback(range) }
+            && first_error == 0
+        {
             first_error = errno;
         }
     }
-    if let Err(errno) = unsafe { require_open_fd(registration_fd) } {
-        if first_error == 0 {
-            first_error = errno;
-        }
+    if let Err(errno) = unsafe { require_open_fd(control_fd) }
+        && first_error == 0
+    {
+        first_error = errno;
+    }
+    if let Err(errno) = unsafe { require_open_fd(registration_fd) }
+        && first_error == 0
+    {
+        first_error = errno;
     }
     if first_error == 0 {
         Ok(())

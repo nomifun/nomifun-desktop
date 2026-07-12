@@ -26,7 +26,7 @@ impl PtyPair {
     pub(super) fn open(cols: u16, rows: u16) -> io::Result<Self> {
         let mut master = -1;
         let mut slave = -1;
-        let mut size = libc::winsize {
+        let size = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
@@ -40,7 +40,7 @@ impl PtyPair {
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                &mut size,
+                &size,
             )
         };
         if result != 0 {
