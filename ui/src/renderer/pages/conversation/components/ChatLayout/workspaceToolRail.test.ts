@@ -17,6 +17,16 @@ const rule = (selector: string) => {
 };
 
 describe('workspace tool rail dimensions', () => {
+  test('uses a text-free red dot when workspace changes are pending', () => {
+    const badge = rule('\\.workspace-tool-rail__badge');
+
+    expect(componentSource.includes("changeCount > 0 ? <span className='workspace-tool-rail__badge' /> : undefined")).toBe(true);
+    expect(componentSource.includes("changeCount > 99 ? '99+' : changeCount")).toBe(false);
+    expect(badge.includes('width: 7px;')).toBe(true);
+    expect(badge.includes('height: 7px;')).toBe(true);
+    expect(badge.includes('background: rgb(var(--danger-6));')).toBe(true);
+  });
+
   test('uses compact square desktop controls', () => {
     const rail = rule('\\.workspace-tool-rail');
     const item = rule('\\.workspace-tool-rail__item');
