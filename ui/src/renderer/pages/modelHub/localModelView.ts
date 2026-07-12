@@ -30,7 +30,9 @@ export const stateForLocalModel = (
   modelId: string
 ): LocalModelState => states?.find((state) => state.modelId === modelId) ?? emptyLocalModelState(modelId);
 
-export const isLocalModelActivityPending = (status: LocalModelServiceStatus | undefined): boolean =>
+export const isLocalModelActivityPending = (
+  status: Pick<LocalModelServiceStatus, 'models' | 'runtime'> | undefined
+): boolean =>
   Boolean(
     status &&
       (status.models.some((model) => ACTIVE_INSTALL_PHASES.has(model.installPhase)) ||

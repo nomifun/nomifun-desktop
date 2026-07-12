@@ -8,7 +8,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import classNames from 'classnames';
-import { DataServer, LinkCloud, Robot, SettingTwo, Platte, Lightning } from '@icon-park/react';
+import { DataServer, HeadsetOne, LinkCloud, Robot, SettingTwo, Platte, Lightning } from '@icon-park/react';
 import ContentSider from '@/renderer/components/layout/ContentSider';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
 import { SettingsViewModeProvider } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
@@ -21,14 +21,16 @@ import GlobalModelConfig from './GlobalModelConfig';
 import CreationModelsContent from './CreationModelsContent';
 import FreeModelsContent from './FreeModelsContent';
 import LocalModelsContent from './LocalModelsContent';
+import SpeechToTextContent from './SpeechToTextContent';
 
-type Section = 'agents' | 'models' | 'free' | 'local' | 'creation' | 'global';
+type Section = 'agents' | 'models' | 'free' | 'local' | 'speech' | 'creation' | 'global';
 
 const isSection = (value: string | null): value is Section =>
   value === 'agents' ||
   value === 'models' ||
   value === 'free' ||
   value === 'local' ||
+  value === 'speech' ||
   value === 'creation' ||
   value === 'global';
 
@@ -105,6 +107,7 @@ const ModelHubPage: React.FC = () => {
       { key: 'models', label: t('settings.modelHub.sectionModels'), icon: <LinkCloud theme='outline' size='16' strokeWidth={3} /> },
       { key: 'free', label: t('settings.modelHub.sectionFree'), icon: <Lightning theme='outline' size='16' strokeWidth={3} /> },
       { key: 'local', label: t('settings.modelHub.sectionLocal'), icon: <DataServer theme='outline' size='16' strokeWidth={3} /> },
+      { key: 'speech', label: t('settings.modelHub.sectionSpeech'), icon: <HeadsetOne theme='outline' size='16' strokeWidth={3} /> },
       { key: 'agents', label: t('settings.modelHub.sectionAgents'), icon: <Robot theme='outline' size='16' strokeWidth={3} /> },
       { key: 'creation', label: t('settings.modelHub.sectionCreation'), icon: <Platte theme='outline' size='16' strokeWidth={3} /> },
       { key: 'global', label: t('settings.modelHub.sectionGlobal'), icon: <SettingTwo theme='outline' size='16' strokeWidth={3} /> },
@@ -118,6 +121,7 @@ const ModelHubPage: React.FC = () => {
       {section === 'models' && <ModelModalContent />}
       {section === 'free' && <FreeModelsContent />}
       {section === 'local' && <LocalModelsContent />}
+      {section === 'speech' && <SpeechToTextContent />}
       {section === 'creation' && <CreationModelsContent />}
       {section === 'global' && <GlobalModelConfig />}
     </>

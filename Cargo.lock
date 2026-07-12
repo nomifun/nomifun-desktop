@@ -6071,6 +6071,8 @@ version = "0.2.17"
 dependencies = [
  "async-trait",
  "axum",
+ "bytes",
+ "futures-util",
  "http-body-util",
  "nomifun-api-types",
  "nomifun-common",
@@ -6086,6 +6088,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "which 7.0.3",
  "wiremock",

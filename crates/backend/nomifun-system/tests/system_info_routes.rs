@@ -46,7 +46,9 @@ fn build_state(db: &nomifun_db::Database, version_check_service: VersionCheckSer
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,        image_model_service: None,
+        local_model_service: None,
+        image_model_service: None,
+        asr_model_service: None,
         lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client),
         version_check_service,
@@ -167,7 +169,7 @@ async fn test_system_info_snake_case_keys() {
 }
 
 // ===========================================================================
-// POST /api/system/check-update â€?with wiremock
+// POST /api/system/check-update â€” with wiremock
 // ===========================================================================
 
 #[tokio::test]
@@ -238,7 +240,7 @@ async fn test_check_update_skips_draft() {
     Mock::given(method("GET"))
         .and(path("/repos/nomifun/nomifun-app/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            make_github_release("v5.0.0", true, false, vec![]), // draft â€?skip
+            make_github_release("v5.0.0", true, false, vec![]), // draft â€” skip
             make_github_release("v2.0.0", false, false, vec![]),
         ])))
         .mount(&mock_server)

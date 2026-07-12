@@ -30,6 +30,24 @@ llama.cpp / llama-server runtime
   Licensed under the MIT License.
   License text: https://github.com/ggml-org/llama.cpp/blob/b9957/LICENSE
 
+whisper.cpp / whisper-cli runtime
+  https://github.com/ggml-org/whisper.cpp
+  Pinned release: v1.9.1
+  Copyright (c) 2023-2026 The ggml authors
+  Licensed under the MIT License.
+  License text: https://github.com/ggml-org/whisper.cpp/blob/v1.9.1/LICENSE
+
+OpenAI Whisper multilingual model weights and whisper.cpp GGML quantizations
+  https://github.com/openai/whisper
+  https://huggingface.co/ggerganov/whisper.cpp/tree/5359861c739e955e79d9a303bcbc70fb988958b1
+  Optional local speech-recognition models: Whisper Small Q5_1 and
+  Whisper Large v3 Turbo Q5_0.
+  The OpenAI Whisper source code and model weights are licensed under the
+  MIT License.
+  License text: https://github.com/openai/whisper/blob/main/LICENSE
+  The pinned whisper.cpp repository publishes the GGML conversions used by
+  NomiFun under its MIT-licensed project.
+
 Qwen3.5 models (4B and 9B)
   https://huggingface.co/Qwen
   Developed by the Qwen Team at Alibaba Cloud.

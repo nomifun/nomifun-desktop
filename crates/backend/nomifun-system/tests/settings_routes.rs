@@ -1,6 +1,6 @@
 //! Black-box integration tests for system settings routes.
 //!
-//! Tests exercise the HTTP layer (request â†?handler â†?response) via
+//! Tests exercise the HTTP layer (request â†’ handler â†’ response) via
 //! `tower::ServiceExt::oneshot`, without authentication middleware.
 //! Auth protection is verified at the app-level E2E tests (task 3.9).
 
@@ -37,7 +37,9 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,        image_model_service: None,
+        local_model_service: None,
+        image_model_service: None,
+        asr_model_service: None,
         lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),

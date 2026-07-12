@@ -9,8 +9,8 @@ use nomifun_db::{IModelProfileRepository, IProviderRepository};
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::{
-    ImageModelService, LocalModelServer, LocalModelService, reconcile_local_catalog_profiles,
-    start_and_provision_local_model,
+    AsrModelService, ImageModelService, LocalModelServer, LocalModelService,
+    reconcile_local_catalog_profiles, start_and_provision_local_model,
 };
 
 struct LocalModelServices {
@@ -31,6 +31,8 @@ pub struct LazyLocalModelRuntime {
     encryption_key: [u8; 32],
     services: OnceCell<Arc<LocalModelServices>>,
     init_lock: Mutex<()>,
+    asr: OnceCell<Arc<AsrModelService>>,
+    asr_init_lock: Mutex<()>,
 }
 
 impl LazyLocalModelRuntime {
@@ -47,11 +49,17 @@ impl LazyLocalModelRuntime {
             encryption_key,
             services: OnceCell::new(),
             init_lock: Mutex::new(()),
+            asr: OnceCell::new(),
+            asr_init_lock: Mutex::new(()),
         })
     }
 
     pub fn is_started(&self) -> bool {
         self.services.get().is_some()
+    }
+
+    pub fn is_asr_started(&self) -> bool {
+        self.asr.get().is_some()
     }
 
     /// Start a previously opted-in local runtime during application bootstrap.
@@ -138,6 +146,39 @@ impl LazyLocalModelRuntime {
         Ok(self.ensure().await?.image.clone())
     }
 
+    async fn ensure_asr(&self) -> Result<Arc<AsrModelService>, AppError> {
+        if let Some(service) = self.asr.get() {
+            return Ok(service.clone());
+        }
+        let _guard = self.asr_init_lock.lock().await;
+        if let Some(service) = self.asr.get() {
+            return Ok(service.clone());
+        }
+        let service = AsrModelService::new(&self.data_dir).await?;
+        self.asr
+            .set(service.clone())
+            .map_err(|_| AppError::Internal("ASR model runtime initialized twice".into()))?;
+        Ok(service)
+    }
+
+    pub fn asr_if_started(&self) -> Option<Arc<AsrModelService>> {
+        self.asr.get().cloned()
+    }
+
+    pub async fn asr(&self) -> Result<Arc<AsrModelService>, AppError> {
+        self.ensure_asr().await
+    }
+
+    /// Restore only the ASR control plane when a prior installation left its
+    /// own state file. This never starts text/image services or the facade.
+    pub async fn restore_asr_if_opted_in(&self) -> Result<bool, AppError> {
+        if !AsrModelService::opted_in(&self.data_dir) {
+            return Ok(false);
+        }
+        self.ensure_asr().await?;
+        Ok(true)
+    }
+
     pub fn local_existing(&self) -> Result<Arc<LocalModelService>, AppError> {
         self.local_if_started().ok_or_else(|| {
             AppError::ProviderUnavailable("local model service has not been enabled".into())
@@ -147,6 +188,12 @@ impl LazyLocalModelRuntime {
     pub fn image_existing(&self) -> Result<Arc<ImageModelService>, AppError> {
         self.image_if_started().ok_or_else(|| {
             AppError::ProviderUnavailable("image model service has not been enabled".into())
+        })
+    }
+
+    pub fn asr_existing(&self) -> Result<Arc<AsrModelService>, AppError> {
+        self.asr_if_started().ok_or_else(|| {
+            AppError::ProviderUnavailable("ASR model service has not been enabled".into())
         })
     }
 
@@ -249,5 +296,86 @@ mod tests {
             &image.unwrap(),
             &runtime.image_if_started().unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn first_asr_use_does_not_start_text_image_or_provider_facade() {
+        let db = init_database_memory().await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let provider_repo: Arc<dyn IProviderRepository> =
+            Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let profile_repo: Arc<dyn IModelProfileRepository> =
+            Arc::new(SqliteModelProfileRepository::new(db.pool().clone()));
+        let runtime = LazyLocalModelRuntime::new(
+            temp.path(),
+            provider_repo.clone(),
+            profile_repo,
+            [3_u8; 32],
+        );
+
+        let asr = runtime.asr().await.unwrap();
+        assert!(runtime.is_asr_started());
+        assert!(!runtime.is_started());
+        assert!(Arc::ptr_eq(&asr, &runtime.asr_if_started().unwrap()));
+        assert!(temp.path().join("local-ai").join("asr").is_dir());
+        assert!(
+            provider_repo
+                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_asr_restore_is_side_effect_free() {
+        let db = init_database_memory().await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let provider_repo: Arc<dyn IProviderRepository> =
+            Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let profile_repo: Arc<dyn IModelProfileRepository> =
+            Arc::new(SqliteModelProfileRepository::new(db.pool().clone()));
+        let runtime =
+            LazyLocalModelRuntime::new(temp.path(), provider_repo, profile_repo, [4_u8; 32]);
+
+        assert!(!runtime.restore_asr_if_opted_in().await.unwrap());
+        assert!(!runtime.is_asr_started());
+        assert!(!runtime.is_started());
+        assert!(!temp.path().join("local-ai").exists());
+    }
+
+    #[tokio::test]
+    async fn persisted_asr_restore_does_not_start_text_image_facade() {
+        let db = init_database_memory().await.unwrap();
+        let temp = TempDir::new().unwrap();
+        let asr_dir = temp.path().join("local-ai").join("asr");
+        tokio::fs::create_dir_all(&asr_dir).await.unwrap();
+        tokio::fs::write(
+            asr_dir.join("state.json"),
+            br#"{"version":1,"installedModelIds":["whisper-small-q5-1"],"activeModelId":null}"#,
+        )
+        .await
+        .unwrap();
+        let provider_repo: Arc<dyn IProviderRepository> =
+            Arc::new(SqliteProviderRepository::new(db.pool().clone()));
+        let profile_repo: Arc<dyn IModelProfileRepository> =
+            Arc::new(SqliteModelProfileRepository::new(db.pool().clone()));
+        let runtime = LazyLocalModelRuntime::new(
+            temp.path(),
+            provider_repo.clone(),
+            profile_repo,
+            [5_u8; 32],
+        );
+
+        assert!(runtime.restore_asr_if_opted_in().await.unwrap());
+        assert!(runtime.is_asr_started());
+        assert!(!runtime.is_started());
+        assert!(
+            provider_repo
+                .find_by_id(crate::LOCAL_MODEL_PROVIDER_ID)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

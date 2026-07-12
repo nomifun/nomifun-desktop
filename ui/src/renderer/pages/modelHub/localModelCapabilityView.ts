@@ -18,7 +18,7 @@ export interface LocalModelCapabilityDefinition {
 export const LOCAL_MODEL_CAPABILITIES: readonly LocalModelCapabilityDefinition[] = [
   { key: 'text', implemented: true },
   { key: 'image', implemented: true },
-  { key: 'speech_recognition', implemented: false },
+  { key: 'speech_recognition', implemented: true },
   { key: 'speech_synthesis', implemented: false },
 ];
 

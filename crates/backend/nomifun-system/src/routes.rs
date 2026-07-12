@@ -6,9 +6,10 @@ use axum::routing::{delete, get, patch, post};
 use std::path::PathBuf;
 
 use nomifun_api_types::{
-    ApiResponse, ClientPreferencesResponse, CreateProviderRequest, DetectProtocolRequest,
-    FetchModelsAnonymousRequest, FetchModelsRequest, FetchModelsResponse, ImageModelCatalogEntry,
-    ImageModelServiceStatus, LocalModelCatalogEntry, LocalModelServiceStatus, ManagedModel,
+    ApiResponse, AsrModelCatalogEntry, AsrModelServiceStatus, ClientPreferencesResponse,
+    CreateProviderRequest, DetectProtocolRequest, FetchModelsAnonymousRequest,
+    FetchModelsRequest, FetchModelsResponse, ImageModelCatalogEntry, ImageModelServiceStatus,
+    LocalModelCatalogEntry, LocalModelServiceStatus, ManagedModel,
     ManagedModelHealthBatchResult,
     ManagedModelHealthResult, ManagedModelServiceStatus, ModelProfile, ModelProfileKeyRequest,
     ModelProfileUpsertRequest, ProtocolDetectionResponse, ProviderResponse, ResolveModelsRequest,
@@ -20,6 +21,7 @@ use nomifun_api_types::{
 use nomifun_common::AppError;
 
 use crate::client_pref::ClientPrefService;
+use crate::asr_model::AsrModelService;
 use crate::image_model::ImageModelService;
 use crate::local_model::LocalModelService;
 use crate::local_model_runtime::LazyLocalModelRuntime;
@@ -42,6 +44,7 @@ pub struct SystemRouterState {
     pub managed_model_service: Option<std::sync::Arc<ManagedModelService>>,
     pub local_model_service: Option<std::sync::Arc<LocalModelService>>,
     pub image_model_service: Option<std::sync::Arc<ImageModelService>>,
+    pub asr_model_service: Option<std::sync::Arc<AsrModelService>>,
     pub lazy_local_model_runtime: Option<std::sync::Arc<LazyLocalModelRuntime>>,
     pub protocol_detection_service: ProtocolDetectionService,
     pub version_check_service: VersionCheckService,
@@ -110,6 +113,14 @@ pub fn system_routes(state: SystemRouterState) -> Router {
             get(get_image_model_status),
         )
         .route(
+            "/api/model-services/local/asr/catalog",
+            get(get_asr_model_catalog),
+        )
+        .route(
+            "/api/model-services/local/asr/status",
+            get(get_asr_model_status),
+        )
+        .route(
             "/api/model-services/local/image/models/{id}/install",
             post(install_image_model),
         )
@@ -124,6 +135,22 @@ pub fn system_routes(state: SystemRouterState) -> Router {
         .route(
             "/api/model-services/local/image/models/{id}",
             delete(delete_image_model),
+        )
+        .route(
+            "/api/model-services/local/asr/models/{id}/install",
+            post(install_asr_model),
+        )
+        .route(
+            "/api/model-services/local/asr/models/{id}/cancel",
+            post(cancel_asr_model_install),
+        )
+        .route(
+            "/api/model-services/local/asr/models/{id}/activate",
+            post(set_asr_model_active),
+        )
+        .route(
+            "/api/model-services/local/asr/models/{id}",
+            delete(delete_asr_model),
         )
         .route(
             "/api/model-services/local/models/{id}/install",
@@ -325,6 +352,25 @@ async fn image_service(
         runtime.image().await
     } else {
         runtime.image_existing()
+    }
+}
+
+async fn asr_service(
+    state: &SystemRouterState,
+    initialize: bool,
+) -> Result<std::sync::Arc<AsrModelService>, AppError> {
+    if let Some(service) = &state.asr_model_service {
+        return Ok(service.clone());
+    }
+    let runtime = state.lazy_local_model_runtime.as_ref().ok_or_else(|| {
+        AppError::ProviderUnavailable(
+            "ASR model service is not available in this process".into(),
+        )
+    })?;
+    if initialize {
+        runtime.asr().await
+    } else {
+        runtime.asr_existing()
     }
 }
 
@@ -544,6 +590,67 @@ async fn delete_image_model(
 ) -> Result<Json<ApiResponse<ImageModelServiceStatus>>, AppError> {
     let service = image_service(&state, false).await?;
     Ok(Json(ApiResponse::ok(service.delete(&id).await?)))
+}
+
+async fn get_asr_model_status(
+    State(state): State<SystemRouterState>,
+) -> Result<Json<ApiResponse<AsrModelServiceStatus>>, AppError> {
+    if let Some(service) = &state.asr_model_service {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    if let Some(service) = state
+        .lazy_local_model_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.asr_if_started())
+    {
+        return Ok(Json(ApiResponse::ok(service.status().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::inactive_asr_model_status())))
+}
+
+async fn get_asr_model_catalog(
+    State(state): State<SystemRouterState>,
+) -> Result<Json<ApiResponse<Vec<AsrModelCatalogEntry>>>, AppError> {
+    if let Some(service) = &state.asr_model_service {
+        return Ok(Json(ApiResponse::ok(service.catalog().await)));
+    }
+    Ok(Json(ApiResponse::ok(crate::asr_model_catalog())))
+}
+
+async fn install_asr_model(
+    State(state): State<SystemRouterState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<AsrModelServiceStatus>>, AppError> {
+    let service = asr_service(&state, true).await?;
+    Ok(Json(ApiResponse::ok(service.install(&id).await?)))
+}
+
+async fn cancel_asr_model_install(
+    State(state): State<SystemRouterState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<AsrModelServiceStatus>>, AppError> {
+    let service = asr_service(&state, false).await?;
+    Ok(Json(ApiResponse::ok(service.cancel(&id).await?)))
+}
+
+async fn delete_asr_model(
+    State(state): State<SystemRouterState>,
+    Path(id): Path<String>,
+) -> Result<Json<ApiResponse<AsrModelServiceStatus>>, AppError> {
+    let service = asr_service(&state, false).await?;
+    Ok(Json(ApiResponse::ok(service.delete(&id).await?)))
+}
+
+async fn set_asr_model_active(
+    State(state): State<SystemRouterState>,
+    Path(id): Path<String>,
+    body: Result<Json<SetLocalModelActiveRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<AsrModelServiceStatus>>, AppError> {
+    let Json(req) = body.map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let service = asr_service(&state, req.enabled).await?;
+    Ok(Json(ApiResponse::ok(
+        service.set_active(&id, req.enabled).await?,
+    )))
 }
 
 // ===========================================================================

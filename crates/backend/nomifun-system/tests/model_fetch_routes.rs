@@ -45,7 +45,9 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
             nomifun_db::SqliteModelProfileRepository::new(db.pool().clone()),
         )),
         managed_model_service: None,
-        local_model_service: None,        image_model_service: None,
+        local_model_service: None,
+        image_model_service: None,
+        asr_model_service: None,
         lazy_local_model_runtime: None,
         protocol_detection_service: ProtocolDetectionService::new(http_client.clone()),
         version_check_service: VersionCheckService::new(http_client, "0.1.0".to_owned()),
@@ -299,7 +301,7 @@ async fn fetch_models_ark_agent_plan_uses_remote_catalog_when_available() {
 #[tokio::test]
 async fn fetch_models_ark_agent_plan_falls_back_when_catalog_unavailable() {
     // The plan gateway commonly only routes /chat/completions and 404s on
-    // /models. That must not surface as an error â€?the known switchable set
+    // /models. That must not surface as an error â€” the known switchable set
     // is returned instead, always including the ark-code-latest router alias.
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -317,7 +319,7 @@ async fn fetch_models_ark_agent_plan_falls_back_when_catalog_unavailable() {
     let json = body_json(resp).await;
     let models = json["data"]["models"].as_array().unwrap();
     assert!(models.iter().any(|model| model == "ark-code-latest"));
-    // No fixed_base_url â€?the known-correct base is never auto-rewritten.
+    // No fixed_base_url â€” the known-correct base is never auto-rewritten.
     assert!(json["data"].get("fixed_base_url").is_none());
 }
 
@@ -743,13 +745,13 @@ async fn fetch_models_anonymous_minimax_hardcoded() {
 async fn fetch_models_route_literal_segment_beats_id_shadowing() {
     // Regression guard for axum route ordering: POST /api/providers/fetch-models
     // must NOT be matched as /api/providers/{id}/models with id="fetch-models".
-    // If shadowing occurred we'd either hit the by-id handler (â†?404 provider
+    // If shadowing occurred we'd either hit the by-id handler (â†’ 404 provider
     // not found) or get a routing error. Hitting the anonymous handler returns
     // 400 for missing required fields, which is the right signature.
     let (router, _db) = setup().await;
     let req = post_request("/api/providers/fetch-models", json!({}));
     let resp = router.oneshot(req).await.unwrap();
-    // Missing "platform" / "base_url" / "api_key" â€?anonymous handler
+    // Missing "platform" / "base_url" / "api_key" â€” anonymous handler
     // rejects with 400 via JSON deserialization failure, not 404 from the
     // by-id handler.
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);

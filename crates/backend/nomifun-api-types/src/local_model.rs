@@ -134,6 +134,42 @@ pub struct SetLocalModelActiveRequest {
     pub enabled: bool,
 }
 
+/// Immutable metadata for a curated local speech-recognition model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrModelCatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub model_size: String,
+    pub quantization: String,
+    /// Runtime archive plus the model artifact for the current platform.
+    pub download_size_bytes: u64,
+    pub required_memory_bytes: u64,
+    pub languages: Vec<String>,
+    pub license: String,
+    pub source: String,
+    pub recommended: bool,
+}
+
+/// Complete status for the opt-in local speech-recognition service.
+///
+/// The runtime phase describes availability of the installed speech-recognition
+/// command-line runtime. It is launched for one transcription request and is
+/// never kept resident between requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrModelServiceStatus {
+    pub protocol_version: String,
+    pub enabled: bool,
+    pub ready: bool,
+    pub active_model_id: Option<String>,
+    pub runtime: LocalRuntimeStatus,
+    pub models: Vec<LocalModelState>,
+    /// Sanitized service-level diagnostic, if any.
+    pub last_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
