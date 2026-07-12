@@ -8,7 +8,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Button, Modal, Progress, Tag, Tooltip } from '@arco-design/web-react';
-import { CheckOne, Delete, Download, Info, Loading, Pause, Pic, PlayOne, Refresh } from '@icon-park/react';
+import { CheckOne, Delete, Download, Loading, Pause, PlayOne } from '@icon-park/react';
 import type {
   ImageModelCatalogEntry,
   ImageModelComponent,
@@ -18,6 +18,9 @@ import type {
 } from '@/common/types/provider/imageModelService';
 import type { LocalModelErrorKind } from '@/common/types/provider/localModelService';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import LocalModelCapabilitySummary from './LocalModelCapabilitySummary';
+import LocalModelDetails from './LocalModelDetails';
+import { detailsForcedOpen } from './localModelCapabilityView';
 import { formatLocalModelBytes, formatLocalModelRate } from './localModelView';
 import {
   canDeleteImageModel,
@@ -32,6 +35,7 @@ import {
 import { useLocalImageModels } from './useLocalImageModels';
 
 export interface ImageModelsPanelProps {
+  controller: ReturnType<typeof useLocalImageModels>;
   className?: string;
 }
 
@@ -43,7 +47,7 @@ const phaseColor = (phase: ImageModelInstallPhase): string | undefined => {
   return undefined;
 };
 
-const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
+const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ controller, className }) => {
   const { t, i18n } = useTranslation();
   const [message, messageContext] = useArcoMessage();
   const {
@@ -53,12 +57,11 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
     statusError,
     isLoading,
     pendingAction,
-    refresh,
     install,
     pause,
     resume,
     remove,
-  } = useLocalImageModels();
+  } = controller;
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const unsupported = Boolean(
     status?.models.some(
@@ -307,100 +310,37 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
   };
 
   const loadFailed = (catalogError || statusError) && !catalog && !status;
-  const readinessColor = unsupported || status?.runtimePhase === 'failed'
-    ? 'red'
-    : status?.runtimePhase === 'busy'
-      ? 'blue'
-      : status?.inferenceReady
-        ? 'green'
-        : status?.artifactsReady
-          ? 'orange'
-          : undefined;
+  const installedCount = status?.models.filter((model) => model.installPhase === 'installed').length ?? 0;
 
   return (
-    <section
-      className={classNames(
-        'rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-14px py-13px',
-        className
-      )}
-    >
+    <div className={classNames('space-y-12px', className)}>
       {messageContext}
-
-      <div className='flex items-start justify-between gap-12px flex-wrap'>
-        <div className='flex items-start gap-9px min-w-0'>
-          <span className='size-30px flex items-center justify-center rd-8px bg-primary-1 text-primary-6 shrink-0'>
-            <Pic theme='outline' size='18' strokeWidth={3} />
-          </span>
-          <div className='min-w-0'>
-            <div className='text-16px font-600 leading-22px text-t-primary'>
-              {t('settings.modelHub.local.image.title')}
-            </div>
-            <div className='mt-2px text-12px leading-18px text-t-secondary'>
-              {t('settings.modelHub.local.image.subtitle')}
-            </div>
-          </div>
-        </div>
-        <Tooltip content={t('settings.modelHub.local.image.refreshHint')}>
-          <Button
-            size='small'
-            type='secondary'
-            icon={<Refresh theme='outline' size='14' />}
-            loading={isLoading}
-            disabled={pendingAction != null}
-            onClick={() => {
-              void refresh().catch((error) => {
-                console.error('Local image model refresh failed:', error);
-                message.error(t('settings.modelHub.local.image.loadFailed'));
-              });
-            }}
-          >
-            {t('settings.modelHub.local.image.refresh')}
-          </Button>
-        </Tooltip>
-      </div>
-
-      <div
-        className='mt-11px rd-9px px-11px py-9px border border-solid flex items-start gap-8px'
-        style={{
-          borderColor: 'rgba(var(--primary-6),0.24)',
-          backgroundColor: 'rgba(var(--primary-6),0.06)',
-        }}
-      >
-        <Info theme='outline' size='15' className='shrink-0 mt-1px text-[rgb(var(--primary-6))]' />
-        <div className='text-12px leading-18px text-t-secondary'>
-          <span className='font-600 text-t-primary'>{t('settings.modelHub.local.image.onDemandTitle')}</span>{' '}
-          {t('settings.modelHub.local.image.onDemandNotice')}
-        </div>
-      </div>
-
-      <div className='mt-10px grid grid-cols-1 gap-8px md:grid-cols-2'>
-        <div className='rd-9px bg-[var(--fill-0)] px-11px py-9px flex items-center justify-between gap-8px'>
-          <div>
-            <div className='text-11px text-t-secondary'>{t('settings.modelHub.local.image.readiness.artifacts')}</div>
-            <div className='mt-2px text-12px font-500 text-t-primary'>
-              {status?.artifactsReady
-                ? t('settings.modelHub.local.image.readiness.artifactsReady')
-                : t('settings.modelHub.local.image.readiness.artifactsMissing')}
-            </div>
-          </div>
-          <Tag size='small' color={status?.artifactsReady ? 'green' : undefined}>
-            {status?.artifactsReady
-              ? t('settings.modelHub.local.image.readiness.installed')
-              : t('settings.modelHub.local.image.readiness.notInstalled')}
-          </Tag>
-        </div>
-        <div className='rd-9px bg-[var(--fill-0)] px-11px py-9px flex items-center justify-between gap-8px'>
-          <div>
-            <div className='text-11px text-t-secondary'>{t('settings.modelHub.local.image.readiness.runtime')}</div>
-            <div className='mt-2px text-12px font-500 text-t-primary'>{runtimeLabel(status?.runtimePhase)}</div>
-          </div>
-          <Tag size='small' color={readinessColor}>
-            {unsupported
+      <LocalModelCapabilitySummary
+        items={[
+          {
+            label: t('settings.modelHub.local.image.title'),
+            value: t('settings.modelHub.local.capabilityCenter.availableModels', { count: catalog?.length ?? 0 }),
+          },
+          {
+            label: t('settings.modelHub.local.image.readiness.artifacts'),
+            value: t('settings.modelHub.local.capabilityCenter.installedModels', { count: installedCount }),
+            tone: status?.artifactsReady ? 'success' : 'neutral',
+          },
+          {
+            label: t('settings.modelHub.local.image.readiness.runtime'),
+            value: unsupported
               ? t('settings.modelHub.local.image.runtime.unsupported')
-              : runtimeLabel(status?.runtimePhase)}
-          </Tag>
-        </div>
-      </div>
+              : runtimeLabel(status?.runtimePhase),
+            tone: unsupported || status?.runtimePhase === 'failed'
+              ? 'danger'
+              : status?.inferenceReady
+                ? 'success'
+                : status?.artifactsReady
+                  ? 'warning'
+                  : 'neutral',
+          },
+        ]}
+      />
 
       {unsupported ? (
         <div className='mt-8px rd-8px bg-[rgba(var(--danger-6),0.07)] px-10px py-8px text-12px leading-18px text-[rgb(var(--danger-6))]'>
@@ -422,7 +362,7 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
         </div>
       ) : null}
 
-      <div className='mt-13px border-t border-solid border-[var(--color-border-2)] pt-12px'>
+      <div>
         {isLoading && !catalog ? (
           <div className='flex items-center justify-center gap-7px py-24px text-12px text-t-secondary'>
             <Loading theme='outline' size='16' className='animate-spin' />
@@ -455,7 +395,7 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
               return (
                 <article
                   key={model.id}
-                  className='rd-10px border border-solid border-[var(--color-border-2)] px-12px py-11px'
+                  className='rd-11px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)] px-13px py-12px shadow-[0_5px_18px_rgba(0,0,0,0.025)]'
                 >
                   <div className='flex items-start justify-between gap-12px flex-wrap'>
                     <div className='min-w-0 flex-1'>
@@ -487,38 +427,10 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
                             size: formatLocalModelBytes(model.requiredMemoryBytes, locale),
                           })}
                         </span>
-                        <span>{t('settings.modelHub.local.image.metadata.license', { license: model.license })}</span>
-                      </div>
-                      <div className='mt-7px flex items-center gap-6px flex-wrap'>
-                        {model.components.map((component) => (
-                          <Tag key={component} size='small'>
-                            {componentLabel(component)}
-                          </Tag>
-                        ))}
-                        <span className='text-11px text-t-secondary'>
-                          {t('settings.modelHub.local.image.metadata.source', { source: model.source })}
-                        </span>
                       </div>
                     </div>
 
                     <div className='flex items-center gap-7px shrink-0'>
-                      {deleteAllowed && (
-                        <Tooltip content={t('settings.modelHub.local.image.action.delete')}>
-                          <Button
-                            size='small'
-                            type='secondary'
-                            status='danger'
-                            icon={<Delete theme='outline' size='14' />}
-                            disabled={
-                              pendingAction != null ||
-                              Boolean(statusError) ||
-                              status?.runtimePhase === 'busy'
-                            }
-                            onClick={() => confirmRemove(model)}
-                            aria-label={t('settings.modelHub.local.image.deleteModelLabel', { model: model.name })}
-                          />
-                        </Tooltip>
-                      )}
                       {action !== 'none' && (
                         <Button
                           size='small'
@@ -534,30 +446,65 @@ const ImageModelsPanel: React.FC<ImageModelsPanelProps> = ({ className }) => {
                     </div>
                   </div>
 
-                  {model.notice && (
-                    <div className='mt-9px rd-8px border border-solid border-[rgba(var(--warning-6),0.24)] bg-[rgba(var(--warning-6),0.06)] px-10px py-8px'>
-                      <div className='text-11px font-600 text-t-primary'>
-                        {t('settings.modelHub.local.image.notice.title')}
-                      </div>
-                      <div className='mt-2px text-11px leading-17px text-t-secondary'>
-                        {t('settings.modelHub.local.image.notice.vae')}
-                      </div>
+                  <LocalModelDetails
+                    forcedOpen={detailsForcedOpen(state.installPhase, Boolean(state.errorKind))}
+                  >
+                    <div className='flex items-center gap-6px flex-wrap'>
+                      {model.components.map((component) => (
+                        <Tag key={component} size='small'>
+                          {componentLabel(component)}
+                        </Tag>
+                      ))}
+                      <span className='text-11px text-t-secondary'>
+                        {t('settings.modelHub.local.image.metadata.license', { license: model.license })}
+                      </span>
+                      <span className='text-11px text-t-secondary'>
+                        {t('settings.modelHub.local.image.metadata.source', { source: model.source })}
+                      </span>
+                      {deleteAllowed && (
+                        <Tooltip content={t('settings.modelHub.local.image.action.delete')}>
+                          <Button
+                            size='mini'
+                            type='text'
+                            status='danger'
+                            icon={<Delete theme='outline' size='13' />}
+                            disabled={
+                              pendingAction != null ||
+                              Boolean(statusError) ||
+                              status?.runtimePhase === 'busy'
+                            }
+                            onClick={() => confirmRemove(model)}
+                            aria-label={t('settings.modelHub.local.image.deleteModelLabel', { model: model.name })}
+                          >
+                            {t('settings.modelHub.local.image.action.delete')}
+                          </Button>
+                        </Tooltip>
+                      )}
                     </div>
-                  )}
-
-                  {renderBundleProgress(state)}
-                  {state.errorKind && state.errorKind !== 'unsupported_platform' && (
-                    <div className='mt-9px rd-7px bg-[rgba(var(--danger-6),0.07)] px-9px py-7px text-12px text-[rgb(var(--danger-6))]'>
-                      {errorLabel(state.errorKind)}
-                    </div>
-                  )}
+                    {model.notice && (
+                      <div className='mt-9px rd-8px border border-solid border-[rgba(var(--warning-6),0.24)] bg-[rgba(var(--warning-6),0.06)] px-10px py-8px'>
+                        <div className='text-11px font-600 text-t-primary'>
+                          {t('settings.modelHub.local.image.notice.title')}
+                        </div>
+                        <div className='mt-2px text-11px leading-17px text-t-secondary'>
+                          {t('settings.modelHub.local.image.notice.vae')}
+                        </div>
+                      </div>
+                    )}
+                    {renderBundleProgress(state)}
+                    {state.errorKind && state.errorKind !== 'unsupported_platform' && (
+                      <div className='mt-9px rd-7px bg-[rgba(var(--danger-6),0.07)] px-9px py-7px text-12px text-[rgb(var(--danger-6))]'>
+                        {errorLabel(state.errorKind)}
+                      </div>
+                    )}
+                  </LocalModelDetails>
                 </article>
               );
             })}
           </div>
         )}
       </div>
-    </section>
+    </div>
   );
 };
 

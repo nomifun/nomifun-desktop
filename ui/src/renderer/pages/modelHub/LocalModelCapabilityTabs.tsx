@@ -16,6 +16,7 @@ import {
 } from './localModelCapabilityView';
 
 export interface LocalModelCapabilityTabsProps {
+  className?: string;
   activeKey: LocalModelCapabilityKey;
   activity: Partial<Record<LocalModelCapabilityKey, CapabilityActivity>>;
   onChange: (key: LocalModelCapabilityKey) => void;
@@ -40,6 +41,7 @@ const CapabilityIcon: React.FC<{ capability: LocalModelCapabilityKey }> = ({ cap
 const LocalModelCapabilityTabs: React.FC<LocalModelCapabilityTabsProps> = ({
   activeKey,
   activity,
+  className,
   onChange,
 }) => {
   const { t } = useTranslation();
@@ -55,7 +57,10 @@ const LocalModelCapabilityTabs: React.FC<LocalModelCapabilityTabsProps> = ({
     <div
       role='tablist'
       aria-label={t('settings.modelHub.local.title')}
-      className='flex max-w-full items-center gap-3px overflow-x-auto rd-12px bg-[var(--color-fill-2)] p-4px scrollbar-hide'
+      className={classNames(
+        'flex max-w-full items-center gap-3px overflow-x-auto rd-12px bg-[var(--color-fill-2)] p-4px scrollbar-hide',
+        className
+      )}
     >
       {LOCAL_MODEL_CAPABILITIES.map((capability) => {
         const active = activeKey === capability.key;
