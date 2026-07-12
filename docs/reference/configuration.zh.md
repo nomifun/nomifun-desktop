@@ -96,7 +96,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `CSRF_COOKIE_NAME` | `nomifun-csrf-token` | CSRF cookie（不是 HttpOnly——JavaScript 需要读取它）。 |
 | `CSRF_HEADER_NAME` | `x-csrf-token` | 与 CSRF cookie 值对应的请求头（Double Submit Cookie 模式）。 |
 | `COOKIE_MAX_AGE_DAYS` | `30` | Cookie 的 `Max-Age`。 |
-| `SESSION_EXPIRY` | `24h` | JWT 在需要刷新前的有效期。 |
+| `SESSION_EXPIRY` | `30d` | JWT 有效期，与浏览器会话 Cookie 生命周期保持一致。 |
 | `HEARTBEAT_INTERVAL_MS` / `HEARTBEAT_TIMEOUT_MS` | `30000` / `60000` | WebSocket 的心跳 ping/pong。 |
 
 ## 数据目录与工作目录的语义

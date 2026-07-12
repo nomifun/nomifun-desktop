@@ -89,7 +89,7 @@ Source: [`crates/backend/nomifun-common/src/constants.rs`](../../crates/backend/
 | `CSRF_COOKIE_NAME` | `nomifun-csrf-token` | CSRF cookie (NOT HttpOnly — JavaScript reads it). |
 | `CSRF_HEADER_NAME` | `x-csrf-token` | Header that mirrors the CSRF cookie value (Double Submit Cookie). |
 | `COOKIE_MAX_AGE_DAYS` | `30` | Cookie `Max-Age`. |
-| `SESSION_EXPIRY` | `24h` | JWT validity window before refresh is required. |
+| `SESSION_EXPIRY` | `30d` | JWT validity window, kept identical to the browser session cookie lifetime. |
 | `HEARTBEAT_INTERVAL_MS` / `HEARTBEAT_TIMEOUT_MS` | `30000` / `60000` | WebSocket heartbeat ping/pong. |
 
 ## Data directory and work directory semantics

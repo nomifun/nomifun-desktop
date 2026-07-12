@@ -5,13 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use dashmap::DashMap;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use nomifun_common::constants::SESSION_MAX_AGE_SECONDS;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::AuthError;
 
-/// JWT token lifetime: 24 hours.
-const TOKEN_EXPIRY: Duration = Duration::from_secs(24 * 60 * 60);
+/// JWT token lifetime, kept identical to the browser session cookie.
+const TOKEN_EXPIRY: Duration = Duration::from_secs(SESSION_MAX_AGE_SECONDS);
 
 /// JWT issuer claim value.
 const JWT_ISSUER: &str = "nomifun";
@@ -57,7 +58,7 @@ impl JwtService {
         }
     }
 
-    /// Sign a new JWT for the given user. The token expires after 24 hours.
+    /// Sign a new JWT for the given user. The token expires with the browser session cookie.
     pub fn sign(&self, user_id: &str, username: &str) -> Result<String, AuthError> {
         let now = now_secs()?;
         let exp = now + TOKEN_EXPIRY.as_secs();
@@ -226,6 +227,7 @@ fn token_hash(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::constants::COOKIE_MAX_AGE_DAYS;
 
     fn test_service() -> JwtService {
         JwtService::new("test_secret_key_for_testing".into())
@@ -249,6 +251,11 @@ mod tests {
         assert_eq!(payload.iss, JWT_ISSUER);
         assert_eq!(payload.aud, JWT_AUDIENCE);
         assert!(payload.exp > payload.iat);
+        assert_eq!(
+            payload.exp - payload.iat,
+            u64::from(COOKIE_MAX_AGE_DAYS) * 24 * 60 * 60,
+            "JWT lifetime must match the browser session cookie contract",
+        );
     }
 
     #[test]

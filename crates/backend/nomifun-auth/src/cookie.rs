@@ -1,4 +1,4 @@
-use nomifun_common::constants::{COOKIE_MAX_AGE_DAYS, COOKIE_NAME, CSRF_COOKIE_NAME};
+use nomifun_common::constants::{COOKIE_NAME, CSRF_COOKIE_NAME, SESSION_MAX_AGE_SECONDS};
 
 /// Cookie security configuration derived from the deployment environment.
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ impl CookieConfig {
     ///
     /// Attributes: HttpOnly, SameSite, Secure (if HTTPS), Max-Age=30d.
     pub fn build_session_cookie(&self, token: &str) -> String {
-        let max_age = u64::from(COOKIE_MAX_AGE_DAYS) * 24 * 60 * 60;
+        let max_age = SESSION_MAX_AGE_SECONDS;
         format!(
             "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite={}{}; Max-Age={max_age}",
             self.same_site,
@@ -50,7 +50,7 @@ impl CookieConfig {
     /// NOT HttpOnly — JavaScript must read this value to include it
     /// in the `x-csrf-token` request header (Double Submit Cookie pattern).
     pub fn build_csrf_cookie(&self, token: &str) -> String {
-        let max_age = u64::from(COOKIE_MAX_AGE_DAYS) * 24 * 60 * 60;
+        let max_age = SESSION_MAX_AGE_SECONDS;
         format!(
             "{CSRF_COOKIE_NAME}={token}; Path=/; SameSite={}{}; Max-Age={max_age}",
             self.same_site,

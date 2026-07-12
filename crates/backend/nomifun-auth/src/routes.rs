@@ -16,7 +16,7 @@ use nomifun_api_types::{
     WebuiChangeUsernameResponse, WebuiGenerateQrTokenResponse, WebuiResetPasswordResponse, WsTokenResponse,
 };
 use nomifun_common::AppError;
-use nomifun_common::constants::COOKIE_MAX_AGE_DAYS;
+use nomifun_common::constants::SESSION_MAX_AGE_SECONDS;
 use nomifun_db::{IUserRepository, models::User};
 
 use crate::extract::extract_token_from_headers;
@@ -625,7 +625,7 @@ async fn ws_token_handler(
         .ok_or_else(|| AppError::Unauthorized("User not found".into()))?;
 
     // Cookie max age in milliseconds
-    let expires_in = u64::from(COOKIE_MAX_AGE_DAYS) * 24 * 60 * 60 * 1000;
+    let expires_in = SESSION_MAX_AGE_SECONDS * 1000;
 
     Ok(Json(WsTokenResponse {
         success: true,
