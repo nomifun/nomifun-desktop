@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(service.blacklist_size(), 1);
 
         service.cleanup_blacklist();
-        // Token just signed with 24h expiry should still be in blacklist
+        // Token just signed with the configured session expiry should still be in blacklist.
         assert_eq!(service.blacklist_size(), 1);
     }
 
