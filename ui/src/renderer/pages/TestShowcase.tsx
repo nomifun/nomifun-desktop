@@ -1,4 +1,4 @@
-import { Button, Message, Collapse, Tag } from '@arco-design/web-react';
+import { Button, Checkbox, Collapse, Message, Radio, Switch, Tabs, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import React, { useState } from 'react';
 import StepsWrapper from '@/renderer/components/base/StepsWrapper';
@@ -9,6 +9,9 @@ const ComponentsShowcase: React.FC = () => {
   const [message, contextHolder] = useArcoMessage();
   const [modalVisible, setModalVisible] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
+  const [checked, setChecked] = useState(true);
+  const [radioValue, setRadioValue] = useState('focused');
+  const [switchChecked, setSwitchChecked] = useState(true);
 
   return (
     <div className='p-8 space-y-8 max-w-6xl mx-auto'>
@@ -96,6 +99,35 @@ const ComponentsShowcase: React.FC = () => {
           </Tag>
         </div>
         <p className='text-sm text-t-secondary'>提示：切换到深色模式查看优化效果</p>
+      </section>
+
+      {/* Core control matrix */}
+      <section className='space-y-4'>
+        <h2 className='text-xl font-semibold'>Core controls - 全主题可读性检查</h2>
+        <p className='text-sm text-t-secondary'>用于检查默认、选中、禁用和键盘焦点状态在所有主题下是否清晰可辨。</p>
+        <div className='flex flex-wrap items-center gap-x-6 gap-y-4'>
+          <Checkbox checked={checked} onChange={setChecked}>
+            已选复选框
+          </Checkbox>
+          <Checkbox disabled checked>
+            禁用复选框
+          </Checkbox>
+          <Radio.Group value={radioValue} onChange={setRadioValue}>
+            <Radio value='focused'>新建会话</Radio>
+            <Radio value='continue'>持续会话</Radio>
+            <Radio disabled value='disabled'>禁用选项</Radio>
+          </Radio.Group>
+          <Switch checked={switchChecked} onChange={setSwitchChecked} checkedText='开' uncheckedText='关' />
+          <Switch checked disabled />
+        </div>
+        <Tabs defaultActiveTab='selected' className='max-w-lg'>
+          <Tabs.TabPane key='selected' title='已选标签'>
+            选中态标签页
+          </Tabs.TabPane>
+          <Tabs.TabPane key='idle' title='待选标签'>
+            未选中标签页
+          </Tabs.TabPane>
+        </Tabs>
       </section>
 
       {/* Steps */}

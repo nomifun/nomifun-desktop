@@ -188,6 +188,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   useWorkspaceEvents({
     source,
     refreshWorkspace: treeHook.refreshWorkspace,
+    refreshChanges: fileChangesHook.refreshChanges,
     setFiles: treeHook.setFiles,
     setSelected: treeHook.setSelected,
     setExpandedKeys: treeHook.setExpandedKeys,

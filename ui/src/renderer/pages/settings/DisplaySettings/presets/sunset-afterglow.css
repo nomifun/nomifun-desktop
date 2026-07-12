@@ -158,6 +158,14 @@ body {
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
 
+  --control-selected-bg: #bb3614;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #fffaf4;
+  --control-idle-border: #a77b55;
+  --control-hover-bg: #fff0df;
+  --control-disabled-selected-bg: #d69b82;
+  --control-focus-ring: rgba(187, 54, 20, 0.26);
+
   /* ---- B. Arco 杂项 Misc ---- */
   --color-tooltip-bg: #3a2410;
   --color-mask-bg: rgba(42, 18, 8, 0.45);
@@ -290,6 +298,14 @@ body {
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
+
+  --control-selected-bg: #f3b240;
+  --control-selected-fg: #2a1800;
+  --control-idle-bg: #241809;
+  --control-idle-border: #8d6e39;
+  --control-hover-bg: #38260e;
+  --control-disabled-selected-bg: #8f6b2d;
+  --control-focus-ring: rgba(243, 178, 64, 0.32);
 
   /* ---- B. Arco 杂项 Misc ---- */
   --color-tooltip-bg: #3a2410;

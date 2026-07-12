@@ -132,6 +132,15 @@ body {
   --button-primary-disabled-border: var(--color-border-2);
   --button-primary-disabled-text: var(--color-text-3);
 
+  /* Interactive control palette: separate from the near-black button primary. */
+  --control-selected-bg: #171717;
+  --control-selected-fg: #ffffff;
+  --control-idle-bg: #ffffff;
+  --control-idle-border: #737373;
+  --control-hover-bg: #f0f0ef;
+  --control-disabled-selected-bg: #a3a3a3;
+  --control-focus-ring: rgba(23, 23, 23, 0.24);
+
   /* Arco misc */
   --color-tooltip-bg: #272725;
   --color-mask-bg: rgba(17, 17, 16, 0.5);
@@ -263,6 +272,15 @@ body {
   --button-primary-disabled-bg: var(--color-fill-3);
   --button-primary-disabled-border: var(--color-border-3);
   --button-primary-disabled-text: var(--color-text-2);
+
+  /* The silver brand primary needs a dark indicator, not Arco's fixed white one. */
+  --control-selected-bg: #e5e5e5;
+  --control-selected-fg: #171717;
+  --control-idle-bg: #1e1e1e;
+  --control-idle-border: #737373;
+  --control-hover-bg: #2a2a2a;
+  --control-disabled-selected-bg: #737373;
+  --control-focus-ring: rgba(229, 229, 229, 0.28);
 
   /* Arco misc */
   --color-tooltip-bg: #363636;

@@ -20,6 +20,11 @@ import { useDeepLink } from '@renderer/hooks/system/useDeepLink';
 import { useNotificationClick } from '@renderer/hooks/system/useNotificationClick';
 import { useDirectorySelection } from '@renderer/hooks/file/useDirectorySelection';
 import { processCustomCss } from '@renderer/utils/theme/customCssProcessor';
+import {
+  ensureThemeControlContract,
+  removeThemeControlContract,
+  THEME_CONTROL_CONTRACT_STYLE_ID,
+} from '@renderer/utils/theme/themeControlContract';
 import { broadcastCustomCssSync } from '@renderer/utils/theme/themeBroadcast';
 import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
@@ -260,6 +265,7 @@ const Layout: React.FC<{
 
     if (!customCss) {
       document.getElementById(styleId)?.remove();
+      ensureThemeControlContract();
       return;
     }
 
@@ -267,17 +273,25 @@ const Layout: React.FC<{
 
     const ensureStyleAtEnd = () => {
       let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+      const controlStyle = document.getElementById(THEME_CONTROL_CONTRACT_STYLE_ID);
 
-      if (styleEl && styleEl.textContent === wrappedCss && styleEl === document.head.lastElementChild) {
+      if (
+        styleEl &&
+        styleEl.textContent === wrappedCss &&
+        styleEl.nextElementSibling === controlStyle &&
+        controlStyle === document.head.lastElementChild
+      ) {
         return;
       }
 
       styleEl?.remove();
+      controlStyle?.remove();
       styleEl = document.createElement('style');
       styleEl.id = styleId;
       styleEl.type = 'text/css';
       styleEl.textContent = wrappedCss;
       document.head.appendChild(styleEl);
+      ensureThemeControlContract();
     };
 
     ensureStyleAtEnd();
@@ -289,7 +303,8 @@ const Layout: React.FC<{
 
       if (hasNewStyle) {
         const element = document.getElementById(styleId);
-        if (element && element !== document.head.lastElementChild) {
+        const controlStyle = document.getElementById(THEME_CONTROL_CONTRACT_STYLE_ID);
+        if (element && (element.nextElementSibling !== controlStyle || controlStyle !== document.head.lastElementChild)) {
           ensureStyleAtEnd();
         }
       }
@@ -300,6 +315,7 @@ const Layout: React.FC<{
     return () => {
       observer.disconnect();
       document.getElementById(styleId)?.remove();
+      removeThemeControlContract();
     };
   }, [customCss]);
 
