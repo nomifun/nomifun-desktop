@@ -765,9 +765,12 @@ export function wsEmitter<Params = undefined>(eventName: string): EmitterLike<Pa
         if (listeners?.size === 0) {
           wsListeners.delete(eventName);
         }
-        if (wsListeners.size === 0 && wsReconnectTimer) {
-          clearTimeout(wsReconnectTimer);
-          wsReconnectTimer = null;
+        if (wsListeners.size === 0) {
+          if (wsReconnectTimer) {
+            clearTimeout(wsReconnectTimer);
+            wsReconnectTimer = null;
+          }
+          wsReconnectAttempt = 0;
         }
       };
     },
