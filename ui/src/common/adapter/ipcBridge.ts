@@ -99,6 +99,16 @@ import type {
   LocalModelServiceStatus,
   SetLocalModelActiveRequest,
 } from '../types/provider/localModelService';
+import type {
+  ImageModelCatalogEntry,
+  ImageModelIdRequest,
+  ImageModelServiceStatus,
+} from '../types/provider/imageModelService';
+import type {
+  OcrModelCatalogEntry,
+  OcrModelIdRequest,
+  OcrModelServiceStatus,
+} from '../types/provider/ocrModelService';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
   TAdjustRunRequest,
@@ -977,6 +987,44 @@ export const managedModelService = {
       (p) => `/api/model-services/local/models/${encodeURIComponent(p.id)}/activate`,
       (p) => ({ enabled: p.enabled })
     ),
+    ocr: {
+      catalog: httpGet<OcrModelCatalogEntry[], void>('/api/model-services/local/ocr/catalog'),
+      status: httpGet<OcrModelServiceStatus, void>('/api/model-services/local/ocr/status'),
+      install: httpPost<OcrModelServiceStatus, OcrModelIdRequest>(
+        (p) => `/api/model-services/local/ocr/models/${encodeURIComponent(p.id)}/install`,
+        () => undefined
+      ),
+      pause: httpPost<OcrModelServiceStatus, OcrModelIdRequest>(
+        (p) => `/api/model-services/local/ocr/models/${encodeURIComponent(p.id)}/pause`,
+        () => undefined
+      ),
+      resume: httpPost<OcrModelServiceStatus, OcrModelIdRequest>(
+        (p) => `/api/model-services/local/ocr/models/${encodeURIComponent(p.id)}/resume`,
+        () => undefined
+      ),
+      remove: httpDelete<OcrModelServiceStatus, OcrModelIdRequest>((p) =>
+        `/api/model-services/local/ocr/models/${encodeURIComponent(p.id)}`
+      ),
+    },
+    image: {
+      catalog: httpGet<ImageModelCatalogEntry[], void>('/api/model-services/local/image/catalog'),
+      status: httpGet<ImageModelServiceStatus, void>('/api/model-services/local/image/status'),
+      install: httpPost<ImageModelServiceStatus, ImageModelIdRequest>(
+        (p) => `/api/model-services/local/image/models/${encodeURIComponent(p.id)}/install`,
+        () => undefined
+      ),
+      pause: httpPost<ImageModelServiceStatus, ImageModelIdRequest>(
+        (p) => `/api/model-services/local/image/models/${encodeURIComponent(p.id)}/pause`,
+        () => undefined
+      ),
+      resume: httpPost<ImageModelServiceStatus, ImageModelIdRequest>(
+        (p) => `/api/model-services/local/image/models/${encodeURIComponent(p.id)}/resume`,
+        () => undefined
+      ),
+      remove: httpDelete<ImageModelServiceStatus, ImageModelIdRequest>((p) =>
+        `/api/model-services/local/image/models/${encodeURIComponent(p.id)}`
+      ),
+    },
   },
 };
 

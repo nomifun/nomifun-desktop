@@ -46,6 +46,12 @@ pub struct AppServices {
     /// One-click local-model control plane. `None` only when its isolated
     /// startup failed; the rest of NomiFun remains usable in that case.
     pub local_model_service: Option<Arc<nomifun_system::LocalModelService>>,
+    /// Opt-in OCR artifact control plane. It does not download at boot and
+    /// does not claim inference readiness until an ONNX executor is wired.
+    pub ocr_model_service: Option<Arc<nomifun_system::OcrModelService>>,
+    /// Opt-in Z-Image installer and lazy creation backend. Construction is
+    /// network-free; downloads happen only after an explicit user action.
+    pub image_model_service: Option<Arc<nomifun_system::ImageModelService>>,
     /// Keeps the stable local OpenAI facade alive while llama-server itself is
     /// loaded, sleeping, or restarted on demand.
     pub(crate) _local_model_server: Option<nomifun_system::LocalModelServer>,
@@ -255,6 +261,33 @@ impl AppServices {
                     (None, None)
                 }
             };
+        let ocr_model_service = match nomifun_system::OcrModelService::new(&data_dir).await {
+            Ok(service) => Some(service),
+            Err(error) => {
+                // OCR is an optional local capability. Storage damage or an
+                // unsafe managed path must not prevent the rest of NomiFun
+                // from starting.
+                tracing::warn!(error = %error, "OCR model service is unavailable");
+                None
+            }
+        };
+        let image_model_service = if let Some(local) = &local_model_service {
+            match nomifun_system::ImageModelService::new(&data_dir).await {
+                Ok(service) => {
+                    if let Err(error) = service.bind_projection_service(local).await {
+                        tracing::warn!(error = %error, "Could not initialize local image model projection");
+                    }
+                    Some(service)
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Local image model service is unavailable");
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("Local image model service requires the managed local provider");
+            None
+        };
         if let Some(local) = &local_model_service {
             let catalog = local.catalog().await;
             match nomifun_system::reconcile_local_catalog_profiles(
@@ -272,6 +305,22 @@ impl AppServices {
                 Err(error) => tracing::warn!(
                     error = %error,
                     "Local-model profile reconciliation failed"
+                ),
+            }
+        }
+        if let Some(image) = &image_model_service {
+            match image
+                .reconcile_profile(
+                    model_profile_repo.as_ref(),
+                    nomifun_system::LOCAL_MODEL_PROVIDER_ID,
+                )
+                .await
+            {
+                Ok(true) => tracing::info!("Reconciled curated local image-model profile"),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "Local image-model profile reconciliation failed"
                 ),
             }
         }
@@ -729,6 +778,18 @@ impl AppServices {
             data_dir.clone(),
             Arc::new(nomifun_db::SqliteWorkshopRepository::new(database.pool().clone())),
         ));
+        let creation_adapters = if let Some(image) = &image_model_service {
+            let workload_gate = local_model_service
+                .as_ref()
+                .map(|service| service.workload_gate())
+                .unwrap_or_else(|| Arc::new(tokio::sync::Semaphore::new(1)));
+            nomifun_creation::default_adapters_with_local_image(
+                creation_http.clone(),
+                image.creation_backend(workload_gate),
+            )
+        } else {
+            nomifun_creation::default_adapters(creation_http.clone())
+        };
         let creation_service = nomifun_creation::CreationService::builder(Arc::new(
             nomifun_db::SqliteCreationTaskRepository::new(database.pool().clone()),
         ))
@@ -739,7 +800,7 @@ impl AppServices {
         )
         .with_asset_source(creation_asset_bridge.clone())
         .with_asset_sink(creation_asset_bridge)
-        .with_providers(nomifun_creation::default_adapters(creation_http))
+        .with_providers(creation_adapters)
         .build();
 
         // Headless seed: bind a Remote access token to the default companion so an
@@ -862,6 +923,8 @@ impl AppServices {
             managed_model_service,
             _managed_model_server: managed_model_server,
             local_model_service,
+            ocr_model_service,
+            image_model_service,
             _local_model_server: local_model_server,
             _managed_model_refresh_task: managed_model_refresh_task,
             model_profile_repo: model_profile_repo.clone(),

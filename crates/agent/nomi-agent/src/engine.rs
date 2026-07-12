@@ -60,6 +60,11 @@ const TRANSCRIPT_TOOL_RESULT_MAX: usize = 600;
 /// generating a large tool-call argument.
 const STREAM_IDLE_ACTIVITY_AFTER: Duration = Duration::from_millis(1_200);
 
+/// Durable transcript marker used after the current turn has finished seeing
+/// an attached image. Keeping the text marker preserves conversational meaning
+/// without re-sending a large base64 payload on every later provider request.
+const USER_IMAGE_HISTORY_PLACEHOLDER: &str = "[Image attachment omitted after processing.]";
+
 /// Render the conversation history as a role-tagged plain-text transcript for
 /// post-session memory distillation.
 ///
@@ -648,6 +653,26 @@ impl AgentEngine {
 
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        self.run_with_content(
+            vec![ContentBlock::Text {
+                text: user_input.to_string(),
+            }],
+            msg_id,
+        )
+        .await
+    }
+
+    /// Run the agent loop with a pre-built user message.
+    ///
+    /// This is the multimodal counterpart to [`Self::run`]. Hosts may include
+    /// text and already-validated, base64-encoded image blocks. Tool/thinking
+    /// blocks are rejected so a caller cannot forge assistant or tool history.
+    pub async fn run_with_content(
+        &mut self,
+        user_content: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let first_new_message = self.messages.len();
         let session_id = self
             .current_session
             .as_ref()
@@ -659,7 +684,20 @@ impl AgentEngine {
             session_id = %session_id,
             msg_id = %msg_id,
         );
-        self.run_inner(user_input, msg_id).instrument(span).await
+        let result = self.run_inner(user_content, msg_id).instrument(span).await;
+
+        // Keep the image available for every provider/tool iteration in this
+        // logical run, then remove it before the engine is reused. `run_inner`
+        // has several success/error return paths and may already have persisted
+        // the original turn, so perform the cleanup in this outer finally-like
+        // wrapper and save the redacted transcript once more. If the host drops
+        // this future during non-cooperative cancellation, `abort_current_turn`
+        // performs the same cleanup explicitly.
+        if self.redact_user_images_since(first_new_message) {
+            self.save_session();
+        }
+
+        result
     }
 
     /// Return metadata for all registered slash commands.
@@ -673,11 +711,28 @@ impl AgentEngine {
 
     async fn run_inner(
         &mut self,
-        user_input: &str,
+        user_content: Vec<ContentBlock>,
         msg_id: &str,
     ) -> Result<AgentResult, AgentError> {
-        // Slash command interception — before any LLM call
-        if let Some(result) = self.handle_command(user_input).await {
+        if user_content.is_empty()
+            || user_content
+                .iter()
+                .any(|block| !matches!(block, ContentBlock::Text { .. } | ContentBlock::Image { .. }))
+        {
+            return Err(AgentError::ApiError(
+                "user content must contain only text or image blocks".to_string(),
+            ));
+        }
+
+        // Slash command interception — before any LLM call. Commands remain
+        // text-only; attaching an image makes the input an ordinary model turn.
+        let command_input = match user_content.as_slice() {
+            [ContentBlock::Text { text }] => Some(text.as_str()),
+            _ => None,
+        };
+        if let Some(user_input) = command_input
+            && let Some(result) = self.handle_command(user_input).await
+        {
             let cmd_name = user_input.split_whitespace().next().unwrap_or(user_input);
             return match result {
                 Ok(crate::commands::CommandResult::Exit) => {
@@ -704,12 +759,7 @@ impl AgentEngine {
         self.output.emit_stream_start(msg_id);
         // 记录本 turn 的起始锚点（用户消息 push 之前），供 rewind_last_turn 回退。
         self.last_turn_start_len = Some(self.messages.len());
-        self.messages.push(Message::now(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: user_input.to_string(),
-            }],
-        ));
+        self.messages.push(Message::now(Role::User, user_content));
 
         let mut turn: usize = 0;
         loop {
@@ -1193,6 +1243,41 @@ impl AgentEngine {
         }
     }
 
+    /// Replace top-level user image blocks added by the current logical run
+    /// with one small marker per message. Nested tool-result images are owned by
+    /// `prune_old_tool_images` and deliberately remain untouched.
+    fn redact_user_images_since(&mut self, first_message: usize) -> bool {
+        let mut changed = false;
+        for message in self.messages.iter_mut().skip(first_message) {
+            if message.role != Role::User
+                || !message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Image { .. }))
+            {
+                continue;
+            }
+
+            let mut redacted = Vec::with_capacity(message.content.len());
+            let mut marker_inserted = false;
+            for block in std::mem::take(&mut message.content) {
+                if matches!(block, ContentBlock::Image { .. }) {
+                    changed = true;
+                    if !marker_inserted {
+                        redacted.push(ContentBlock::Text {
+                            text: USER_IMAGE_HISTORY_PLACEHOLDER.to_owned(),
+                        });
+                        marker_inserted = true;
+                    }
+                } else {
+                    redacted.push(block);
+                }
+            }
+            message.content = redacted;
+        }
+        changed
+    }
+
     /// Run the multi-level compaction pipeline before each API call.
     ///
     /// Execution order: microcompact → autocompact → emergency check.
@@ -1426,18 +1511,16 @@ impl AgentEngine {
     /// be followed immediately by user `tool_result` blocks. If the host drops
     /// `run()` while tools are executing, the assistant `tool_use` message may
     /// already be in memory without its matching results. Add synthetic error
-    /// results so the next request can safely reuse this history.
+    /// results so the next request can safely reuse this history. The dropped
+    /// `run_with_content()` future cannot execute its normal image-redaction
+    /// wrapper, so this path also strips current-turn user image payloads.
     pub fn abort_current_turn(&mut self, reason: &str) {
-        let Some(last_message) = self.messages.last() else {
-            return;
-        };
-        if last_message.role != Role::Assistant {
-            return;
-        }
-
-        let pending_results: Vec<_> = last_message
-            .content
-            .iter()
+        let pending_results: Vec<_> = self
+            .messages
+            .last()
+            .filter(|message| message.role == Role::Assistant)
+            .into_iter()
+            .flat_map(|message| &message.content)
             .filter_map(|block| {
                 let ContentBlock::ToolUse { id, name, .. } = block else {
                     return None;
@@ -1446,32 +1529,38 @@ impl AgentEngine {
             })
             .collect();
 
-        if pending_results.is_empty() {
-            return;
+        let mut changed = false;
+        if !pending_results.is_empty() {
+            let result_blocks = pending_results
+                .into_iter()
+                .map(|(tool_use_id, name)| {
+                    tracing::info!(
+                        target: "nomi_agent",
+                        tool_use_id = %tool_use_id,
+                        tool = %name,
+                        "closing pending tool_use after abort"
+                    );
+                    self.output
+                        .emit_tool_result(&tool_use_id, &name, true, reason);
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content: reason.to_string(),
+                        is_error: true,
+                        images: Vec::new(),
+                    }
+                })
+                .collect();
+            self.messages.push(Message::now(Role::User, result_blocks));
+            changed = true;
         }
 
-        let result_blocks = pending_results
-            .into_iter()
-            .map(|(tool_use_id, name)| {
-                tracing::info!(
-                    target: "nomi_agent",
-                    tool_use_id = %tool_use_id,
-                    tool = %name,
-                    "closing pending tool_use after abort"
-                );
-                self.output
-                    .emit_tool_result(&tool_use_id, &name, true, reason);
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content: reason.to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                }
-            })
-            .collect();
-
-        self.messages.push(Message::now(Role::User, result_blocks));
-        self.save_session();
+        // Top-level user images are ephemeral transport payloads. Redact all of
+        // them here rather than relying on the rewind anchor: compaction may
+        // legitimately clear that anchor while a run is still in flight.
+        changed |= self.redact_user_images_since(0);
+        if changed {
+            self.save_session();
+        }
     }
 }
 
@@ -1508,6 +1597,7 @@ impl Drop for AgentEngine {
 mod set_config_tests {
     use std::sync::{Arc, Mutex};
 
+    use super::USER_IMAGE_HISTORY_PLACEHOLDER;
     use nomi_providers::{LlmProvider, ProviderError};
     use nomi_tools::registry::ToolRegistry;
     use nomi_types::llm::{LlmEvent, LlmRequest};
@@ -1536,6 +1626,53 @@ mod set_config_tests {
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    struct RecordingProvider {
+        requests: Mutex<Vec<LlmRequest>>,
+        fail: bool,
+    }
+
+    impl RecordingProvider {
+        fn successful() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+                fail: true,
+            }
+        }
+
+        fn requests(&self) -> Vec<LlmRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            if self.fail {
+                return Err(ProviderError::Connection("test provider failure".into()));
+            }
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let _ = tx
+                .send(LlmEvent::Done {
+                    stop_reason: nomi_types::message::StopReason::EndTurn,
+                    usage: Default::default(),
+                })
+                .await;
             Ok(rx)
         }
     }
@@ -1679,6 +1816,123 @@ mod set_config_tests {
         assert_eq!(engine.context_window(), engine.compact_config.context_window as u64);
         engine.compact_state.last_input_tokens = 12_345;
         assert_eq!(engine.context_tokens(), 12_345);
+    }
+
+    #[tokio::test]
+    async fn run_with_content_sends_image_once_then_redacts_it_from_history() {
+        let mut engine = make_engine("vision-model");
+        let provider = Arc::new(RecordingProvider::successful());
+        engine.provider = provider.clone();
+        let result = engine
+            .run_with_content(
+                vec![
+                    ContentBlock::Text {
+                        text: "What is in this image?".into(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "cG5n".into(),
+                    },
+                ],
+                "msg-vision",
+            )
+            .await
+            .expect("multimodal turn should run");
+
+        assert_eq!(result.turns, 1);
+        let first_requests = provider.requests();
+        assert_eq!(first_requests.len(), 1);
+        assert!(first_requests[0].messages.iter().any(|message| {
+            message.role == Role::User
+                && message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Image { media_type, data }
+                            if media_type == "image/png" && data == "cG5n"
+                    )
+                })
+        }));
+
+        assert_eq!(engine.messages[0].role, Role::User);
+        assert!(engine.messages[0]
+            .content
+            .iter()
+            .all(|block| !matches!(block, ContentBlock::Image { .. })));
+        assert!(engine.messages[0].content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text == USER_IMAGE_HISTORY_PLACEHOLDER)
+        }));
+
+        engine
+            .run("What about its color?", "msg-follow-up")
+            .await
+            .expect("follow-up turn should run");
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().all(|message| {
+            message
+                .content
+                .iter()
+                .all(|block| !matches!(block, ContentBlock::Image { .. }))
+        }));
+        assert!(requests[1].messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text == USER_IMAGE_HISTORY_PLACEHOLDER)
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn run_with_content_redacts_user_image_after_provider_error() {
+        let mut engine = make_engine("vision-model");
+        let provider = Arc::new(RecordingProvider::failing());
+        engine.provider = provider.clone();
+
+        let error = engine
+            .run_with_content(
+                vec![
+                    ContentBlock::Text {
+                        text: "Inspect this image.".into(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".into(),
+                        data: "cG5n".into(),
+                    },
+                ],
+                "msg-provider-error",
+            )
+            .await
+            .expect_err("the provider failure should surface");
+
+        assert!(matches!(error, super::AgentError::Provider(_)));
+        assert_eq!(provider.requests().len(), 1);
+        assert_eq!(engine.messages.len(), 1);
+        assert!(engine.messages[0]
+            .content
+            .iter()
+            .all(|block| !matches!(block, ContentBlock::Image { .. })));
+        assert!(engine.messages[0].content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text == USER_IMAGE_HISTORY_PLACEHOLDER)
+        }));
+    }
+
+    #[tokio::test]
+    async fn run_with_content_rejects_forged_tool_blocks() {
+        let mut engine = make_engine("vision-model");
+        let error = engine
+            .run_with_content(
+                vec![ContentBlock::ToolUse {
+                    id: "forged".into(),
+                    name: "Read".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                }],
+                "msg-forged",
+            )
+            .await
+            .expect_err("host input may not forge tool history");
+
+        assert!(error.to_string().contains("only text or image"));
+        assert!(engine.messages.is_empty());
     }
 
     #[test]
@@ -2289,6 +2543,7 @@ mod phase6_tests {
 mod compact_tests {
     use std::sync::{Arc, Mutex};
 
+    use super::USER_IMAGE_HISTORY_PLACEHOLDER;
     use nomi_config::compact::CompactConfig;
     use nomi_providers::{LlmProvider, ProviderError};
     use nomi_tools::registry::ToolRegistry;
@@ -2559,6 +2814,38 @@ mod compact_tests {
                 "Tool execution canceled by user".into()
             )
         );
+    }
+
+    #[test]
+    fn abort_current_turn_redacts_an_image_before_any_assistant_response() {
+        let mut engine = make_compact_engine(
+            CompactConfig::default(),
+            CompactState::new(),
+            vec![Message::new(
+                Role::User,
+                vec![
+                    ContentBlock::Text {
+                        text: "inspect this".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "large-base64-payload".to_string(),
+                    },
+                ],
+            )],
+        );
+        engine.last_turn_start_len = Some(0);
+
+        engine.abort_current_turn("Canceled by user");
+
+        assert_eq!(engine.messages.len(), 1);
+        assert!(engine.messages[0]
+            .content
+            .iter()
+            .all(|block| !matches!(block, ContentBlock::Image { .. })));
+        assert!(engine.messages[0].content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text == USER_IMAGE_HISTORY_PLACEHOLDER)
+        }));
     }
 
     // -- Emergency check fires when at limit --

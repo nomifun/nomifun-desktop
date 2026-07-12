@@ -1354,11 +1354,13 @@
       },
       "capability": {
         "chat": "支持对话",
-        "functionCalling": "工具调用"
+        "functionCalling": "工具调用",
+        "vision": "看图与图片理解"
       },
       "progress": {
         "runtime": "正在准备推理运行时",
         "model": "正在下载模型",
+        "visionProjector": "正在下载图片理解组件",
         "preparing": "准备中",
         "verifyingHint": "正在校验文件完整性，请勿退出 NomiFun。"
       },
@@ -1371,6 +1373,176 @@
         "busy": "另一个本地模型操作正在进行",
         "notFound": "模型或本地文件不存在",
         "unknown": "本地模型操作失败"
+      },
+      "ocr": {
+        "title": "本地 OCR（实验性）",
+        "subtitle": "当前仅提供 OCR 模型文件的按需下载与管理，尚未接入文字识别。",
+        "refresh": "刷新状态",
+        "refreshHint": "重新检查 OCR 模型文件和推理可用状态",
+        "onDemandTitle": "由你决定何时下载。",
+        "onDemandNotice": "只有点击“下载模型文件”后才会联网实时下载；不会预装或静默下载。暂停会保留断点。当前版本下载完成后仍不能执行 OCR 识别。",
+        "loading": "正在检查本地 OCR",
+        "loadFailed": "暂时无法读取本地 OCR 状态",
+        "loadFailedHint": "本地服务可能仍在启动，请稍后刷新。",
+        "empty": "暂时没有可安装的 OCR 模型",
+        "recommended": "推荐",
+        "catalogDescription": "PP-OCRv6 Small 中英文检测与识别模型文件。当前版本只管理下载，后续接入推理运行组件和识别入口。",
+        "actionFailed": "OCR 模型操作失败，请稍后重试",
+        "installSuccess": "已开始实时下载 OCR 模型文件",
+        "pauseSuccess": "下载已暂停，断点已保留",
+        "resumeSuccess": "已从断点继续下载",
+        "deleteSuccess": "OCR 模型文件已删除",
+        "deleteConfirmTitle": "删除 OCR 模型？",
+        "deleteConfirmContent": "将删除 {{model}} 的本地文件和下载断点；以后仍可重新下载。",
+        "deleteModelLabel": "删除 {{model}}",
+        "readiness": {
+          "artifacts": "模型文件",
+          "artifactsReady": "检测与识别文件完整",
+          "artifactsMissing": "尚未完整下载",
+          "ready": "已就绪",
+          "notReady": "未就绪",
+          "inference": "OCR 推理",
+          "inferenceReady": "可以在 NomiFun 中使用",
+          "runtimePending": "当前版本尚未接入推理",
+          "installFirst": "当前版本尚未接入推理",
+          "available": "可使用",
+          "unavailable": "暂不可用",
+          "runtimePendingHint": "这里只完成了模型文件管理；ONNX 推理、预处理/后处理和识别入口尚未接入，因此当前不能执行 OCR。"
+        },
+        "phase": {
+          "notInstalled": "未安装",
+          "downloading": "下载中",
+          "verifying": "校验中",
+          "installed": "文件已安装",
+          "paused": "已暂停",
+          "failed": "安装失败"
+        },
+        "component": {
+          "detector": "文字检测",
+          "detectorConfig": "检测配置",
+          "recognizer": "文字识别",
+          "recognizerConfig": "识别字典与配置"
+        },
+        "action": {
+          "install": "下载模型文件",
+          "pause": "暂停下载",
+          "resume": "继续下载",
+          "retry": "重新下载",
+          "delete": "删除"
+        },
+        "metadata": {
+          "download": "下载 {{size}}",
+          "memory": "建议可用内存 {{size}}",
+          "source": "来源：{{source}}"
+        },
+        "progress": {
+          "overall": "总下载进度",
+          "preparing": "准备中",
+          "currentComponent": "当前：{{component}}",
+          "verifyingHint": "正在校验文件完整性，请保持 NomiFun 打开。",
+          "checkpointSaved": "下载断点已保留"
+        },
+        "error": {
+          "network": "网络连接失败，可从断点继续",
+          "insufficientSpace": "磁盘可用空间不足",
+          "checksumMismatch": "文件校验失败，请重新下载",
+          "unsupportedPlatform": "当前系统或处理器暂不受支持",
+          "runtimeUnavailable": "本地 OCR 运行组件不可用",
+          "busy": "另一个本地模型操作正在进行",
+          "notFound": "OCR 模型或本地文件不存在",
+          "unknown": "本地 OCR 操作失败"
+        }
+      },
+      "image": {
+        "title": "本地图片生成",
+        "subtitle": "在 NomiFun 内下载 Z-Image Turbo，图片生成全程在本机完成。",
+        "refresh": "刷新状态",
+        "refreshHint": "重新检查图片模型文件、完整性与运行状态",
+        "onDemandTitle": "由你决定何时下载。",
+        "onDemandNotice": "只有点击“下载安装”后，才会实时下载约 6 GB 的完整组件包；不会预装或静默下载。暂停会保留已完成文件和下载断点。",
+        "loading": "正在检查本地图片生成能力",
+        "loadFailed": "无法读取本地图片模型状态",
+        "loadFailedHint": "本地服务可能仍在启动，请稍后刷新。",
+        "empty": "暂时没有可安装的图片模型",
+        "emptyHint": "请更新 NomiFun 以获取内置图片模型目录。",
+        "recommended": "推荐",
+        "catalogDescription": "面向民用电脑的 Z-Image Turbo 轻量组合，使用 Q3_K 扩散模型与 Qwen3 4B 文本编码器，适合快速本地文生图。",
+        "actionFailed": "图片模型操作失败，请稍后重试",
+        "installSuccess": "已开始下载；安装完成后会自动出现在“创作模型”中",
+        "pauseSuccess": "下载已暂停，已完成文件和断点均已保留",
+        "resumeSuccess": "已从保留的断点继续下载",
+        "deleteSuccess": "本地图片模型文件已删除",
+        "deleteConfirmTitle": "删除本地图片模型？",
+        "deleteConfirmContent": "将删除 {{model}} 的运行时、三个模型组件及下载断点；以后仍可重新下载。",
+        "deleteModelLabel": "删除 {{model}}",
+        "readiness": {
+          "artifacts": "安装组件包",
+          "artifactsReady": "运行时与三个模型组件均已完整安装",
+          "artifactsMissing": "下载或安装尚未完成",
+          "installed": "已安装",
+          "notInstalled": "未就绪",
+          "runtime": "创作就绪状态",
+          "unsupportedHint": "当前平台没有可用的图片运行时安装包。本版本支持 Windows / Linux x64 与 Apple 芯片 Mac；此设备不会开始下载。",
+          "runtimeFailedHint": "已安装的运行时无法使用，请重新安装；若仍然失败，当前设备或显卡驱动可能不支持这个运行时安装包。",
+          "integrityPendingHint": "已经安装并加入“创作模型”。本次启动首次生成前，NomiFun 会执行完整的 SHA-256 校验，通过后才启动推理；此过程不会重新下载组件包。",
+          "generatingHint": "正在生成本地图片。重型本地 AI 任务一次只运行一个。",
+          "creationReadyHint": "完整性校验已通过，可在“创作模型”中选择 Z-Image Turbo 进行本地生成。"
+        },
+        "phase": {
+          "notInstalled": "未安装",
+          "downloading": "下载中",
+          "verifying": "校验中",
+          "extracting": "正在安装运行时",
+          "installed": "已安装",
+          "paused": "已暂停",
+          "failed": "安装失败"
+        },
+        "runtime": {
+          "checking": "检查中",
+          "onDemand": "使用时启动",
+          "integrityPending": "待首次使用校验",
+          "ready": "完整性已校验",
+          "busy": "正在生成",
+          "failed": "运行异常",
+          "unsupported": "当前平台不支持"
+        },
+        "component": {
+          "runtime": "stable-diffusion.cpp 运行时",
+          "diffusionModel": "Z-Image 扩散模型",
+          "textEncoder": "Qwen3 4B 文本编码器",
+          "vae": "VAE 图片解码器"
+        },
+        "action": {
+          "install": "下载安装",
+          "pause": "暂停下载",
+          "resume": "继续下载",
+          "retry": "重新安装",
+          "delete": "删除"
+        },
+        "metadata": {
+          "downloadApprox": "约 6 GB（当前平台 {{size}}）",
+          "memory": "建议可用内存 {{size}}",
+          "license": "许可证：{{license}}",
+          "source": "来源：{{source}}"
+        },
+        "progress": {
+          "bundle": "运行时 + 3 个模型组件",
+          "preparing": "准备中"
+        },
+        "notice": {
+          "title": "第三方组件声明",
+          "vae": "扩散模型和文本编码器采用 Apache-2.0，运行时采用 MIT。固定 VAE 来自 Comfy-Org/z_image_turbo，其仓库卡未声明许可证；再分发前必须保留并复核上游声明。"
+        },
+        "error": {
+          "network": "网络连接失败，可从保留的断点继续",
+          "insufficientSpace": "磁盘空间不足，需容纳约 6 GB 组件包及安装预留空间",
+          "checksumMismatch": "组件未通过 SHA-256 校验，请重新安装",
+          "unsupportedPlatform": "当前系统或处理器没有受支持的图片运行时",
+          "runtimeUnavailable": "本地图片生成运行时不可用",
+          "busy": "另一个本地 AI 任务正在占用运行时",
+          "notFound": "图片模型或本地文件不存在",
+          "unknown": "本地图片模型操作失败"
+        }
       }
     },
     "creation": {

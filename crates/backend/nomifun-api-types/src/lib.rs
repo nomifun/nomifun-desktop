@@ -16,6 +16,7 @@ mod exposure;
 mod extension;
 mod file;
 mod idmm;
+mod image_model;
 mod knowledge;
 mod lifecycle;
 mod local_model;
@@ -26,6 +27,7 @@ pub mod model_capability;
 pub mod model_catalog;
 pub mod model_task;
 mod office;
+mod ocr_model;
 mod orchestrator;
 mod provider;
 mod remote_agent;
@@ -126,6 +128,13 @@ pub use idmm::{
     IdmmTargetKind, InterventionRecord, ModelFailoverConfig, OpenQuestionRule, OptionRule,
     PermissionRule, ScanScope, SetIdmmRequest, Tendency, WakeStrategy, WatchBase, WatchTier,
 };
+pub use image_model::{
+    CancelImageModelInstallRequest, CancelImageModelInstallResponse, DeleteImageModelRequest,
+    DeleteImageModelResponse, ImageModelCatalogEntry, ImageModelComponent,
+    ImageModelComponentProgress, ImageModelInstallPhase, ImageModelRuntimePhase,
+    ImageModelServiceStatus, ImageModelState, InstallImageModelRequest,
+    InstallImageModelResponse, ResumeImageModelInstallRequest, ResumeImageModelInstallResponse,
+};
 pub use knowledge::{
     ConnectorCredentialSummary, ConnectorSyncState, CreateKnowledgeTagRequest, KnowledgeMountInfo,
     KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode, KnowledgeTag,
@@ -168,6 +177,10 @@ pub use office::{
     PreviewHistoryTargetDto, PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent,
     PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse,
     StartPreviewRequest, StopPreviewRequest,
+};
+pub use ocr_model::{
+    OcrModelCatalogEntry, OcrModelComponent, OcrModelServiceStatus, OcrModelState,
+    OcrModelTransferProgress,
 };
 pub use orchestrator::{
     Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,

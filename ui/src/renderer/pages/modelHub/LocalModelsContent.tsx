@@ -28,6 +28,8 @@ import {
   type LocalModelPrimaryAction,
 } from './localModelView';
 import { useLocalModels } from './useLocalModels';
+import ImageModelsPanel from './ImageModelsPanel';
+import OcrModelsPanel from './OcrModelsPanel';
 
 const installPhaseColor = (phase: LocalModelInstallPhase): string | undefined => {
   if (phase === 'installed') return 'green';
@@ -216,7 +218,9 @@ const LocalModelsContent: React.FC = () => {
           <span>
             {progress.component === 'runtime'
               ? t('settings.modelHub.local.progress.runtime')
-              : t('settings.modelHub.local.progress.model')}
+              : progress.component === 'vision_projector'
+                ? t('settings.modelHub.local.progress.visionProjector')
+                : t('settings.modelHub.local.progress.model')}
           </span>
           <span>{percent == null ? t('settings.modelHub.local.progress.preparing') : `${percent.toFixed(1)}%`}</span>
         </div>
@@ -314,32 +318,33 @@ const LocalModelsContent: React.FC = () => {
       </div>
 
       <NomiScrollArea className='flex-1 min-h-0' disableOverflow={isPageMode}>
-        {isLoading && !catalog ? (
-          <div className='flex items-center justify-center gap-8px py-48px text-13px text-t-secondary'>
-            <Loading theme='outline' size='18' className='animate-spin' />
-            {t('settings.modelHub.local.loading')}
-          </div>
-        ) : loadFailed ? (
-          <div className='flex flex-col items-center justify-center py-48px text-center'>
-            <DataServer theme='outline' size='40' className='text-t-tertiary mb-12px' />
-            <div className='text-15px font-500 text-t-primary'>{t('settings.modelHub.local.loadFailed')}</div>
-            <div className='mt-5px text-12px text-t-secondary'>{t('settings.modelHub.local.loadFailedHint')}</div>
-          </div>
-        ) : !catalog?.length ? (
-          <div className='flex flex-col items-center justify-center py-48px text-center'>
-            <DataServer theme='outline' size='40' className='text-t-tertiary mb-12px' />
-            <div className='text-15px font-500 text-t-primary'>{t('settings.modelHub.local.empty')}</div>
-            <div className='mt-5px text-12px text-t-secondary'>{t('settings.modelHub.local.emptyHint')}</div>
-          </div>
-        ) : (
-          <div className='space-y-12px'>
-            <div className='flex items-center justify-between gap-12px'>
-              <div>
-                <div className='text-15px font-600 text-t-primary'>{t('settings.modelHub.local.catalogTitle')}</div>
-                <div className='mt-3px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.local.singleModelHint')}</div>
-              </div>
-              <Tag size='small'>{t('settings.modelHub.local.modelCount', { count: catalog.length })}</Tag>
+        <div className='space-y-14px'>
+          {isLoading && !catalog ? (
+            <div className='flex items-center justify-center gap-8px py-48px text-13px text-t-secondary'>
+              <Loading theme='outline' size='18' className='animate-spin' />
+              {t('settings.modelHub.local.loading')}
             </div>
+          ) : loadFailed ? (
+            <div className='flex flex-col items-center justify-center py-48px text-center'>
+              <DataServer theme='outline' size='40' className='text-t-tertiary mb-12px' />
+              <div className='text-15px font-500 text-t-primary'>{t('settings.modelHub.local.loadFailed')}</div>
+              <div className='mt-5px text-12px text-t-secondary'>{t('settings.modelHub.local.loadFailedHint')}</div>
+            </div>
+          ) : !catalog?.length ? (
+            <div className='flex flex-col items-center justify-center py-48px text-center'>
+              <DataServer theme='outline' size='40' className='text-t-tertiary mb-12px' />
+              <div className='text-15px font-500 text-t-primary'>{t('settings.modelHub.local.empty')}</div>
+              <div className='mt-5px text-12px text-t-secondary'>{t('settings.modelHub.local.emptyHint')}</div>
+            </div>
+          ) : (
+            <div className='space-y-12px'>
+              <div className='flex items-center justify-between gap-12px'>
+                <div>
+                  <div className='text-15px font-600 text-t-primary'>{t('settings.modelHub.local.catalogTitle')}</div>
+                  <div className='mt-3px text-12px leading-18px text-t-secondary'>{t('settings.modelHub.local.singleModelHint')}</div>
+                </div>
+                <Tag size='small'>{t('settings.modelHub.local.modelCount', { count: catalog.length })}</Tag>
+              </div>
 
             {catalog.map((model) => {
               const state = stateForLocalModel(status?.models, model.id);
@@ -421,6 +426,11 @@ const LocalModelsContent: React.FC = () => {
                             {t('settings.modelHub.local.capability.functionCalling')}
                           </Tag>
                         )}
+                        {model.traits.includes('vision_input') && (
+                          <Tag size='small' color='magenta'>
+                            {t('settings.modelHub.local.capability.vision')}
+                          </Tag>
+                        )}
                         <span className='text-11px text-t-secondary'>
                           {t('settings.modelHub.local.metadata.source', { source: model.source })}
                         </span>
@@ -470,8 +480,11 @@ const LocalModelsContent: React.FC = () => {
                 </section>
               );
             })}
-          </div>
-        )}
+            </div>
+          )}
+          <ImageModelsPanel />
+          <OcrModelsPanel />
+        </div>
       </NomiScrollArea>
     </div>
   );
