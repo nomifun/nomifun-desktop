@@ -27,7 +27,9 @@ async fn provider_full_crud_with_auth() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["data"], json!([]));
+    let providers = json["data"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["id"], "nomifun-free-model");
 
     // 2. Create
     let req = json_with_token(
@@ -61,7 +63,18 @@ async fn provider_full_crud_with_auth() {
         .await
         .unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"].as_array().unwrap().len(), 1);
+    let providers = json["data"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    assert!(
+        providers
+            .iter()
+            .any(|provider| provider["id"] == "nomifun-free-model")
+    );
+    assert!(
+        providers
+            .iter()
+            .any(|provider| provider["id"].as_str() == Some(id.as_str()))
+    );
 
     // 4. Update
     let req = json_with_token(
@@ -88,7 +101,9 @@ async fn provider_full_crud_with_auth() {
     // 6. Verify deleted
     let resp = app.oneshot(get_with_token("/api/providers", &token)).await.unwrap();
     let json = body_json(resp).await;
-    assert_eq!(json["data"], json!([]));
+    let providers = json["data"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["id"], "nomifun-free-model");
 }
 
 #[tokio::test]
