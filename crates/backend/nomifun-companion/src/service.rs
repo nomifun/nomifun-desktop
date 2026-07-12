@@ -300,6 +300,7 @@ impl CompanionService {
             registry: self.registry.clone(),
             conversations,
             task_manager,
+            skill_paths: self.skill_paths.clone(),
         });
     }
 
@@ -437,6 +438,7 @@ impl CompanionService {
         let prev = self.registry.get(id).await;
         let prev_model = prev.as_ref().map(|p| p.model.clone());
         let prev_name = prev.as_ref().map(|p| p.name.clone());
+        let prev_skills = prev.as_ref().map(|p| p.skills.clone());
         let profile = self.registry.patch(id, patch).await?;
         self.emitter.emit_companion_updated(&profile.id, &profile);
 
@@ -456,6 +458,9 @@ impl CompanionService {
         if prev_name.as_deref() != Some(profile.name.as_str()) {
             self.reconcile_companion_workspace(&profile).await;
         }
+        if prev_skills.as_ref() != Some(&profile.skills) {
+            self.reconcile_companion_skills(&profile).await;
+        }
         Ok(profile)
     }
 
@@ -472,6 +477,25 @@ impl CompanionService {
         };
         if let Some(thread) = threads.into_iter().next() {
             companion.reconcile_thread_workspace(profile, &thread.conversation_id).await;
+        }
+    }
+
+    /// Best-effort: apply the profile's general-purpose skill configuration to
+    /// the companion's existing single conversation. No conversation means
+    /// there is nothing to reconcile yet; creation will apply the profile.
+    async fn reconcile_companion_skills(&self, profile: &CompanionProfileConfig) {
+        let Ok(companion) = self.companion() else { return };
+        let threads = match companion.list(&profile.id).await {
+            Ok(threads) => threads,
+            Err(e) => {
+                tracing::warn!(error = %e, companion_id = %profile.id, "list threads for skill reconcile failed");
+                return;
+            }
+        };
+        if let Some(thread) = threads.into_iter().next() {
+            companion
+                .reconcile_profile_skills(profile, &thread.conversation_id)
+                .await;
         }
     }
 

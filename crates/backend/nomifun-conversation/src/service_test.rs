@@ -626,6 +626,21 @@ fn make_service_with_resolver_and_acp_session_repo(
     (svc, broadcaster, repo, task_mgr)
 }
 
+fn make_service_with_concrete_task_manager() -> (ConversationService, Arc<MockRepo>, Arc<MockTaskManager>) {
+    let repo = Arc::new(MockRepo::new());
+    let task_mgr = Arc::new(MockTaskManager::new());
+    let svc = ConversationService::new(
+        std::env::temp_dir(),
+        Arc::new(MockBroadcaster::new()),
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        task_mgr.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+    );
+    (svc, repo, task_mgr)
+}
+
 fn make_create_req() -> CreateConversationRequest {
     serde_json::from_value(json!({
         "type": "acp",
@@ -3565,6 +3580,54 @@ async fn check_approval_not_found() {
 }
 
 // ── Skill snapshot tests ───────────────────────────────────────────
+
+#[tokio::test]
+async fn replace_skill_snapshot_updates_and_recycles_only_on_change() {
+    let (svc, repo, task_mgr) = make_service_with_concrete_task_manager();
+    let conv = svc.create("u", make_create_req()).await.unwrap();
+
+    assert!(
+        svc.replace_skill_snapshot(&conv.id.to_string(), &["pdf".into(), "pdf".into()])
+            .await
+            .unwrap()
+    );
+    assert_eq!(task_mgr.kill_count(), 1);
+    assert!(
+        !svc
+            .replace_skill_snapshot(&conv.id.to_string(), &["pdf".into()])
+            .await
+            .unwrap()
+    );
+    assert_eq!(task_mgr.kill_count(), 1);
+
+    let row = repo.get(conv.id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+    assert_eq!(extra["skills"], json!(["pdf"]));
+}
+
+#[tokio::test]
+async fn replace_skill_snapshot_repairs_non_object_extra() {
+    let (svc, repo, _task_mgr) = make_service_with_concrete_task_manager();
+    let conv = svc.create("u", make_create_req()).await.unwrap();
+    repo.update(
+        conv.id,
+        &ConversationRowUpdate {
+            extra: Some("[]".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        svc.replace_skill_snapshot(&conv.id.to_string(), &["pdf".into()])
+            .await
+            .unwrap()
+    );
+    let row = repo.get(conv.id).await.unwrap().unwrap();
+    let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap();
+    assert_eq!(extra["skills"], json!(["pdf"]));
+}
 
 #[tokio::test]
 async fn create_writes_extra_skills_from_auto_inject_and_preset() {

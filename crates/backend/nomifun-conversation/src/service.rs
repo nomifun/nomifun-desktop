@@ -1066,6 +1066,58 @@ impl ConversationService {
         Ok(())
     }
 
+    /// Replace the immutable skill snapshot for a backend-owned conversation
+    /// and recycle its cached agent so the next turn bootstraps with the new
+    /// workspace skills. Public conversation PATCH keeps rejecting skill
+    /// changes; this narrow method is for owners such as desktop companions.
+    pub async fn replace_skill_snapshot(
+        &self,
+        conversation_id: &str,
+        skills: &[String],
+    ) -> Result<bool, AppError> {
+        let existing = self
+            .conversation_repo
+            .get(parse_conv_id(conversation_id)?)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let mut extra = serde_json::from_str::<serde_json::Value>(&existing.extra)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let mut desired = skills.to_vec();
+        desired.sort();
+        desired.dedup();
+        let mut current = extra
+            .get("skills")
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+            .unwrap_or_default();
+        current.sort();
+        current.dedup();
+        if current == desired {
+            return Ok(false);
+        }
+        extra["skills"] = serde_json::Value::Array(
+            desired.into_iter().map(serde_json::Value::String).collect(),
+        );
+        self.conversation_repo
+            .update(
+                parse_conv_id(conversation_id)?,
+                &ConversationRowUpdate {
+                    extra: Some(
+                        serde_json::to_string(&extra)
+                            .map_err(|e| AppError::Internal(format!("Failed to serialize skill snapshot: {e}")))?,
+                    ),
+                    updated_at: Some(now_ms()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if let Err(e) = self.task_manager.kill(conversation_id, None) {
+            warn!(error = %ErrorChain(&e), conversation_id, "Failed to recycle agent after skill snapshot change");
+        }
+        Ok(true)
+    }
+
     /// Link an orchestrator run to its originating conversation.
     ///
     /// Merges `extra.orchestrator_run_id` (only touching `extra` — never

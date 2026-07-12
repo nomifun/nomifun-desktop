@@ -6,16 +6,31 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Empty, Input, Message, Modal, Pagination, Popconfirm, Select, Spin, Tag, Tooltip } from '@arco-design/web-react';
+import {
+  Button,
+  Checkbox,
+  Empty,
+  Input,
+  Message,
+  Modal,
+  Pagination,
+  Popconfirm,
+  Select,
+  Spin,
+  Tag,
+  Tooltip,
+} from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { ICompanionSkill } from '@/common/adapter/ipcBridge';
 import type { useCompanion } from '../useNomi';
+import { toggleCompanionSkill } from './companionSkillConfig';
 
 interface Props {
   companion: ReturnType<typeof useCompanion>;
 }
 
 const STATUS_COLORS: Record<string, string> = { draft: 'orange', active: 'green', archived: 'gray' };
+type CatalogSkill = Awaited<ReturnType<typeof ipcBridge.fs.listAvailableSkills.invoke>>[number];
 
 /**
  * 伙伴「技能」Tab —— 看得见 + 能编辑（design §8）。
@@ -25,6 +40,11 @@ const STATUS_COLORS: Record<string, string> = { draft: 'orange', active: 'green'
 const SkillsTab: React.FC<Props> = ({ companion }) => {
   const { t } = useTranslation();
   const companionId = companion.profile?.id ?? '';
+  const [catalog, setCatalog] = useState<CatalogSkill[]>([]);
+  const [autoNames, setAutoNames] = useState<Set<string>>(new Set());
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogQuery, setCatalogQuery] = useState('');
+  const [savingConfig, setSavingConfig] = useState(false);
   const [skills, setSkills] = useState<ICompanionSkill[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
@@ -48,6 +68,76 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   const [others, setOthers] = useState<{ id: string; name: string }[]>([]);
 
   const refreshSeq = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCatalogLoading(true);
+    Promise.all([ipcBridge.fs.listAvailableSkills.invoke(), ipcBridge.fs.listBuiltinAutoSkills.invoke()])
+      .then(([available, auto]) => {
+        if (cancelled) return;
+        setCatalog(available);
+        setAutoNames(new Set(auto.map((item) => item.name)));
+      })
+      .catch((e) => {
+        if (!cancelled) Message.error(String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [companionId]);
+
+  const configuredEnabled = companion.profile?.skills?.enabled ?? [];
+  const configuredDisabledAuto = companion.profile?.skills?.disabled_auto ?? [];
+  const configuredEnabledSet = new Set(configuredEnabled);
+  const configuredDisabledAutoSet = new Set(configuredDisabledAuto);
+  const missingConfiguredNames = [...new Set([...configuredEnabled, ...configuredDisabledAuto])];
+  const missingConfigured: CatalogSkill[] = missingConfiguredNames
+    .filter((name) => !catalog.some((skill) => skill.name === name))
+    .map((name) => ({
+      name,
+      description: t('nomi.skills.configMissingHint', {
+        defaultValue: '这个 Skill 当前未安装；重新安装后会自动恢复。',
+      }),
+      location: '',
+      is_custom: false,
+      source: 'custom',
+    }));
+  const filteredCatalog = [...missingConfigured, ...catalog].filter((skill) => {
+    const query = catalogQuery.trim().toLocaleLowerCase();
+    return !query || skill.name.toLocaleLowerCase().includes(query) || skill.description.toLocaleLowerCase().includes(query);
+  });
+
+  const skillChecked = useCallback(
+    (name: string) =>
+      autoNames.has(name) || configuredDisabledAutoSet.has(name)
+        ? !configuredDisabledAutoSet.has(name)
+        : configuredEnabledSet.has(name),
+    [autoNames, configuredDisabledAutoSet, configuredEnabledSet]
+  );
+
+  const toggleConfiguredSkill = useCallback(
+    async (name: string, checked: boolean) => {
+      if (!companion.profile) return;
+      const skills = toggleCompanionSkill(companion.profile.skills, autoNames, name, checked);
+      setSavingConfig(true);
+      try {
+        await companion.patchCompanion({ skills });
+        Message.success(
+          t('nomi.skills.configSaved', {
+            defaultValue: '技能配置已保存，将在下一条消息生效',
+          })
+        );
+      } catch (e) {
+        Message.error(String(e));
+      } finally {
+        setSavingConfig(false);
+      }
+    },
+    [autoNames, companion, t]
+  );
 
   const refresh = useCallback(async () => {
     if (!companionId) {
@@ -223,6 +313,80 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
 
   return (
     <div className='flex flex-col gap-12px py-8px'>
+      <section className='flex flex-col gap-8px bg-fill-1 rd-12px p-12px'>
+        <div className='flex items-start justify-between gap-12px'>
+          <div>
+            <div className='text-14px font-600 text-t-primary'>
+              {t('nomi.skills.configuredTitle', { defaultValue: '已配置能力' })}
+            </div>
+            <div className='mt-2px text-12px text-t-secondary'>
+              {t('nomi.skills.configuredHint', {
+                defaultValue: '从全局 Skill 库授予这个伙伴能力；伙伴自己学习的专精技能在下方管理。',
+              })}
+            </div>
+          </div>
+          {savingConfig && <Spin size={16} />}
+        </div>
+        <Input.Search
+          allowClear
+          value={catalogQuery}
+          onChange={setCatalogQuery}
+          placeholder={t('nomi.skills.configSearch', { defaultValue: '搜索 Skill' })}
+        />
+        {catalogLoading ? (
+          <div className='flex justify-center py-20px'>
+            <Spin />
+          </div>
+        ) : filteredCatalog.length === 0 ? (
+          <Empty description={t('nomi.skills.configEmpty', { defaultValue: '没有可配置的 Skill' })} />
+        ) : (
+          <div className='grid grid-cols-1 xl:grid-cols-2 gap-8px'>
+            {filteredCatalog.map((skill) => {
+              const isAuto = autoNames.has(skill.name) || configuredDisabledAutoSet.has(skill.name);
+              return (
+                <div
+                  key={skill.name}
+                  className='flex items-start gap-9px rd-10px bg-fill-2 px-10px py-9px'
+                >
+                  <Checkbox
+                    className='mt-1px'
+                    checked={skillChecked(skill.name)}
+                    disabled={savingConfig}
+                    onChange={(checked) => void toggleConfiguredSkill(skill.name, checked)}
+                  />
+                  <div className='min-w-0 flex-1'>
+                    <div className='flex items-center gap-6px flex-wrap'>
+                      <span className='text-13px font-600 text-t-primary break-all'>{skill.name}</span>
+                      <Tag size='small' color={isAuto ? 'arcoblue' : 'gray'}>
+                        {isAuto
+                          ? t('nomi.skills.configDefault', { defaultValue: '默认能力' })
+                          : t('nomi.skills.configOptional', { defaultValue: '额外能力' })}
+                      </Tag>
+                      <Tag size='small'>{skill.source}</Tag>
+                      {!skill.location && (
+                        <Tag size='small' color='red'>
+                          {t('nomi.skills.configMissing', { defaultValue: '未安装' })}
+                        </Tag>
+                      )}
+                    </div>
+                    {skill.description && (
+                      <div className='mt-3px text-12px leading-18px text-t-secondary line-clamp-2'>
+                        {skill.description}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <div className='pt-4px'>
+        <div className='text-14px font-600 text-t-primary'>
+          {t('nomi.skills.learnedTitle', { defaultValue: '伙伴专精' })}
+        </div>
+      </div>
       <div className='flex gap-8px items-center flex-wrap'>
         <Select
           style={{ width: 130 }}
