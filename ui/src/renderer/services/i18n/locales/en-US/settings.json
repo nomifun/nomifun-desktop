@@ -1353,6 +1353,7 @@
       "progress": {
         "runtime": "Preparing inference runtime",
         "model": "Downloading model",
+        "asrAuxiliary": "Downloading speech segmentation component",
         "visionProjector": "Downloading image-understanding component",
         "preparing": "Preparing",
         "verifyingHint": "Verifying file integrity. Keep NomiFun open."
@@ -1460,7 +1461,8 @@
       },
       "asr": {
         "title": "Local Speech Recognition",
-        "subtitle": "Download once to dictate into NomiFun input boxes offline. The recommended model handles both English and Chinese well.",
+        "subtitle": "Download once to dictate into NomiFun input boxes offline. Paraformer is recommended for Chinese; Whisper remains available for general multilingual speech.",
+        "chineseRecommended": "Chinese recommended",
         "catalogTitle": "Choose a speech recognition model",
         "loading": "Checking local speech recognition",
         "loadFailed": "Unable to read local speech-model status",

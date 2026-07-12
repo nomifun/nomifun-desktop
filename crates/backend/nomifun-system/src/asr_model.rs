@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use nomifun_api_types::{
-    AsrModelCatalogEntry, AsrModelServiceStatus, LocalModelErrorKind,
+    AsrCapability, AsrEngine, AsrModelCatalogEntry, AsrModelServiceStatus, LocalModelErrorKind,
     LocalModelInstallPhase, LocalModelProgressComponent, LocalModelRuntimeBackend,
     LocalModelRuntimePhase, LocalModelState, LocalModelTransferProgress,
     LocalRuntimeStatus,
@@ -28,7 +28,7 @@ use tokio::sync::{Mutex, Notify, OwnedRwLockReadGuard, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-const PROTOCOL_VERSION: &str = "1";
+const PROTOCOL_VERSION: &str = "2";
 const LOCAL_AI_DIR: &str = "local-ai";
 const ASR_DIR: &str = "asr";
 const RUNTIME_DIR: &str = "runtime";
@@ -36,8 +36,9 @@ const MODELS_DIR: &str = "models";
 const DOWNLOADS_DIR: &str = "downloads";
 const JOBS_DIR: &str = "jobs";
 const STATE_FILE: &str = "state.json";
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 const WHISPER_CPP_VERSION: &str = "1.9.1";
+const FUNASR_LLAMACPP_VERSION: &str = "0.1.4";
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DISK_SAFETY_BYTES: u64 = 64 * 1024 * 1024;
@@ -49,14 +50,49 @@ const MAX_AUDIO_BYTES: usize = 30 * 1024 * 1024;
 #[derive(Clone)]
 struct AsrModelArtifact {
     entry: AsrModelCatalogEntry,
+    engine: AsrEngineKind,
+    file_name: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    size: u64,
+    auxiliary: Option<AsrAuxiliaryArtifact>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum AsrEngineKind {
+    WhisperCpp,
+    FunAsrParaformer,
+}
+
+impl AsrEngineKind {
+    fn runtime_family(self) -> RuntimeFamily {
+        match self {
+            Self::WhisperCpp => RuntimeFamily::WhisperCpp,
+            Self::FunAsrParaformer => RuntimeFamily::FunAsrLlamaCpp,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AsrAuxiliaryArtifact {
+    id: &'static str,
     file_name: &'static str,
     url: &'static str,
     sha256: &'static str,
     size: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RuntimeFamily {
+    WhisperCpp,
+    FunAsrLlamaCpp,
+}
+
 #[derive(Clone, Copy)]
 struct RuntimeArtifact {
+    family: RuntimeFamily,
+    version: &'static str,
+    executable: &'static str,
     file_name: &'static str,
     url: &'static str,
     sha256: &'static str,
@@ -101,8 +137,8 @@ struct MutableState {
     persisted: PersistedState,
     models: HashMap<String, LocalModelState>,
     verified_models: HashSet<String>,
-    runtime_present: bool,
-    runtime_verified: bool,
+    present_runtimes: HashSet<RuntimeFamily>,
+    verified_runtimes: HashSet<RuntimeFamily>,
     active_install: Option<ActiveInstall>,
     next_generation: u64,
     last_error: Option<String>,
@@ -170,7 +206,7 @@ pub struct AsrModelService {
     root: PathBuf,
     http_client: reqwest::Client,
     catalog: Vec<AsrModelArtifact>,
-    runtime_artifact: Option<RuntimeArtifact>,
+    runtime_artifacts: Vec<RuntimeArtifact>,
     allow_insecure_loopback_downloads: bool,
     state: Mutex<MutableState>,
     mutation_lock: Mutex<()>,
@@ -189,18 +225,18 @@ impl AsrModelService {
         let Ok(state) = serde_json::from_slice::<PersistedState>(&bytes) else {
             return false;
         };
-        state.version == STATE_VERSION
+        matches!(state.version, 1 | STATE_VERSION)
             && (state.active_model_id.is_some() || !state.installed_model_ids.is_empty())
     }
 
     pub async fn new(data_dir: impl AsRef<Path>) -> Result<Arc<Self>, AppError> {
         let root = data_dir.as_ref().join(LOCAL_AI_DIR);
-        let runtime_artifact = production_runtime_artifact();
+        let runtime_artifacts = production_runtime_artifacts();
         Self::new_inner(
             root,
             asr_download_client(),
             built_in_catalog(),
-            runtime_artifact,
+            runtime_artifacts,
             false,
         )
         .await
@@ -210,17 +246,21 @@ impl AsrModelService {
         root: PathBuf,
         http_client: reqwest::Client,
         catalog: Vec<AsrModelArtifact>,
-        runtime_artifact: Option<RuntimeArtifact>,
+        runtime_artifacts: Vec<RuntimeArtifact>,
         allow_insecure_loopback_downloads: bool,
     ) -> Result<Arc<Self>, AppError> {
-        prepare_layout(&root, &catalog, runtime_artifact.as_ref())
+        prepare_layout(&root, &catalog, &runtime_artifacts)
             .map_err(|error| AppError::Internal(format!("prepare ASR model directory: {error}")))?;
         let root = std::fs::canonicalize(&root)
             .map_err(|error| AppError::Internal(format!("resolve ASR model directory: {error}")))?;
         let mut persisted = load_state(&root).await;
-        let configured_runtime = configured_runtime_path().is_some();
-        let runtime_present =
-            configured_runtime || find_runtime_executable(&runtime_install_dir(&root)).is_ok();
+        let present_runtimes = catalog
+            .iter()
+            .filter_map(|artifact| {
+                let family = artifact.engine.runtime_family();
+                runtime_is_present(&root, family, &runtime_artifacts).then_some(family)
+            })
+            .collect::<HashSet<_>>();
         let known_ids = catalog
             .iter()
             .map(|artifact| artifact.entry.id.as_str())
@@ -236,7 +276,8 @@ impl AsrModelService {
                 .installed_model_ids
                 .iter()
                 .any(|id| id == &artifact.entry.id)
-                && file_len(&final_path).await == artifact.size;
+                && file_len(&final_path).await == artifact.size
+                && auxiliary_is_present(&root, artifact).await;
             if !installed {
                 persisted
                     .installed_model_ids
@@ -244,7 +285,7 @@ impl AsrModelService {
             }
             let partial = partial_model_path(&root, artifact);
             let downloaded = if installed {
-                artifact.size
+                artifact_total_size(artifact)
             } else {
                 file_len(&partial).await.min(artifact.size)
             };
@@ -252,7 +293,9 @@ impl AsrModelService {
                 artifact.entry.id.clone(),
                 LocalModelState {
                     model_id: artifact.entry.id.clone(),
-                    install_phase: if installed && runtime_present {
+                    install_phase: if installed
+                        && present_runtimes.contains(&artifact.engine.runtime_family())
+                    {
                         LocalModelInstallPhase::Installed
                     } else if installed {
                         LocalModelInstallPhase::Failed
@@ -264,9 +307,12 @@ impl AsrModelService {
                     progress: None,
                     installed_bytes: downloaded,
                     runtime_phase: LocalModelRuntimePhase::Stopped,
-                    error_kind: (installed && !runtime_present)
+                    error_kind: (installed
+                        && !present_runtimes.contains(&artifact.engine.runtime_family()))
                         .then_some(LocalModelErrorKind::RuntimeUnavailable),
-                    message: (installed && !runtime_present).then(|| {
+                    message: (installed
+                        && !present_runtimes.contains(&artifact.engine.runtime_family()))
+                    .then(|| {
                         "The local ASR runtime is missing. Retry installation to repair it."
                             .into()
                     }),
@@ -280,21 +326,35 @@ impl AsrModelService {
         {
             persisted.active_model_id = None;
         }
-        let missing_runtime_for_install =
-            !runtime_present && !persisted.installed_model_ids.is_empty();
+        let missing_runtime_for_install = persisted.installed_model_ids.iter().any(|id| {
+            catalog
+                .iter()
+                .find(|artifact| &artifact.entry.id == id)
+                .is_some_and(|artifact| {
+                    !present_runtimes.contains(&artifact.engine.runtime_family())
+                })
+        });
+
+        let verified_runtimes = catalog
+            .iter()
+            .filter_map(|artifact| {
+                configured_runtime_path(artifact.engine.runtime_family())
+                    .map(|_| artifact.engine.runtime_family())
+            })
+            .collect();
 
         Ok(Arc::new(Self {
             root,
             http_client,
             catalog,
-            runtime_artifact,
+            runtime_artifacts,
             allow_insecure_loopback_downloads,
             state: Mutex::new(MutableState {
                 persisted,
                 models,
                 verified_models: HashSet::new(),
-                runtime_present,
-                runtime_verified: configured_runtime,
+                verified_runtimes,
+                present_runtimes,
                 active_install: None,
                 next_generation: 0,
                 last_error: missing_runtime_for_install.then(|| {
@@ -322,8 +382,7 @@ impl AsrModelService {
         snapshot(
             &state,
             &self.catalog,
-            self.runtime_artifact.as_ref(),
-            configured_runtime_path().is_some(),
+            &self.runtime_artifacts,
         )
     }
 
@@ -335,12 +394,21 @@ impl AsrModelService {
             .ok_or_else(|| AppError::NotFound("ASR model is not in the curated catalog".into()))
     }
 
+    fn runtime_artifact(&self, family: RuntimeFamily) -> Option<&RuntimeArtifact> {
+        self.runtime_artifacts
+            .iter()
+            .find(|runtime| runtime.family == family)
+    }
+
     pub async fn install(
         self: &Arc<Self>,
         model_id: &str,
     ) -> Result<AsrModelServiceStatus, AppError> {
         let artifact = self.artifact(model_id)?;
-        if self.runtime_artifact.is_none() && configured_runtime_path().is_none() {
+        if !runtime_supported(
+            artifact.engine.runtime_family(),
+            &self.runtime_artifacts,
+        ) {
             return Err(AppError::BadRequest(
                 "Local speech recognition is not supported on this platform".into(),
             ));
@@ -362,8 +430,7 @@ impl AsrModelService {
                     return Ok(snapshot(
                         &state,
                         &self.catalog,
-                        self.runtime_artifact.as_ref(),
-                        configured_runtime_path().is_some(),
+                        &self.runtime_artifacts,
                     ));
                 }
                 return Err(AppError::Conflict(
@@ -374,7 +441,9 @@ impl AsrModelService {
                 .models
                 .get(&model_id)
                 .is_some_and(|model| model.install_phase == LocalModelInstallPhase::Installed)
-                && state.runtime_present
+                && state
+                    .present_runtimes
+                    .contains(&artifact.engine.runtime_family())
             {
                 drop(state);
                 return self.set_active_locked(&model_id, true).await;
@@ -459,10 +528,16 @@ impl AsrModelService {
             {
                 return Err(AppError::Conflict("Install the ASR model first".into()));
             }
-            if enabled && !state.runtime_present {
+            if enabled {
+                let artifact = self.artifact(model_id)?;
+                if !state
+                    .present_runtimes
+                    .contains(&artifact.engine.runtime_family())
+                {
                 return Err(AppError::Conflict(
                     "Repair the local ASR runtime before enabling the model".into(),
                 ));
+                }
             }
             if enabled {
                 state.persisted.active_model_id = Some(model_id.to_owned());
@@ -494,6 +569,31 @@ impl AsrModelService {
             partial_model_path(&self.root, &artifact),
         ] {
             remove_file_if_exists(&self.root, &path).await?;
+        }
+        if let Some(auxiliary) = artifact.auxiliary {
+            let used_by_other_installed_model = {
+                let state = self.state.lock().await;
+                self.catalog.iter().any(|candidate| {
+                    candidate.entry.id != model_id
+                        && state
+                            .persisted
+                            .installed_model_ids
+                            .contains(&candidate.entry.id)
+                        && candidate
+                            .auxiliary
+                            .is_some_and(|candidate_auxiliary| {
+                                candidate_auxiliary.id == auxiliary.id
+                            })
+                })
+            };
+            if !used_by_other_installed_model {
+                for path in [
+                    auxiliary_path(&self.root, &auxiliary),
+                    partial_auxiliary_path(&self.root, &auxiliary),
+                ] {
+                    remove_file_if_exists(&self.root, &path).await?;
+                }
+            }
         }
         let mut state = self.state.lock().await;
         state
@@ -555,7 +655,7 @@ impl AsrModelService {
             .ok_or_else(|| AppError::ProviderUnavailable("No local ASR model is active".into()))?;
         let artifact = self.artifact(&active_id)?;
         let _runtime = self.prepare_runtime_for_use(&artifact).await?;
-        let executable = self.runtime_executable()?;
+        let executable = self.runtime_executable(&artifact)?;
 
         let extension = safe_audio_extension(file_name, mime_type).ok_or_else(|| {
             AppError::BadRequest(
@@ -577,32 +677,47 @@ impl AsrModelService {
             .await
             .map_err(|error| AppError::Internal(format!("write ASR audio input: {error}")))?;
 
-        let language = normalize_language_hint(language_hint);
-        let output_prefix = job_root.join("transcript");
         let model = model_path(&self.root, &artifact);
         let threads = std::thread::available_parallelism()
             .map(|value| value.get().clamp(1, 8))
             .unwrap_or(4);
         let mut command = Command::new(executable);
+        let language = match artifact.engine {
+            AsrEngineKind::WhisperCpp => {
+                let language = normalize_language_hint(language_hint);
+                let output_prefix = job_root.join("transcript");
+                command
+                    .arg("-m")
+                    .arg(&model)
+                    .arg("-f")
+                    .arg(&input)
+                    .arg("-l")
+                    .arg(language.as_deref().unwrap_or("auto"))
+                    .arg("-t")
+                    .arg(threads.to_string())
+                    .arg("-oj")
+                    .arg("-of")
+                    .arg(&output_prefix)
+                    .arg("-np")
+                    .arg("-nt");
+                language
+            }
+            AsrEngineKind::FunAsrParaformer => {
+                command.arg("-m").arg(&model).arg("-a").arg(&input);
+                if let Some(auxiliary) = artifact.auxiliary {
+                    command
+                        .arg("--vad")
+                        .arg(auxiliary_path(&self.root, &auxiliary));
+                }
+                Some("zh".into())
+            }
+        };
         command
-            .arg("-m")
-            .arg(&model)
-            .arg("-f")
-            .arg(&input)
-            .arg("-l")
-            .arg(language.as_deref().unwrap_or("auto"))
-            .arg("-t")
-            .arg(threads.to_string())
-            .arg("-oj")
-            .arg("-of")
-            .arg(&output_prefix)
-            .arg("-np")
-            .arg("-nt")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // If the request future is cancelled or its timeout fires, dropping
-            // the child future must not leave whisper-cli behind.
+            // the child future must not leave the native ASR process behind.
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
@@ -630,38 +745,18 @@ impl AsrModelService {
             Err(error) => return Err(error),
         };
         let result = if output.status.success() {
-            let output_path = output_prefix.with_extension("json");
-            let raw = tokio::fs::read(&output_path).await.map_err(|error| {
-                AppError::ProviderUnavailable(format!(
-                    "Local ASR runtime did not produce a result: {error}"
-                ))
-            })?;
-            let value: serde_json::Value = serde_json::from_slice(&raw).map_err(|error| {
-                AppError::ProviderUnavailable(format!(
-                    "Local ASR runtime returned an invalid result: {error}"
-                ))
-            })?;
-            let text = value
-                .get("transcription")
-                .and_then(serde_json::Value::as_array)
-                .map(|segments| {
-                    segments
-                        .iter()
-                        .filter_map(|segment| {
-                            segment.get("text").and_then(serde_json::Value::as_str)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .or_else(|| {
-                    value
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default()
-                .trim()
-                .to_owned();
+            let text = match artifact.engine {
+                AsrEngineKind::WhisperCpp => {
+                    let output_path = job_root.join("transcript.json");
+                    let raw = tokio::fs::read(&output_path).await.map_err(|error| {
+                        AppError::ProviderUnavailable(format!(
+                            "Local ASR runtime did not produce a result: {error}"
+                        ))
+                    })?;
+                    parse_whisper_json(&raw)?
+                }
+                AsrEngineKind::FunAsrParaformer => parse_funasr_stdout(&output.stdout),
+            };
             if text.is_empty() {
                 Err(AppError::ProviderUnavailable(
                     "Local ASR returned an empty transcription".into(),
@@ -675,6 +770,7 @@ impl AsrModelService {
             }
         } else {
             warn!(
+                engine = ?artifact.engine,
                 status = ?output.status.code(),
                 stderr = %sanitize_process_output(&output.stderr),
                 "local ASR runtime failed"
@@ -729,13 +825,17 @@ impl AsrModelService {
                 if let Some(model) = state.models.get_mut(&artifact.entry.id) {
                     model.install_phase = LocalModelInstallPhase::Installed;
                     model.progress = None;
-                    model.installed_bytes = artifact.size;
+                    model.installed_bytes = artifact_total_size(&artifact);
                     model.error_kind = None;
                     model.message = Some("ASR model is installed and ready to use.".into());
                 }
                 state.verified_models.insert(artifact.entry.id.clone());
-                state.runtime_present = true;
-                state.runtime_verified = true;
+                state
+                    .present_runtimes
+                    .insert(artifact.engine.runtime_family());
+                state
+                    .verified_runtimes
+                    .insert(artifact.engine.runtime_family());
                 state.last_error = None;
                 info!(model = %artifact.entry.id, "local ASR model installed");
             }
@@ -785,22 +885,23 @@ impl AsrModelService {
         cancel: &CancellationToken,
     ) -> Result<(), AsrFailure> {
         self.ensure_disk_space(artifact).await?;
-        if configured_runtime_path().is_none() {
-            let runtime = self.runtime_artifact.as_ref().ok_or_else(|| {
+        let family = artifact.engine.runtime_family();
+        if configured_runtime_path(family).is_none() {
+            let runtime = self.runtime_artifact(family).ok_or_else(|| {
                 AsrFailure::new(
                     LocalModelErrorKind::UnsupportedPlatform,
                     "Local speech recognition is unavailable on this platform.",
-                    "no whisper.cpp runtime artifact",
+                    "no compatible ASR runtime artifact",
                 )
             })?;
-            if find_runtime_executable(&runtime_install_dir(&self.root)).is_err() {
+            if find_installed_runtime_executable(&self.root, runtime).is_err() {
                 let destination = runtime_archive_path(&self.root, runtime);
                 self.download_verified(
                     runtime.url,
                     runtime.sha256,
                     runtime.size,
                     &destination,
-                    &partial_runtime_path(&self.root),
+                    &partial_runtime_path(&self.root, runtime),
                     &artifact.entry.id,
                     generation,
                     LocalModelProgressComponent::Runtime,
@@ -808,7 +909,7 @@ impl AsrModelService {
                 )
                 .await?;
                 let _runtime_write = self.runtime_lifecycle.write().await;
-                if find_runtime_executable(&runtime_install_dir(&self.root)).is_err() {
+                if find_installed_runtime_executable(&self.root, runtime).is_err() {
                     self.extract_runtime(runtime, cancel).await?;
                 }
             }
@@ -827,7 +928,22 @@ impl AsrModelService {
             LocalModelProgressComponent::Model,
             cancel,
         )
-        .await
+        .await?;
+        if let Some(auxiliary) = artifact.auxiliary {
+            self.download_verified(
+                auxiliary.url,
+                auxiliary.sha256,
+                auxiliary.size,
+                &auxiliary_path(&self.root, &auxiliary),
+                &partial_auxiliary_path(&self.root, &auxiliary),
+                &artifact.entry.id,
+                generation,
+                LocalModelProgressComponent::AsrAuxiliary,
+                cancel,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn download_verified(
@@ -1134,7 +1250,16 @@ impl AsrModelService {
                 total_bytes,
                 bytes_per_second,
             });
-            model.installed_bytes = downloaded_bytes;
+            let completed_before_component = match component {
+                LocalModelProgressComponent::AsrAuxiliary => self
+                    .catalog
+                    .iter()
+                    .find(|artifact| artifact.entry.id == model_id)
+                    .map_or(0, |artifact| artifact.size),
+                _ => 0,
+            };
+            model.installed_bytes =
+                completed_before_component.saturating_add(downloaded_bytes);
         }
     }
 
@@ -1147,8 +1272,9 @@ impl AsrModelService {
             return Err(AsrFailure::cancelled());
         }
         let archive = runtime_archive_path(&self.root, runtime);
-        let staging = runtime_staging_dir(&self.root);
-        let destination = runtime_install_dir(&self.root);
+        let staging = runtime_staging_dir(&self.root, runtime);
+        let destination = runtime_install_dir(&self.root, runtime);
+        let executable = runtime.executable;
         let root = self.root.clone();
         tokio::task::spawn_blocking(move || {
             if staging.exists() {
@@ -1156,7 +1282,10 @@ impl AsrModelService {
             }
             prepare_managed_directory(&root, &staging)?;
             extract_runtime_zip(&archive, &staging)?;
-            find_runtime_executable(&staging)?;
+            find_runtime_executable(&staging, executable)?;
+            if let Some(parent) = destination.parent() {
+                prepare_managed_directory(&root, parent)?;
+            }
             if destination.exists() {
                 remove_managed_tree(&root, &destination)?;
             }
@@ -1190,10 +1319,11 @@ impl AsrModelService {
     }
 
     async fn verify_before_use(&self, artifact: &AsrModelArtifact) -> Result<(), AppError> {
+        let family = artifact.engine.runtime_family();
         {
             let state = self.state.lock().await;
             if state.verified_models.contains(&artifact.entry.id)
-                && state.runtime_verified
+                && state.verified_runtimes.contains(&family)
             {
                 return Ok(());
             }
@@ -1202,7 +1332,7 @@ impl AsrModelService {
         {
             let state = self.state.lock().await;
             if state.verified_models.contains(&artifact.entry.id)
-                && state.runtime_verified
+                && state.verified_runtimes.contains(&family)
             {
                 return Ok(());
             }
@@ -1230,12 +1360,37 @@ impl AsrModelService {
                 "The local ASR model failed integrity verification".into(),
             ));
         }
-        if configured_runtime_path().is_none() {
-            self.runtime_artifact.as_ref().ok_or_else(|| {
+        if let Some(auxiliary) = artifact.auxiliary {
+            let path = auxiliary_path(&self.root, &auxiliary);
+            if file_len(&path).await != auxiliary.size
+                || hash_file(&path, &cancel)
+                    .await
+                    .map_err(|error| {
+                        AppError::ProviderUnavailable(format!(
+                            "Could not verify local ASR auxiliary model: {}",
+                            error.safe_message
+                        ))
+                    })?
+                    != auxiliary.sha256
+            {
+                self.invalidate_model(
+                    &artifact.entry.id,
+                    LocalModelErrorKind::ChecksumMismatch,
+                    "Local ASR auxiliary model integrity verification failed. Reinstall it.",
+                )
+                .await;
+                return Err(AppError::ProviderUnavailable(
+                    "The local ASR auxiliary model failed integrity verification".into(),
+                ));
+            }
+        }
+        if configured_runtime_path(family).is_none() {
+            let runtime = self.runtime_artifact(family).ok_or_else(|| {
                 AppError::ProviderUnavailable("Local ASR runtime is unavailable".into())
             })?;
-            if find_runtime_executable(&runtime_install_dir(&self.root)).is_err() {
+            if find_installed_runtime_executable(&self.root, runtime).is_err() {
                 self.invalidate_runtime(
+                    family,
                     LocalModelErrorKind::RuntimeUnavailable,
                     "Local ASR runtime is missing. Retry installation to repair it.",
                 )
@@ -1247,7 +1402,7 @@ impl AsrModelService {
         }
         let mut state = self.state.lock().await;
         state.verified_models.insert(artifact.entry.id.clone());
-        state.runtime_verified = true;
+        state.verified_runtimes.insert(family);
         Ok(())
     }
 
@@ -1276,12 +1431,22 @@ impl AsrModelService {
         let _ = self.save_state().await;
     }
 
-    async fn invalidate_runtime(&self, kind: LocalModelErrorKind, message: &str) {
+    async fn invalidate_runtime(
+        &self,
+        family: RuntimeFamily,
+        kind: LocalModelErrorKind,
+        message: &str,
+    ) {
         let mut state = self.state.lock().await;
-        state.runtime_present = false;
-        state.runtime_verified = false;
+        state.present_runtimes.remove(&family);
+        state.verified_runtimes.remove(&family);
         let active = state.persisted.active_model_id.clone();
         if let Some(model_id) = active
+            && self
+                .catalog
+                .iter()
+                .find(|artifact| artifact.entry.id == model_id)
+                .is_some_and(|artifact| artifact.engine.runtime_family() == family)
             && let Some(model) = state.models.get_mut(&model_id)
         {
             model.install_phase = LocalModelInstallPhase::Failed;
@@ -1291,11 +1456,15 @@ impl AsrModelService {
         state.last_error = Some(message.to_owned());
     }
 
-    fn runtime_executable(&self) -> Result<PathBuf, AppError> {
-        if let Some(path) = configured_runtime_path() {
+    fn runtime_executable(&self, artifact: &AsrModelArtifact) -> Result<PathBuf, AppError> {
+        let family = artifact.engine.runtime_family();
+        if let Some(path) = configured_runtime_path(family) {
             return Ok(path);
         }
-        find_runtime_executable(&runtime_install_dir(&self.root)).map_err(|error| {
+        let runtime = self.runtime_artifact(family).ok_or_else(|| {
+            AppError::ProviderUnavailable("Local ASR runtime is unavailable".into())
+        })?;
+        find_installed_runtime_executable(&self.root, runtime).map_err(|error| {
             AppError::ProviderUnavailable(format!("Local ASR runtime is unavailable: {error}"))
         })
     }
@@ -1304,19 +1473,28 @@ impl AsrModelService {
         let model_remaining = artifact
             .size
             .saturating_sub(file_len(&partial_model_path(&self.root, artifact)).await);
-        let runtime_remaining = if configured_runtime_path().is_some() {
+        let auxiliary_remaining = if let Some(auxiliary) = artifact.auxiliary {
+            auxiliary.size.saturating_sub(
+                file_len(&partial_auxiliary_path(&self.root, &auxiliary)).await,
+            )
+        } else {
+            0
+        };
+        let family = artifact.engine.runtime_family();
+        let runtime_remaining = if configured_runtime_path(family).is_some() {
             0
         } else {
-            self.runtime_artifact.as_ref().map_or(0, |runtime| {
+            self.runtime_artifact(family).map_or(0, |runtime| {
                 runtime
                     .size
-                    .saturating_sub(std::fs::metadata(partial_runtime_path(&self.root)).map_or(
-                        0,
-                        |metadata| metadata.len(),
-                    ))
+                    .saturating_sub(
+                        std::fs::metadata(partial_runtime_path(&self.root, runtime))
+                            .map_or(0, |metadata| metadata.len()),
+                    )
             })
         };
         let required = model_remaining
+            .saturating_add(auxiliary_remaining)
             .saturating_add(runtime_remaining)
             .saturating_add(RUNTIME_EXTRACT_RESERVE_BYTES)
             .saturating_add(DISK_SAFETY_BYTES);
@@ -1387,18 +1565,19 @@ pub fn asr_model_catalog() -> Vec<AsrModelCatalogEntry> {
 
 /// Side-effect-free status for a fresh installation.
 pub fn inactive_asr_model_status() -> AsrModelServiceStatus {
-    let runtime = production_runtime_artifact();
-    let supported = runtime.is_some() || configured_runtime_path().is_some();
+    let runtimes = production_runtime_artifacts();
+    let catalog = built_in_catalog();
+    let supported = catalog.iter().any(|artifact| {
+        runtime_supported(artifact.engine.runtime_family(), &runtimes)
+    });
     AsrModelServiceStatus {
         protocol_version: PROTOCOL_VERSION.into(),
         enabled: false,
         ready: false,
         active_model_id: None,
         runtime: LocalRuntimeStatus {
-            version: supported.then(|| WHISPER_CPP_VERSION.into()),
-            backend: runtime.as_ref().map(|artifact| artifact.backend).or_else(|| {
-                configured_runtime_path().map(|_| LocalModelRuntimeBackend::Cpu)
-            }),
+            version: supported.then(|| "multi-engine".into()),
+            backend: runtimes.first().map(|runtime| runtime.backend),
             phase: LocalModelRuntimePhase::Stopped,
             error_kind: (!supported).then_some(LocalModelErrorKind::UnsupportedPlatform),
             message: (!supported).then(|| {
@@ -1428,28 +1607,54 @@ pub fn inactive_asr_model_status() -> AsrModelServiceStatus {
 fn snapshot(
     state: &MutableState,
     catalog: &[AsrModelArtifact],
-    runtime: Option<&RuntimeArtifact>,
-    configured_runtime: bool,
+    runtimes: &[RuntimeArtifact],
 ) -> AsrModelServiceStatus {
-    let supported = runtime.is_some() || configured_runtime;
     let active = state.persisted.active_model_id.clone();
-    let ready = active.as_ref().is_some_and(|id| {
+    let active_artifact = active
+        .as_ref()
+        .and_then(|id| catalog.iter().find(|artifact| &artifact.entry.id == id));
+    let supported = active_artifact.map_or_else(
+        || {
+            catalog.iter().any(|artifact| {
+                runtime_supported(artifact.engine.runtime_family(), runtimes)
+            })
+        },
+        |artifact| runtime_supported(artifact.engine.runtime_family(), runtimes),
+    );
+    let ready = active_artifact.is_some_and(|artifact| {
         state
             .models
-            .get(id)
+            .get(&artifact.entry.id)
             .is_some_and(|model| model.install_phase == LocalModelInstallPhase::Installed)
-    }) && supported
-        && state.runtime_present;
+            && state
+                .present_runtimes
+                .contains(&artifact.engine.runtime_family())
+    });
+    let runtime_version = active_artifact
+        .and_then(|artifact| {
+            runtimes
+                .iter()
+                .find(|runtime| runtime.family == artifact.engine.runtime_family())
+                .map(|runtime| runtime.version.to_owned())
+        })
+        .or_else(|| supported.then(|| "multi-engine".into()));
     AsrModelServiceStatus {
         protocol_version: PROTOCOL_VERSION.into(),
         enabled: active.is_some(),
         ready,
         active_model_id: active,
         runtime: LocalRuntimeStatus {
-            version: supported.then(|| WHISPER_CPP_VERSION.into()),
-            backend: runtime
-                .map(|artifact| artifact.backend)
-                .or(configured_runtime.then_some(LocalModelRuntimeBackend::Cpu)),
+            version: runtime_version,
+            backend: active_artifact
+                .and_then(|artifact| {
+                    runtimes
+                        .iter()
+                        .find(|runtime| {
+                            runtime.family == artifact.engine.runtime_family()
+                        })
+                        .map(|runtime| runtime.backend)
+                })
+                .or(supported.then_some(LocalModelRuntimeBackend::Cpu)),
             // The CLI is deliberately one-shot, so it is "ready" when its
             // verified artifacts can be launched and otherwise stopped.
             phase: if ready {
@@ -1471,8 +1676,51 @@ fn snapshot(
 }
 
 fn built_in_catalog() -> Vec<AsrModelArtifact> {
-    let runtime_size = production_runtime_artifact().map_or(0, |runtime| runtime.size);
+    let runtimes = production_runtime_artifacts();
+    let whisper_runtime_size = runtimes
+        .iter()
+        .find(|runtime| runtime.family == RuntimeFamily::WhisperCpp)
+        .map_or(0, |runtime| runtime.size);
+    let funasr_runtime_size = runtimes
+        .iter()
+        .find(|runtime| runtime.family == RuntimeFamily::FunAsrLlamaCpp)
+        .map_or(0, |runtime| runtime.size);
+    let vad = AsrAuxiliaryArtifact {
+        id: "funasr-fsmn-vad",
+        file_name: "fsmn-vad.gguf",
+        url: "https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/resolve/6840bae4c5c92ee8c04faaf4db23dd0105098d7f/fsmn-vad.gguf",
+        sha256: "1270f2559c495f4e7b6e739541151027d360761a3fda43fc147034f5719f5479",
+        size: 1_720_512,
+    };
     vec![
+        AsrModelArtifact {
+            entry: AsrModelCatalogEntry {
+                id: "funasr-paraformer-zh-q8".into(),
+                name: "Paraformer 中文 Q8".into(),
+                description:
+                    "Chinese-first offline speech recognition with fast CPU inference and built-in long-audio VAD."
+                        .into(),
+                model_size: "Paraformer-zh".into(),
+                quantization: "Q8".into(),
+                download_size_bytes: 236_929_024 + vad.size + funasr_runtime_size,
+                required_memory_bytes: 900_000_000,
+                languages: vec!["zh".into(), "en".into(), "中英混说".into()],
+                license: "Apache-2.0".into(),
+                source: "FunAudioLLM Paraformer / FunASR llama.cpp".into(),
+                recommended: true,
+                engine: AsrEngine::FunAsrLlamaCpp,
+                capabilities: vec![
+                    AsrCapability::Transcription,
+                    AsrCapability::LongAudioVad,
+                ],
+            },
+            engine: AsrEngineKind::FunAsrParaformer,
+            file_name: "paraformer-q8.gguf",
+            url: "https://huggingface.co/FunAudioLLM/Paraformer-GGUF/resolve/de2cbaaa0f30b34f398d7a066fdfefb8e50d902c/paraformer-q8.gguf",
+            sha256: "42bf76ea1575a336aaca4c1b7c01a82b79113e6d04d0d6b799561bfcf07ee011",
+            size: 236_929_024,
+            auxiliary: Some(vad),
+        },
         AsrModelArtifact {
             entry: AsrModelCatalogEntry {
                 id: "whisper-small-q5-1".into(),
@@ -1482,17 +1730,24 @@ fn built_in_catalog() -> Vec<AsrModelArtifact> {
                         .into(),
                 model_size: "244M".into(),
                 quantization: "Q5_1".into(),
-                download_size_bytes: 190_085_487 + runtime_size,
+                download_size_bytes: 190_085_487 + whisper_runtime_size,
                 required_memory_bytes: 1_200_000_000,
                 languages: vec!["zh".into(), "en".into(), "multilingual".into()],
                 license: "MIT".into(),
                 source: "OpenAI Whisper / whisper.cpp".into(),
-                recommended: true,
+                recommended: false,
+                engine: AsrEngine::WhisperCpp,
+                capabilities: vec![
+                    AsrCapability::Transcription,
+                    AsrCapability::LanguageDetection,
+                ],
             },
+            engine: AsrEngineKind::WhisperCpp,
             file_name: "ggml-small-q5_1.bin",
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin",
             sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
             size: 190_085_487,
+            auxiliary: None,
         },
         AsrModelArtifact {
             entry: AsrModelCatalogEntry {
@@ -1503,37 +1758,97 @@ fn built_in_catalog() -> Vec<AsrModelArtifact> {
                         .into(),
                 model_size: "809M".into(),
                 quantization: "Q5_0".into(),
-                download_size_bytes: 574_041_195 + runtime_size,
+                download_size_bytes: 574_041_195 + whisper_runtime_size,
                 required_memory_bytes: 2_400_000_000,
                 languages: vec!["zh".into(), "en".into(), "multilingual".into()],
                 license: "MIT".into(),
                 source: "OpenAI Whisper large-v3-turbo / whisper.cpp".into(),
                 recommended: false,
+                engine: AsrEngine::WhisperCpp,
+                capabilities: vec![
+                    AsrCapability::Transcription,
+                    AsrCapability::LanguageDetection,
+                ],
             },
+            engine: AsrEngineKind::WhisperCpp,
             file_name: "ggml-large-v3-turbo-q5_0.bin",
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
             sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
             size: 574_041_195,
+            auxiliary: None,
         },
     ]
 }
 
-fn production_runtime_artifact() -> Option<RuntimeArtifact> {
+fn production_runtime_artifacts() -> Vec<RuntimeArtifact> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => Some(RuntimeArtifact {
-            file_name: "whisper-bin-x64-v1.9.1.zip",
-            url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip",
-            sha256: "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539",
-            size: 7_982_101,
-            backend: LocalModelRuntimeBackend::Cpu,
-        }),
-        _ => None,
+        ("windows", "x86_64") => vec![
+            RuntimeArtifact {
+                family: RuntimeFamily::WhisperCpp,
+                version: WHISPER_CPP_VERSION,
+                executable: "whisper-cli.exe",
+                file_name: "whisper-bin-x64-v1.9.1.zip",
+                url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip",
+                sha256: "7d8be46ecd31828e1eb7a2ecdd0d6b314feafd82163038ab6092594b0a063539",
+                size: 7_982_101,
+                backend: LocalModelRuntimeBackend::Cpu,
+            },
+            RuntimeArtifact {
+                family: RuntimeFamily::FunAsrLlamaCpp,
+                version: FUNASR_LLAMACPP_VERSION,
+                executable: "llama-funasr-paraformer.exe",
+                file_name: "funasr-llamacpp-windows-x64-v0.1.4.zip",
+                url: "https://github.com/modelscope/FunASR/releases/download/runtime-llamacpp-v0.1.4/funasr-llamacpp-windows-x64.zip",
+                sha256: "ae0bca37e046dcd0e59ac3399f2ed246abf0696a84dc1f4322adc894bb5339e7",
+                size: 4_663_344,
+                backend: LocalModelRuntimeBackend::Cpu,
+            },
+        ],
+        _ => Vec::new(),
     }
 }
 
-fn configured_runtime_path() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os("NOMIFUN_WHISPER_CLI_PATH")?);
+fn configured_runtime_path(family: RuntimeFamily) -> Option<PathBuf> {
+    let variable = match family {
+        RuntimeFamily::WhisperCpp => "NOMIFUN_WHISPER_CLI_PATH",
+        RuntimeFamily::FunAsrLlamaCpp => "NOMIFUN_FUNASR_PARAFORMER_CLI_PATH",
+    };
+    let path = PathBuf::from(std::env::var_os(variable)?);
     path.is_file().then_some(path)
+}
+
+fn runtime_supported(family: RuntimeFamily, runtimes: &[RuntimeArtifact]) -> bool {
+    configured_runtime_path(family).is_some()
+        || runtimes.iter().any(|runtime| runtime.family == family)
+}
+
+fn runtime_is_present(
+    root: &Path,
+    family: RuntimeFamily,
+    runtimes: &[RuntimeArtifact],
+) -> bool {
+    if configured_runtime_path(family).is_some() {
+        return true;
+    }
+    runtimes
+        .iter()
+        .find(|runtime| runtime.family == family)
+        .is_some_and(|runtime| {
+            find_installed_runtime_executable(root, runtime).is_ok()
+        })
+}
+
+async fn auxiliary_is_present(root: &Path, artifact: &AsrModelArtifact) -> bool {
+    match artifact.auxiliary {
+        Some(auxiliary) => file_len(&auxiliary_path(root, &auxiliary)).await == auxiliary.size,
+        None => true,
+    }
+}
+
+fn artifact_total_size(artifact: &AsrModelArtifact) -> u64 {
+    artifact
+        .size
+        .saturating_add(artifact.auxiliary.map_or(0, |auxiliary| auxiliary.size))
 }
 
 async fn load_state(root: &Path) -> PersistedState {
@@ -1541,9 +1856,15 @@ async fn load_state(root: &Path) -> PersistedState {
     let Ok(bytes) = tokio::fs::read(path).await else {
         return PersistedState::default();
     };
-    serde_json::from_slice(&bytes)
-        .ok()
-        .filter(|state: &PersistedState| state.version == STATE_VERSION)
+    let Some(mut state) = serde_json::from_slice::<PersistedState>(&bytes).ok() else {
+        return PersistedState::default();
+    };
+    if state.version == 1 {
+        state.version = STATE_VERSION;
+        return state;
+    }
+    (state.version == STATE_VERSION)
+        .then_some(state)
         .unwrap_or_default()
 }
 
@@ -1563,7 +1884,21 @@ fn runtime_root(root: &Path) -> PathBuf {
     asr_root(root).join(RUNTIME_DIR)
 }
 
-fn runtime_install_dir(root: &Path) -> PathBuf {
+fn runtime_family_dir_name(family: RuntimeFamily) -> &'static str {
+    match family {
+        RuntimeFamily::WhisperCpp => "whisper-cpp",
+        RuntimeFamily::FunAsrLlamaCpp => "funasr-llamacpp",
+    }
+}
+
+fn runtime_install_dir(root: &Path, runtime: &RuntimeArtifact) -> PathBuf {
+    runtime_root(root)
+        .join(runtime_family_dir_name(runtime.family))
+        .join(runtime.version)
+        .join(format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
+}
+
+fn legacy_whisper_runtime_install_dir(root: &Path) -> PathBuf {
     runtime_root(root).join(format!(
         "{}-{}-{WHISPER_CPP_VERSION}",
         std::env::consts::OS,
@@ -1571,11 +1906,34 @@ fn runtime_install_dir(root: &Path) -> PathBuf {
     ))
 }
 
-fn runtime_staging_dir(root: &Path) -> PathBuf {
+fn find_installed_runtime_executable(
+    root: &Path,
+    runtime: &RuntimeArtifact,
+) -> std::io::Result<PathBuf> {
+    find_runtime_executable(
+        &runtime_install_dir(root, runtime),
+        runtime.executable,
+    )
+    .or_else(|primary_error| {
+        if runtime.family == RuntimeFamily::WhisperCpp {
+            find_runtime_executable(
+                &legacy_whisper_runtime_install_dir(root),
+                runtime.executable,
+            )
+            .map_err(|_| primary_error)
+        } else {
+            Err(primary_error)
+        }
+    })
+}
+
+fn runtime_staging_dir(root: &Path, runtime: &RuntimeArtifact) -> PathBuf {
     runtime_root(root).join(format!(
-        ".extracting-{}-{}-{WHISPER_CPP_VERSION}",
+        ".extracting-{}-{}-{}-{}",
+        runtime_family_dir_name(runtime.family),
         std::env::consts::OS,
-        std::env::consts::ARCH
+        std::env::consts::ARCH,
+        runtime.version
     ))
 }
 
@@ -1593,12 +1951,27 @@ fn partial_model_path(root: &Path, artifact: &AsrModelArtifact) -> PathBuf {
     downloads_dir(root).join(format!("{}.part", artifact.entry.id))
 }
 
+fn auxiliary_path(root: &Path, auxiliary: &AsrAuxiliaryArtifact) -> PathBuf {
+    models_dir(root)
+        .join("shared")
+        .join(auxiliary.id)
+        .join(auxiliary.file_name)
+}
+
+fn partial_auxiliary_path(root: &Path, auxiliary: &AsrAuxiliaryArtifact) -> PathBuf {
+    downloads_dir(root).join(format!("{}.part", auxiliary.id))
+}
+
 fn runtime_archive_path(root: &Path, runtime: &RuntimeArtifact) -> PathBuf {
     downloads_dir(root).join(runtime.file_name)
 }
 
-fn partial_runtime_path(root: &Path) -> PathBuf {
-    downloads_dir(root).join("runtime.part")
+fn partial_runtime_path(root: &Path, runtime: &RuntimeArtifact) -> PathBuf {
+    downloads_dir(root).join(format!(
+        "runtime-{}-{}.part",
+        runtime_family_dir_name(runtime.family),
+        runtime.version
+    ))
 }
 
 fn state_path(root: &Path) -> PathBuf {
@@ -1612,7 +1985,7 @@ fn state_temp_path(root: &Path) -> PathBuf {
 fn prepare_layout(
     root: &Path,
     catalog: &[AsrModelArtifact],
-    runtime: Option<&RuntimeArtifact>,
+    runtimes: &[RuntimeArtifact],
 ) -> std::io::Result<()> {
     for directory in [
         root.to_path_buf(),
@@ -1627,10 +2000,14 @@ fn prepare_layout(
     for artifact in catalog {
         prepare_managed_file(root, &model_path(root, artifact))?;
         prepare_managed_file(root, &partial_model_path(root, artifact))?;
+        if let Some(auxiliary) = artifact.auxiliary {
+            prepare_managed_file(root, &auxiliary_path(root, &auxiliary))?;
+            prepare_managed_file(root, &partial_auxiliary_path(root, &auxiliary))?;
+        }
     }
-    if let Some(runtime) = runtime {
+    for runtime in runtimes {
         prepare_managed_file(root, &runtime_archive_path(root, runtime))?;
-        prepare_managed_file(root, &partial_runtime_path(root))?;
+        prepare_managed_file(root, &partial_runtime_path(root, runtime))?;
     }
     prepare_managed_file(root, &state_path(root))?;
     prepare_managed_file(root, &state_temp_path(root))?;
@@ -1680,6 +2057,69 @@ fn sanitize_process_output(bytes: &[u8]) -> String {
         .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
         .take(1_000)
         .collect()
+}
+
+fn parse_whisper_json(raw: &[u8]) -> Result<String, AppError> {
+    let value: serde_json::Value = serde_json::from_slice(raw).map_err(|error| {
+        AppError::ProviderUnavailable(format!(
+            "Local ASR runtime returned an invalid result: {error}"
+        ))
+    })?;
+    Ok(value
+        .get("transcription")
+        .and_then(serde_json::Value::as_array)
+        .map(|segments| {
+            segments
+                .iter()
+                .filter_map(|segment| segment.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_owned())
+}
+
+fn parse_funasr_stdout(stdout: &[u8]) -> String {
+    let text = decode_process_text(stdout);
+    text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            !line.starts_with("usage:")
+                && !line.starts_with("system_info:")
+                && !line.starts_with("main:")
+                && !line.starts_with("load:")
+                && !line.starts_with("vad:")
+                && !line.starts_with("ggml_")
+                && !line.starts_with("llama_")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn decode_process_text(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_owned();
+    }
+    #[cfg(windows)]
+    {
+        let (text, _, _) = encoding_rs::GBK.decode(bytes);
+        return text.into_owned();
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 fn asr_download_client() -> reqwest::Client {
@@ -1837,12 +2277,7 @@ fn storage_failure(error: std::io::Error) -> AsrFailure {
     )
 }
 
-fn find_runtime_executable(root: &Path) -> std::io::Result<PathBuf> {
-    let target = if cfg!(windows) {
-        "whisper-cli.exe"
-    } else {
-        "whisper-cli"
-    };
+fn find_runtime_executable(root: &Path, target: &str) -> std::io::Result<PathBuf> {
     let mut found = None;
     let mut stack = vec![(root.to_path_buf(), 0_usize)];
     while let Some((directory, depth)) = stack.pop() {
@@ -1860,7 +2295,7 @@ fn find_runtime_executable(root: &Path) -> std::io::Result<PathBuf> {
                 if found.replace(path).is_some() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "runtime contains multiple whisper-cli executables",
+                        "runtime contains multiple matching ASR executables",
                     ));
                 }
             } else if file_type.is_dir() {
@@ -1871,7 +2306,7 @@ fn find_runtime_executable(root: &Path) -> std::io::Result<PathBuf> {
     found.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "runtime does not contain whisper-cli",
+            "runtime does not contain the expected ASR executable",
         )
     })
 }
@@ -2144,7 +2579,34 @@ mod tests {
         let recommended = catalog.iter().find(|model| model.recommended).unwrap();
         assert!(recommended.languages.contains(&"zh".to_owned()));
         assert!(recommended.languages.contains(&"en".to_owned()));
-        assert!(recommended.download_size_bytes >= 190_085_487);
+        assert_eq!(recommended.id, "funasr-paraformer-zh-q8");
+        assert_eq!(recommended.engine, AsrEngine::FunAsrLlamaCpp);
+        assert!(
+            recommended
+                .capabilities
+                .contains(&AsrCapability::LongAudioVad)
+        );
+        assert!(recommended.download_size_bytes >= 236_929_024);
+    }
+
+    #[test]
+    fn funasr_stdout_parser_keeps_transcript_and_drops_known_runtime_logs() {
+        let output = r#"
+system_info: n_threads = 8
+ggml_backend_load_all: loaded CPU backend
+欢迎大家来体验达摩院推出的语音识别模型。
+"#;
+        assert_eq!(
+            parse_funasr_stdout(output.as_bytes()),
+            "欢迎大家来体验达摩院推出的语音识别模型。"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn funasr_stdout_parser_accepts_windows_gbk_console_output() {
+        let (encoded, _, _) = encoding_rs::GBK.encode("中文语音识别");
+        assert_eq!(parse_funasr_stdout(&encoded), "中文语音识别");
     }
 
     #[test]
@@ -2202,24 +2664,35 @@ mod tests {
             license: "MIT".into(),
             source: "test".into(),
             recommended: true,
+            engine: AsrEngine::WhisperCpp,
+            capabilities: vec![AsrCapability::Transcription],
         };
         AsrModelService::new_inner(
             temp.path().join("local-ai"),
             reqwest::Client::new(),
             vec![AsrModelArtifact {
                 entry,
+                engine: AsrEngineKind::WhisperCpp,
                 file_name: "model.bin",
                 url: Box::leak(format!("{}/model.bin", server.uri()).into_boxed_str()),
                 sha256: Box::leak(hex::encode(Sha256::digest(&model)).into_boxed_str()),
                 size: model.len() as u64,
+                auxiliary: None,
             }],
-            Some(RuntimeArtifact {
+            vec![RuntimeArtifact {
+                family: RuntimeFamily::WhisperCpp,
+                version: "test",
+                executable: if cfg!(windows) {
+                    "whisper-cli.exe"
+                } else {
+                    "whisper-cli"
+                },
                 file_name: "runtime.zip",
                 url: Box::leak(format!("{}/runtime.zip", server.uri()).into_boxed_str()),
                 sha256: Box::leak(hex::encode(Sha256::digest(&runtime)).into_boxed_str()),
                 size: runtime.len() as u64,
                 backend: LocalModelRuntimeBackend::Cpu,
-            }),
+            }],
             true,
         )
         .await
@@ -2260,24 +2733,35 @@ mod tests {
             license: "MIT".into(),
             source: "test".into(),
             recommended: true,
+            engine: AsrEngine::WhisperCpp,
+            capabilities: vec![AsrCapability::Transcription],
         };
         AsrModelService::new_inner(
             temp.path().join("local-ai"),
             reqwest::Client::new(),
             vec![AsrModelArtifact {
                 entry,
+                engine: AsrEngineKind::WhisperCpp,
                 file_name: "model.bin",
                 url: "http://127.0.0.1/model.bin",
                 sha256: Box::leak(hex::encode(Sha256::digest(model)).into_boxed_str()),
                 size: model.len() as u64,
+                auxiliary: None,
             }],
-            Some(RuntimeArtifact {
+            vec![RuntimeArtifact {
+                family: RuntimeFamily::WhisperCpp,
+                version: "test",
+                executable: if cfg!(windows) {
+                    "whisper-cli.exe"
+                } else {
+                    "whisper-cli"
+                },
                 file_name: "runtime.zip",
                 url: "http://127.0.0.1/runtime.zip",
                 sha256: Box::leak(hex::encode(Sha256::digest(&runtime)).into_boxed_str()),
                 size: runtime.len() as u64,
                 backend: LocalModelRuntimeBackend::Cpu,
-            }),
+            }],
             true,
         )
         .await
@@ -2370,7 +2854,9 @@ mod tests {
         tokio::fs::write(model_path(&service.root, &artifact), b"tiny-model")
             .await
             .unwrap();
-        let runtime = service.runtime_artifact.unwrap();
+        let runtime = *service
+            .runtime_artifact(RuntimeFamily::WhisperCpp)
+            .unwrap();
         tokio::fs::write(runtime_archive_path(&service.root, &runtime), b"runtime")
             .await
             .unwrap();
@@ -2378,7 +2864,7 @@ mod tests {
             temp.path().join("local-ai"),
             reqwest::Client::new(),
             service.catalog.clone(),
-            service.runtime_artifact,
+            service.runtime_artifacts.clone(),
             true,
         )
         .await
@@ -2386,6 +2872,27 @@ mod tests {
         assert_eq!(
             reloaded.status().await.active_model_id.as_deref(),
             Some("test-asr")
+        );
+    }
+
+    #[tokio::test]
+    async fn version_one_state_is_migrated_without_losing_whisper_selection() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("local-ai");
+        let state_dir = asr_root(&root);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join(STATE_FILE),
+            br#"{"version":1,"installedModelIds":["whisper-small-q5-1"],"activeModelId":"whisper-small-q5-1"}"#,
+        )
+        .unwrap();
+
+        assert!(AsrModelService::opted_in(temp.path()));
+        let state = load_state(&root).await;
+        assert_eq!(state.version, STATE_VERSION);
+        assert_eq!(
+            state.active_model_id.as_deref(),
+            Some("whisper-small-q5-1")
         );
     }
 
@@ -2405,12 +2912,14 @@ mod tests {
         }
         service.save_state().await.unwrap();
 
-        let runtime = service.runtime_artifact.unwrap();
+        let runtime = *service
+            .runtime_artifact(RuntimeFamily::WhisperCpp)
+            .unwrap();
         let reloaded = AsrModelService::new_inner(
             temp.path().join("local-ai"),
             reqwest::Client::new(),
             service.catalog.clone(),
-            Some(runtime),
+            vec![runtime],
             true,
         )
         .await
@@ -2437,7 +2946,9 @@ mod tests {
         let server = MockServer::start().await;
         let service = tiny_test_service(&temp, &server, b"tiny-model".to_vec()).await;
         let artifact = service.artifact("test-asr").unwrap();
-        let runtime = service.runtime_artifact.unwrap();
+        let runtime = *service
+            .runtime_artifact(RuntimeFamily::WhisperCpp)
+            .unwrap();
         tokio::fs::write(model_path(&service.root, &artifact), b"tiny-model")
             .await
             .unwrap();
@@ -2450,8 +2961,8 @@ mod tests {
             state.persisted.active_model_id = Some("test-asr".into());
             state.models.get_mut("test-asr").unwrap().install_phase =
                 LocalModelInstallPhase::Installed;
-            state.runtime_present = true;
-            state.runtime_verified = false;
+            state.present_runtimes.insert(RuntimeFamily::WhisperCpp);
+            state.verified_runtimes.remove(&RuntimeFamily::WhisperCpp);
         }
 
         assert!(service.verify_before_use(&artifact).await.is_err());
@@ -2469,7 +2980,9 @@ mod tests {
         let runtime = test_runtime_zip();
         let service = runtime_test_service(&temp, runtime.clone()).await;
         let artifact = service.artifact("runtime-test-asr").unwrap();
-        let runtime_artifact = service.runtime_artifact.unwrap();
+        let runtime_artifact = *service
+            .runtime_artifact(RuntimeFamily::WhisperCpp)
+            .unwrap();
         tokio::fs::write(
             model_path(&service.root, &artifact),
             b"runtime-test-model",
@@ -2486,7 +2999,11 @@ mod tests {
             .extract_runtime(&runtime_artifact, &CancellationToken::new())
             .await
             .unwrap();
-        let executable = find_runtime_executable(&runtime_install_dir(&service.root)).unwrap();
+        let executable = find_runtime_executable(
+            &runtime_install_dir(&service.root, &runtime_artifact),
+            runtime_artifact.executable,
+        )
+        .unwrap();
         tokio::fs::write(&executable, b"keep installed runtime")
             .await
             .unwrap();
@@ -2504,7 +3021,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let runtime = test_runtime_zip();
         let service = runtime_test_service(&temp, runtime.clone()).await;
-        let runtime_artifact = service.runtime_artifact.unwrap();
+        let runtime_artifact = *service
+            .runtime_artifact(RuntimeFamily::WhisperCpp)
+            .unwrap();
         tokio::fs::write(
             runtime_archive_path(&service.root, &runtime_artifact),
             runtime,

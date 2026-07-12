@@ -42,4 +42,13 @@ describe('speech input local-format handling', () => {
     expect(button.includes('selectedCloudProvider.model_enabled?.[config.model] !== false')).toBe(true);
     expect(button.includes('config.model === status.activeModelId')).toBe(true);
   });
+
+  test('does not opt the desktop multipart request into credentialed CORS', () => {
+    const service = readSource(
+      new URL('../../services/SpeechToTextService.ts', import.meta.url)
+    );
+
+    expect(service.includes('xhr.withCredentials = true')).toBe(false);
+    expect(service.includes("buildBackendAuthHeaders('POST')")).toBe(true);
+  });
 });

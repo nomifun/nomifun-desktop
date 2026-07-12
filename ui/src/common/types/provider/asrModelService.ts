@@ -9,6 +9,14 @@ import type {
   LocalRuntimeStatus,
 } from './localModelService';
 
+export type AsrEngine = 'whisper_cpp' | 'fun_asr_llama_cpp';
+export type AsrCapability =
+  | 'transcription'
+  | 'language_detection'
+  | 'emotion_detection'
+  | 'audio_event_detection'
+  | 'long_audio_vad';
+
 /** Immutable metadata from NomiFun's curated local speech-recognition catalog. */
 export interface AsrModelCatalogEntry {
   id: string;
@@ -22,12 +30,14 @@ export interface AsrModelCatalogEntry {
   license: string;
   source: string;
   recommended: boolean;
+  engine: AsrEngine;
+  capabilities: AsrCapability[];
 }
 
 /**
- * Local ASR runtime status. whisper.cpp is launched only for one transcription
- * request, so `ready` means the verified one-shot runtime and active model are
- * available rather than that a resident process is running.
+ * Local ASR runtime status. The selected engine is launched only for one
+ * transcription request, so `ready` means its verified one-shot runtime and
+ * active model are available rather than that a resident process is running.
  */
 export interface AsrModelServiceStatus {
   protocolVersion: string;

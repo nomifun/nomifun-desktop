@@ -48,6 +48,19 @@ OpenAI Whisper multilingual model weights and whisper.cpp GGML quantizations
   The pinned whisper.cpp repository publishes the GGML conversions used by
   NomiFun under its MIT-licensed project.
 
+FunASR llama.cpp / GGUF runtime
+  https://github.com/modelscope/FunASR
+  Pinned release: runtime-llamacpp-v0.1.4
+  Copyright (c) FunASR contributors
+  Licensed under the MIT License.
+  License text: https://github.com/modelscope/FunASR/blob/main/LICENSE
+
+FunAudioLLM Paraformer-zh and FSMN-VAD GGUF model weights
+  https://huggingface.co/FunAudioLLM/Paraformer-GGUF/tree/de2cbaaa0f30b34f398d7a066fdfefb8e50d902c
+  https://huggingface.co/FunAudioLLM/fsmn-vad-GGUF/tree/6840bae4c5c92ee8c04faaf4db23dd0105098d7f
+  Optional local Chinese speech-recognition and voice-activity-detection
+  models. The pinned repository cards declare the Apache License, Version 2.0.
+
 Qwen3.5 models (4B and 9B)
   https://huggingface.co/Qwen
   Developed by the Qwen Team at Alibaba Cloud.

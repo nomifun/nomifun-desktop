@@ -49,6 +49,9 @@ const emptyState = (modelId: string): LocalModelState => ({
   message: null,
 });
 
+const asrEngineLabel = (engine: 'whisper_cpp' | 'fun_asr_llama_cpp'): string =>
+  engine === 'fun_asr_llama_cpp' ? 'FunASR · llama.cpp' : 'Whisper · whisper.cpp';
+
 export interface AsrModelsPanelProps {
   controller: ReturnType<typeof useLocalAsrModels>;
 }
@@ -289,7 +292,9 @@ const AsrModelsPanel: React.FC<AsrModelsPanelProps> = ({ controller }) => {
           <span>
             {progress.component === 'runtime'
               ? t('settings.modelHub.local.progress.runtime')
-              : t('settings.modelHub.local.progress.model')}
+              : progress.component === 'asr_auxiliary'
+                ? t('settings.modelHub.local.progress.asrAuxiliary')
+                : t('settings.modelHub.local.progress.model')}
           </span>
           <span>{percent == null ? t('settings.modelHub.local.progress.preparing') : `${percent.toFixed(1)}%`}</span>
         </div>
@@ -405,9 +410,14 @@ const AsrModelsPanel: React.FC<AsrModelsPanelProps> = ({ controller }) => {
                         <span className='text-15px font-600 text-t-primary'>{model.name}</span>
                         {model.recommended && (
                           <Tag size='small' color='arcoblue'>
-                            {t('settings.modelHub.local.recommended')}
+                            {model.engine === 'fun_asr_llama_cpp'
+                              ? t('settings.modelHub.local.asr.chineseRecommended')
+                              : t('settings.modelHub.local.recommended')}
                           </Tag>
                         )}
+                        <Tag size='small' color={model.engine === 'fun_asr_llama_cpp' ? 'purple' : undefined}>
+                          {asrEngineLabel(model.engine)}
+                        </Tag>
                         {isActive && (
                           <Tag size='small' color='green'>
                             {t('settings.modelHub.local.active')}

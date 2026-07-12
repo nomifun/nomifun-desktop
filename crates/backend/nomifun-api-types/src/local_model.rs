@@ -52,6 +52,8 @@ pub enum LocalModelRuntimePhase {
 pub enum LocalModelProgressComponent {
     Runtime,
     Model,
+    /// Auxiliary speech-recognition artifact such as a VAD model.
+    AsrAuxiliary,
     /// Vision encoder/projector paired with a multimodal GGUF.
     VisionProjector,
 }
@@ -135,6 +137,24 @@ pub struct SetLocalModelActiveRequest {
 }
 
 /// Immutable metadata for a curated local speech-recognition model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrEngine {
+    WhisperCpp,
+    FunAsrLlamaCpp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsrCapability {
+    Transcription,
+    LanguageDetection,
+    EmotionDetection,
+    AudioEventDetection,
+    LongAudioVad,
+}
+
+/// Immutable metadata for a curated local speech-recognition model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AsrModelCatalogEntry {
@@ -150,6 +170,8 @@ pub struct AsrModelCatalogEntry {
     pub license: String,
     pub source: String,
     pub recommended: bool,
+    pub engine: AsrEngine,
+    pub capabilities: Vec<AsrCapability>,
 }
 
 /// Complete status for the opt-in local speech-recognition service.
