@@ -2317,6 +2317,10 @@ enabled = false
         std::fs::write(
             &project_toml,
             r#"
+project_doc_fallback_filenames = ["TEAM_GUIDE.md", ".agents.md"]
+project_doc_max_bytes = 65536
+project_root_markers = [".git", ".hg"]
+
 [default]
 max_tokens = 1234
 "#,
@@ -2338,6 +2342,15 @@ max_tokens = 1234
 
         let config = Config::resolve(&cli_args).unwrap();
         assert_eq!(config.max_tokens, 1234);
+        assert_eq!(
+            config.project_instructions.project_doc_fallback_filenames,
+            vec!["TEAM_GUIDE.md", ".agents.md"]
+        );
+        assert_eq!(config.project_instructions.project_doc_max_bytes, 65_536);
+        assert_eq!(
+            config.project_instructions.project_root_markers,
+            vec![".git", ".hg"]
+        );
     }
 
     #[test]
