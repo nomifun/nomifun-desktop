@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Modify only `provider_full_crud_with_auth` in `crates/backend/nomifun-app/tests/system_provider_e2e.rs`.
+- Modify provider-list assertions only in `provider_full_crud_with_auth` and `full_system_flow_e2e`.
 - Do not change production provider or managed-model behavior.
 - Preserve existing create, update, authentication, API-key, and delete assertions.
 - On Windows, add Git for Windows `sh` to the test process `PATH` and provide a temporary `C:\tmp` for the full suite, then remove it.
@@ -88,6 +88,36 @@ Expected: The single test and all 10 `system_provider_e2e` tests pass; formattin
 git add crates/backend/nomifun-app/tests/system_provider_e2e.rs
 git commit -m "test(app): account for managed provider in CRUD flow"
 ```
+
+### Task 1B: Align the Full-System Provider Count
+
+**Files:**
+- Modify: `crates/backend/nomifun-app/tests/system_version_e2e.rs:205-214`
+- Test: `crates/backend/nomifun-app/tests/system_version_e2e.rs`
+
+**Interfaces:**
+- Consumes: The provider created earlier in `full_system_flow_e2e` and the reserved provider provisioned at application startup.
+- Produces: A full-system flow assertion that verifies both stable provider IDs without relying on list order.
+
+- [ ] **Step 1: Run the existing full-system flow to verify the red baseline**
+
+Run `cargo test -p nomifun-app --test system_version_e2e full_system_flow_e2e -- --exact --nocapture`.
+
+Expected: FAIL because the provider count is 2 rather than 1.
+
+- [ ] **Step 2: Replace the count-only assertion**
+
+Assert that the list length is 2 and that it contains both `nomifun-free-model` and the previously captured `provider_id`.
+
+- [ ] **Step 3: Run targeted verification**
+
+Run the single `full_system_flow_e2e` test, then the complete `system_version_e2e` target.
+
+Expected: The single test and all 5 target tests pass.
+
+- [ ] **Step 4: Commit the expanded repair**
+
+Commit the test and the updated design/plan documents with message `test(app): align system flow with managed provider`.
 
 ### Task 2: Verify and Push Main
 

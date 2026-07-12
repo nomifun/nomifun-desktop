@@ -6,7 +6,7 @@ Application startup now provisions the reserved `nomifun-free-model` provider. T
 
 ## Scope
 
-Update only `provider_full_crud_with_auth` in `crates/backend/nomifun-app/tests/system_provider_e2e.rs`. Production provider behavior, managed-model startup, and shared test setup remain unchanged.
+Update provider-list assertions in `provider_full_crud_with_auth` and `full_system_flow_e2e`. Production provider behavior, managed-model startup, and shared test setup remain unchanged.
 
 ## Expected Behavior
 
@@ -18,6 +18,8 @@ The test will verify three states:
 
 The existing create, update, authentication, API-key, and delete assertions remain intact.
 
+The broader full-system flow will likewise assert that its newly created provider and the reserved provider are both present, instead of assuming the created provider is the only row.
+
 ## Error Handling and Stability
 
 Assertions will extract provider IDs from the JSON response and compare membership. This avoids coupling the test to repository ordering while retaining an exact provider-count check at each stage.
@@ -28,5 +30,6 @@ Use the existing failing test as the red baseline. After the assertion-only chan
 
 - Run `provider_full_crud_with_auth` alone and require it to pass.
 - Run the complete `system_provider_e2e` test target.
+- Run `full_system_flow_e2e` alone and the complete `system_version_e2e` target.
 - Run formatting checks and the full Rust test suite with the Windows test prerequisites already identified (`sh` on `PATH` and a temporary `C:\tmp`).
 - Confirm the worktree contains no test-generated changes before committing and pushing `main`.
