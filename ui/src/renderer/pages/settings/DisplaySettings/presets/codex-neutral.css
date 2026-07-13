@@ -135,6 +135,7 @@ body {
   /* Interactive control palette: separate from the near-black button primary. */
   --control-selected-bg: #171717;
   --control-selected-fg: #ffffff;
+  --enhanced-checkbox-selected-bg: #171717;
   --control-idle-bg: #ffffff;
   --control-idle-border: #737373;
   --control-hover-bg: #f0f0ef;
