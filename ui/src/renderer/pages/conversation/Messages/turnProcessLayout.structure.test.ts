@@ -10,6 +10,12 @@ import { describe, expect, test } from 'bun:test';
 const cssSource = readFileSync(new URL('./messages.css', import.meta.url), 'utf8');
 const disclosureSource = readFileSync(new URL('./components/TurnProcessDisclosure.tsx', import.meta.url), 'utf8');
 const messageListSource = readFileSync(new URL('./MessageList.tsx', import.meta.url), 'utf8');
+const zhMessages = JSON.parse(
+  readFileSync(new URL('../../../services/i18n/locales/zh-CN/messages.json', import.meta.url), 'utf8')
+) as Record<string, string>;
+const enMessages = JSON.parse(
+  readFileSync(new URL('../../../services/i18n/locales/en-US/messages.json', import.meta.url), 'utf8')
+) as Record<string, string>;
 
 const cssRuleFor = (selector: string) => {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -30,6 +36,20 @@ describe('turn process disclosure content layout', () => {
     expect(disclosureSource.includes('window.setInterval')).toBe(true);
     expect(disclosureSource.includes('const durationEndAt = item.running ? now : item.endAt;')).toBe(true);
     expect(messageListSource.includes('running: entry.running')).toBe(true);
+  });
+
+  test('never exposes a failed or success outcome in the turn header', () => {
+    expect(disclosureSource.includes("failed: 'messages.turnProcessed'")).toBe(true);
+    expect(disclosureSource.includes('messages.turnFailed')).toBe(false);
+    expect(disclosureSource.includes('messages.turnSuccess')).toBe(false);
+    expect(cssSource.includes('.turn-process-disclosure--failed')).toBe(false);
+  });
+
+  test('keeps execution duration in processed and canceled header copy', () => {
+    expect(zhMessages.turnProcessed.includes('{{duration}}')).toBe(true);
+    expect(zhMessages.turnCanceled.includes('{{duration}}')).toBe(true);
+    expect(enMessages.turnProcessed.includes('{{duration}}')).toBe(true);
+    expect(enMessages.turnCanceled.includes('{{duration}}')).toBe(true);
   });
 
   test('does not render an empty disclosure body before process rows arrive', () => {

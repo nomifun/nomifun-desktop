@@ -370,10 +370,6 @@
   color: var(--color-warning-6, #ff7d00);
 }
 
-.turn-process-disclosure--failed {
-  color: var(--color-danger-6, #f53f3f);
-}
-
 .turn-process-disclosure--canceled {
   color: var(--color-text-4, #c9cdd4);
 }

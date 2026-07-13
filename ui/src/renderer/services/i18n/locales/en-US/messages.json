@@ -51,7 +51,6 @@
   "turnProcessed": "Processed {{duration}}",
   "turnProcessing": "Processing {{duration}}",
   "turnWaiting": "Waiting for confirmation {{duration}}",
-  "turnFailed": "Failed {{duration}}",
   "turnCanceled": "Canceled {{duration}}",
   "turnProcess": {
     "expandAllThinkingProcess": "Expand all thinking process",

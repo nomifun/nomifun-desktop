@@ -163,7 +163,19 @@ function buildSegmentOutput(segment: TurnDisclosureInputItem[], isClosed: boolea
   }
 
   const resolvedState = resolveDisclosureState(processItems, stateOptions);
-  const state = !isClosed && resolvedState === 'completed' ? 'running' : resolvedState;
+  const terminalProcessState = getEffectiveProcessState(processItems.at(-1)!, stateOptions);
+  // The header describes lifecycle, not whether every individual operation
+  // succeeded. Once processing settles, every non-canceled turn is "processed";
+  // intermediate failures remain available in `processItemStates` for the
+  // expanded trace. While the turn is live, a failed step must not prematurely
+  // close the header because the agent may recover and continue.
+  const state: TurnDisclosureProcessState = isClosed
+    ? terminalProcessState === 'canceled'
+      ? 'canceled'
+      : 'completed'
+    : resolvedState === 'waiting'
+      ? 'waiting'
+      : 'running';
 
   const finalOrProcessItems =
     finalAssistantIndex === -1 ? processItems : [...processItems, segment[finalAssistantIndex]].filter(Boolean);
