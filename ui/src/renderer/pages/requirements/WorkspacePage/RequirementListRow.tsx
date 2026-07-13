@@ -81,7 +81,11 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
     >
       {/* Checkbox — selection, never opens the drawer */}
       <div className='flex-shrink-0' onClick={stop}>
-        <Checkbox checked={selected} onChange={() => onToggleSelect(item.id)} />
+        <Checkbox
+          className='requirements-selection-checkbox'
+          checked={selected}
+          onChange={() => onToggleSelect(item.id)}
+        />
       </div>
 
       {/* `#id` badge — tabular-nums so digits stay aligned column-to-column */}

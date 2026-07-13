@@ -301,6 +301,7 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
         {listSelection && (
           <div className='ml-auto flex flex-wrap items-center gap-12px text-13px text-[var(--color-text-3)]'>
             <Checkbox
+              className='requirements-selection-checkbox'
               checked={allOnPageSelected}
               indeterminate={someOnPageSelected && !allOnPageSelected}
               onChange={(checked) => listSelection.onToggleSelectAll(listSelection.pageIds, checked)}
