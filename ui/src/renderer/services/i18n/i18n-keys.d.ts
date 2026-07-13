@@ -1758,7 +1758,6 @@ export type I18nKey =
   | 'messages.toolSummary.skipped'
   | 'messages.toolSummary.waiting'
   | 'messages.turnCanceled'
-  | 'messages.turnFailed'
   | 'messages.turnProcess.collapseAllThinkingProcess'
   | 'messages.turnProcess.expandAllThinkingProcess'
   | 'messages.turnProcessed'

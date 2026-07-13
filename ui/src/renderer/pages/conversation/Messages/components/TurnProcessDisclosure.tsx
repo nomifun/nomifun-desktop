@@ -44,7 +44,7 @@ const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'messages.turnProcessed',
   running: 'messages.turnProcessing',
   waiting: 'messages.turnWaiting',
-  failed: 'messages.turnFailed',
+  failed: 'messages.turnProcessed',
   canceled: 'messages.turnCanceled',
 };
 
@@ -52,7 +52,7 @@ const defaultLabelByState: Record<TurnDisclosureProcessState, string> = {
   completed: 'Processed {{duration}}',
   running: 'Processing {{duration}}',
   waiting: 'Waiting for confirmation {{duration}}',
-  failed: 'Failed {{duration}}',
+  failed: 'Processed {{duration}}',
   canceled: 'Canceled {{duration}}',
 };
 
@@ -193,16 +193,20 @@ function TurnProcessDisclosure<T>({
 
   const durationEndAt = item.running ? now : item.endAt;
   const duration = formatTurnDuration(durationEndAt - item.startAt, t);
-  const label = t(labelKeyByState[item.state], {
+  // Defensive compatibility: historical or third-party callers may still
+  // provide an aggregate `failed` state. The header must remain lifecycle-only;
+  // detailed rows continue to render their own failure state below.
+  const displayState = item.state === 'failed' ? 'completed' : item.state;
+  const label = t(labelKeyByState[displayState], {
     duration,
-    defaultValue: defaultLabelByState[item.state],
+    defaultValue: defaultLabelByState[displayState],
   });
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems;
 
   return (
-    <div className={classNames('turn-process-disclosure', `turn-process-disclosure--${item.state}`)}>
+    <div className={classNames('turn-process-disclosure', `turn-process-disclosure--${displayState}`)}>
       <div
         className={classNames(
           'turn-process-disclosure__header',
