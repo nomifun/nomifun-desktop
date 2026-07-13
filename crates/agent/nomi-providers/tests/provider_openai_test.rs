@@ -775,6 +775,58 @@ async fn test_openai_api_error_non_success_status() {
     }
 }
 
+#[tokio::test]
+async fn test_openai_multi_key_rotates_after_auth_failure() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer rejected-key"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(
+            r#"{"error":{"message":"Invalid token","type":"invalid_request_error"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let success_chunk = json!({
+        "choices": [{ "delta": { "content": "rotated" }, "finish_reason": null }]
+    })
+    .to_string();
+    let success_finish = json!({
+        "choices": [{ "delta": {}, "finish_reason": "stop" }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer working-key"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                build_sse_body(&[&success_chunk, &success_finish]),
+                "text/event-stream",
+            ),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        " rejected-key,\n working-key ",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    for _ in 0..2 {
+        let events = collect_events(provider.stream(&make_request()).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "rotated"))
+        );
+    }
+    server.verify().await;
+}
+
 // ---------------------------------------------------------------------------
 // test_openai_rate_limited
 // ---------------------------------------------------------------------------

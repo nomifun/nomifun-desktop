@@ -68,6 +68,31 @@ impl ProviderError {
     }
 }
 
+/// Split the stored provider credential into individual API keys.
+///
+/// Provider settings persist multiple credentials as a comma-separated string;
+/// older data may use one key per line. Keep this parser in the provider layer
+/// so every Nomi execution path (interactive sessions, compaction and one-shot
+/// sidecars) sends one credential per HTTP request rather than the whole list
+/// as a single invalid bearer token.
+pub(crate) fn parse_api_keys(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(crate) fn is_api_key_rotation_error(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::Api {
+            status: 401 | 403,
+            ..
+        } | ProviderError::RateLimited { .. }
+    )
+}
+
 /// Parse a `Retry-After` HTTP header into milliseconds, honouring the provider's
 /// requested backoff instead of a fixed guess. Supports the delta-seconds form
 /// (what LLM gateways send); returns `None` for an absent, non-numeric, or
@@ -193,7 +218,7 @@ pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
 #[cfg(test)]
 mod retryable_tests {
     use super::ProviderError;
-    use super::parse_retry_after_ms;
+    use super::{is_api_key_rotation_error, parse_api_keys, parse_retry_after_ms};
 
     #[test]
     fn parse_retry_after_seconds_clamped() {
@@ -274,5 +299,36 @@ mod retryable_tests {
                 .iter()
                 .all(|error| !error.is_tool_schema_incompatible())
         );
+    }
+
+    #[test]
+    fn api_key_list_supports_comma_and_legacy_newline_separators() {
+        assert_eq!(
+            parse_api_keys(" key-one,\nkey-two\r\n, key-three "),
+            vec!["key-one", "key-two", "key-three"]
+        );
+        assert!(parse_api_keys(" , \n ").is_empty());
+    }
+
+    #[test]
+    fn auth_and_rate_limit_errors_rotate_api_keys() {
+        for status in [401, 403] {
+            assert!(is_api_key_rotation_error(&ProviderError::Api {
+                status,
+                message: "rejected".into(),
+            }));
+        }
+        assert!(is_api_key_rotation_error(&ProviderError::RateLimited {
+            retry_after_ms: 1000,
+            message: "limited".into(),
+        }));
+        assert!(!is_api_key_rotation_error(&ProviderError::Api {
+            status: 400,
+            message: "bad request".into(),
+        }));
+        assert!(!is_api_key_rotation_error(&ProviderError::Api {
+            status: 500,
+            message: "server error".into(),
+        }));
     }
 }
