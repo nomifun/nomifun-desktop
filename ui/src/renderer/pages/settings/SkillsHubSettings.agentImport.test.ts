@@ -18,4 +18,11 @@ describe('SkillsHubSettings agent skill migration entry', () => {
     expect(source.includes('detectAndCountExternalSkills')).toBe(true);
     expect(source.includes('setAgentImportVisible(true)')).toBe(true);
   });
+
+  test('keeps a visible gap between icons and labels for every import action', () => {
+    const source = readSource(new URL('./SkillsHubSettings.tsx', import.meta.url));
+
+    expect(source.includes("gap-6px';")).toBe(true);
+    expect(source.match(/className=\{IMPORT_ACTION_BUTTON_CLASS\}/g)).toHaveLength(3);
+  });
 });
