@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use nomi_config::compat::ProviderCompat;
@@ -85,6 +87,38 @@ impl Respond for OpenAiBedrockSchemaResponder {
     }
 }
 
+#[derive(Clone)]
+struct OpenAiFailedSanitizedResendResponder {
+    attempt: Arc<AtomicUsize>,
+}
+
+impl Respond for OpenAiFailedSanitizedResendResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        match self.attempt.fetch_add(1, Ordering::SeqCst) {
+            0 => ResponseTemplate::new(500).set_body_json(json!({
+                "error": {
+                    "message": "input_schema does not support oneOf at the top level",
+                    "reason": "TOOL_SCHEMA_INVALID"
+                }
+            })),
+            1 => ResponseTemplate::new(503).set_body_string("sanitized resend unavailable"),
+            _ => {
+                let chunk = json!({
+                    "choices": [{ "delta": { "content": "Recovered" }, "finish_reason": null }]
+                })
+                .to_string();
+                let finish = json!({
+                    "choices": [{ "delta": {}, "finish_reason": "stop" }],
+                    "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+                })
+                .to_string();
+                ResponseTemplate::new(200)
+                    .set_body_raw(build_sse_body(&[&chunk, &finish]), "text/event-stream")
+            }
+        }
+    }
+}
+
 fn request_with_composed_tool_schema() -> LlmRequest {
     let mut request = make_request();
     request.tools.push(ToolDef {
@@ -162,6 +196,48 @@ async fn openai_gateway_does_not_schema_retry_an_unrelated_500() {
         .await
         .unwrap_err();
     assert!(matches!(error, ProviderError::Api { status: 500, .. }));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn openai_gateway_does_not_remember_a_failed_sanitized_resend() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(OpenAiFailedSanitizedResendResponder {
+            attempt: Arc::new(AtomicUsize::new(0)),
+        })
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let request = request_with_composed_tool_schema();
+
+    let error = provider.stream(&request).await.unwrap_err();
+    assert!(matches!(error, ProviderError::Api { status: 503, .. }));
+
+    let events = collect_events(provider.stream(&request).await.unwrap()).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "Recovered"))
+    );
+
+    let received = server.received_requests().await.unwrap();
+    let has_root_one_of: Vec<bool> = received
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body["tools"][0]["function"]["parameters"]
+                .get("oneOf")
+                .is_some()
+        })
+        .collect();
+    assert_eq!(has_root_one_of, vec![true, false, true]);
     server.verify().await;
 }
 
