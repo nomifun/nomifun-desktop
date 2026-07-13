@@ -278,6 +278,7 @@ const WorkspacePage: React.FC = () => {
           activeKey={view}
           onChange={(key) => setView(key === 'board' ? 'board' : 'list')}
           size='sm'
+          className='requirements-view-toggle'
         />
         <Button type='primary' shape='round' onClick={openCreate}>
           {t('requirements.newRequirement')}
