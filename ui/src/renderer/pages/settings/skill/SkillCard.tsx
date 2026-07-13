@@ -8,7 +8,8 @@
  *   - a source badge: Built-in / Custom / Extension / Auto-injected
  *   - NO enable switch (skills aren't toggled here)
  *   - hover footer: Edit Tags (every source) + Delete (custom only)
- * The whole card is clickable → onEditTags.
+ * The whole card is clickable → onOpenDetails. Tag editing stays an explicit
+ * footer action so inspecting a skill never mutates its organization.
  *
  * Theme variables only (the avatar hex palette is the documented exception);
  * `<div onClick>` for clickables (no <button>, to dodge the WebView2 black box).
@@ -29,6 +30,7 @@ type SkillCardProps = {
   localeKey: string;
   /** True when the skill name is in the built-in auto-inject set (parent-supplied). */
   isAutoInjected: boolean;
+  onOpenDetails: (skill: SkillInfo) => void;
   onEditTags: (skill: SkillInfo) => void;
   onDelete: (skill: SkillInfo) => void;
   highlighted?: boolean;
@@ -90,6 +92,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
   tagByKey,
   localeKey,
   isAutoInjected,
+  onOpenDetails,
   onEditTags,
   onDelete,
   highlighted = false,
@@ -112,13 +115,13 @@ const SkillCard: React.FC<SkillCardProps> = ({
     <div
       ref={cardRef}
       data-testid={`skill-card-${testId}`}
-      onClick={() => onEditTags(skill)}
+      onClick={() => onOpenDetails(skill)}
       role='button'
       tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
-          onEditTags(skill);
+          onOpenDetails(skill);
         }
       }}
       className={[
@@ -205,6 +208,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
+                e.stopPropagation();
                 onDelete(skill);
               }
             }}
@@ -222,6 +226,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
+              e.stopPropagation();
               onEditTags(skill);
             }
           }}

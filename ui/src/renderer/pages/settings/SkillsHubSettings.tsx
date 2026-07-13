@@ -25,6 +25,7 @@ import type { SkillInfo } from './PresetSettings/types';
 import AgentSkillImportDrawer from './skill/AgentSkillImportDrawer';
 import type { ExternalAgentSkillSource } from './skill/agentSkillImportUtils';
 import SkillCard from './skill/SkillCard';
+import SkillDetailDrawer from './skill/SkillDetailDrawer';
 import SkillTagModal from './skill/SkillTagModal';
 import { filterSkillsByTags, type SkillTagFilterState } from './skill/skillFilter';
 import { Button, Input, Modal } from '@arco-design/web-react';
@@ -74,6 +75,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
   const tags = usePresetTags();
   const [tagMgmtVisible, setTagMgmtVisible] = useState(false);
   const [tagModalSkill, setTagModalSkill] = useState<SkillInfo | null>(null);
+  const [detailSkill, setDetailSkill] = useState<SkillInfo | null>(null);
 
   // Name set of built-in auto-inject skills → drives the "Auto" badge.
   const autoInjectedNames = useMemo(
@@ -346,6 +348,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
                   tagByKey={tags.tagByKey}
                   localeKey={localeKey}
                   isAutoInjected={skill.source !== 'extension' && autoInjectedNames.has(skill.name)}
+                  onOpenDetails={setDetailSkill}
                   onEditTags={setTagModalSkill}
                   onDelete={confirmDelete}
                   highlighted={highlightedSkill === skill.name}
@@ -387,6 +390,23 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
           </div>
         </div>
       </div>
+
+      <SkillDetailDrawer
+        visible={detailSkill !== null}
+        skill={detailSkill}
+        tagByKey={tags.tagByKey}
+        localeKey={localeKey}
+        isAutoInjected={
+          detailSkill !== null &&
+          detailSkill.source !== 'extension' &&
+          autoInjectedNames.has(detailSkill.name)
+        }
+        onClose={() => setDetailSkill(null)}
+        onEditTags={(skill) => {
+          setDetailSkill(null);
+          setTagModalSkill(skill);
+        }}
+      />
 
       <SkillTagModal
         visible={tagModalSkill !== null}
