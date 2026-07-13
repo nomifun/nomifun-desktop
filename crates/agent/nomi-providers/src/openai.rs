@@ -362,7 +362,11 @@ impl OpenAIProvider {
             .collect()
     }
 
-    fn build_request_body(&self, request: &LlmRequest) -> Value {
+    fn build_request_body(
+        &self,
+        request: &LlmRequest,
+        sanitize_tool_schemas: bool,
+    ) -> Value {
         let max_tokens_field = self
             .compat
             .max_tokens_field
@@ -385,7 +389,7 @@ impl OpenAIProvider {
         if !request.tools.is_empty() {
             body["tools"] = json!(Self::build_tools(
                 &request.tools,
-                self.should_sanitize_tool_schemas(),
+                sanitize_tool_schemas,
             ));
         }
 
@@ -715,8 +719,8 @@ impl LlmProvider for OpenAIProvider {
         let headers = self.build_headers()?;
         let client = crate::http_client();
 
-        let used_sanitized_schema = self.should_sanitize_tool_schemas();
-        let mut body = self.build_request_body(request);
+        let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
+        let mut body = self.build_request_body(request, sanitize_tool_schemas);
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
@@ -724,7 +728,7 @@ impl LlmProvider for OpenAIProvider {
             Ok(response) => response,
             Err(error)
                 if !request.tools.is_empty()
-                    && !used_sanitized_schema
+                    && !sanitize_tool_schemas
                     && error.is_tool_schema_incompatible() =>
             {
                 let ProviderError::Api { status, .. } = &error else {
@@ -736,9 +740,10 @@ impl LlmProvider for OpenAIProvider {
                     status,
                     "provider rejected tool schemas; retrying with Bedrock-compatible schema roots"
                 );
+                body = self.build_request_body(request, true);
+                let response = Self::send_initial(&client, &url, &headers, &body).await?;
                 self.sanitize_tool_schemas.store(true, Ordering::Release);
-                body = self.build_request_body(request);
-                Self::send_initial(&client, &url, &headers, &body).await?
+                response
             }
             Err(error) => return Err(error),
         };
@@ -2188,7 +2193,7 @@ mod tests {
             ),
         ];
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request, provider.should_sanitize_tool_schemas());
         let assistant = body["messages"]
             .as_array()
             .unwrap()
@@ -2211,7 +2216,7 @@ mod tests {
             }],
         )];
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request, provider.should_sanitize_tool_schemas());
         assert!(
             body["messages"][0].get("reasoning_content").is_none(),
             "unrelated models must retain normal OpenAI message semantics"
@@ -2274,7 +2279,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
         };
-        let body = provider.build_request_body(&req);
+        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas());
         assert_eq!(body["max_tokens"], 1024);
         assert!(body.get("max_completion_tokens").is_none());
     }
@@ -2295,7 +2300,7 @@ mod tests {
             thinking: None,
             reasoning_effort: None,
         };
-        let body = provider.build_request_body(&req);
+        let body = provider.build_request_body(&req, provider.should_sanitize_tool_schemas());
         assert_eq!(body["max_completion_tokens"], 2048);
         assert!(body.get("max_tokens").is_none());
     }
@@ -2548,6 +2553,38 @@ mod tests {
         assert!(spawn_params["properties"].as_object().unwrap().is_empty());
         let spawn_desc = result[1]["function"]["description"].as_str().unwrap();
         assert!(spawn_desc.contains("ToolSearch"));
+    }
+
+    #[test]
+    fn test_request_body_uses_explicit_schema_sanitize_snapshot() {
+        let provider = OpenAIProvider::new("key", "http://localhost", openai_compat());
+        let mut request = simple_request();
+        request.tools.push(ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "oneOf": [{ "required": ["path"] }]
+            }),
+            deferred: false,
+        });
+
+        provider.sanitize_tool_schemas.store(true, Ordering::Release);
+
+        let unsanitized = provider.build_request_body(&request, false);
+        assert!(
+            unsanitized["tools"][0]["function"]["parameters"]
+                .get("oneOf")
+                .is_some()
+        );
+
+        let sanitized = provider.build_request_body(&request, true);
+        assert!(
+            sanitized["tools"][0]["function"]["parameters"]
+                .get("oneOf")
+                .is_none()
+        );
     }
 
     #[test]
