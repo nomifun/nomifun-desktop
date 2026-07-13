@@ -43,6 +43,8 @@ import SettingsPageWrapper from './components/SettingsPageWrapper';
  * 232px lower bound.
  */
 const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
+const IMPORT_ACTION_BUTTON_CLASS =
+  '!rounded-[100px] !h-34px !px-14px !text-t-primary flex items-center gap-6px';
 
 interface SkillsHubSettingsProps {
   /** When false, renders without SettingsPageWrapper — useful for embedding in a tab */
@@ -287,7 +289,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
                 <Button
                   size='small'
                   data-testid='btn-import-agent-skills'
-                  className='!rounded-[100px] !h-34px !px-14px !text-t-primary'
+                  className={IMPORT_ACTION_BUTTON_CLASS}
                   icon={<FolderOpen size={14} fill='currentColor' />}
                   onClick={() => setAgentImportVisible(true)}
                 >
@@ -296,7 +298,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
                 <Button
                   size='small'
                   data-testid='btn-manual-import'
-                  className='!rounded-[100px] !h-34px !px-14px !text-t-primary'
+                  className={IMPORT_ACTION_BUTTON_CLASS}
                   icon={<FolderOpen size={14} fill='currentColor' />}
                   onClick={handleImportFolder}
                 >
@@ -305,7 +307,7 @@ const SkillsHubSettings: React.FC<SkillsHubSettingsProps> = ({ withWrapper = tru
                 <Button
                   size='small'
                   data-testid='btn-import-zip'
-                  className='!rounded-[100px] !h-34px !px-14px !text-t-primary'
+                  className={IMPORT_ACTION_BUTTON_CLASS}
                   icon={<FileZip size={14} fill='currentColor' />}
                   onClick={handleImportZip}
                 >
