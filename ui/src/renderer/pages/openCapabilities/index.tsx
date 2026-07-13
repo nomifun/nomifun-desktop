@@ -240,6 +240,7 @@ const OpenCapabilitiesPage: React.FC = () => {
         defaultValue: '分开管理 WebUI 访问入口，以及 NomiFun Remote MCP / REST 对外开放能力。',
       })}
       maxWidthClass='md:max-w-1180px'
+      className='open-capabilities-page'
     >
       <Tabs
         activeTab={activeOpenCapabilityTab}
@@ -459,20 +460,22 @@ const DomainOptionCard: React.FC<{
   onChange: (checked: boolean) => void;
 }> = ({ id, title, description, checked, onChange }) => (
   <label
-    className={`block cursor-pointer rd-10px border px-11px py-10px transition-colors ${
+    className={`open-capabilities-domain-card${checked ? ' is-selected' : ''} block cursor-pointer rd-10px border px-11px py-10px transition-colors ${
       checked
         ? 'border-[rgba(var(--primary-6),0.32)] bg-[rgba(var(--primary-6),0.06)]'
         : 'border-border-2 bg-fill-1 hover:border-border-3 hover:bg-fill-2'
     }`}
   >
     <div className='flex items-start gap-9px'>
-      <Checkbox checked={checked} onChange={onChange} className='mt-2px shrink-0' />
+      <Checkbox checked={checked} onChange={onChange} className='open-capabilities-domain-checkbox mt-2px shrink-0' />
       <div className='min-w-0'>
         <div className='flex items-center gap-6px'>
           <span className='text-13px font-600 leading-19px text-t-primary'>{title}</span>
-          <code className='truncate rd-6px bg-fill-0 px-5px py-1px font-mono text-10px text-t-tertiary'>{id}</code>
+          <code className='open-capabilities-domain-badge truncate rd-6px bg-fill-0 px-5px py-1px font-mono text-10px text-t-tertiary'>
+            {id}
+          </code>
         </div>
-        <div className='mt-4px text-12px leading-17px text-t-tertiary'>{description}</div>
+        <div className='open-capabilities-domain-description mt-4px text-12px leading-17px text-t-tertiary'>{description}</div>
       </div>
     </div>
   </label>
