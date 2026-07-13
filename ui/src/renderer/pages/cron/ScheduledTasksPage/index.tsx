@@ -178,11 +178,11 @@ const ScheduledTasksPage: React.FC = () => {
             <Spin />
           </div>
         ) : jobs.length === 0 ? (
-          <div className='flex min-h-220px items-center justify-center rounded-16px border border-dashed border-border-2 bg-fill-1'>
+          <div className='flex min-h-220px items-center justify-center [&_.arco-empty-image]:!text-64px'>
             <Empty description={t('cron.noTasks')} />
           </div>
         ) : filteredJobs.length === 0 ? (
-          <div className='flex min-h-220px items-center justify-center rounded-16px border border-dashed border-border-2 bg-fill-1'>
+          <div className='flex min-h-220px items-center justify-center [&_.arco-empty-image]:!text-64px'>
             <Empty
               description={t('cron.page.noSearchResults', {
                 defaultValue: '没有匹配的定时任务',
