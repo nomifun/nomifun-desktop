@@ -159,6 +159,12 @@
   color: var(--control-selected-fg, var(--color-white)) !important;
 }
 
+/* Compact switches: keep their thumbs visible in dark, information-dense
+ * panels without changing standard-sized switches elsewhere. */
+[data-theme='dark'] .compact-dark-switch .arco-switch-dot {
+  background-color: #ffffff !important;
+}
+
 /* In dark themes, a green track makes enabled switches immediately legible
    without competing with the neutral black-and-white selection language. */
 body[arco-theme='dark'] .arco-switch-checked {
