@@ -539,6 +539,48 @@ async fn test_anthropic_auth_error() {
     }
 }
 
+#[tokio::test]
+async fn test_anthropic_multi_key_rotates_after_auth_failure() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "rejected-key"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "working-key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(text_sse_body("rotated"), "text/event-stream"),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let provider = AnthropicProvider::new(
+        " rejected-key,\n working-key ",
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+    )
+    .with_cache(false);
+    for _ in 0..2 {
+        let events = collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "rotated"))
+        );
+    }
+    server.verify().await;
+}
+
 // ---------------------------------------------------------------------------
 // test_anthropic_rate_limit_retryable
 // ---------------------------------------------------------------------------

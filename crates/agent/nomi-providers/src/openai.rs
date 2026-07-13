@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -14,7 +14,8 @@ use crate::anthropic_shared::StreamOutcome;
 use crate::{LlmProvider, ProviderError};
 
 pub struct OpenAIProvider {
-    api_key: String,
+    api_keys: Vec<String>,
+    current_api_key: AtomicUsize,
     base_url: String,
     compat: ProviderCompat,
     sanitize_tool_schemas: AtomicBool,
@@ -23,7 +24,8 @@ pub struct OpenAIProvider {
 impl OpenAIProvider {
     pub fn new(api_key: &str, base_url: &str, compat: ProviderCompat) -> Self {
         Self {
-            api_key: api_key.to_string(),
+            api_keys: crate::parse_api_keys(api_key),
+            current_api_key: AtomicUsize::new(0),
             base_url: base_url.to_string(),
             compat,
             sanitize_tool_schemas: AtomicBool::new(false),
@@ -34,9 +36,9 @@ impl OpenAIProvider {
         self.compat.sanitize_schema() || self.sanitize_tool_schemas.load(Ordering::Acquire)
     }
 
-    fn build_headers(&self) -> Result<HeaderMap, ProviderError> {
+    fn build_headers(api_key: &str) -> Result<HeaderMap, ProviderError> {
         let mut headers = HeaderMap::new();
-        let bearer = format!("Bearer {}", self.api_key);
+        let bearer = format!("Bearer {api_key}");
         let auth = HeaderValue::from_str(&bearer).map_err(|e| {
             ProviderError::Connection(format!("Invalid authorization header: {}", e))
         })?;
@@ -432,6 +434,47 @@ impl OpenAIProvider {
         })
         .await
     }
+
+    async fn send_initial_with_key_rotation(
+        &self,
+        client: &reqwest::Client,
+        url: &str,
+        body: &Value,
+    ) -> Result<(reqwest::Response, HeaderMap), ProviderError> {
+        let mut last_error = None;
+        let key_count = self.api_keys.len();
+        let start_index = self.current_api_key.load(Ordering::Acquire) % key_count.max(1);
+
+        for offset in 0..key_count {
+            let index = (start_index + offset) % key_count;
+            let api_key = &self.api_keys[index];
+            let headers = Self::build_headers(api_key)?;
+            match Self::send_initial(client, url, &headers, body).await {
+                Ok(response) => {
+                    self.current_api_key.store(index, Ordering::Release);
+                    return Ok((response, headers));
+                }
+                Err(error) if crate::is_api_key_rotation_error(&error) && offset + 1 < key_count => {
+                    let next_index = (index + 1) % key_count;
+                    tracing::warn!(
+                        target: "nomi_providers",
+                        provider = "openai",
+                        key_index = index + 1,
+                        key_count = self.api_keys.len(),
+                        error = %error,
+                        "provider rejected API key; trying the next configured key"
+                    );
+                    self.current_api_key.store(next_index, Ordering::Release);
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            ProviderError::Connection("No usable API key configured".to_owned())
+        }))
+    }
 }
 
 /// Generate a unique tool call ID in OpenAI `call_xxx` format. UUIDv7
@@ -716,7 +759,6 @@ impl LlmProvider for OpenAIProvider {
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let url = format!("{}{}", self.base_url, self.compat.api_path());
-        let headers = self.build_headers()?;
         let client = crate::http_client();
 
         let sanitize_tool_schemas = self.should_sanitize_tool_schemas();
@@ -724,8 +766,11 @@ impl LlmProvider for OpenAIProvider {
 
         tracing::debug!(target: "nomi_providers", body = %serde_json::to_string_pretty(&body).unwrap_or_default(), "outgoing request");
 
-        let response = match Self::send_initial(&client, &url, &headers, &body).await {
-            Ok(response) => response,
+        let (response, headers) = match self
+            .send_initial_with_key_rotation(&client, &url, &body)
+            .await
+        {
+            Ok(result) => result,
             Err(error)
                 if !request.tools.is_empty()
                     && !sanitize_tool_schemas
@@ -741,9 +786,11 @@ impl LlmProvider for OpenAIProvider {
                     "provider rejected tool schemas; retrying with Bedrock-compatible schema roots"
                 );
                 body = self.build_request_body(request, true);
-                let response = Self::send_initial(&client, &url, &headers, &body).await?;
+                let (response, headers) = self
+                    .send_initial_with_key_rotation(&client, &url, &body)
+                    .await?;
                 self.sanitize_tool_schemas.store(true, Ordering::Release);
-                response
+                (response, headers)
             }
             Err(error) => return Err(error),
         };
