@@ -53,6 +53,19 @@ impl ProviderError {
             _ => false,
         }
     }
+
+    pub(crate) fn is_tool_schema_incompatible(&self) -> bool {
+        let ProviderError::Api { message, .. } = self else {
+            return false;
+        };
+        let lower = message.to_ascii_lowercase();
+        lower.contains("tool_schema_invalid")
+            || (lower.contains("input_schema")
+                && lower.contains("top level")
+                && ["oneof", "allof", "anyof"]
+                    .iter()
+                    .any(|keyword| lower.contains(keyword)))
+    }
 }
 
 /// Parse a `Retry-After` HTTP header into milliseconds, honouring the provider's
@@ -227,5 +240,39 @@ mod retryable_tests {
         assert!(ProviderError::Connection("x".to_string()).is_retryable());
         assert!(!ProviderError::PromptTooLong("x".to_string()).is_retryable());
         assert!(!ProviderError::Parse("x".to_string()).is_retryable());
+    }
+
+    #[test]
+    fn tool_schema_classifier_accepts_bedrock_gateway_signals() {
+        let reason = ProviderError::Api {
+            status: 500,
+            message: r#"{"reason":"TOOL_SCHEMA_INVALID"}"#.into(),
+        };
+        let wording = ProviderError::Api {
+            status: 400,
+            message: "input_schema does not support oneOf, allOf, or anyOf at the top level".into(),
+        };
+        assert!(reason.is_tool_schema_incompatible());
+        assert!(wording.is_tool_schema_incompatible());
+    }
+
+    #[test]
+    fn tool_schema_classifier_rejects_unrelated_failures() {
+        let errors = [
+            ProviderError::Api {
+                status: 500,
+                message: "upstream unavailable".into(),
+            },
+            ProviderError::Api {
+                status: 400,
+                message: "input_schema is malformed".into(),
+            },
+            ProviderError::Connection("input_schema connection reset".into()),
+        ];
+        assert!(
+            errors
+                .iter()
+                .all(|error| !error.is_tool_schema_incompatible())
+        );
     }
 }
