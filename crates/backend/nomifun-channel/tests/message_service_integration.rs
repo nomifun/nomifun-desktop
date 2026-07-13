@@ -12,7 +12,7 @@ use nomifun_channel::types::PluginType;
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
-use nomifun_db::models::AssistantSessionRow;
+use nomifun_db::models::ChannelSessionRow;
 use nomifun_db::{
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
     SqliteClientPreferenceRepository, SqliteConversationRepository, init_database_memory,
@@ -204,7 +204,7 @@ async fn send_to_agent_warms_cold_task_before_returning_stream_subscription() {
         "system_default_user".to_owned(),
     );
 
-    let session = AssistantSessionRow {
+    let session = ChannelSessionRow {
         id: "session-1".to_owned(),
         user_id: "channel-user-1".to_owned(),
         agent_type: "nomi".to_owned(),
@@ -277,8 +277,8 @@ fn build_stack(pool: nomifun_db::SqlitePool) -> TestStack {
     }
 }
 
-fn make_session(conversation_id: Option<i64>) -> AssistantSessionRow {
-    AssistantSessionRow {
+fn make_session(conversation_id: Option<i64>) -> ChannelSessionRow {
+    ChannelSessionRow {
         id: "session-1".to_owned(),
         user_id: "channel-user-1".to_owned(),
         agent_type: "nomi".to_owned(),
@@ -459,12 +459,12 @@ async fn channel_companion_turn_routes_into_companion_single_session() {
     ]);
     let message_svc = stack.message_svc.with_master_profile(Arc::new(StubProfile::new(sessions)));
 
-    bind_channel_to_companion(&stack.channel_repo, "achn_test", "companion_x").await;
+    bind_channel_to_companion(&stack.channel_repo, "chn_test", "companion_x").await;
 
     // Bound channel → channel companion (companion_x) wins; the turn runs on
     // companion_x's single session conversation, NOT a new channel conversation.
     let mut bound = make_session(None);
-    bound.channel_id = Some("achn_test".to_owned());
+    bound.channel_id = Some("chn_test".to_owned());
     let sent = message_svc.send_to_agent(&bound, "hi", PluginType::Telegram).await.unwrap();
     assert_eq!(sent.conversation_id, conv_x.to_string());
     wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
@@ -488,17 +488,17 @@ async fn companion_im_turns_share_one_session() {
     let conv_x = seed_companion_session(&stack.conversation_svc, "companion_x").await;
     let sessions = std::collections::HashMap::from([("companion_x".to_owned(), conv_x)]);
     let message_svc = stack.message_svc.with_master_profile(Arc::new(StubProfile::new(sessions)));
-    bind_channel_to_companion(&stack.channel_repo, "achn_test", "companion_x").await;
+    bind_channel_to_companion(&stack.channel_repo, "chn_test", "companion_x").await;
 
     let mut chat_a = make_session(None);
-    chat_a.channel_id = Some("achn_test".to_owned());
+    chat_a.channel_id = Some("chn_test".to_owned());
     chat_a.chat_id = Some("chat-A".to_owned());
     let a = message_svc.send_to_agent(&chat_a, "hi from A", PluginType::Telegram).await.unwrap();
     wait_until_idle(&stack.conversation_svc, &a.conversation_id).await;
 
     let mut chat_b = make_session(None);
     chat_b.id = "session-b".to_owned();
-    chat_b.channel_id = Some("achn_test".to_owned());
+    chat_b.channel_id = Some("chn_test".to_owned());
     chat_b.chat_id = Some("chat-B".to_owned());
     let b = message_svc.send_to_agent(&chat_b, "hi from B", PluginType::Telegram).await.unwrap();
 
@@ -518,10 +518,10 @@ async fn companion_without_model_refuses_turn() {
     let message_svc = stack
         .message_svc
         .with_master_profile(Arc::new(StubProfile::new(std::collections::HashMap::new())));
-    bind_channel_to_companion(&stack.channel_repo, "achn_test", "companion_x").await;
+    bind_channel_to_companion(&stack.channel_repo, "chn_test", "companion_x").await;
 
     let mut bound = make_session(None);
-    bound.channel_id = Some("achn_test".to_owned());
+    bound.channel_id = Some("chn_test".to_owned());
     let err = message_svc
         .send_to_agent(&bound, "hi", PluginType::Telegram)
         .await
@@ -597,7 +597,7 @@ async fn public_agent_bound_platform_builds_clamped_session() {
     let stack = build_stack(db.pool().clone());
 
     // The routing reads the BOT ROW's public_agent_id (per-bot), via channel_id.
-    bind_channel_to_public_agent(&stack.channel_repo, "achn_pa", "pubagent_1").await;
+    bind_channel_to_public_agent(&stack.channel_repo, "chn_pa", "pubagent_1").await;
 
     let model = nomifun_common::ProviderWithModel {
         provider_id: "prov_pa".to_owned(),
@@ -610,7 +610,7 @@ async fn public_agent_bound_platform_builds_clamped_session() {
     }));
 
     let mut session = make_session(None);
-    session.channel_id = Some("achn_pa".to_owned());
+    session.channel_id = Some("chn_pa".to_owned());
     let sent = message_svc
         .send_to_agent(&session, "你好", PluginType::Telegram)
         .await
@@ -649,7 +649,7 @@ async fn public_agent_bound_but_disabled_refuses_without_companion_fallthrough()
     let db = init_database_memory().await.unwrap();
     let stack = build_stack(db.pool().clone());
 
-    bind_channel_to_public_agent(&stack.channel_repo, "achn_pa", "pubagent_1").await;
+    bind_channel_to_public_agent(&stack.channel_repo, "chn_pa", "pubagent_1").await;
 
     // servable = false models a disabled/deleted agent.
     let message_svc = stack.message_svc.with_master_profile(Arc::new(PublicStubProfile {
@@ -658,7 +658,7 @@ async fn public_agent_bound_but_disabled_refuses_without_companion_fallthrough()
     }));
 
     let mut session = make_session(None);
-    session.channel_id = Some("achn_pa".to_owned());
+    session.channel_id = Some("chn_pa".to_owned());
     let err = message_svc
         .send_to_agent(&session, "你好", PluginType::Telegram)
         .await

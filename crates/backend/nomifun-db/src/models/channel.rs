@@ -1,7 +1,7 @@
 use nomifun_common::TimestampMs;
 use serde::{Deserialize, Serialize};
 
-/// Row mapping for the `assistant_plugins` table.
+/// Row mapping for the `channel_plugins` table.
 ///
 /// One row per connected bot — multiple rows may share the same platform
 /// `type` (legacy rows keep `id == type`). The `config` column holds an
@@ -32,16 +32,16 @@ pub struct ChannelPluginRow {
     pub updated_at: TimestampMs,
 }
 
-/// Row mapping for the `assistant_users` table.
+/// Row mapping for the `channel_users` table.
 ///
-/// Represents an IM user authorized to chat with the assistant.
+/// Represents an IM user authorized to chat with the Agent.
 /// UNIQUE constraint on (platform_user_id, platform_type).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AssistantUserRow {
+pub struct ChannelUserRow {
     pub id: String,
     pub platform_user_id: String,
     pub platform_type: String,
-    /// The `assistant_plugins` row (bot) this authorization belongs to.
+    /// The `channel_plugins` row (bot) this authorization belongs to.
     /// `None` only for legacy rows the 004 migration could not backfill.
     pub channel_id: Option<String>,
     pub display_name: Option<String>,
@@ -50,32 +50,32 @@ pub struct AssistantUserRow {
     pub session_id: Option<String>,
 }
 
-/// Row mapping for the `assistant_sessions` table.
+/// Row mapping for the `channel_sessions` table.
 ///
 /// Per-chat session linking an authorized user to a conversation.
-/// FK: user_id → assistant_users(id) ON DELETE CASCADE.
+/// FK: user_id → channel_users(id) ON DELETE CASCADE.
 /// FK: conversation_id → conversations(id) ON DELETE SET NULL.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AssistantSessionRow {
+pub struct ChannelSessionRow {
     pub id: String,
     pub user_id: String,
     pub agent_type: String,
     pub conversation_id: Option<i64>,
     pub workspace: Option<String>,
     pub chat_id: Option<String>,
-    /// The `assistant_plugins` row this session arrived through. Two bots
+    /// The `channel_plugins` row this session arrived through. Two bots
     /// in the same chat get isolated sessions.
     pub channel_id: Option<String>,
     pub created_at: TimestampMs,
     pub last_activity: TimestampMs,
 }
 
-/// Row mapping for the `assistant_pairing_codes` table.
+/// Row mapping for the `channel_pairing_codes` table.
 ///
 /// 6-digit pairing code with 10-minute expiry. Status transitions:
 /// pending → approved | rejected | expired.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct PairingCodeRow {
+pub struct ChannelPairingCodeRow {
     pub code: String,
     pub platform_user_id: String,
     pub platform_type: String,

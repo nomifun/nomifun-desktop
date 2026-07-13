@@ -1,4 +1,4 @@
-import type { SkillInfo } from '@/renderer/pages/settings/AssistantSettings/types';
+import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 
 export type SkillDisplay = {
   name: string;

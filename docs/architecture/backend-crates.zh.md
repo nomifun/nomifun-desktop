@@ -21,7 +21,7 @@
 | --- | --- |
 | [`nomifun-common`](../../crates/backend/nomifun-common/) | `AppError`、错误链、各类枚举（`AgentType`、`ConversationStatus`、`MessageType`、`McpServerStatus` 等）、id 生成（实体 ID 用 `generate_prefixed_id`，令牌用 `generate_id`）、AES-GCM `encrypt_string` / `decrypt_string`、`TimestampMs`、分页辅助、`constants::DEFAULT_HOST/DEFAULT_PORT/BODY_LIMIT/CSRF_*`。 |
 | [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | 每个 HTTP 请求 / 响应 DTO，`WebSocketMessage` 信封，ACP / Nomi / OpenClaw / Remote 等扩展。前端 TypeScript 类型镜像该 crate。 |
-| [`nomifun-db`](../../crates/backend/nomifun-db/) | 通过 `sqlx` 操作 SQLite，内嵌迁移，为用户、会话、MCP、需求、cron、ACP 会话、助手、终端会话、伙伴令牌、知识库、渠道、连接器凭据、IDMM 介入、远程 agent、webhook 等提供仓储 trait 与 Sqlite 实现。持有 `Database` 句柄以及 `init_database`。 |
+| [`nomifun-db`](../../crates/backend/nomifun-db/) | 通过 `sqlx` 操作 SQLite，内嵌迁移，为用户、会话、MCP、需求、cron、ACP 会话、设定、终端会话、伙伴令牌、知识库、渠道、连接器凭据、IDMM 介入、远程 agent、webhook 等提供仓储 trait 与 Sqlite 实现。持有 `Database` 句柄以及 `init_database`。 |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime/) | `WebSocketManager`、`BroadcastEventBus`，带 token 校验的 `/ws` 升级处理器，消息路由 trait，心跳计时，每连接缓冲常量。 |
 | [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | 内嵌 Bun 运行时支持、为子进程增强 `PATH`、跨平台进程树终止，以及携带合并 PATH 的 spawn `Builder`。 |
 | [`nomifun-assets`](../../crates/backend/nomifun-assets/) | 随服务器一同发布的内嵌静态资源（`include_dir!`）。 |
@@ -44,15 +44,15 @@
 | --- | --- |
 | [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | 会话与消息 CRUD、send-message 路由、**流式中继**（将后端 agent token 投递到 `/ws`）、ACP 错误恢复、响应中间件（如 `/cron` 斜杠命令检测、`<think>` 剥离）、技能解析 / 快照、运行时状态持久化。 |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP 服务器 CRUD、**OAuth 流程**、多 CLI 同步（`adapters/` 下的 `Claude`、`Codex`、`CodeBuddy`、`Gemini`、`Qwen`、`OpenCode`、`Nomi`、`Nomifun` 适配器）、连接测试、向会话注入 MCP 能力（含内置图像生成）。 |
-| [`nomifun-extension`](../../crates/backend/nomifun-extension/) | 扩展与技能枢纽：清单、依赖图、分类器、安装 / 启用 / 禁用，捆绑技能 + MCP 服务器 + 助手的扩展包。 |
+| [`nomifun-extension`](../../crates/backend/nomifun-extension/) | 扩展与技能枢纽：清单、依赖图、分类器、安装 / 启用 / 禁用，捆绑技能 + MCP 服务器 + 设定的扩展包。 |
 | [`nomifun-team`](../../crates/backend/nomifun-team/) | 多智能协同（多 agent）：调度器、信箱、任务板、崩溃检测、事件循环、协同 MCP 服务器（`mcp/`）、Guide MCP 工具、提示词。（`nomifun-team` crate 名与 `team_*` 工具名作为线缆契约有意保留。） |
-| [`nomifun-channel`](../../crates/backend/nomifun-channel/) | 外部聊天渠道适配器（Telegram、Lark、DingTalk、WeChat）—— 通过 feature 控制。新会话默认进入**主 Agent 模式**：伙伴人格 + 桌面网关工具（可按平台经 `assistant.{platform}.masterAgent` 关闭）。 |
+| [`nomifun-channel`](../../crates/backend/nomifun-channel/) | 外部聊天渠道适配器（Telegram、Lark、DingTalk、WeChat）—— 通过 feature 控制。新会话默认进入**主 Agent 模式**：伙伴人格 + 桌面网关工具（可按平台经 `channels.{platform}.masterAgent` 关闭）。 |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **桌面网关 MCP** —— 进程内 HTTP 工具服务器，把整个桌面（会话、定时任务、伙伴记忆、需求平台，以及 feature 控制的 browser/computer 工具）以 `nomi_*` 工具暴露给内部与外部 agent 入口。内部经 `nomicore mcp-gateway-stdio` 桥接入。 |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | 定时任务：cron 表达式、时区修复、cron 守护进程、由斜杠命令驱动的创建。 |
 | [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **AutoWork 编排器** —— 后端驱动、boot-resume、持久循环。通过 `RequirementSink` 与 agent 层通信。 |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | 智能决策模式（IDMM）：一个按会话的监督器，在提供商故障与决策停滞中保活智能体 / 终端会话（规则层 + 旁路模型）。详见[智能决策](../guides/intelligent-decision.zh.md)。 |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | 外发飞书消息发送器，agent 运行结束时的 `CompletionNotifier`。 |
-| [`nomifun-assistant`](../../crates/backend/nomifun-assistant/) | 助手（预设提示词 + 技能集 + MCP 集）的 CRUD、覆盖解析、导入 / 导出。 |
+| [`nomifun-preset`](../../crates/backend/nomifun-preset/) | 面向会话、集群成员、伙伴和定时任务的可复用启动配置：合并 builtin/user/extension 目录、关系化 CRUD、按目标解析、不可变快照与导入。 |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | 桌面伙伴状态、形象 / 图片资源、记忆 / 人格数据、伙伴公开图片服务，以及伙伴绑定令牌集成。 |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | 知识库、来源摄取、绑定库挂载状态，以及作用域只读的知识 MCP 服务器。 |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | 由伙伴令牌鉴权的公开对外入口：`/mcp`、`/mcp-agent` 与 `/v1`。 |
@@ -77,7 +77,7 @@
 | `cli.rs` | 顶层 `nomicore` clap 解析器：`--host/--port/--data-dir/--work-dir/--app-version/--local/--log-dir/--log-level`，加上子命令 `mcp-requirement-stdio`、`mcp-knowledge-stdio`、`mcp-gateway-stdio`、`mcp-open-stdio`、`mcp-computer-stdio`、`mcp-browser-stdio`、`terminal-hook`、`doctor`、`tools`、`call`、`agent`。Web 宿主调用 `Cli::parse_from(["nomifun-web"])` 取得带默认值的实例，然后覆盖自身关心的项。 |
 | `bootstrap/` | 分层初始化：`tracing_init`（文件 + 控制台层）、`work_dir` 解析、`builtin_skills` 物化、`environment::{init_environment,init_data_layer}`、`admin::ensure_admin_credentials`（认证模式下的首次运行预置）。 |
 | `services.rs` | `AppServices` 大杂烩：每个功能 crate 的服务带着对应仓储一并接好。通过 `AppServices::from_config(database, &config)` 一次构建。 |
-| `router/` | `create_router(&services)` 以及类型化的 `routes`、`state`、`health`、`trace` 辅助；`build_assistant_state` / `build_conversation_state` / `build_extension_states` / `build_module_states` / `build_ws_state`。 |
+| `router/` | `create_router(&services)` 以及类型化的 `routes`、`state`、`health`、`trace` 辅助；`build_preset_state` / `build_conversation_state` / `build_extension_states` / `build_module_states` / `build_ws_state`。 |
 | `commands/` | CLI 子命令的实现体：服务器、各 stdio MCP bridge、终端生命周期 hook、诊断，以及公开能力客户端命令。 |
 | `lib.rs` | 公共门面：`run_embedded_server`、`AppServices`、`create_router`、`bootstrap` 再导出。这是宿主二进制唯一引入的 API。 |
 

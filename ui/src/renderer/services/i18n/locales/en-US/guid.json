@@ -6,7 +6,7 @@
   "autoSwitchToAgent": "Gemini is not configured, auto-switching to {{agent}}",
   "autoSwitchedAgent": "{{from}} is not available, switched to {{to}}",
   "promptExamplesHint": "Try example prompts:",
-  "selectAssistantHint": "Select an assistant to start a task",
+  "selectPresetHint": "Select an preset to start a task",
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "Switched to {{agent}}",
   "modelRequired": "Select a model first",
@@ -54,7 +54,7 @@
   },
   "entry": {
     "free": "Free-form",
-    "summon": "Summon assistant",
+    "usePreset": "Use preset",
     "skills": "Use Skills",
     "skillsActive": "Use Skills · Enabled",
     "skillsAdjustAria": "Adjust the {{count}} Skills enabled for this chat",
@@ -72,19 +72,19 @@
     "adjustHint": "Click “Use Skills” to adjust this chat."
   },
   "drawer": {
-    "assistantTab": "Assistants",
+    "presetTab": "Presets",
     "skillsTab": "Skills",
-    "searchAssistant": "Search assistants…",
+    "searchPreset": "Search presets…",
     "searchSkill": "Search skills…",
-    "summon": "Summon",
+    "usePreset": "Use",
     "keepFree": "Stay free-form",
     "applySkills": "Apply to this chat",
     "selectedCount": "{{count}} skill(s) selected",
     "sourceCustom": "Custom",
     "sourceBuiltin": "Built-in",
     "autoInject": "Auto-inject",
-    "assistantCount": "assistant(s)",
+    "presetCount": "preset(s)",
     "skillCount": "skill(s)",
-    "assistantHint": "Click a card to summon — this session will use that assistant (single-select)"
+    "presetHint": "Choose one preset; the backend resolves and snapshots it for this conversation."
   }
 }

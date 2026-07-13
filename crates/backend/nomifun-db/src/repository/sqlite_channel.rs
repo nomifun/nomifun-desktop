@@ -1,7 +1,7 @@
 use sqlx::SqlitePool;
 
 use crate::error::DbError;
-use crate::models::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+use crate::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
 use crate::repository::channel::{IChannelRepository, UpdatePluginStatusParams};
 
 /// SQLite-backed implementation of [`IChannelRepository`].
@@ -21,14 +21,14 @@ impl IChannelRepository for SqliteChannelRepository {
     // ── Plugin CRUD ──────────────────────────────────────────────────
 
     async fn get_all_plugins(&self) -> Result<Vec<ChannelPluginRow>, DbError> {
-        let rows = sqlx::query_as::<_, ChannelPluginRow>("SELECT * FROM assistant_plugins ORDER BY created_at ASC")
+        let rows = sqlx::query_as::<_, ChannelPluginRow>("SELECT * FROM channel_plugins ORDER BY created_at ASC")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
     }
 
     async fn get_plugin(&self, id: &str) -> Result<Option<ChannelPluginRow>, DbError> {
-        let row = sqlx::query_as::<_, ChannelPluginRow>("SELECT * FROM assistant_plugins WHERE id = ?")
+        let row = sqlx::query_as::<_, ChannelPluginRow>("SELECT * FROM channel_plugins WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -37,7 +37,7 @@ impl IChannelRepository for SqliteChannelRepository {
 
     async fn upsert_plugin(&self, row: &ChannelPluginRow) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO assistant_plugins \
+            "INSERT INTO channel_plugins \
                 (id, type, name, enabled, config, status, last_connected, companion_id, public_agent_id, bot_key, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
@@ -97,7 +97,7 @@ impl IChannelRepository for SqliteChannelRepository {
         }
 
         set_clauses.push("updated_at = ?");
-        let sql = format!("UPDATE assistant_plugins SET {} WHERE id = ?", set_clauses.join(", "));
+        let sql = format!("UPDATE channel_plugins SET {} WHERE id = ?", set_clauses.join(", "));
 
         let now = nomifun_common::now_ms();
         let mut query = sqlx::query(&sql);
@@ -126,7 +126,7 @@ impl IChannelRepository for SqliteChannelRepository {
         // public-agent binding on the same row. Clearing (`None`) leaves the
         // public-agent binding untouched.
         let result = sqlx::query(
-            "UPDATE assistant_plugins \
+            "UPDATE channel_plugins \
              SET companion_id = ?, \
                  public_agent_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE public_agent_id END, \
                  updated_at = ? \
@@ -149,7 +149,7 @@ impl IChannelRepository for SqliteChannelRepository {
         // any companion binding on the same row. Clearing (`None`) leaves the
         // companion binding untouched.
         let result = sqlx::query(
-            "UPDATE assistant_plugins \
+            "UPDATE channel_plugins \
              SET public_agent_id = ?, \
                  companion_id = CASE WHEN ? IS NOT NULL THEN NULL ELSE companion_id END, \
                  updated_at = ? \
@@ -168,7 +168,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn update_plugin_bot_key(&self, id: &str, bot_key: &str) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE assistant_plugins SET bot_key = ?, updated_at = ? WHERE id = ?")
+        let result = sqlx::query("UPDATE channel_plugins SET bot_key = ?, updated_at = ? WHERE id = ?")
             .bind(bot_key)
             .bind(nomifun_common::now_ms())
             .bind(id)
@@ -188,7 +188,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn delete_plugin(&self, id: &str) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM assistant_plugins WHERE id = ?")
+        let result = sqlx::query("DELETE FROM channel_plugins WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -200,8 +200,8 @@ impl IChannelRepository for SqliteChannelRepository {
 
     // ── User CRUD ────────────────────────────────────────────────────
 
-    async fn get_all_users(&self) -> Result<Vec<AssistantUserRow>, DbError> {
-        let rows = sqlx::query_as::<_, AssistantUserRow>("SELECT * FROM assistant_users ORDER BY authorized_at DESC")
+    async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
+        let rows = sqlx::query_as::<_, ChannelUserRow>("SELECT * FROM channel_users ORDER BY authorized_at DESC")
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
@@ -212,9 +212,9 @@ impl IChannelRepository for SqliteChannelRepository {
         platform_user_id: &str,
         platform_type: &str,
         channel_id: &str,
-    ) -> Result<Option<AssistantUserRow>, DbError> {
-        let row = sqlx::query_as::<_, AssistantUserRow>(
-            "SELECT * FROM assistant_users \
+    ) -> Result<Option<ChannelUserRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelUserRow>(
+            "SELECT * FROM channel_users \
              WHERE platform_user_id = ? AND platform_type = ? AND channel_id = ?",
         )
         .bind(platform_user_id)
@@ -225,9 +225,9 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(row)
     }
 
-    async fn create_user(&self, row: &AssistantUserRow) -> Result<(), DbError> {
+    async fn create_user(&self, row: &ChannelUserRow) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO assistant_users \
+            "INSERT INTO channel_users \
                 (id, platform_user_id, platform_type, channel_id, display_name, \
                  authorized_at, last_active, session_id) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -256,7 +256,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn update_user_last_active(&self, id: &str, last_active: nomifun_common::TimestampMs) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE assistant_users SET last_active = ? WHERE id = ?")
+        let result = sqlx::query("UPDATE channel_users SET last_active = ? WHERE id = ?")
             .bind(last_active)
             .bind(id)
             .execute(&self.pool)
@@ -268,7 +268,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn delete_user(&self, id: &str) -> Result<(), DbError> {
-        let result = sqlx::query("DELETE FROM assistant_users WHERE id = ?")
+        let result = sqlx::query("DELETE FROM channel_users WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -280,16 +280,16 @@ impl IChannelRepository for SqliteChannelRepository {
 
     // ── Session CRUD ─────────────────────────────────────────────────
 
-    async fn get_all_sessions(&self) -> Result<Vec<AssistantSessionRow>, DbError> {
+    async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
         let rows =
-            sqlx::query_as::<_, AssistantSessionRow>("SELECT * FROM assistant_sessions ORDER BY last_activity DESC")
+            sqlx::query_as::<_, ChannelSessionRow>("SELECT * FROM channel_sessions ORDER BY last_activity DESC")
                 .fetch_all(&self.pool)
                 .await?;
         Ok(rows)
     }
 
-    async fn get_session(&self, id: &str) -> Result<Option<AssistantSessionRow>, DbError> {
-        let row = sqlx::query_as::<_, AssistantSessionRow>("SELECT * FROM assistant_sessions WHERE id = ?")
+    async fn get_session(&self, id: &str) -> Result<Option<ChannelSessionRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelSessionRow>("SELECT * FROM channel_sessions WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -301,11 +301,11 @@ impl IChannelRepository for SqliteChannelRepository {
         user_id: &str,
         chat_id: &str,
         channel_id: &str,
-        new_row: &AssistantSessionRow,
-    ) -> Result<AssistantSessionRow, DbError> {
+        new_row: &ChannelSessionRow,
+    ) -> Result<ChannelSessionRow, DbError> {
         // Try to find an existing session first.
-        let existing = sqlx::query_as::<_, AssistantSessionRow>(
-            "SELECT * FROM assistant_sessions \
+        let existing = sqlx::query_as::<_, ChannelSessionRow>(
+            "SELECT * FROM channel_sessions \
              WHERE user_id = ? AND chat_id = ? AND channel_id = ?",
         )
         .bind(user_id)
@@ -317,13 +317,13 @@ impl IChannelRepository for SqliteChannelRepository {
         if let Some(row) = existing {
             // Touch last_activity.
             let now = nomifun_common::now_ms();
-            sqlx::query("UPDATE assistant_sessions SET last_activity = ? WHERE id = ?")
+            sqlx::query("UPDATE channel_sessions SET last_activity = ? WHERE id = ?")
                 .bind(now)
                 .bind(&row.id)
                 .execute(&self.pool)
                 .await?;
 
-            return Ok(AssistantSessionRow {
+            return Ok(ChannelSessionRow {
                 last_activity: now,
                 ..row
             });
@@ -331,7 +331,7 @@ impl IChannelRepository for SqliteChannelRepository {
 
         // Insert new session.
         sqlx::query(
-            "INSERT INTO assistant_sessions \
+            "INSERT INTO channel_sessions \
                 (id, user_id, agent_type, conversation_id, workspace, \
                  chat_id, channel_id, created_at, last_activity) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -356,7 +356,7 @@ impl IChannelRepository for SqliteChannelRepository {
         id: &str,
         last_activity: nomifun_common::TimestampMs,
     ) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE assistant_sessions SET last_activity = ? WHERE id = ?")
+        let result = sqlx::query("UPDATE channel_sessions SET last_activity = ? WHERE id = ?")
             .bind(last_activity)
             .bind(id)
             .execute(&self.pool)
@@ -370,7 +370,7 @@ impl IChannelRepository for SqliteChannelRepository {
     async fn update_session_conversation(&self, id: &str, conversation_id: i64) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
-            "UPDATE assistant_sessions \
+            "UPDATE channel_sessions \
              SET conversation_id = ?, last_activity = ? \
              WHERE id = ?",
         )
@@ -388,7 +388,7 @@ impl IChannelRepository for SqliteChannelRepository {
     async fn update_session_agent_type(&self, id: &str, agent_type: &str) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
-            "UPDATE assistant_sessions \
+            "UPDATE channel_sessions \
              SET agent_type = ?, last_activity = ? \
              WHERE id = ?",
         )
@@ -404,7 +404,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn delete_sessions_by_user(&self, user_id: &str) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM assistant_sessions WHERE user_id = ?")
+        sqlx::query("DELETE FROM channel_sessions WHERE user_id = ?")
             .bind(user_id)
             .execute(&self.pool)
             .await?;
@@ -412,7 +412,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn delete_sessions_by_channel(&self, channel_id: &str) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM assistant_sessions WHERE channel_id = ?")
+        sqlx::query("DELETE FROM channel_sessions WHERE channel_id = ?")
             .bind(channel_id)
             .execute(&self.pool)
             .await?;
@@ -426,7 +426,7 @@ impl IChannelRepository for SqliteChannelRepository {
         channel_id: &str,
     ) -> Result<(), DbError> {
         sqlx::query(
-            "DELETE FROM assistant_sessions \
+            "DELETE FROM channel_sessions \
              WHERE user_id = ? AND chat_id = ? AND channel_id = ?",
         )
         .bind(user_id)
@@ -439,9 +439,9 @@ impl IChannelRepository for SqliteChannelRepository {
 
     // ── Pairing Codes ────────────────────────────────────────────────
 
-    async fn create_pairing(&self, row: &PairingCodeRow) -> Result<(), DbError> {
+    async fn create_pairing(&self, row: &ChannelPairingCodeRow) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO assistant_pairing_codes \
+            "INSERT INTO channel_pairing_codes \
                 (code, platform_user_id, platform_type, channel_id, display_name, \
                  requested_at, expires_at, status) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -466,9 +466,9 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    async fn get_pending_pairings(&self) -> Result<Vec<PairingCodeRow>, DbError> {
-        let rows = sqlx::query_as::<_, PairingCodeRow>(
-            "SELECT * FROM assistant_pairing_codes \
+    async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError> {
+        let rows = sqlx::query_as::<_, ChannelPairingCodeRow>(
+            "SELECT * FROM channel_pairing_codes \
              WHERE status = 'pending' \
              ORDER BY requested_at DESC",
         )
@@ -477,8 +477,8 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(rows)
     }
 
-    async fn get_pairing_by_code(&self, code: &str) -> Result<Option<PairingCodeRow>, DbError> {
-        let row = sqlx::query_as::<_, PairingCodeRow>("SELECT * FROM assistant_pairing_codes WHERE code = ?")
+    async fn get_pairing_by_code(&self, code: &str) -> Result<Option<ChannelPairingCodeRow>, DbError> {
+        let row = sqlx::query_as::<_, ChannelPairingCodeRow>("SELECT * FROM channel_pairing_codes WHERE code = ?")
             .bind(code)
             .fetch_optional(&self.pool)
             .await?;
@@ -486,7 +486,7 @@ impl IChannelRepository for SqliteChannelRepository {
     }
 
     async fn update_pairing_status(&self, code: &str, status: &str) -> Result<(), DbError> {
-        let result = sqlx::query("UPDATE assistant_pairing_codes SET status = ? WHERE code = ?")
+        let result = sqlx::query("UPDATE channel_pairing_codes SET status = ? WHERE code = ?")
             .bind(status)
             .bind(code)
             .execute(&self.pool)
@@ -499,7 +499,7 @@ impl IChannelRepository for SqliteChannelRepository {
 
     async fn cleanup_expired_pairings(&self, now: nomifun_common::TimestampMs) -> Result<u64, DbError> {
         let result = sqlx::query(
-            "UPDATE assistant_pairing_codes \
+            "UPDATE channel_pairing_codes \
              SET status = 'expired' \
              WHERE status = 'pending' AND expires_at <= ?",
         )
@@ -547,9 +547,9 @@ mod tests {
         }
     }
 
-    fn sample_user() -> AssistantUserRow {
+    fn sample_user() -> ChannelUserRow {
         let now = nomifun_common::now_ms();
-        AssistantUserRow {
+        ChannelUserRow {
             id: "usr-1".into(),
             platform_user_id: "tg_12345".into(),
             platform_type: "telegram".into(),
@@ -561,9 +561,9 @@ mod tests {
         }
     }
 
-    fn sample_session(user_id: &str) -> AssistantSessionRow {
+    fn sample_session(user_id: &str) -> ChannelSessionRow {
         let now = nomifun_common::now_ms();
-        AssistantSessionRow {
+        ChannelSessionRow {
             id: "sess-1".into(),
             user_id: user_id.into(),
             agent_type: "gemini".into(),
@@ -576,9 +576,9 @@ mod tests {
         }
     }
 
-    fn sample_pairing() -> PairingCodeRow {
+    fn sample_pairing() -> ChannelPairingCodeRow {
         let now = nomifun_common::now_ms();
-        PairingCodeRow {
+        ChannelPairingCodeRow {
             code: "123456".into(),
             platform_user_id: "tg_99".into(),
             platform_type: "telegram".into(),
@@ -881,7 +881,7 @@ mod tests {
         seed_channel(&repo, "tg-1").await;
         repo.create_user(&sample_user()).await.unwrap();
 
-        let dup = AssistantUserRow {
+        let dup = ChannelUserRow {
             id: "usr-2".into(),
             ..sample_user()
         };
@@ -906,7 +906,7 @@ mod tests {
         seed_channel(&repo, "lark-1").await;
         seed_channel(&repo, "lark-2").await;
 
-        let mk = |id: &str, chan: &str| AssistantUserRow {
+        let mk = |id: &str, chan: &str| ChannelUserRow {
             id: id.into(),
             platform_user_id: "ou_same".into(),
             platform_type: "lark".into(),
@@ -927,7 +927,7 @@ mod tests {
     async fn deleting_channel_cascades_its_users() {
         let (repo, _db) = setup().await;
         seed_channel(&repo, "lark-1").await;
-        repo.create_user(&AssistantUserRow {
+        repo.create_user(&ChannelUserRow {
             id: "u1".into(),
             platform_user_id: "ou_x".into(),
             platform_type: "lark".into(),
@@ -1036,7 +1036,7 @@ mod tests {
         let first = repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &new).await.unwrap();
 
         // Second call with different new_row id should still return the first.
-        let another = AssistantSessionRow {
+        let another = ChannelSessionRow {
             id: "sess-2".into(),
             ..new
         };
@@ -1055,7 +1055,7 @@ mod tests {
         let s1 = sample_session("usr-1");
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &s1).await.unwrap();
 
-        let s2 = AssistantSessionRow {
+        let s2 = ChannelSessionRow {
             id: "sess-2".into(),
             chat_id: Some("chat-xyz".into()),
             ..sample_session("usr-1")
@@ -1116,7 +1116,7 @@ mod tests {
         let s1 = sample_session("usr-1");
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &s1).await.unwrap();
 
-        let s2 = AssistantSessionRow {
+        let s2 = ChannelSessionRow {
             id: "sess-2".into(),
             chat_id: Some("chat-xyz".into()),
             ..sample_session("usr-1")
@@ -1134,8 +1134,8 @@ mod tests {
         repo.delete_sessions_by_user("usr-1").await.unwrap();
     }
 
-    /// Seeds an `assistant_plugins` row so `assistant_sessions.channel_id`
-    /// (FK → assistant_plugins(id), added in the seq/primary-key refactor) can
+    /// Seeds an `channel_plugins` row so `channel_sessions.channel_id`
+    /// (FK → channel_plugins(id), added in the seq/primary-key refactor) can
     /// reference it. `channel_id` is used as a routing key bound verbatim in
     /// `get_or_create_session`, so it cannot be nulled out without breaking the
     /// reuse-matching semantics the session tests exercise — the parent row
@@ -1243,7 +1243,7 @@ mod tests {
         let s1 = sample_session("usr-1");
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &s1).await.unwrap();
 
-        let s2 = AssistantSessionRow {
+        let s2 = ChannelSessionRow {
             id: "sess-2".into(),
             chat_id: Some("chat-xyz".into()),
             ..sample_session("usr-1")
@@ -1275,7 +1275,7 @@ mod tests {
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &s1).await.unwrap();
 
         // Same user + same chat through another bot → a second session.
-        let s2 = AssistantSessionRow {
+        let s2 = ChannelSessionRow {
             id: "sess-2".into(),
             channel_id: Some("achn_2".into()),
             ..sample_session("usr-1")
@@ -1304,7 +1304,7 @@ mod tests {
 
         let s1 = sample_session("usr-1");
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &s1).await.unwrap();
-        let s2 = AssistantSessionRow {
+        let s2 = ChannelSessionRow {
             id: "sess-2".into(),
             channel_id: Some("achn_2".into()),
             ..sample_session("usr-1")
@@ -1347,7 +1347,7 @@ mod tests {
         let p1 = sample_pairing();
         repo.create_pairing(&p1).await.unwrap();
 
-        let p2 = PairingCodeRow {
+        let p2 = ChannelPairingCodeRow {
             code: "654321".into(),
             status: "approved".into(),
             ..sample_pairing()
@@ -1389,7 +1389,7 @@ mod tests {
         let now = nomifun_common::now_ms();
 
         // Create an already-expired pairing.
-        let expired = PairingCodeRow {
+        let expired = ChannelPairingCodeRow {
             code: "111111".into(),
             expires_at: now - 1000,
             ..sample_pairing()
@@ -1397,7 +1397,7 @@ mod tests {
         repo.create_pairing(&expired).await.unwrap();
 
         // Create a still-valid pairing.
-        let valid = PairingCodeRow {
+        let valid = ChannelPairingCodeRow {
             code: "222222".into(),
             expires_at: now + 600_000,
             ..sample_pairing()
@@ -1420,7 +1420,7 @@ mod tests {
         let now = nomifun_common::now_ms();
 
         // Create an expired pairing that is already approved.
-        let approved = PairingCodeRow {
+        let approved = ChannelPairingCodeRow {
             code: "333333".into(),
             expires_at: now - 1000,
             status: "approved".into(),

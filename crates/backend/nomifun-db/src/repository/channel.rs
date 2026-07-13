@@ -1,12 +1,12 @@
 use nomifun_common::TimestampMs;
 
 use crate::error::DbError;
-use crate::models::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+use crate::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
 
 /// Data access abstraction for channel integration tables.
 ///
-/// Covers four tables: `assistant_plugins`, `assistant_users`,
-/// `assistant_sessions`, and `assistant_pairing_codes`.
+/// Covers four tables: `channel_plugins`, `channel_users`,
+/// `channel_sessions`, and `channel_pairing_codes`.
 ///
 /// Object-safe via `async_trait` to support `Arc<dyn IChannelRepository>`.
 #[async_trait::async_trait]
@@ -46,7 +46,7 @@ pub trait IChannelRepository: Send + Sync {
     // ── User CRUD ────────────────────────────────────────────────────
 
     /// Returns all authorized users.
-    async fn get_all_users(&self) -> Result<Vec<AssistantUserRow>, DbError>;
+    async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError>;
 
     /// Finds a user by platform identity scoped to one bot channel.
     async fn get_user_by_platform(
@@ -54,10 +54,10 @@ pub trait IChannelRepository: Send + Sync {
         platform_user_id: &str,
         platform_type: &str,
         channel_id: &str,
-    ) -> Result<Option<AssistantUserRow>, DbError>;
+    ) -> Result<Option<ChannelUserRow>, DbError>;
 
     /// Creates a new authorized user record.
-    async fn create_user(&self, row: &AssistantUserRow) -> Result<(), DbError>;
+    async fn create_user(&self, row: &ChannelUserRow) -> Result<(), DbError>;
 
     /// Updates `last_active` timestamp for a user.
     async fn update_user_last_active(&self, id: &str, last_active: TimestampMs) -> Result<(), DbError>;
@@ -69,10 +69,10 @@ pub trait IChannelRepository: Send + Sync {
     // ── Session CRUD ─────────────────────────────────────────────────
 
     /// Returns all sessions.
-    async fn get_all_sessions(&self) -> Result<Vec<AssistantSessionRow>, DbError>;
+    async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError>;
 
     /// Returns a single session by id.
-    async fn get_session(&self, id: &str) -> Result<Option<AssistantSessionRow>, DbError>;
+    async fn get_session(&self, id: &str) -> Result<Option<ChannelSessionRow>, DbError>;
 
     /// Finds an existing session by channel + user + chat, or creates a new
     /// one. If found, updates `last_activity` and returns the existing row.
@@ -82,8 +82,8 @@ pub trait IChannelRepository: Send + Sync {
         user_id: &str,
         chat_id: &str,
         channel_id: &str,
-        new_row: &AssistantSessionRow,
-    ) -> Result<AssistantSessionRow, DbError>;
+        new_row: &ChannelSessionRow,
+    ) -> Result<ChannelSessionRow, DbError>;
 
     /// Updates `last_activity` timestamp for a session.
     async fn update_session_activity(&self, id: &str, last_activity: TimestampMs) -> Result<(), DbError>;
@@ -107,13 +107,13 @@ pub trait IChannelRepository: Send + Sync {
     // ── Pairing Codes ────────────────────────────────────────────────
 
     /// Creates a new pairing code record.
-    async fn create_pairing(&self, row: &PairingCodeRow) -> Result<(), DbError>;
+    async fn create_pairing(&self, row: &ChannelPairingCodeRow) -> Result<(), DbError>;
 
     /// Returns all pairing codes with status = 'pending'.
-    async fn get_pending_pairings(&self) -> Result<Vec<PairingCodeRow>, DbError>;
+    async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError>;
 
     /// Retrieves a single pairing code, or `None` if not found.
-    async fn get_pairing_by_code(&self, code: &str) -> Result<Option<PairingCodeRow>, DbError>;
+    async fn get_pairing_by_code(&self, code: &str) -> Result<Option<ChannelPairingCodeRow>, DbError>;
 
     /// Updates the status of a pairing code.
     /// Returns `DbError::NotFound` if the code doesn't exist.

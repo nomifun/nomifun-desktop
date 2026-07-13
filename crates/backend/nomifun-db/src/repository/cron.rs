@@ -19,6 +19,9 @@ pub struct UpdateCronJobParams {
     pub payload_message: Option<String>,
     pub execution_mode: Option<String>,
     pub agent_config: Option<Option<String>>,
+    pub preset_id: Option<Option<String>>,
+    pub preset_revision: Option<Option<i64>>,
+    pub preset_snapshot: Option<Option<String>>,
     /// Target conversation. `Some(Some(id))` binds a conversation, `Some(None)`
     /// clears it to NULL (FK ON DELETE SET NULL), `None` leaves it unchanged.
     pub conversation_id: Option<Option<i64>>,

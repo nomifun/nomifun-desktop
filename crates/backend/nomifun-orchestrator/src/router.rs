@@ -171,6 +171,9 @@ mod tests {
         FleetMember {
             id: "m".to_string(),
             agent_id: "a".to_string(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: None,
             model: None,
             role_hint: None,

@@ -110,7 +110,7 @@
     <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="新建智能体终端"><br/><sub><b>终端 · 能力开放给 Agent CLI</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme-03-assistants.png" alt="助手与 Skill 能力库"><br/><sub><b>助手 & Skill · 场景化能力库</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-03-presets.png" alt="设定与 Skill 能力库"><br/><sub><b>设定 & Skill · 可复用能力模板</b></sub></td>
     <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="模型与 Agent 管理"><br/><sub><b>模型 & Agent · 统一管理与接入</b></sub></td>
   </tr>
 </table>
@@ -235,7 +235,7 @@ NomiFun 不绑定任何一家模型厂商。你可以按地区、价格、额度
 
 ### ⚙️ config one，use anywhere
 
-**知识库**、**Assistants & Skills**、**MCP**、**模型**、**开放能力**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
+**知识库**、**设定 & Skills**、**MCP**、**模型**、**开放能力**的集中管理中枢 —— 配置一次，再按会话、终端、渠道或伙伴逐一选用。单一事实源，处处复用。
 
 ### 💬 11 个 IM 渠道
 

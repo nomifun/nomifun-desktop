@@ -9,7 +9,7 @@ use std::fmt;
 /// Platform type identifier for channel plugins.
 ///
 /// Includes the four supported IM platforms and reserved variants
-/// for future platforms (`slack`/`discord` per the `assistant_plugins.type`
+/// for future platforms (`slack`/`discord` per the `channel_plugins.type`
 /// CHECK constraint in the DB schema).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -283,7 +283,7 @@ pub enum ConnectionMode {
 
 /// Combined plugin configuration: credentials + options.
 ///
-/// Stored as JSON in the `assistant_plugins.config` column (encrypted).
+/// Stored as JSON in the `channel_plugins.config` column (encrypted).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginConfig {
     pub credentials: PluginCredentials,
@@ -294,7 +294,7 @@ pub struct PluginConfig {
 /// Extracts the platform-level bot identity from credentials.
 ///
 /// This key is what makes two configs "the same bot": it backs the
-/// `UNIQUE(type, bot_key)` constraint on `assistant_plugins`, which
+/// `UNIQUE(type, bot_key)` constraint on `channel_plugins`, which
 /// structurally prevents one bot from being bound to more than one companion.
 /// Only non-secret identifiers are used (the telegram token's numeric
 /// bot-id prefix is public; secrets stay inside the encrypted config).
@@ -362,7 +362,7 @@ pub struct UnifiedIncomingMessage {
     pub raw: Option<serde_json::Value>,
 }
 
-/// An incoming message stamped with the `assistant_plugins` row it arrived
+/// An incoming message stamped with the `channel_plugins` row it arrived
 /// through. Plugins emit bare [`UnifiedIncomingMessage`]s; the manager's
 /// per-instance forwarder adds the channel id so the orchestrator can route
 /// sessions, replies and companion bindings per bot (not per platform).

@@ -7,6 +7,8 @@
 // (max_parallel / sort_order / created_at / updated_at) are i64 on the backend
 // but arrive as plain `number` over JSON, so they are typed `number` here.
 
+import type { PresetOverrides, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+
 /** A member's declared capability profile, used by the orchestrator for routing. */
 export type TCapabilityProfile = {
   strengths: string[];
@@ -28,6 +30,9 @@ export type TMemberConstraints = {
 export type TFleetMember = {
   id: string;
   agent_id: string;
+  preset_id?: string;
+  preset_revision?: number;
+  preset_snapshot?: ResolvedPresetSnapshot;
   provider_id?: string;
   model?: string;
   role_hint?: string;
@@ -36,11 +41,11 @@ export type TFleetMember = {
   sort_order: number;
   /** Role/model description fed to the description-driven planner (P3/P4). */
   description?: string;
-  /** Assistant persona (rule text); the worker uses it as `preset_rules` (P4). */
+  /** Resolved preset instructions frozen into the run snapshot. */
   system_prompt?: string;
-  /** Assistant skills the worker enables (P4). Empty for bare-model members. */
+  /** Resolved preset skills. Empty for bare-model members. */
   enabled_skills?: string[];
-  /** Assistant's disabled built-in skills (P4). Empty for bare-model members. */
+  /** Resolved preset exclusions. Empty for bare-model members. */
   disabled_builtin_skills?: string[];
 };
 
@@ -70,6 +75,8 @@ export type TOrchWorkspace = {
 /** Input shape for a fleet member when creating/updating a fleet. */
 export type TFleetMemberInput = {
   agent_id: string;
+  preset_id?: string;
+  preset_overrides?: PresetOverrides;
   provider_id?: string;
   model?: string;
   role_hint?: string;

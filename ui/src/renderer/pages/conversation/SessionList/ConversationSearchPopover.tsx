@@ -7,7 +7,7 @@
 import { ipcBridge } from '@/common';
 import type { IMessageSearchItem } from '@/common/types/team/database';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import { usePresetAssistantInfo } from '@/renderer/hooks/agent/usePresetAssistantInfo';
+import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { blockMobileInputFocus, blurActiveElement } from '@/renderer/utils/ui/focus';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -100,22 +100,22 @@ interface ConversationSearchPopoverProps {
 }
 
 const ConversationAgentMark: React.FC<{ conversation: IMessageSearchItem['conversation'] }> = ({ conversation }) => {
-  const { info: assistantInfo } = usePresetAssistantInfo(conversation);
+  const { info: presetInfo } = usePresetInfo(conversation);
 
-  if (assistantInfo) {
-    if (assistantInfo.isEmoji) {
+  if (presetInfo) {
+    if (presetInfo.isEmoji) {
       return (
-        <span className='text-18px leading-none flex-shrink-0' title={assistantInfo.name}>
-          {assistantInfo.logo}
+        <span className='text-18px leading-none flex-shrink-0' title={presetInfo.name}>
+          {presetInfo.logo}
         </span>
       );
     }
 
     return (
       <img
-        src={assistantInfo.logo}
-        alt={assistantInfo.name}
-        title={assistantInfo.name}
+        src={presetInfo.logo}
+        alt={presetInfo.name}
+        title={presetInfo.name}
         className='w-18px h-18px rounded-50% flex-shrink-0'
       />
     );

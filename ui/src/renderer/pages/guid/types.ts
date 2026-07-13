@@ -33,9 +33,9 @@ export type AvailableAgent = {
    */
   custom_agent_id?: string;
   is_preset?: boolean;
+  preset_id?: string;
   context?: string;
   avatar?: string;
-  presetAgentType?: string;
   isExtension?: boolean;
   extensionName?: string;
 };

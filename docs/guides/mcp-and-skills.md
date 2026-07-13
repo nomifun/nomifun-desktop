@@ -12,8 +12,8 @@ Current pages:
 | Capability | Page |
 | --- | --- |
 | MCP servers | `/mcp` |
-| Skills | `/assistants?tab=skills` |
-| Assistants | `/assistants?tab=assistants` |
+| Skills | `/skills` |
+| Presets | `/presets` |
 | Public/remote capability exposure | `/open-capabilities` |
 
 Legacy settings URLs redirect to these pages.
@@ -74,7 +74,7 @@ The resulting list is passed to the agent session start payload.
 
 ## Skills
 
-Open `/assistants?tab=skills`.
+Open `/skills`.
 
 ![Skills tab](../images/mcp-03-skills.png)
 
@@ -101,12 +101,12 @@ or materialized for a specific agent backend.
 | Import / export / delete | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | Scan / detect paths | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
 | Materialize for agent | `POST /api/skills/materialize-for-agent` |
-| Assistant rule/skill files | `/api/skills/assistant-rule/*`, `/api/skills/assistant-skill/*` |
+| Preset instructions | `/api/skills/preset-rule/*` |
 | External paths | `GET`, `POST`, `DELETE /api/skills/external-paths` |
 | Skills market | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
 
 ## Related
 
-- [Assistants](./assistants.md)
+- [Presets](./presets.md)
 - [Remote Capability API](./remote-capability-api.md)
 - [Terminal](./terminal.md)

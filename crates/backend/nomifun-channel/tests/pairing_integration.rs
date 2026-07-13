@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{TimestampMs, now_ms};
-use nomifun_db::models::{ChannelPluginRow, PairingCodeRow};
+use nomifun_db::models::{ChannelPluginRow, ChannelPairingCodeRow};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
 use nomifun_realtime::EventBroadcaster;
 
@@ -16,8 +16,8 @@ use nomifun_channel::constants::{PAIRING_CODE_LENGTH, PAIRING_CODE_TTL};
 use nomifun_channel::error::ChannelError;
 use nomifun_channel::pairing::PairingService;
 
-/// Telegram bot channel id used by the integration tests. `assistant_pairing_codes`
-/// and `assistant_users` carry an FK channel_id → assistant_plugins(id), so the
+/// Telegram bot channel id used by the integration tests. `channel_pairing_codes`
+/// and `channel_users` carry an FK channel_id → channel_plugins(id), so the
 /// plugin rows must exist before any pairing is created.
 const CH_TG: &str = "tg-1";
 /// Lark bot channel id (second platform exercised by these tests).
@@ -59,8 +59,8 @@ async fn setup() -> (PairingService, Arc<dyn IChannelRepository>, Arc<MockBroadc
     let bc = Arc::new(MockBroadcaster::new());
     let svc = PairingService::new(repo.clone(), bc.clone());
 
-    // Seed the bot channels the tests pair against. assistant_pairing_codes /
-    // assistant_users have an FK channel_id → assistant_plugins(id), so these
+    // Seed the bot channels the tests pair against. channel_pairing_codes /
+    // channel_users have an FK channel_id → channel_plugins(id), so these
     // rows must exist before request_pairing inserts a code.
     for (id, ty, name) in [(CH_TG, "telegram", "Telegram Bot"), (CH_LARK, "lark", "Lark Bot")] {
         repo.upsert_plugin(&ChannelPluginRow {
@@ -156,7 +156,7 @@ async fn pp3_expired_not_in_pending() {
     svc.request_pairing("u1", "telegram", CH_TG, None).await.unwrap();
 
     // Insert already-expired code directly
-    let expired_row = PairingCodeRow {
+    let expired_row = ChannelPairingCodeRow {
         code: "000001".into(),
         platform_user_id: "u2".into(),
         platform_type: "lark".into(),
@@ -218,7 +218,7 @@ async fn ap4_approve_expired_code() {
     let (_svc, repo, bc) = setup().await;
     let svc = PairingService::new(repo.clone(), bc.clone());
 
-    let expired_row = PairingCodeRow {
+    let expired_row = ChannelPairingCodeRow {
         code: "999999".into(),
         platform_user_id: "u1".into(),
         platform_type: "telegram".into(),
@@ -308,7 +308,7 @@ async fn ec1_expired_codes_cleaned_up() {
     let (_svc, repo, bc) = setup().await;
     let _svc = PairingService::new(repo.clone(), bc.clone());
 
-    let expired_row = PairingCodeRow {
+    let expired_row = ChannelPairingCodeRow {
         code: "111111".into(),
         platform_user_id: "u1".into(),
         platform_type: "telegram".into(),
@@ -433,7 +433,7 @@ async fn two_lark_bots_pair_independently() {
     let (svc, repo, _bc) = setup().await;
 
     // setup() seeds CH_LARK (lark-1). Seed a second lark bot so the
-    // channel_id FK (assistant_pairing_codes/assistant_users → assistant_plugins)
+    // channel_id FK (channel_pairing_codes/channel_users → channel_plugins)
     // is satisfied for bot 2. Same upsert_plugin pattern setup() uses.
     repo.upsert_plugin(&ChannelPluginRow {
         id: CH_LARK2.into(),

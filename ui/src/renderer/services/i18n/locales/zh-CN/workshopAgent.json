@@ -1,0 +1,8 @@
+{
+  "agent": {
+    "placeholder": "画布 Agent 文案(M9 实装)"
+  },
+  "applied": {
+    "ops": "Nomi 更新了画布（{{count}} 项操作）"
+  }
+}

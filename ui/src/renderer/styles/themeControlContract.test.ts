@@ -10,8 +10,8 @@ import { PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets'
 
 const controlCss = readFileSync(new URL('./theme-control-contract.css', import.meta.url), 'utf8');
 const showcaseSource = readFileSync(new URL('../pages/TestShowcase.tsx', import.meta.url), 'utf8');
-const assistantTagPickerSource = readFileSync(
-  new URL('../pages/settings/AssistantSettings/AssistantTagPicker.tsx', import.meta.url),
+const presetTagPickerSource = readFileSync(
+  new URL('../pages/settings/PresetSettings/PresetTagPicker.tsx', import.meta.url),
   'utf8'
 );
 const knowledgeTagFilterSource = readFileSync(new URL('../pages/knowledge/KnowledgeTagFilterBar.tsx', import.meta.url), 'utf8');
@@ -20,8 +20,8 @@ const requirementSourceCardSource = readFileSync(
   'utf8'
 );
 const knowledgeEmptyStateSource = readFileSync(new URL('../pages/knowledge/KnowledgeEmptyState.tsx', import.meta.url), 'utf8');
-const assistantTagFilterSource = readFileSync(
-  new URL('../pages/settings/AssistantSettings/AssistantTagFilterBar.tsx', import.meta.url),
+const presetTagFilterSource = readFileSync(
+  new URL('../pages/settings/PresetSettings/PresetTagFilterBar.tsx', import.meta.url),
   'utf8'
 );
 
@@ -71,7 +71,7 @@ describe('theme control contract', () => {
 
   test('uses the control palette for custom selected chips and selected source tags', () => {
     for (const source of [
-      assistantTagPickerSource,
+      presetTagPickerSource,
       knowledgeTagFilterSource,
       requirementSourceCardSource,
       knowledgeEmptyStateSource,
@@ -81,9 +81,9 @@ describe('theme control contract', () => {
     }
   });
 
-  test('uses a matte black and white active state for assistant tag filters', () => {
-    expect(assistantTagFilterSource.includes('bg-[#151515] text-white border-white')).toBe(true);
-    expect(assistantTagFilterSource.includes('shadow-[0_1px_2px_rgba(var(--primary-6),0.08)]')).toBe(false);
+  test('uses a matte black and white active state for preset tag filters', () => {
+    expect(presetTagFilterSource.includes('bg-[#151515] text-white border-white')).toBe(true);
+    expect(presetTagFilterSource.includes('shadow-[0_1px_2px_rgba(var(--primary-6),0.08)]')).toBe(false);
   });
 
   test('uses a green track and white thumb for checked switches in dark themes', () => {

@@ -166,23 +166,23 @@ pub struct SkillPathsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// D. Assistant rules & skills
+// D. Preset rules & skills
 // ---------------------------------------------------------------------------
 
-/// Request body for `POST /api/skills/assistant-rule/read` and
-/// `POST /api/skills/assistant-skill/read`.
+/// Request body for `POST /api/skills/preset-rule/read` and
+/// `POST /api/skills/preset-skill/read`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ReadAssistantRuleRequest {
-    pub assistant_id: String,
+pub struct ReadPresetRuleRequest {
+    pub preset_id: String,
     #[serde(default)]
     pub locale: Option<String>,
 }
 
-/// Request body for `POST /api/skills/assistant-rule/write` and
-/// `POST /api/skills/assistant-skill/write`.
+/// Request body for `POST /api/skills/preset-rule/write` and
+/// `POST /api/skills/preset-skill/write`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct WriteAssistantRuleRequest {
-    pub assistant_id: String,
+pub struct WritePresetRuleRequest {
+    pub preset_id: String,
     pub content: String,
     #[serde(default)]
     pub locale: Option<String>,
@@ -577,32 +577,32 @@ mod tests {
         assert!(json.get("builtinSkillsDir").is_none());
     }
 
-    // -- Assistant rules --
+    // -- Preset rules --
 
     #[test]
-    fn test_read_assistant_rule_request_with_locale() {
-        let raw = json!({"assistant_id": "abc123", "locale": "zh-CN"});
-        let req: ReadAssistantRuleRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.assistant_id, "abc123");
+    fn test_read_preset_rule_request_with_locale() {
+        let raw = json!({"preset_id": "abc123", "locale": "zh-CN"});
+        let req: ReadPresetRuleRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.preset_id, "abc123");
         assert_eq!(req.locale.as_deref(), Some("zh-CN"));
     }
 
     #[test]
-    fn test_read_assistant_rule_request_without_locale() {
-        let raw = json!({"assistant_id": "abc123"});
-        let req: ReadAssistantRuleRequest = serde_json::from_value(raw).unwrap();
+    fn test_read_preset_rule_request_without_locale() {
+        let raw = json!({"preset_id": "abc123"});
+        let req: ReadPresetRuleRequest = serde_json::from_value(raw).unwrap();
         assert!(req.locale.is_none());
     }
 
     #[test]
-    fn test_write_assistant_rule_request() {
+    fn test_write_preset_rule_request() {
         let raw = json!({
-            "assistant_id": "abc123",
+            "preset_id": "abc123",
             "content": "# Rules\nBe helpful.",
             "locale": "en-US"
         });
-        let req: WriteAssistantRuleRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.assistant_id, "abc123");
+        let req: WritePresetRuleRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.preset_id, "abc123");
         assert_eq!(req.content, "# Rules\nBe helpful.");
         assert_eq!(req.locale.as_deref(), Some("en-US"));
     }

@@ -286,6 +286,8 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
         model,
         source: None,
         channel_chat_id: None,
+        preset_id: None,
+        preset_overrides: None,
         extra,
     };
     match deps.conversation_service.create(&user_id, req).await {
@@ -450,6 +452,8 @@ async fn agent_run(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: AgentRunParams, pr
         model,
         source: None,
         channel_chat_id: None,
+        preset_id: None,
+        preset_overrides: None,
         extra,
     };
     let conv = match deps.conversation_service.create(&user_id, create_req).await {

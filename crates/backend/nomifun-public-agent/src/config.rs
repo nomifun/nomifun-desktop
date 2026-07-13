@@ -60,6 +60,11 @@ pub struct PublicAgentConfig {
     /// tone). Owner-authored; injected as a hard system directive. Free-text in
     /// P1 (structured policy is P2).
     pub service_policy: String,
+    /// Frozen reusable configuration. Runtime policy remains authoritative:
+    /// public-service tool clamps and grounded restrictions cannot be relaxed
+    /// by a preset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_preset: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     /// Day-level audit retention (see `crate::audit`).
     pub audit_retention_days: u32,
     /// Whether the agent is live (serving) or paused.
@@ -82,6 +87,7 @@ impl PublicAgentConfig {
             knowledge_base_ids: Vec::new(),
             grounded_mode: true,
             service_policy: String::new(),
+            applied_preset: None,
             audit_retention_days: DEFAULT_AUDIT_RETENTION_DAYS,
             enabled: true,
             created_at: now_ms(),

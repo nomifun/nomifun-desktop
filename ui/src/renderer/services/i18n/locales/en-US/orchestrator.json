@@ -41,8 +41,8 @@
     },
     "rolesLabel": "Pinned roles",
     "rolesHint": "Optional · leave empty to let the fleet assemble itself",
-    "rolesPlaceholder": "Pick roles from enabled assistants",
-    "rolesEmpty": "No assistants available",
+    "rolesPlaceholder": "Pick roles from enabled presets",
+    "rolesEmpty": "No presets available",
     "autonomyLabel": "Autonomy",
     "autonomy": {
       "interactive": "Review first",
@@ -317,15 +317,15 @@
       "scrollLatest": "Jump to latest"
     },
     "precipitate": {
-      "title": "Save roles as assistants",
-      "subtitle": "{{count}} role(s) from this run can be saved as assistants for reuse",
+      "title": "Save roles as presets",
+      "subtitle": "{{count}} role(s) from this run can be saved as presets for reuse",
       "modelsLabel": "Models",
       "skillsLabel": "{{count}} skill(s)",
-      "saveAsAssistant": "Save as assistant",
+      "saveAsPreset": "Save as preset",
       "saved": "Saved",
-      "exists": "An assistant with this name already exists",
-      "saveOk": "Saved “{{name}}” as an assistant",
-      "saveError": "Failed to save assistant: {{error}}",
+      "exists": "An preset with this name already exists",
+      "saveOk": "Saved “{{name}}” as an preset",
+      "saveError": "Failed to save preset: {{error}}",
       "synthDesc": "“{{role}}” role — handled: {{tasks}}",
       "synthDescBare": "“{{role}}” role precipitated from a run",
       "taskSep": ", "

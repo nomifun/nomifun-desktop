@@ -149,7 +149,7 @@ all per-companion, while memory stays shared.
 Each IM platform (Telegram / Lark / DingTalk / WeChat) can bind its own
 greeter companion for remote messages: open the companion's **Remote**
 tab (`/nomi?companion=<id>&tab=remote`) and connect or rebind the bot
-there. The binding is still persisted as `assistant.{platform}.companionId`
+there. The binding is persisted as `channels.{platform}.companionId`
 for legacy platform-level preferences when a channel row has no direct
 companion binding. With no binding the **default companion** takes over;
 switching the binding resets that channel's active sessions (the next

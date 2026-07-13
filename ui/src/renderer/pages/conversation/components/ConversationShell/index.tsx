@@ -107,7 +107,7 @@ const ConversationShell: React.FC = () => {
   const handleNewChat = useCallback(() => {
     setBatchMode(false);
     if (isMobile) setMobileOpen(false);
-    void navigate('/guid', { state: { resetAssistant: true } });
+    void navigate('/guid', { state: { resetPreset: true } });
   }, [isMobile, navigate]);
 
   const handleNewTerminal = useCallback(() => {

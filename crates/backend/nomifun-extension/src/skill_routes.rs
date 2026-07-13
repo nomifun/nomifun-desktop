@@ -10,15 +10,15 @@ use axum::routing::{delete, get, post, put};
 use nomifun_api_types::{
     AddExternalPathRequest, ApiResponse, BuiltinAutoSkillResponse, ExportSkillRequest, ExternalSkillSourceResponse,
     ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest, MaterializeSkillsResponse, MaterializedSkillRef,
-    NamedPathResponse, ReadAssistantRuleRequest, ReadBuiltinResourceRequest, ReadSkillInfoRequest,
+    NamedPathResponse, ReadPresetRuleRequest, ReadBuiltinResourceRequest, ReadSkillInfoRequest,
     ReadSkillInfoResponse, RemoveExternalPathRequest, ScanForSkillsRequest, ScanForSkillsResponse,
     ScannedSkillResponse, SetSkillTagsRequest, SkillListItemResponse, SkillPathsResponse, SkillSourceResponse,
-    WriteAssistantRuleRequest,
+    WritePresetRuleRequest,
 };
 use nomifun_common::AppError;
 use nomifun_db::ISkillTagRepository;
 
-use crate::classifier::AssistantRuleDispatcher;
+use crate::classifier::PresetRuleDispatcher;
 use crate::external_paths::ExternalPathsManager;
 use crate::skill_service::{self, SkillPaths, SkillSource};
 
@@ -39,11 +39,11 @@ fn to_source_response(source: SkillSource) -> SkillSourceResponse {
 pub struct SkillRouterState {
     pub skill_paths: SkillPaths,
     pub external_paths_manager: Arc<ExternalPathsManager>,
-    /// Optional dispatcher that routes assistant-rule / assistant-skill
+    /// Optional dispatcher that routes preset-rule / preset-skill
     /// read/write/delete by source (builtin / extension / user). When
     /// `None`, the legacy user-directory-only behavior is preserved.
     #[allow(clippy::type_complexity)]
-    pub assistant_dispatcher: Option<Arc<dyn AssistantRuleDispatcher>>,
+    pub preset_dispatcher: Option<Arc<dyn PresetRuleDispatcher>>,
     /// Per-skill tag assignment repo (user assignments/overrides).
     pub skill_tag_repo: Arc<dyn ISkillTagRepository>,
     /// Built-in skill tag seed: skill name → (audience_tags, scenario_tags).
@@ -79,14 +79,14 @@ pub fn skill_routes(state: SkillRouterState) -> Router {
         .route("/api/skills/builtin-skill", post(read_builtin_skill))
         // Per-agent skill resolution (for agent CLI symlink layout).
         .route("/api/skills/materialize-for-agent", post(materialize_for_agent))
-        // Assistant rules CRUD
-        .route("/api/skills/assistant-rule/read", post(read_assistant_rule))
-        .route("/api/skills/assistant-rule/write", post(write_assistant_rule))
-        .route("/api/skills/assistant-rule/{id}", delete(delete_assistant_rule))
-        // Assistant skills CRUD
-        .route("/api/skills/assistant-skill/read", post(read_assistant_skill))
-        .route("/api/skills/assistant-skill/write", post(write_assistant_skill))
-        .route("/api/skills/assistant-skill/{id}", delete(delete_assistant_skill))
+        // Preset rules CRUD
+        .route("/api/skills/preset-rule/read", post(read_preset_rule))
+        .route("/api/skills/preset-rule/write", post(write_preset_rule))
+        .route("/api/skills/preset-rule/{id}", delete(delete_preset_rule))
+        // Preset skills CRUD
+        .route("/api/skills/preset-skill/read", post(read_preset_skill))
+        .route("/api/skills/preset-skill/write", post(write_preset_skill))
+        .route("/api/skills/preset-skill/{id}", delete(delete_preset_skill))
         // External path management
         .route(
             "/api/skills/external-paths",
@@ -149,7 +149,7 @@ async fn list_skills(
 }
 
 /// Decode a JSON-array TEXT column into a `Vec<String>`. Fail-soft on purpose
-/// (intentionally unlike `nomifun-assistant`'s `decode_str_list`, which 500s on
+/// (intentionally unlike `nomifun-preset`'s `decode_str_list`, which 500s on
 /// bad JSON): this is the read path for the skill list, so one corrupted sidecar
 /// row must not break the whole listing — it degrades to no tags for that skill.
 fn decode_tags(raw: Option<&str>) -> Vec<String> {
@@ -384,44 +384,44 @@ async fn materialize_for_agent(
 }
 
 // ---------------------------------------------------------------------------
-// Assistant rules CRUD
+// Preset rules CRUD
 // ---------------------------------------------------------------------------
 
-/// `POST /api/skills/assistant-rule/read` — read an assistant rule.
+/// `POST /api/skills/preset-rule/read` — read an preset rule.
 ///
-/// Dispatches by source via [`AssistantRuleDispatcher`] when wired; falls
+/// Dispatches by source via [`PresetRuleDispatcher`] when wired; falls
 /// back to user-directory-only legacy behavior otherwise.
-async fn read_assistant_rule(
+async fn read_preset_rule(
     State(state): State<SkillRouterState>,
-    body: Result<Json<ReadAssistantRuleRequest>, JsonRejection>,
+    body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
-        let content = dispatcher.read_rule(&req.assistant_id, req.locale.as_deref()).await?;
+    if let Some(dispatcher) = &state.preset_dispatcher {
+        let content = dispatcher.read_rule(&req.preset_id, req.locale.as_deref()).await?;
         return Ok(Json(ApiResponse::ok(content)));
     }
     let content =
-        skill_service::read_assistant_rule(&state.skill_paths, &req.assistant_id, req.locale.as_deref()).await?;
+        skill_service::read_preset_rule(&state.skill_paths, &req.preset_id, req.locale.as_deref()).await?;
     Ok(Json(ApiResponse::ok(content)))
 }
 
-/// `POST /api/skills/assistant-rule/write` — write an assistant rule.
+/// `POST /api/skills/preset-rule/write` — write an preset rule.
 ///
 /// Dispatches by source: builtin / extension ids reject with 400.
-async fn write_assistant_rule(
+async fn write_preset_rule(
     State(state): State<SkillRouterState>,
-    body: Result<Json<WriteAssistantRuleRequest>, JsonRejection>,
+    body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
+    if let Some(dispatcher) = &state.preset_dispatcher {
         dispatcher
-            .write_rule(&req.assistant_id, req.locale.as_deref(), &req.content)
+            .write_rule(&req.preset_id, req.locale.as_deref(), &req.content)
             .await?;
         return Ok(Json(ApiResponse::ok(true)));
     }
-    let ok = skill_service::write_assistant_rule(
+    let ok = skill_service::write_preset_rule(
         &state.skill_paths,
-        &req.assistant_id,
+        &req.preset_id,
         &req.content,
         req.locale.as_deref(),
     )
@@ -429,57 +429,57 @@ async fn write_assistant_rule(
     Ok(Json(ApiResponse::ok(ok)))
 }
 
-/// `DELETE /api/skills/assistant-rule/:id` — delete all locale versions.
-async fn delete_assistant_rule(
+/// `DELETE /api/skills/preset-rule/:id` — delete all locale versions.
+async fn delete_preset_rule(
     State(state): State<SkillRouterState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    if let Some(dispatcher) = &state.assistant_dispatcher {
+    if let Some(dispatcher) = &state.preset_dispatcher {
         let ok = dispatcher.delete_rule(&id).await?;
         return Ok(Json(ApiResponse::ok(ok)));
     }
-    let ok = skill_service::delete_assistant_rule(&state.skill_paths, &id).await?;
+    let ok = skill_service::delete_preset_rule(&state.skill_paths, &id).await?;
     Ok(Json(ApiResponse::ok(ok)))
 }
 
 // ---------------------------------------------------------------------------
-// Assistant skills CRUD
+// Preset skills CRUD
 // ---------------------------------------------------------------------------
 
-/// `POST /api/skills/assistant-skill/read` — read an assistant skill.
+/// `POST /api/skills/preset-skill/read` — read an preset skill.
 ///
-/// Dispatches by source via [`AssistantRuleDispatcher`] when wired.
-async fn read_assistant_skill(
+/// Dispatches by source via [`PresetRuleDispatcher`] when wired.
+async fn read_preset_skill(
     State(state): State<SkillRouterState>,
-    body: Result<Json<ReadAssistantRuleRequest>, JsonRejection>,
+    body: Result<Json<ReadPresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
-        let content = dispatcher.read_skill(&req.assistant_id, req.locale.as_deref()).await?;
+    if let Some(dispatcher) = &state.preset_dispatcher {
+        let content = dispatcher.read_skill(&req.preset_id, req.locale.as_deref()).await?;
         return Ok(Json(ApiResponse::ok(content)));
     }
     let content =
-        skill_service::read_assistant_skill(&state.skill_paths, &req.assistant_id, req.locale.as_deref()).await?;
+        skill_service::read_preset_skill(&state.skill_paths, &req.preset_id, req.locale.as_deref()).await?;
     Ok(Json(ApiResponse::ok(content)))
 }
 
-/// `POST /api/skills/assistant-skill/write` — write an assistant skill.
+/// `POST /api/skills/preset-skill/write` — write an preset skill.
 ///
 /// Dispatches by source: builtin / extension ids reject with 400.
-async fn write_assistant_skill(
+async fn write_preset_skill(
     State(state): State<SkillRouterState>,
-    body: Result<Json<WriteAssistantRuleRequest>, JsonRejection>,
+    body: Result<Json<WritePresetRuleRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if let Some(dispatcher) = &state.assistant_dispatcher {
+    if let Some(dispatcher) = &state.preset_dispatcher {
         dispatcher
-            .write_skill(&req.assistant_id, req.locale.as_deref(), &req.content)
+            .write_skill(&req.preset_id, req.locale.as_deref(), &req.content)
             .await?;
         return Ok(Json(ApiResponse::ok(true)));
     }
-    let ok = skill_service::write_assistant_skill(
+    let ok = skill_service::write_preset_skill(
         &state.skill_paths,
-        &req.assistant_id,
+        &req.preset_id,
         &req.content,
         req.locale.as_deref(),
     )
@@ -487,16 +487,16 @@ async fn write_assistant_skill(
     Ok(Json(ApiResponse::ok(ok)))
 }
 
-/// `DELETE /api/skills/assistant-skill/:id` — delete all locale versions.
-async fn delete_assistant_skill(
+/// `DELETE /api/skills/preset-skill/:id` — delete all locale versions.
+async fn delete_preset_skill(
     State(state): State<SkillRouterState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    if let Some(dispatcher) = &state.assistant_dispatcher {
+    if let Some(dispatcher) = &state.preset_dispatcher {
         let ok = dispatcher.delete_skill(&id).await?;
         return Ok(Json(ApiResponse::ok(ok)));
     }
-    let ok = skill_service::delete_assistant_skill(&state.skill_paths, &id).await?;
+    let ok = skill_service::delete_preset_skill(&state.skill_paths, &id).await?;
     Ok(Json(ApiResponse::ok(ok)))
 }
 
@@ -609,15 +609,15 @@ mod tests {
             cron_skills_dir: tmp.path().join("cron").join("skills"),
             builtin_skills_dir: tmp.path().join("builtin-skills"),
             builtin_rules_dir: tmp.path().join("builtin-rules"),
-            assistant_rules_dir: tmp.path().join("assistant-rules"),
-            assistant_skills_dir: tmp.path().join("assistant-skills"),
+            preset_rules_dir: tmp.path().join("preset-rules"),
+            preset_skills_dir: tmp.path().join("preset-skills"),
         };
         let ext_mgr = Arc::new(ExternalPathsManager::with_file(tmp.path().join("paths.json")).await);
         std::mem::forget(tmp);
         SkillRouterState {
             skill_paths: paths,
             external_paths_manager: ext_mgr,
-            assistant_dispatcher: None,
+            preset_dispatcher: None,
             skill_tag_repo: std::sync::Arc::new(InMemorySkillTagRepo::default()),
             builtin_skill_tags: std::sync::Arc::new(std::collections::HashMap::new()),
         }

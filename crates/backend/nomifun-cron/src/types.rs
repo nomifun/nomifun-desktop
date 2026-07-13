@@ -159,11 +159,13 @@ pub struct CronAgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_preset: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_agent_type: Option<String>,
+    pub preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_revision: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,11 +231,18 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
     let execution_mode = ExecutionMode::from_str(&row.execution_mode)?;
     let created_by = CreatedBy::from_str(&row.created_by)?;
 
-    let agent_config = row
+    let mut agent_config = row
         .agent_config
         .as_deref()
         .map(serde_json::from_str::<CronAgentConfig>)
         .transpose()?;
+    if let Some(config) = agent_config.as_mut() {
+        config.preset_id = row.preset_id.clone().or_else(|| config.preset_id.clone());
+        config.preset_revision = row.preset_revision.or(config.preset_revision);
+        if let Some(raw) = row.preset_snapshot.as_deref() {
+            config.preset_snapshot = Some(serde_json::from_str(raw)?);
+        }
+    }
 
     let last_status = row
         .last_status
@@ -338,6 +347,14 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         payload_message: job.message.clone(),
         execution_mode: job.execution_mode.as_str().to_owned(),
         agent_config: agent_config_json,
+        preset_id: job.agent_config.as_ref().and_then(|config| config.preset_id.clone()),
+        preset_revision: job.agent_config.as_ref().and_then(|config| config.preset_revision),
+        preset_snapshot: job
+            .agent_config
+            .as_ref()
+            .and_then(|config| config.preset_snapshot.as_ref())
+            .map(serde_json::to_string)
+            .transpose()?,
         // Map the empty-string "unbound" convention to a NULL FK so the
         // circular conversations↔cron_jobs FK is satisfied. The column is
         // integer-keyed; a bound id is a positive key. Empty/`0`/non-integer
@@ -436,9 +453,10 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
         backend: c.backend.clone(),
         name: c.name.clone(),
         cli_path: c.cli_path.clone(),
-        is_preset: c.is_preset,
         custom_agent_id: c.custom_agent_id.clone(),
-        preset_agent_type: c.preset_agent_type.clone(),
+        preset_id: c.preset_id.clone(),
+        preset_revision: c.preset_revision,
+        preset_snapshot: c.preset_snapshot.clone(),
         mode: c.mode.clone(),
         model_id: c.model_id.clone(),
         config_options: c.config_options.clone(),
@@ -720,9 +738,10 @@ mod tests {
                 backend: "acp".into(),
                 name: "Claude".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: None,
                 config_options: None,

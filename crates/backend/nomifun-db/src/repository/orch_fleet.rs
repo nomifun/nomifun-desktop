@@ -22,6 +22,9 @@ pub struct UpdateFleetParams {
 /// `id`/`fleet_id`/timestamps are minted/filled by the repository.
 pub struct NewFleetMember {
     pub agent_id: String,
+    pub preset_id: Option<String>,
+    pub preset_revision: Option<i64>,
+    pub preset_snapshot: Option<String>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role_hint: Option<String>,

@@ -53,10 +53,10 @@ fn mv8_file_reference_resolved() {
     std::fs::create_dir_all(&dir).unwrap();
     let prompt_dir = dir.join("prompts");
     std::fs::create_dir_all(&prompt_dir).unwrap();
-    std::fs::write(prompt_dir.join("system.md"), "You are a helpful assistant.").unwrap();
+    std::fs::write(prompt_dir.join("system.md"), "You are a helpful preset.").unwrap();
 
     let result = resolve_file_reference("@file:prompts/system.md", &dir).unwrap();
-    assert_eq!(result, "You are a helpful assistant.");
+    assert_eq!(result, "You are a helpful preset.");
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

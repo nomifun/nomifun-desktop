@@ -26,7 +26,7 @@ pub use nomifun_auth::AuthPolicy;
 // direct `nomifun-common` dep.
 pub use nomifun_common::channel;
 pub use router::{
-    ChannelOrchestratorComponents, ModuleStates, build_assistant_state, build_conversation_state,
+    ChannelOrchestratorComponents, ModuleStates, build_preset_state, build_conversation_state,
     build_extension_states, build_module_states, build_ws_state, create_router, create_router_with_all_state,
     create_router_with_states,
 };

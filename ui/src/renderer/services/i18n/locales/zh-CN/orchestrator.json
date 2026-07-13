@@ -41,8 +41,8 @@
     },
     "rolesLabel": "钉选角色",
     "rolesHint": "可选 · 留空则由编队自动组建",
-    "rolesPlaceholder": "从已启用助手中选择角色",
-    "rolesEmpty": "暂无可用助手",
+    "rolesPlaceholder": "从已启用设定中选择角色",
+    "rolesEmpty": "暂无可用设定",
     "autonomyLabel": "自主级别",
     "autonomy": {
       "interactive": "先审批",
@@ -317,15 +317,15 @@
       "scrollLatest": "回到最新"
     },
     "precipitate": {
-      "title": "沉淀为助手",
-      "subtitle": "这个 Run 里有 {{count}} 个角色可一键保存为助手，下次直接复用",
+      "title": "沉淀为设定",
+      "subtitle": "这个 Run 里有 {{count}} 个角色可一键保存为设定，下次直接复用",
       "modelsLabel": "模型",
       "skillsLabel": "{{count}} 项技能",
-      "saveAsAssistant": "保存为助手",
+      "saveAsPreset": "保存为设定",
       "saved": "已保存",
-      "exists": "已存在同名助手",
-      "saveOk": "已将「{{name}}」保存为助手",
-      "saveError": "保存助手失败：{{error}}",
+      "exists": "已存在同名设定",
+      "saveOk": "已将「{{name}}」保存为设定",
+      "saveError": "保存设定失败：{{error}}",
       "synthDesc": "「{{role}}」角色，负责：{{tasks}}",
       "synthDescBare": "从 Run 沉淀的「{{role}}」角色",
       "taskSep": "、"

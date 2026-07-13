@@ -21,7 +21,7 @@ use crate::types::{ChannelIncoming, PluginConfig, PluginStatus, PluginType, Unif
 
 /// Manages the lifecycle of channel plugins.
 ///
-/// One plugin instance per `assistant_plugins` row — multiple bots may run
+/// One plugin instance per `channel_plugins` row — multiple bots may run
 /// on the same platform simultaneously (each bound to its own companion).
 ///
 /// Responsibilities:
@@ -38,7 +38,7 @@ pub struct ChannelManager {
     repo: Arc<dyn IChannelRepository>,
     broadcaster: Arc<dyn EventBroadcaster>,
     encryption_key: [u8; 32],
-    /// Active plugin instances keyed by `assistant_plugins.id` (row id, not
+    /// Active plugin instances keyed by `channel_plugins.id` (row id, not
     /// platform — legacy rows keep `id == platform`).
     plugins: DashMap<String, Box<dyn ChannelPlugin>>,
     /// Sender for incoming messages from all plugins, stamped with their
@@ -63,7 +63,7 @@ pub type PluginFactory = Box<dyn Fn(PluginType) -> Option<Box<dyn ChannelPlugin>
 /// - `plugin_id` set: update that row (legacy callers pass the platform
 ///   name, which doubles as the legacy row id).
 /// - `plugin_id` unset + `plugin_type` set: create a new row with a
-///   generated `achn_` id — this is the per-companion multi-bot path.
+///   generated `chn_` id — this is the per-companion multi-bot path.
 /// - `companion_id`: bind the bot to a companion; `None` keeps the row's binding.
 /// - `public_agent_id`: bind the bot to a 对外伙伴 (public agent); `None` keeps
 ///   the row's binding. Row-level MUTUALLY EXCLUSIVE with `companion_id` — an
@@ -234,7 +234,7 @@ impl ChannelManager {
                         .ok_or_else(|| ChannelError::InvalidConfig("plugin_type is required to create a channel".into()))?;
                     let pt = PluginType::from_str_opt(type_str)
                         .ok_or_else(|| ChannelError::InvalidPluginType(type_str.to_owned()))?;
-                    (generate_prefixed_id("achn"), pt, now_ms(), None, None)
+                    (generate_prefixed_id("chn"), pt, now_ms(), None, None)
                 }
             };
 
@@ -481,7 +481,7 @@ impl ChannelManager {
     /// Called when a 伙伴 (companion) 的 profile.model 变更后，main 在 services.rs
     /// 接线触发，让已绑定 bot 的 channel 会话下轮重建拾取新模型。
     ///
-    /// Best-effort: enumerates `assistant_plugins` rows whose `companion_id` matches
+    /// Best-effort: enumerates `channel_plugins` rows whose `companion_id` matches
     /// (no per-companion repo query exists, so list-all + filter), then clears each
     /// channel via the same `delete_sessions_by_channel` primitive that
     /// `rebind_channel_companion` / `delete_channel` use. Failures are logged and
@@ -1222,7 +1222,7 @@ mod tests {
         BotInfo, OutgoingMessageType, PluginCredentials, PluginStatus, PluginType, UnifiedOutgoingMessage,
     };
     use nomifun_common::TimestampMs;
-    use nomifun_db::models::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+    use nomifun_db::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
     use nomifun_db::{DbError, IChannelRepository, UpdatePluginStatusParams};
     use std::sync::Mutex;
 
@@ -1368,7 +1368,7 @@ mod tests {
         }
 
         // -- User CRUD (unused stubs) --
-        async fn get_all_users(&self) -> Result<Vec<AssistantUserRow>, DbError> {
+        async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(vec![])
         }
         async fn get_user_by_platform(
@@ -1376,10 +1376,10 @@ mod tests {
             _pid: &str,
             _pt: &str,
             _channel_id: &str,
-        ) -> Result<Option<AssistantUserRow>, DbError> {
+        ) -> Result<Option<ChannelUserRow>, DbError> {
             Ok(None)
         }
-        async fn create_user(&self, _row: &AssistantUserRow) -> Result<(), DbError> {
+        async fn create_user(&self, _row: &ChannelUserRow) -> Result<(), DbError> {
             Ok(())
         }
         async fn update_user_last_active(&self, _id: &str, _la: TimestampMs) -> Result<(), DbError> {
@@ -1390,10 +1390,10 @@ mod tests {
         }
 
         // -- Session CRUD (unused stubs) --
-        async fn get_all_sessions(&self) -> Result<Vec<AssistantSessionRow>, DbError> {
+        async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
             Ok(vec![])
         }
-        async fn get_session(&self, _id: &str) -> Result<Option<AssistantSessionRow>, DbError> {
+        async fn get_session(&self, _id: &str) -> Result<Option<ChannelSessionRow>, DbError> {
             Ok(None)
         }
         async fn get_or_create_session(
@@ -1401,8 +1401,8 @@ mod tests {
             _uid: &str,
             _cid: &str,
             _channel_id: &str,
-            new_row: &AssistantSessionRow,
-        ) -> Result<AssistantSessionRow, DbError> {
+            new_row: &ChannelSessionRow,
+        ) -> Result<ChannelSessionRow, DbError> {
             Ok(new_row.clone())
         }
         async fn update_session_activity(&self, _id: &str, _la: TimestampMs) -> Result<(), DbError> {
@@ -1426,13 +1426,13 @@ mod tests {
         }
 
         // -- Pairing codes (unused stubs) --
-        async fn create_pairing(&self, _row: &PairingCodeRow) -> Result<(), DbError> {
+        async fn create_pairing(&self, _row: &ChannelPairingCodeRow) -> Result<(), DbError> {
             Ok(())
         }
-        async fn get_pending_pairings(&self) -> Result<Vec<PairingCodeRow>, DbError> {
+        async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError> {
             Ok(vec![])
         }
-        async fn get_pairing_by_code(&self, _code: &str) -> Result<Option<PairingCodeRow>, DbError> {
+        async fn get_pairing_by_code(&self, _code: &str) -> Result<Option<ChannelPairingCodeRow>, DbError> {
             Ok(None)
         }
         async fn update_pairing_status(&self, _code: &str, _status: &str) -> Result<(), DbError> {
@@ -2269,7 +2269,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(id.starts_with("achn"), "generated id should be achn-prefixed: {id}");
+        assert!(id.starts_with("chn"), "generated id should be chn-prefixed: {id}");
         let plugins = repo.get_plugins();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].id, id);

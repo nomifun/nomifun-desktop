@@ -1,5 +1,5 @@
 /**
- * SkillCard — A grid item for the Skills Hub. Mirrors the AssistantCard visual
+ * SkillCard — A grid item for the Skills Hub. Mirrors the PresetCard visual
  * language (rounded-16px bordered surface on bg-2, soft hover lift, fixed 2-line
  * description clamp, resolved tag-chip row capped at MAX_VISIBLE_TAGS + "+N", and
  * a hover-revealed action footer) but is tuned for skills:
@@ -13,8 +13,8 @@
  * Theme variables only (the avatar hex palette is the documented exception);
  * `<div onClick>` for clickables (no <button>, to dodge the WebView2 black box).
  */
-import type { AssistantTag } from '@/common/types/agent/assistantTypes';
-import type { SkillInfo } from '@/renderer/pages/settings/AssistantSettings/types';
+import type { PresetTag } from '@/common/types/agent/presetTypes';
+import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 import { resolveSkillDisplay } from './skillDisplay';
 import { getAvatarColorClass, normalizeTestId } from './skillPresentation';
 import { Tag } from '@arco-design/web-react';
@@ -24,8 +24,8 @@ import { useTranslation } from 'react-i18next';
 
 type SkillCardProps = {
   skill: SkillInfo;
-  /** Shared assistant tag vocabulary, for resolving tag keys → labels. */
-  tagByKey: Map<string, AssistantTag>;
+  /** Shared preset tag vocabulary, for resolving tag keys → labels. */
+  tagByKey: Map<string, PresetTag>;
   localeKey: string;
   /** True when the skill name is in the built-in auto-inject set (parent-supplied). */
   isAutoInjected: boolean;
@@ -102,7 +102,7 @@ const SkillCard: React.FC<SkillCardProps> = ({
   // Resolve tag keys → labels via the shared vocabulary; drop unknown keys.
   const resolvedTags = [...(skill.audience_tags ?? []), ...(skill.scenario_tags ?? [])]
     .map((key) => tagByKey.get(key))
-    .filter((tag): tag is AssistantTag => Boolean(tag));
+    .filter((tag): tag is PresetTag => Boolean(tag));
   const visibleTags = resolvedTags.slice(0, MAX_VISIBLE_TAGS);
   const overflowCount = resolvedTags.length - visibleTags.length;
 

@@ -96,6 +96,11 @@ pub struct CompanionProfileConfig {
     /// Per-companion companion-chat model (the shared learn loop has its own).
     pub model: ModelConfig,
     pub appearance: CompanionWindowConfig,
+    /// Frozen reusable configuration applied to this companion. Identity,
+    /// memories, evolved skills, window state and channel credentials remain
+    /// companion-owned; this snapshot only supplies execution preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_preset: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     pub created_at: i64,
 }
 
@@ -114,6 +119,7 @@ impl CompanionProfileConfig {
             persona: PersonaConfig::default(),
             model: ModelConfig::default(),
             appearance: CompanionWindowConfig::default(),
+            applied_preset: None,
             created_at: now_ms(),
         }
     }

@@ -9,7 +9,7 @@
  * bases. Supports inline rename, color picker (preset palette), sort-order
  * adjustment (move up/down), and delete with Popconfirm warning.
  *
- * Mirrors structure from settings/AssistantSettings/TagManagementModal.
+ * Mirrors structure from settings/PresetSettings/TagManagementModal.
  * Theme variables only; `<div onClick>` for clickables (no <button>).
  */
 import type { IKnowledgeTag } from '@/common/adapter/ipcBridge';

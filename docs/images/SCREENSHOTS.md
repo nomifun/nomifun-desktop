@@ -63,7 +63,7 @@ window chrome from the installed app.
 | `cron-` | guides/scheduled-tasks |
 | `channels-` | guides/channels |
 | `mcp-` | guides/mcp-and-skills |
-| `assistants-` | guides/assistants |
+| `presets-` | guides/presets |
 | `readme-` | root README showcase |
 
 ## Manifest
@@ -77,7 +77,7 @@ see notes).
 | `readme-00-orchestration-hero.png` | desktop app / conversation orchestration | desktop | Header hero showing orchestration conversation, reusable roles, and DAG canvas | README / README.zh-CN | live |
 | `readme-01-workbench-overview.png` | desktop app / conversation orchestration | desktop | Work orchestration with conversation, reusable roles, and DAG canvas | README / README.zh-CN | live |
 | `readme-02-terminal-create.png` | `#/terminal-new` | desktop | Create terminal flow with expanded capability handoff panel | README / README.zh-CN | live |
-| `readme-03-assistants.png` | `#/assistants?tab=assistants` | desktop | Assistants and Skills capability library | README / README.zh-CN | live |
+| `readme-03-presets.png` | `#/presets` | desktop | Preset library | README / README.zh-CN | refresh required |
 | `readme-04-model-agents.png` | `#/models` | desktop | Models and Agents management with installed and supported CLI agents | README / README.zh-CN | live |
 | `readme-05-companions.png` | `#/nomi` | desktop | Desktop companion overview with memory and growth state | README / README.zh-CN | live |
 | `readme-06-knowledge.png` | `#/knowledge` | desktop | Knowledge base list and local domain context | README / README.zh-CN | live |
@@ -106,9 +106,9 @@ see notes).
 | `channels-01-overview.png` | `#/nomi?tab=remote` | web | Companion Remote tab — channel overview | guides/channels | live |
 | `channels-02-pairing.png` | `#/nomi?tab=remote` (connect) | web | Channel connect / settings dialog | guides/channels | live |
 | `mcp-01-capabilities.png` | `#/mcp` | web | MCP page | guides/mcp-and-skills | live |
-| `mcp-03-skills.png` | `#/assistants?tab=skills` | web | Skills tab | guides/mcp-and-skills | live |
-| `assistants-01-list.png` | `#/assistants?tab=assistants` | web | Assistants list (builtin library) | guides/assistants | live |
-| `assistants-02-editor.png` | `#/assistants?tab=assistants` (edit) | web | Assistant editor drawer | guides/assistants | live |
+| `mcp-03-skills.png` | `#/skills` | web | Skills library | guides/mcp-and-skills | refresh required |
+| `presets-01-list.png` | `#/presets` | web | Preset list (builtin library) | guides/presets | refresh required |
+| `presets-02-editor.png` | `#/presets` (edit) | web | Preset editor drawer | guides/presets | refresh required |
 | `webserver-02-first-run-setup.png` | `#/login` (no admin) | web (auth) | First-run admin setup | guides/web-server-deployment | live |
 
 ## Not screenshots (rendered as commands / diagrams)

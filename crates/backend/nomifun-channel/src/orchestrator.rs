@@ -77,7 +77,7 @@ impl ChannelOrchestrator {
         let platform = msg.platform;
         let chat_id = msg.chat_id.clone();
         // Outgoing routing is per channel row — the manager keys running
-        // bot instances by their `assistant_plugins` row id.
+        // bot instances by their `channel_plugins` row id.
         let plugin_id = channel_id.clone();
         let text = msg.content.text.clone();
 

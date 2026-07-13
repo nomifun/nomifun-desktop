@@ -24,13 +24,13 @@ import { useCompanions } from '../useNomi';
 
 /**
  * 伙伴设置页「远程连接」节：每伙伴视角的多机器人管理。
- * 每个机器人 = assistant_plugins 一行（行上 companion_id 绑宠，UNIQUE(type,bot_key)
+ * 每个机器人 = channel_plugins 一行（行上 companion_id 绑宠，UNIQUE(type,bot_key)
  * 保证同一机器人不绑多宠）。同一平台可以有多行：本宠的行直接启停/配置/解绑/
  * 删除；未绑定的行可以绑到本宠；他宠的行不可抢，但本宠可以为该平台新建自己的
  * 机器人——这是多行模型的核心能力。
  *
  * Per-companion "Remote connect" section over the multi-bot channel model. Each bot
- * is one assistant_plugins row; the card for a platform branches on whether
+ * is one channel_plugins row; the card for a platform branches on whether
  * this companion owns a row, an unbound row exists, or only other companions' rows exist.
  * Pending pairing requests still surface as a platform-level badge.
  */

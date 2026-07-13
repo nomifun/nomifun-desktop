@@ -5,7 +5,7 @@
  */
 
 /**
- * 画布助手 (canvas assistant) op applier.
+ * 画布 Agent (canvas agent) op applier.
  *
  * While a canvas is open, this hook polls the backend's pending agent-op queue
  * (`GET /api/workshop/canvases/{id}/pending-ops`) and applies each op to the

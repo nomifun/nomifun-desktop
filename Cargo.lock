@@ -5403,7 +5403,6 @@ dependencies = [
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-assets",
- "nomifun-assistant",
  "nomifun-auth",
  "nomifun-channel",
  "nomifun-common",
@@ -5421,6 +5420,7 @@ dependencies = [
  "nomifun-net",
  "nomifun-office",
  "nomifun-orchestrator",
+ "nomifun-preset",
  "nomifun-public",
  "nomifun-public-agent",
  "nomifun-realtime",
@@ -5463,27 +5463,6 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tower",
-]
-
-[[package]]
-name = "nomifun-assistant"
-version = "0.2.19"
-dependencies = [
- "async-trait",
- "axum",
- "http-body-util",
- "include_dir",
- "nomifun-api-types",
- "nomifun-common",
- "nomifun-db",
- "nomifun-extension",
- "nomifun-realtime",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
 ]
 
 [[package]]
@@ -5580,6 +5559,8 @@ dependencies = [
  "nomifun-conversation",
  "nomifun-db",
  "nomifun-extension",
+ "nomifun-knowledge",
+ "nomifun-preset",
  "nomifun-realtime",
  "reqwest 0.12.28",
  "serde",
@@ -5606,6 +5587,7 @@ dependencies = [
  "nomifun-file",
  "nomifun-knowledge",
  "nomifun-mcp",
+ "nomifun-preset",
  "nomifun-realtime",
  "nomifun-runtime",
  "regex",
@@ -5655,6 +5637,7 @@ dependencies = [
  "nomifun-common",
  "nomifun-conversation",
  "nomifun-db",
+ "nomifun-preset",
  "nomifun-realtime",
  "serde",
  "serde_json",
@@ -5778,7 +5761,6 @@ dependencies = [
  "nomi-types",
  "nomifun-ai-agent",
  "nomifun-api-types",
- "nomifun-assistant",
  "nomifun-channel",
  "nomifun-common",
  "nomifun-companion",
@@ -5792,6 +5774,7 @@ dependencies = [
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-orchestrator",
+ "nomifun-preset",
  "nomifun-requirement",
  "nomifun-secret",
  "nomifun-shell",
@@ -5939,12 +5922,34 @@ dependencies = [
  "nomifun-conversation",
  "nomifun-db",
  "nomifun-file",
+ "nomifun-preset",
  "nomifun-realtime",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "nomifun-preset"
+version = "0.2.19"
+dependencies = [
+ "async-trait",
+ "axum",
+ "http-body-util",
+ "include_dir",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "nomifun-extension",
+ "nomifun-realtime",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -5977,6 +5982,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
+ "nomifun-preset",
  "serde",
  "serde_json",
  "tempfile",

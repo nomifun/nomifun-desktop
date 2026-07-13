@@ -111,7 +111,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
     <td width="50%"><img src="docs/images/readme-02-terminal-create.png" alt="Create an agent terminal"><br/><sub><b>Terminal · capabilities for Agent CLI</b></sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/readme-03-assistants.png" alt="Assistants and Skills capability library"><br/><sub><b>Assistants & Skills · scenario capability library</b></sub></td>
+    <td width="50%"><img src="docs/images/readme-03-presets.png" alt="Presets and Skills capability library"><br/><sub><b>Presets & Skills · reusable capability templates</b></sub></td>
     <td width="50%"><img src="docs/images/readme-04-model-agents.png" alt="Models and Agents management"><br/><sub><b>Models & Agents · unified management and setup</b></sub></td>
   </tr>
 </table>
@@ -128,7 +128,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 
 > Guide: [`docs/guides/companions.md`](docs/guides/companions.md)
 
-The companion you talk to every day quietly becomes the assistant who *gets* you.
+The companion you talk to every day quietly becomes the partner who *gets* you.
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
 - **One brain, many faces.** Run multiple companions that share a common memory hub, while each keeps its own **private** memory and can mount different domain knowledge bases. Teach *one* companion well, then have it teach the others.
@@ -236,7 +236,7 @@ No social platform required. One-tap **QR pairing** connects your phone or table
 
 ### ⚙️ Config once, use anywhere
 
-Central hubs for **Knowledge**, **Assistants & Skills**, **MCP**, **Models**, and **Open Capabilities** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
+Central hubs for **Knowledge**, **Presets & Skills**, **MCP**, **Models**, and **Open Capabilities** — define them once, then select per conversation, terminal, channel, or companion. One source of truth, reused everywhere.
 
 ### 💬 11 IM channels
 

@@ -19,7 +19,7 @@ use crate::resolvers::{resolve_all_contributions, resolve_i18n_for_all};
 use crate::state::ExtensionStateStore;
 use crate::types::{
     ExtensionLifecyclePayload, ExtensionState, ExtensionSystemEvent, LoadedExtension, ResolvedAcpAdapter,
-    ResolvedAgent, ResolvedAssistant, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
+    ResolvedAgent, ResolvedPreset, ResolvedChannelPlugin, ResolvedContributions, ResolvedModelProvider,
     ResolvedSettingsTab, ResolvedSkill, ResolvedTheme, WebuiContribution,
 };
 
@@ -305,21 +305,21 @@ impl ExtensionRegistry {
         guard.contributions.themes.clone()
     }
 
-    pub async fn get_assistants(&self) -> Vec<ResolvedAssistant> {
+    pub async fn get_presets(&self) -> Vec<ResolvedPreset> {
         let guard = self.inner.read().await;
-        guard.contributions.assistants.clone()
+        guard.contributions.presets.clone()
     }
 
-    /// Return `true` if any extension contributes an assistant with this id.
-    pub async fn has_assistant(&self, id: &str) -> bool {
+    /// Return `true` if any extension contributes an preset with this id.
+    pub async fn has_preset(&self, id: &str) -> bool {
         let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().any(|a| a.id == id)
+        guard.contributions.presets.iter().any(|a| a.id == id)
     }
 
-    /// Lookup a single extension-contributed assistant by id.
-    pub async fn get_assistant_by_id(&self, id: &str) -> Option<ResolvedAssistant> {
+    /// Lookup a single extension-contributed preset by id.
+    pub async fn get_preset_by_id(&self, id: &str) -> Option<ResolvedPreset> {
         let guard = self.inner.read().await;
-        guard.contributions.assistants.iter().find(|a| a.id == id).cloned()
+        guard.contributions.presets.iter().find(|a| a.id == id).cloned()
     }
 
     pub async fn get_acp_adapters(&self) -> Vec<ResolvedAcpAdapter> {

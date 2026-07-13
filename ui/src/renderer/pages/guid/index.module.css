@@ -1,6 +1,6 @@
 .guidLayout {
-  --assistant-surface-bg: color-mix(in srgb, var(--bg-2) 65%, transparent);
-  --assistant-surface-bg-hover: color-mix(in srgb, var(--bg-2) 85%, transparent);
+  --preset-surface-bg: color-mix(in srgb, var(--bg-2) 65%, transparent);
+  --preset-surface-bg-hover: color-mix(in srgb, var(--bg-2) 85%, transparent);
   width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
   max-width: 100%;
   padding: 0 16px;
@@ -144,7 +144,7 @@
   padding: 0 14px;
   border-radius: 20px;
   color: var(--color-text-2);
-  background: var(--assistant-surface-bg);
+  background: var(--preset-surface-bg);
   border: none;
   line-height: 20px;
   font-size: 14px;
@@ -157,7 +157,7 @@
 }
 
 .heroSubtitle:hover {
-  background: var(--assistant-surface-bg-hover);
+  background: var(--preset-surface-bg-hover);
 }
 
 .heroSubtitleExpanded {
@@ -168,7 +168,7 @@
 }
 
 .heroSubtitleExpanded:hover {
-  background: var(--assistant-surface-bg);
+  background: var(--preset-surface-bg);
 }
 
 .heroSubtitleExpanded .heroSubtitleBack {
@@ -263,17 +263,17 @@
   box-shadow: none !important;
 }
 
-.assistantPromptChip {
-  background: var(--assistant-surface-bg);
+.presetPromptChip {
+  background: var(--preset-surface-bg);
 }
 
-.assistantPromptHint {
+.presetPromptHint {
   color: var(--color-text-3);
   font-size: 13px;
   line-height: 20px;
 }
 
-.assistantPromptAgentSwitcher {
+.presetPromptAgentSwitcher {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -292,13 +292,13 @@
     color 0.2s;
 }
 
-.assistantPromptAgentSwitcher:hover {
+.presetPromptAgentSwitcher:hover {
   background: var(--color-fill-2);
   border-color: var(--color-border-3);
   color: var(--color-text-1);
 }
 
-.assistantPromptAgentSwitcherName {
+.presetPromptAgentSwitcherName {
   font-size: 13px;
   font-weight: 500;
   line-height: 20px;
@@ -308,7 +308,7 @@
   max-width: 170px;
 }
 
-.assistantPromptAgentSwitcherDot {
+.presetPromptAgentSwitcherDot {
   width: 7px;
   height: 7px;
   border-radius: 999px;
@@ -316,15 +316,15 @@
   flex-shrink: 0;
 }
 
-.assistantPromptAgentSwitcherLogo {
+.presetPromptAgentSwitcherLogo {
   width: 13px;
   height: 13px;
   object-fit: contain;
   flex-shrink: 0;
 }
 
-.assistantPromptChip:hover {
-  background: var(--assistant-surface-bg-hover);
+.presetPromptChip:hover {
+  background: var(--preset-surface-bg-hover);
 }
 
 .guidInputCard {
@@ -1969,8 +1969,8 @@ button.guidResourceCard:focus-visible {
   opacity: 1 !important;
 }
 
-/* 助手卡片网格（首页 list view） */
-.assistantCardScrollWrap {
+/* 设定卡片网格（首页 list view） */
+.presetCardScrollWrap {
   position: relative;
   max-height: 200px;
   overflow-y: auto;
@@ -1978,31 +1978,31 @@ button.guidResourceCard:focus-visible {
   scrollbar-width: thin;
 }
 
-.assistantCardScrollWrapScrollable {
+.presetCardScrollWrapScrollable {
   -webkit-mask-image: linear-gradient(to bottom, black 0, black calc(100% - 56px), transparent 100%);
   mask-image: linear-gradient(to bottom, black 0, black calc(100% - 56px), transparent 100%);
 }
 
-.assistantCardScrollWrap::-webkit-scrollbar {
+.presetCardScrollWrap::-webkit-scrollbar {
   width: 6px;
 }
 
-.assistantCardScrollWrap::-webkit-scrollbar-thumb {
+.presetCardScrollWrap::-webkit-scrollbar-thumb {
   background: var(--color-fill-3);
   border-radius: 3px;
 }
 
-.assistantCardScrollWrap::-webkit-scrollbar-track {
+.presetCardScrollWrap::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.assistantCardGrid {
+.presetCardGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
-.assistantCard {
+.presetCard {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -2017,20 +2017,20 @@ button.guidResourceCard:focus-visible {
     box-shadow 0.15s;
 }
 
-.assistantCard:hover {
+.presetCard:hover {
   border-color: var(--color-border-3);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
 }
 
-:global([data-theme='dark']) .assistantCard {
+:global([data-theme='dark']) .presetCard {
   background: #262626;
 }
 
-:global([data-theme='dark']) .assistantCard:hover {
+:global([data-theme='dark']) .presetCard:hover {
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
 }
 
-.assistantCardAvatar {
+.presetCardAvatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -2042,18 +2042,18 @@ button.guidResourceCard:focus-visible {
   overflow: hidden;
 }
 
-.assistantCardAvatar img {
+.presetCardAvatar img {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-.assistantCardEmoji {
+.presetCardEmoji {
   font-size: 18px;
   line-height: 1;
 }
 
-.assistantCardMeta {
+.presetCardMeta {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -2061,7 +2061,7 @@ button.guidResourceCard:focus-visible {
   gap: 2px;
 }
 
-.assistantCardName {
+.presetCardName {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-1);
@@ -2070,7 +2070,7 @@ button.guidResourceCard:focus-visible {
   text-overflow: ellipsis;
 }
 
-.assistantCardDesc {
+.presetCardDesc {
   font-size: 12px;
   color: var(--color-text-3);
   white-space: nowrap;
@@ -2078,7 +2078,7 @@ button.guidResourceCard:focus-visible {
   text-overflow: ellipsis;
 }
 
-.assistantCardAdd {
+.presetCardAdd {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2092,18 +2092,18 @@ button.guidResourceCard:focus-visible {
   color: var(--color-text-3);
 }
 
-.assistantCardAdd:hover {
+.presetCardAdd:hover {
   background: var(--color-fill-2);
   color: var(--color-text-2);
 }
 
 @media (max-width: 640px) {
-  .assistantCardGrid {
+  .presetCardGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-/* 预设助手标签 */
+/* 设定标签 */
 .presetAgentTag {
   display: inline-flex;
   align-items: center;
@@ -2152,7 +2152,7 @@ button.guidResourceCard:focus-visible {
   flex-shrink: 0;
 }
 
-/* Inner divider between agent logo and assistant avatar/name */
+/* Inner divider between agent logo and preset avatar/name */
 .presetAgentTagInnerDivider {
   width: 1px;
   height: 14px;
@@ -2213,7 +2213,7 @@ button.guidResourceCard:focus-visible {
   background: var(--color-fill-4);
 }
 
-/* 移动端助手标签优化 */
+/* 移动端设定标签优化 */
 @media (max-width: 768px) {
   .presetAgentTagName {
     max-width: 120px;

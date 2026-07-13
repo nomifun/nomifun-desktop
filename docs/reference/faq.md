@@ -61,7 +61,7 @@ There is no telemetry pipeline, no analytics SDK, no `SENTRY_DSN` integration in
 
 ## What about extensions and skills — what runs them?
 
-Extensions (themes, assistants, channel plugins, settings tabs) are loaded by `nomifun-extension` from the data directory. Skills are bundles of prompts/instructions resolved into the agent's context per-conversation. Both are local files under your data dir; the marketplace flow simply downloads them into that directory.
+Extensions (themes, presets, channel plugins, settings tabs) are loaded by `nomifun-extension` from the data directory. Skills are bundles of prompts/instructions resolved into the agent's context per-conversation. Both are local files under your data dir; the marketplace flow simply downloads them into that directory.
 
 The agent CLI binaries are not extensions — they are external CLIs that NomiFun launches as child processes via the ACP protocol.
 

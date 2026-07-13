@@ -24,6 +24,7 @@ pub fn public_agent_routes(state: PublicAgentRouterState) -> Router {
             "/api/public-agents/{id}",
             get(get_agent).patch(patch_agent).delete(delete_agent),
         )
+        .route("/api/public-agents/{id}/apply-preset", axum::routing::post(apply_preset))
         .route(
             "/api/public-agents/{id}/audit",
             get(get_audit).delete(delete_audit),
@@ -71,6 +72,39 @@ async fn patch_agent(
 ) -> Result<Json<ApiResponse<PublicAgentConfig>>, AppError> {
     let Json(patch) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(state.service.patch(&id, patch).await?)))
+}
+
+#[derive(Deserialize)]
+struct ApplyPresetRequest {
+    preset_id: String,
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    overrides: nomifun_api_types::PresetOverrides,
+}
+
+async fn apply_preset(
+    State(state): State<PublicAgentRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+    body: Result<Json<ApplyPresetRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<PublicAgentConfig>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let presets = state
+        .preset_service
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("preset service is not wired".into()))?;
+    let snapshot = presets
+        .resolve(
+            &req.preset_id,
+            nomifun_api_types::PresetTarget::PublicCompanion,
+            req.locale.as_deref(),
+            req.overrides,
+        )
+        .await?;
+    Ok(Json(ApiResponse::ok(
+        state.service.apply_preset_snapshot(&id, snapshot).await?,
+    )))
 }
 
 async fn delete_agent(

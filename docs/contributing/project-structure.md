@@ -151,7 +151,7 @@ from silently tying themselves to engine internals.
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm) | Intelligent Decision-Making Mode: per-session supervision keeping agent / terminal sessions alive through provider faults. |
 | [`nomifun-webhook`](../../crates/backend/nomifun-webhook) | Webhook management + AutoWork completion notifications (Lark/飞书 custom bots), per-tag bindings. |
 | [`nomifun-terminal`](../../crates/backend/nomifun-terminal) | PTY-backed terminal sessions managed alongside conversations; streams output via the realtime broadcaster. |
-| [`nomifun-assistant`](../../crates/backend/nomifun-assistant) | User-authored assistant management; merges built-in + user + extension assistants for `GET /api/assistants`. |
+| [`nomifun-preset`](../../crates/backend/nomifun-preset) | Reusable launch configurations; merges builtin + user + extension presets, resolves target-specific immutable snapshots, and serves `/api/presets`. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge) | Knowledge bases, bound-base state, and scoped knowledge MCP search. |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion) | Desktop companions, figures, shared memory, and companion-bound state. |
 | [`nomifun-gateway`](../../crates/backend/nomifun-gateway) | Desktop Gateway MCP registry and platform capability tools. |

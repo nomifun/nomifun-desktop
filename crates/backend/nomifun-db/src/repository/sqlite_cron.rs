@@ -24,12 +24,13 @@ impl ICronRepository for SqliteCronRepository {
             "INSERT INTO cron_jobs (\
                 id, name, enabled, schedule_kind, schedule_value, schedule_tz, \
                 schedule_description, payload_message, execution_mode, agent_config, \
+                preset_id, preset_revision, preset_snapshot, \
                 conversation_id, conversation_title, agent_type, created_by, \
                 skill_content, description, created_at, updated_at, next_run_at, last_run_at, \
                 last_status, last_error, run_count, retry_count, max_retries, \
                 target_kind, terminal_mode, terminal_session_id, terminal_command, terminal_args, terminal_script\
             ) VALUES (\
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
             )",
         )
         .bind(&row.id)
@@ -42,6 +43,9 @@ impl ICronRepository for SqliteCronRepository {
         .bind(&row.payload_message)
         .bind(&row.execution_mode)
         .bind(&row.agent_config)
+        .bind(&row.preset_id)
+        .bind(row.preset_revision)
+        .bind(&row.preset_snapshot)
         .bind(&row.conversation_id)
         .bind(&row.conversation_title)
         .bind(&row.agent_type)
@@ -121,6 +125,9 @@ impl ICronRepository for SqliteCronRepository {
         push_str!(payload_message);
         push_str!(execution_mode);
         push_opt_str!(agent_config);
+        push_opt_str!(preset_id);
+        push_opt_i64!(preset_revision);
+        push_opt_str!(preset_snapshot);
         push_opt_i64!(conversation_id);
         push_opt_str!(conversation_title);
         push_str!(agent_type);
@@ -312,6 +319,9 @@ mod tests {
             payload_message: "ping".into(),
             execution_mode: "existing".into(),
             agent_config: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             conversation_id: Some(1),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),

@@ -135,6 +135,15 @@ pub async fn build_companion_system_prompt(
     if !profile.persona.custom.trim().is_empty() {
         system.push_str(&format!("\n主人对你的额外设定：{}", profile.persona.custom.trim()));
     }
+    if let Some(snapshot) = profile.applied_preset.as_ref()
+        && !snapshot.instructions.trim().is_empty()
+    {
+        system.push_str(&format!(
+            "\n\n## 当前设定：{}\n{}",
+            snapshot.preset_name,
+            snapshot.instructions.trim()
+        ));
+    }
     system.push_str(
         "\n\n## 知识沉淀技巧\n\
          除了轻量的全局记忆，你还能把成体系的资料沉淀为知识库，让会话/终端长期受益：\n\
@@ -590,10 +599,17 @@ impl CompanionThreads {
             }),
             source: None,
             channel_chat_id: None,
-            extra: serde_json::json!({
+            preset_id: None,
+            preset_overrides: None,
+            extra: {
+                let extra = serde_json::json!({
                 "companionSession": true,
                 "companionId": companion_id,
                 "system_prompt": system_prompt,
+                // `build_companion_system_prompt` already includes the frozen
+                // preset instructions. Prevent the generic conversation path
+                // from appending the same block a second time.
+                "preset_instructions_embedded": true,
                 // The companion is the desktop's master agent: companion threads get
                 // the Desktop Gateway tools (nomi_* — sessions/cron/memory/
                 // requirements). Backend-set only; HTTP routes strip this key.
@@ -608,9 +624,17 @@ impl CompanionThreads {
                 // approval UI, so a tool call under Default mode would park forever
                 // (聊天永久「思考中」). The companion's prompt is what guards destructive
                 // ops (复述确认), not an approval gate.
-            }),
+                });
+                extra
+            },
         };
-        let created = self.conversations.create(COMPANION_USER_ID, req).await?;
+        let created = if let Some(snapshot) = profile.applied_preset.clone() {
+            self.conversations
+                .create_from_preset_snapshot(COMPANION_USER_ID, req, snapshot)
+                .await?
+        } else {
+            self.conversations.create(COMPANION_USER_ID, req).await?
+        };
         // The companion registry (CompanionStore) keys threads by the conversation id
         // as a string; the i64-keyed conversation row id is bridged here at the
         // boundary (Option A).
@@ -717,6 +741,42 @@ impl CompanionThreads {
                         use_model: model.use_model.clone(),
                     }),
                     extra: None,
+                },
+                &self.task_manager,
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Replace only the reusable preset-derived portion of an existing
+    /// companion thread. The companion id, memory, history, workspace and
+    /// desktop-gateway authority stay untouched.
+    pub async fn set_preset(
+        &self,
+        companion_id: &str,
+        conversation_id: &str,
+        system_prompt: String,
+        snapshot: &nomifun_api_types::ResolvedPresetSnapshot,
+    ) -> Result<(), AppError> {
+        self.assert_owned(companion_id, conversation_id).await?;
+        self.conversations
+            .update(
+                COMPANION_USER_ID,
+                conversation_id,
+                nomifun_api_types::UpdateConversationRequest {
+                    name: None,
+                    pinned: None,
+                    model: None,
+                    extra: Some(serde_json::json!({
+                        "system_prompt": system_prompt,
+                        "preset_instructions_embedded": true,
+                        "preset_id": snapshot.preset_id.clone(),
+                        "preset_revision": snapshot.preset_revision,
+                        "preset_snapshot": snapshot,
+                        "skills": snapshot.included_skills.clone(),
+                        "exclude_auto_inject_skills": snapshot.excluded_auto_skills.clone(),
+                        "preset_knowledge_binding": true,
+                    })),
                 },
                 &self.task_manager,
             )

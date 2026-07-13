@@ -61,16 +61,18 @@ import type {
   TProviderWithModel,
 } from '../config/storage';
 import type {
-  Assistant,
-  AssistantTag,
-  CreateAssistantRequest,
-  CreateAssistantTagRequest,
-  ImportAssistantsRequest,
-  ImportAssistantsResult,
-  SetAssistantStateRequest,
-  UpdateAssistantRequest,
-  UpdateAssistantTagRequest,
-} from '../types/agent/assistantTypes';
+  CreatePresetRequest,
+  CreatePresetTagRequest,
+  ImportPresetsRequest,
+  ImportPresetsResult,
+  Preset,
+  PresetTag,
+  ResolvePresetRequest,
+  ResolvedPresetSnapshot,
+  SetPresetStateRequest,
+  UpdatePresetRequest,
+  UpdatePresetTagRequest,
+} from '../types/agent/presetTypes';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
 import type { AcpModelInfo } from '../types/platform/acpTypes';
 import type {
@@ -115,6 +117,8 @@ import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/
 import type {
   TAdjustRunRequest,
   TCreateAdhocRun,
+  TCreateFleet,
+  TFleet,
   TReassign,
   TModelRange,
   TReplanRequest,
@@ -123,6 +127,7 @@ import type {
   TSteer,
   TTaskConfigUpdate,
   TTaskSpecUpdate,
+  TUpdateFleet,
 } from '../types/orchestrator/orchestratorTypes';
 import type {
   TOrchRunCompletedEvent,
@@ -179,39 +184,53 @@ export const shell = {
 };
 
 // ---------------------------------------------------------------------------
-// Assistants — routed to /api/assistants/*
+// Presets — reusable launch configuration catalog
 // ---------------------------------------------------------------------------
 
-export const assistants = {
-  list: httpGet<Assistant[], void>('/api/assistants'),
-  create: httpPost<Assistant, CreateAssistantRequest>('/api/assistants'),
-  update: httpPut<Assistant, UpdateAssistantRequest>((p) => `/api/assistants/${p.id}`),
-  delete: httpDelete<void, { id: string }>((p) => `/api/assistants/${p.id}`),
-  setState: httpPatch<Assistant, SetAssistantStateRequest>(
-    (p) => `/api/assistants/${p.id}/state`,
+export const presets = {
+  list: httpGet<Preset[], void>('/api/presets'),
+  get: httpGet<Preset, { id: string }>((p) => `/api/presets/${p.id}`),
+  create: httpPost<Preset, CreatePresetRequest>('/api/presets'),
+  update: httpPut<Preset, { id: string } & UpdatePresetRequest>(
+    (p) => `/api/presets/${p.id}`,
     (p) => {
       const { id: _id, ...body } = p;
       return body;
     }
   ),
-  import: httpPost<ImportAssistantsResult, ImportAssistantsRequest>('/api/assistants/import'),
+  delete: httpDelete<void, { id: string }>((p) => `/api/presets/${p.id}`),
+  setState: httpPatch<Preset, SetPresetStateRequest>(
+    (p) => `/api/presets/${p.id}/state`,
+    (p) => {
+      const { id: _id, ...body } = p;
+      return body;
+    }
+  ),
+  resolve: httpPost<ResolvedPresetSnapshot, ResolvePresetRequest>(
+    (p) => `/api/presets/${p.id}/resolve`,
+    (p) => {
+      const { id: _id, ...body } = p;
+      return body;
+    }
+  ),
+  import: httpPost<ImportPresetsResult, ImportPresetsRequest>('/api/presets/import'),
 };
 
 // ---------------------------------------------------------------------------
-// Assistant Tags — routed to /api/assistant-tags/*
+// Preset Tags
 // ---------------------------------------------------------------------------
 
-export const assistantTags = {
-  list: httpGet<AssistantTag[], void>('/api/assistant-tags'),
-  create: httpPost<AssistantTag, CreateAssistantTagRequest>('/api/assistant-tags'),
-  update: httpPut<AssistantTag, UpdateAssistantTagRequest>(
-    (p) => `/api/assistant-tags/${p.key}`,
+export const presetTags = {
+  list: httpGet<PresetTag[], void>('/api/preset-tags'),
+  create: httpPost<PresetTag, CreatePresetTagRequest>('/api/preset-tags'),
+  update: httpPut<PresetTag, UpdatePresetTagRequest>(
+    (p) => `/api/preset-tags/${p.key}`,
     (p) => {
       const { key: _key, ...body } = p;
       return body;
     }
   ),
-  delete: httpDelete<void, { key: string }>((p) => `/api/assistant-tags/${p.key}`),
+  delete: httpDelete<void, { key: string }>((p) => `/api/preset-tags/${p.key}`),
 };
 
 // ---------------------------------------------------------------------------
@@ -229,6 +248,8 @@ export const conversation = {
       const body: Record<string, unknown> = {
         type: p.type,
         name: p.name,
+        preset_id: p.preset_id,
+        preset_overrides: p.preset_overrides,
         extra: p.extra,
       };
       if (isNomi) {
@@ -731,20 +752,6 @@ export const fs = {
   renameEntry: httpPost<{ new_path: string }, { path: string; new_name: string }>('/api/fs/rename'),
   readBuiltinRule: httpPost<string, { file_name: string }>('/api/skills/builtin-rule'),
   readBuiltinSkill: httpPost<string, { file_name: string }>('/api/skills/builtin-skill'),
-  readAssistantRule: httpPost<string, { assistant_id: string; locale?: string }>('/api/skills/assistant-rule/read'),
-  writeAssistantRule: httpPost<boolean, { assistant_id: string; content: string; locale?: string }>(
-    '/api/skills/assistant-rule/write'
-  ),
-  deleteAssistantRule: httpDelete<boolean, { assistant_id: string }>(
-    (p) => `/api/skills/assistant-rule/${p.assistant_id}`
-  ),
-  readAssistantSkill: httpPost<string, { assistant_id: string; locale?: string }>('/api/skills/assistant-skill/read'),
-  writeAssistantSkill: httpPost<boolean, { assistant_id: string; content: string; locale?: string }>(
-    '/api/skills/assistant-skill/write'
-  ),
-  deleteAssistantSkill: httpDelete<boolean, { assistant_id: string }>(
-    (p) => `/api/skills/assistant-skill/${p.assistant_id}`
-  ),
   listAvailableSkills: httpGet<
     Array<{
       name: string;
@@ -789,7 +796,7 @@ export const fs = {
   ),
   deleteSkill: httpDelete<void, { skill_name: string }>((p) => `/api/skills/${encodeURIComponent(p.skill_name)}`),
   // Assign tags to a skill (PUT /api/skills/{name}/tags). Tag keys reference the
-  // shared assistant tag vocabulary; the backend stores them in a sidecar table.
+  // shared preset tag vocabulary; the backend stores them in a sidecar table.
   setSkillTags: httpPut<void, { skill_name: string; audience_tags: string[]; scenario_tags: string[] }>(
     (p) => `/api/skills/${encodeURIComponent(p.skill_name)}/tags`,
     (p) => ({ audience_tags: p.audience_tags, scenario_tags: p.scenario_tags })
@@ -1701,12 +1708,10 @@ export interface ICronJobRun {
 }
 
 export interface ICronAgentConfig {
-  backend: string;
-  name: string;
+  backend?: string;
+  name?: string;
   cli_path?: string;
-  is_preset?: boolean;
-  custom_agent_id?: string;
-  preset_agent_type?: string;
+  preset_id?: string;
   mode?: string;
   model_id?: string;
   config_options?: Record<string, string>;
@@ -1873,6 +1878,9 @@ export interface ICreateConversationParams {
   type: 'acp' | 'codex' | 'openclaw-gateway' | 'nanobot' | 'remote' | 'nomi';
   name?: string;
   model: TProviderWithModel;
+  /** Backend-resolved reusable launch configuration. */
+  preset_id?: string;
+  preset_overrides?: import('../types/agent/presetTypes').PresetOverrides;
   extra: {
     workspace?: string;
     custom_workspace?: boolean;
@@ -1893,7 +1901,6 @@ export interface ICreateConversationParams {
     custom_agent_id?: string;
     context?: string;
     context_file_name?: string;
-    preset_rules?: string;
     /** Legacy field kept for backward-compat only (`#[serde(default)]`); no longer
      *  drives any lead prompt (the homepage 智能编排 entry was removed). The model
      *  range (主/协作) is now set per-conversation via the composer's collaborator
@@ -1924,8 +1931,6 @@ export interface ICreateConversationParams {
     /** Transient: session-scoped MCP server configs that are not stored in the
      *  backend catalog (currently built-in MCP servers). */
     selected_session_mcp_servers?: ISessionMcpServer[];
-    preset_context?: string;
-    preset_assistant_id?: string;
     session_mode?: string;
     codex_model?: string;
     current_model_id?: string;
@@ -2249,7 +2254,7 @@ export interface IExtensionAgentActivitySnapshot {
 export const extensions = {
   getThemes: httpGet<ICssTheme[], void>('/api/extensions/themes'),
   getLoadedExtensions: httpGet<IExtensionInfo[], void>('/api/extensions'),
-  getAssistants: httpGet<Record<string, unknown>[], void>('/api/extensions/assistants'),
+  getPresets: httpGet<Record<string, unknown>[], void>('/api/extensions/presets'),
   getAgents: httpGet<Record<string, unknown>[], void>('/api/extensions/agents'),
   getAcpAdapters: httpGet<Record<string, unknown>[], void>('/api/extensions/acp-adapters'),
   getMcpServers: httpGet<Record<string, unknown>[], void>('/api/extensions/mcp-servers'),
@@ -2380,8 +2385,8 @@ export const channel = {
   syncChannelSettings: httpPost<void, { platform: string }>('/api/channel/settings/sync'),
   /**
    * Bind one companion as the master-agent greeter for an IM platform (spec §4.4/§4.7).
-   * Atomic on the backend: writes the `assistant.{platform}.companionId` client
-   * preference and resets the platform's active sessions in one step.
+   * Atomic on the backend: writes the channel companion preference and resets
+   * the platform's active sessions in one step.
    * Omitted/empty `companion_id` clears the binding (falls back to the default companion).
    * Binding a non-existent companion returns 400 — errors propagate to the caller
    * as `BackendHttpError`.
@@ -2954,6 +2959,16 @@ export const webhook = {
 // strings (`fleet_…` / `ows_…`).
 
 export const orchestrator = {
+  fleets: {
+    list: httpGet<TFleet[], void>('/api/orchestrator/fleets'),
+    get: httpGet<TFleet, { id: string }>((p) => `/api/orchestrator/fleets/${p.id}`),
+    create: httpPost<TFleet, TCreateFleet>('/api/orchestrator/fleets'),
+    update: httpPut<TFleet, { id: string } & TUpdateFleet>(
+      (p) => `/api/orchestrator/fleets/${p.id}`,
+      ({ id: _id, ...body }) => body
+    ),
+    remove: httpDelete<void, { id: string }>((p) => `/api/orchestrator/fleets/${p.id}`),
+  },
   runs: {
     // Every run owned by the current user (all workspaces + ad-hoc/workspace-less
     // runs), newest first — the read path for the read-only Run-history library.
@@ -3311,6 +3326,8 @@ export interface ICompanionProfile {
   persona: ICompanionPersona;
   model: ICompanionModelRef;
   appearance: ICompanionWindowConfig;
+  /** Frozen execution configuration last applied to this companion. */
+  applied_preset?: ResolvedPresetSnapshot;
   created_at: number;
 }
 
@@ -3522,6 +3539,13 @@ export const companion = {
   patchCompanion: httpPatch<ICompanionProfile, { companion_id: string; patch: ICompanionProfilePatch }>(
     (p) => `/api/companion/companions/${p.companion_id}`,
     (p) => p.patch
+  ),
+  applyPreset: httpPost<
+    ICompanionProfile,
+    { companion_id: string; preset_id: string; locale?: string; overrides?: import('../types/agent/presetTypes').PresetOverrides }
+  >(
+    (p) => `/api/companion/companions/${p.companion_id}/apply-preset`,
+    (p) => ({ preset_id: p.preset_id, locale: p.locale, overrides: p.overrides ?? {} })
   ),
   deleteCompanion: httpDelete<void, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}`),
   getCompanionStatus: httpGet<ICompanionStatus, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}/status`),
@@ -3884,6 +3908,8 @@ export interface IPublicAgent {
   grounded_mode: boolean;
   /** 服务守则 — business scope / off-limits topics / compliance phrasing. */
   service_policy: string;
+  /** Frozen execution configuration last applied to this public companion. */
+  applied_preset?: ResolvedPresetSnapshot;
   /** How many days of audit entries to retain before auto-pruning. */
   audit_retention_days: number;
   /** Whether this agent is live (serving strangers) or paused. */
@@ -3940,6 +3966,13 @@ export const publicAgent = {
   patch: httpPatch<IPublicAgent, { id: string; patch: IPublicAgentPatch }>(
     (p) => `/api/public-agents/${p.id}`,
     (p) => p.patch
+  ),
+  applyPreset: httpPost<
+    IPublicAgent,
+    { id: string; preset_id: string; locale?: string; overrides?: import('../types/agent/presetTypes').PresetOverrides }
+  >(
+    (p) => `/api/public-agents/${p.id}/apply-preset`,
+    (p) => ({ preset_id: p.preset_id, locale: p.locale, overrides: p.overrides ?? {} })
   ),
   /** Delete a public companion (204). */
   remove: httpDelete<void, { id: string }>((p) => `/api/public-agents/${p.id}`),

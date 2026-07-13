@@ -8,7 +8,7 @@ import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
 import { CronJobManager } from '@/renderer/pages/cron';
-import { usePresetAssistantInfo, resolveAssistantConfigId } from '@/renderer/hooks/agent/usePresetAssistantInfo';
+import { usePresetInfo, resolvePresetConfigId } from '@/renderer/hooks/agent/usePresetInfo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
 import { ChartHistogram, History } from '@icon-park/react';
@@ -158,8 +158,8 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceOrchestration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   collaboratorSelectorNode: React.ReactNode;
-  presetAssistantName?: string;
-}> = ({ conversation, chatLayoutProps, modelSelection, collaboratorSelectorNode, presetAssistantName }) => {
+  presetPresetName?: string;
+}> = ({ conversation, chatLayoutProps, modelSelection, collaboratorSelectorNode, presetPresetName }) => {
   const { t } = useTranslation();
   const orchestration = useOrchestration();
   const status = orchestration.detail?.run.status ?? '';
@@ -203,7 +203,7 @@ const NomiConversationLayout: React.FC<{
               loadedMcpStatuses={
                 (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
               }
-              agent_name={presetAssistantName}
+              agent_name={presetPresetName}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={<ClusterModePill conversation={conversation} />}
               isProcessing={isConversationProcessing(conversation)}
@@ -364,8 +364,8 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
   ]);
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
-  const { info: presetAssistantInfo } = usePresetAssistantInfo(conversation);
-  const nomiAssistantId = resolveAssistantConfigId(conversation) ?? undefined;
+  const { info: presetPresetInfo } = usePresetInfo(conversation);
+  const nomiPresetId = resolvePresetConfigId(conversation) ?? undefined;
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -389,7 +389,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
     backend: 'nomi' as const,
-    presetAssistant: presetAssistantInfo ? { ...presetAssistantInfo, id: nomiAssistantId } : undefined,
+    presetPreset: presetPresetInfo ? { ...presetPresetInfo, id: nomiPresetId } : undefined,
   };
 
   return (
@@ -399,7 +399,7 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
         chatLayoutProps={chatLayoutProps}
         modelSelection={modelSelection}
         collaboratorSelectorNode={collaboratorSelectorNode}
-        presetAssistantName={presetAssistantInfo?.name}
+        presetPresetName={presetPresetInfo?.name}
       />
     </OrchestrationProvider>
   );
@@ -414,14 +414,14 @@ const ChatConversation: React.FC<{
 
   const isNomiConversation = conversation?.type === 'nomi';
 
-  // 使用统一的 Hook 获取预设助手信息（ACP/Codex 会话）
-  // Use unified hook for preset assistant info (ACP/Codex conversations)
+  // 使用统一的 Hook 获取会话的设定快照（ACP/Codex 会话）
+  // Use unified hook for preset preset info (ACP/Codex conversations)
   const acpConversation = isNomiConversation ? undefined : conversation;
-  const { info: presetAssistantInfo, isLoading: isLoadingPreset } = usePresetAssistantInfo(acpConversation);
-  const acpAssistantId = acpConversation ? (resolveAssistantConfigId(acpConversation) ?? undefined) : undefined;
+  const { info: presetPresetInfo, isLoading: isLoadingPreset } = usePresetInfo(acpConversation);
+  const acpPresetId = acpConversation ? (resolvePresetConfigId(acpConversation) ?? undefined) : undefined;
 
   const conversationAgentName = (conversation?.extra as { agent_name?: string } | undefined)?.agent_name;
-  const assistantDisplayName = presetAssistantInfo?.name || conversationAgentName;
+  const presetDisplayName = presetPresetInfo?.name || conversationAgentName;
 
   const conversationNode = useMemo(() => {
     if (!conversation || isNomiConversation) return null;
@@ -437,7 +437,7 @@ const ChatConversation: React.FC<{
               backend={extra.backend || 'claude'}
               initialModelId={extra.current_model_id}
               session_mode={conversation.extra?.session_mode}
-              agent_name={assistantDisplayName}
+              agent_name={presetDisplayName}
               cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
               hideSendBox={hideSendBox}
               loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
@@ -462,7 +462,7 @@ const ChatConversation: React.FC<{
             workspace={conversation.extra?.workspace}
             backend='gemini'
             initialModelId={(conversation.extra as { current_model_id?: string } | undefined)?.current_model_id}
-            agent_name={assistantDisplayName}
+            agent_name={presetDisplayName}
             cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
@@ -480,7 +480,7 @@ const ChatConversation: React.FC<{
             workspace={conversation.extra?.workspace}
             backend='codex'
             initialModelId={(conversation.extra as { current_model_id?: string } | undefined)?.current_model_id}
-            agent_name={assistantDisplayName}
+            agent_name={presetDisplayName}
             hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
             loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
@@ -522,7 +522,7 @@ const ChatConversation: React.FC<{
       default:
         return null;
     }
-  }, [conversation, isNomiConversation, assistantDisplayName, hideSendBox]);
+  }, [conversation, isNomiConversation, presetDisplayName, hideSendBox]);
 
   const sliderTitle = useMemo(() => {
     return (
@@ -541,11 +541,11 @@ const ChatConversation: React.FC<{
     return <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} />;
   }
 
-  // 如果有预设助手信息，使用预设助手的 logo 和名称；加载中时不进入 fallback；否则使用 backend 的 logo
-  // If preset assistant info exists, use preset logo/name; while loading, avoid fallback; otherwise use backend logo
-  const chatLayoutProps = presetAssistantInfo
+  // 如果有设定快照，使用快照中的 logo 和名称；加载中时不进入 fallback；否则使用 backend 的 logo
+  // If preset preset info exists, use preset logo/name; while loading, avoid fallback; otherwise use backend logo
+  const chatLayoutProps = presetPresetInfo
     ? {
-        presetAssistant: { ...presetAssistantInfo, id: acpAssistantId },
+        presetPreset: { ...presetPresetInfo, id: acpPresetId },
       }
     : isLoadingPreset
       ? {} // Still loading custom agents — avoid showing backend logo prematurely

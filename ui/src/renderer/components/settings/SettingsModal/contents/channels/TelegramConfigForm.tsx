@@ -144,7 +144,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   // Test Telegram connection
   const handleTestConnection = async () => {
     if (!telegramToken.trim()) {
-      Message.warning(t('settings.assistant.tokenRequired', 'Please enter a bot token'));
+      Message.warning(t('settings.channels.tokenRequired', 'Please enter a bot token'));
       return;
     }
 
@@ -162,7 +162,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
         setTokenTested(true);
         setTestedBotUsername(result.bot_username || null);
         Message.success(
-          t('settings.assistant.connectionSuccess', {
+          t('settings.channels.connectionSuccess', {
             defaultValue: 'Connected! Bot: @{{username}}',
             username: result.bot_username || 'unknown',
           })
@@ -172,11 +172,11 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
         await handleAutoEnable();
       } else {
         setTokenTested(false);
-        Message.error(result.error || t('settings.assistant.connectionFailed', 'Connection failed'));
+        Message.error(result.error || t('settings.channels.connectionFailed', 'Connection failed'));
       }
     } catch (error: any) {
       setTokenTested(false);
-      Message.error(error.message || t('settings.assistant.connectionFailed', 'Connection failed'));
+      Message.error(error.message || t('settings.channels.connectionFailed', 'Connection failed'));
     } finally {
       setTestLoading(false);
     }
@@ -195,7 +195,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
       }
 
-      Message.success(t('settings.assistant.pluginEnabled', 'Telegram bot enabled'));
+      Message.success(t('settings.channels.pluginEnabled', 'Telegram bot enabled'));
       const plugins = await channel.getPluginStatus.invoke();
       if (plugins) {
         // Multi-row model: resolve by row id (or this companion's freshly created
@@ -225,7 +225,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   const handleApprovePairing = async (code: string) => {
     try {
       await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.assistant.pairingApproved', 'Pairing approved'));
+      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
       await loadPendingPairings();
       await loadAuthorizedUsers();
     } catch (error: unknown) {
@@ -237,7 +237,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   const handleRejectPairing = async (code: string) => {
     try {
       await channel.rejectPairing.invoke({ code });
-      Message.info(t('settings.assistant.pairingRejected', 'Pairing rejected'));
+      Message.info(t('settings.channels.pairingRejected', 'Pairing rejected'));
       await loadPendingPairings();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -248,7 +248,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   const handleRevokeUser = async (user_id: string) => {
     try {
       await channel.revokeUser.invoke({ user_id });
-      Message.success(t('settings.assistant.userRevoked', 'User access revoked'));
+      Message.success(t('settings.channels.userRevoked', 'User access revoked'));
       await loadAuthorizedUsers();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -280,9 +280,9 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   return (
     <div className='flex flex-col gap-24px'>
       <PreferenceRow
-        label={t('settings.assistant.botToken', 'Bot Token')}
+        label={t('settings.channels.botToken', 'Bot Token')}
         description={t(
-          'settings.assistant.botTokenDesc',
+          'settings.channels.botTokenDesc',
           'Open Telegram, find @BotFather and send /newbot to get your Bot Token.'
         )}
       >
@@ -290,7 +290,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
           {credentialsLocked ? (
             <Tooltip
               content={t(
-                'settings.assistant.tokenLocked',
+                'settings.channels.tokenLocked',
                 'Please close the Channel and delete all authorized users before modifying the configuration'
               )}
             >
@@ -322,7 +322,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
           {credentialsLocked ? (
             <Tooltip
               content={t(
-                'settings.assistant.tokenLocked',
+                'settings.channels.tokenLocked',
                 'Please close the Channel and delete all authorized users before modifying the configuration'
               )}
             >
@@ -333,7 +333,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                   onClick={handleTestConnection}
                   disabled={credentialsLocked}
                 >
-                  {t('settings.assistant.testConnection', 'Test')}
+                  {t('settings.channels.testConnection', 'Test')}
                 </Button>
               </span>
             </Tooltip>
@@ -344,7 +344,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
               onClick={handleTestConnection}
               disabled={credentialsLocked}
             >
-              {t('settings.assistant.testConnection', 'Test')}
+              {t('settings.channels.testConnection', 'Test')}
             </Button>
           )}
         </div>
@@ -354,10 +354,10 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       {/* Next Steps Guide - show when bot is enabled and no authorized users yet */}
       {pluginStatus?.enabled && pluginStatus?.connected && authorizedUsers.length === 0 && (
         <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-16px border border-[rgba(var(--primary-rgb),0.2)]'>
-          <SectionHeader title={t('settings.assistant.nextSteps', 'Next Steps')} />
+          <SectionHeader title={t('settings.channels.nextSteps', 'Next Steps')} />
           <div className='text-14px text-t-secondary space-y-8px'>
             <p className='m-0'>
-              <strong>1.</strong> {t('settings.assistant.step1', 'Open Telegram and search for your bot')}
+              <strong>1.</strong> {t('settings.channels.step1', 'Open Telegram and search for your bot')}
               {pluginStatus.botUsername && (
                 <span className='ml-4px'>
                   <code className='bg-fill-2 px-6px py-2px rd-4px'>@{pluginStatus.botUsername}</code>
@@ -366,18 +366,18 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
             </p>
             <p className='m-0'>
               <strong>2.</strong>{' '}
-              {t('settings.assistant.step2', 'Send any message or click /start to initiate pairing')}
+              {t('settings.channels.step2', 'Send any message or click /start to initiate pairing')}
             </p>
             <p className='m-0'>
               <strong>3.</strong>{' '}
               {t(
-                'settings.assistant.step3',
+                'settings.channels.step3',
                 'A pairing request will appear below. Click "Approve" to authorize the user.'
               )}
             </p>
             <p className='m-0'>
               <strong>4.</strong>{' '}
-              {t('settings.assistant.step4', 'Once approved, you can start chatting with Gemini through Telegram!')}
+              {t('settings.channels.step4', 'Once approved, you can start chatting with Gemini through Telegram!')}
             </p>
           </div>
         </div>
@@ -387,7 +387,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       {pluginStatus?.enabled && authorizedUsers.length === 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.pendingPairings', 'Pending Pairing Requests')}
+            title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')}
             action={
               <Button
                 size='mini'
@@ -406,7 +406,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
               <Spin />
             </div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.assistant.noPendingPairings', 'No pending pairing requests')} />
+            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (
@@ -416,7 +416,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                       <span className='text-14px font-500 text-t-primary'>
                         {pairing.display_name || t('common.unknownUser')}
                       </span>
-                      <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
+                      <Tooltip content={t('settings.channels.copyCode', 'Copy pairing code')}>
                         <button
                           className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer'
                           onClick={() => copyToClipboard(pairing.code)}
@@ -426,10 +426,10 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                       </Tooltip>
                     </div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.pairingCode', 'Code')}:{' '}
+                      {t('settings.channels.pairingCode', 'Code')}:{' '}
                       <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
+                      {t('settings.channels.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
                     </div>
                   </div>
                   <div className='flex items-center gap-8px'>
@@ -439,7 +439,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                       icon={<CheckOne size={14} />}
                       onClick={() => handleApprovePairing(pairing.code)}
                     >
-                      {t('settings.assistant.approve', 'Approve')}
+                      {t('settings.channels.approve', 'Approve')}
                     </Button>
                     <Button
                       type='secondary'
@@ -448,7 +448,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                       icon={<CloseOne size={14} />}
                       onClick={() => handleRejectPairing(pairing.code)}
                     >
-                      {t('settings.assistant.reject', 'Reject')}
+                      {t('settings.channels.reject', 'Reject')}
                     </Button>
                   </div>
                 </div>
@@ -462,7 +462,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       {pluginStatus?.enabled && authorizedUsers.length > 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.authorizedUsers', 'Authorized Users')}
+            title={t('settings.channels.authorizedUsers', 'Authorized Users')}
             action={
               <Button
                 size='mini'
@@ -481,7 +481,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
               <Spin />
             </div>
           ) : authorizedUsers.length === 0 ? (
-            <Empty description={t('settings.assistant.noAuthorizedUsers', 'No authorized users yet')} />
+            <Empty description={t('settings.channels.noAuthorizedUsers', 'No authorized users yet')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {authorizedUsers.map((user) => (
@@ -489,12 +489,12 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
                   <div className='flex-1'>
                     <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.platform', 'Platform')}: {user.platformType}
+                      {t('settings.channels.platform', 'Platform')}: {user.platformType}
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
+                      {t('settings.channels.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
                     </div>
                   </div>
-                  <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
+                  <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
                     <Button
                       type='text'
                       status='danger'

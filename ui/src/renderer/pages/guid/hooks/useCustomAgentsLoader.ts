@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { Assistant } from '@/common/types/agent/assistantTypes';
+import type { Preset } from '@/common/types/agent/presetTypes';
 import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import { useAgents } from '@/renderer/hooks/agent/useAgents';
 import { useCallback, useMemo } from 'react';
@@ -23,15 +23,15 @@ type UseCustomAgentsLoaderOptions = {
 
 type UseCustomAgentsLoaderResult = {
   /**
-   * Preset assistant catalog returned by the backend — merged builtin + user +
+   * Preset preset catalog returned by the backend — merged builtin + user +
    * extension, already sorted. This is the list the Guid pill bar and the
    * Settings list render.
    */
-  assistants: Assistant[];
+  presets: Preset[];
   /**
    * User-defined ACP custom agent rows fetched from
    * `ipcBridge.acpConversation.getAvailableAgents` (filtered by
-   * `agent_source === 'custom'`). Completely separate from `assistants`. Only
+   * `agent_source === 'custom'`). Completely separate from `presets`. Only
    * entries whose ids also appear in `availableCustomAgentIds` are returned —
    * we hide configs whose CLI is missing from PATH.
    */
@@ -46,12 +46,12 @@ type UseCustomAgentsLoaderResult = {
 };
 
 /**
- * Loads the two distinct assistant-shaped data sources that the Guid page
+ * Loads the two distinct preset-shaped data sources that the Guid page
  * consumes. These two lists are intentionally kept separate by type:
  *
- *   - `assistants: Assistant[]` — the backend-merged preset catalog
- *     (`GET /api/assistants`). This is the single source of truth for
- *     "what to render in the AssistantSelectionArea pill bar" and what the
+ *   - `presets: Preset[]` — the backend-merged preset catalog
+ *     (`GET /api/presets`). This is the single source of truth for
+ *     "what to render in the PresetSelectionArea pill bar" and what the
  *     editor drawer edits.
  *   - `customAgents: AgentMetadata[]` — user-defined ACP engine rows
  *     derived from the shared `useAgents()` SWR cache (filtered by
@@ -64,17 +64,17 @@ type UseCustomAgentsLoaderResult = {
 export const useCustomAgentsLoader = ({
   availableCustomAgentIds,
 }: UseCustomAgentsLoaderOptions): UseCustomAgentsLoaderResult => {
-  // Preset assistants share their own cache so settings / guid / conversation
+  // Preset presets share their own cache so settings / guid / conversation
   // all see the same list without duplicate HTTP calls.
-  const { data: assistantList } = useSWR('assistants.list', async () => {
+  const { data: presetList } = useSWR('presets.list', async () => {
     try {
-      return await ipcBridge.assistants.list.invoke();
+      return await ipcBridge.presets.list.invoke();
     } catch (error) {
-      console.error('Failed to load assistants:', error);
-      return [] as Assistant[];
+      console.error('Failed to load presets:', error);
+      return [] as Preset[];
     }
   });
-  const assistants = assistantList ?? [];
+  const presets = presetList ?? [];
 
   // Execution-engine rows come from the shared agents cache — every subscriber
   // (guid / conversation / settings / channels / MCP flows) reads through the
@@ -87,14 +87,14 @@ export const useCustomAgentsLoader = ({
 
   const customAgentAvatarMap = useMemo(() => {
     const map = new Map<string, string | undefined>();
-    for (const assistant of assistants) {
-      map.set(assistant.id, assistant.avatar);
+    for (const preset of presets) {
+      map.set(preset.id, preset.avatar);
     }
     for (const agent of customAgents) {
       map.set(agent.id, agent.icon);
     }
     return map;
-  }, [assistants, customAgents]);
+  }, [presets, customAgents]);
 
   // Explicit refresh — used by "switch preset agent type" and the settings
   // refresh button. Not triggered on mount; we rely on the backend's hydration
@@ -110,7 +110,7 @@ export const useCustomAgentsLoader = ({
   }, [revalidate]);
 
   return {
-    assistants,
+    presets,
     customAgents,
     customAgentAvatarMap,
     refreshCustomAgents,

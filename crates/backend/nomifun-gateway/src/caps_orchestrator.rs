@@ -50,7 +50,8 @@ use std::sync::Arc;
 
 use nomifun_api_types::{
     CapabilityProfile, CreateAdhocRunRequest, FleetMember, ModelRange, ModelRef, PlannedTask,
-    RunDetail, derive_capability, infer_model_modalities,
+    PresetOverrides, PresetTarget, ResolvedPresetSnapshot, RunDetail, derive_capability,
+    infer_model_modalities,
 };
 use nomifun_common::{ProviderWithModel, generate_prefixed_id};
 use schemars::JsonSchema;
@@ -277,15 +278,15 @@ async fn create(deps: Arc<GatewayDeps>, ctx: crate::deps::CallerCtx, p: RunCreat
     };
 
     // The concrete (provider_id, model) pairs this run may execute over. An
-    // assistant whose preferred models are all OUTSIDE this set is skipped (we
+    // preset whose preferred models are all OUTSIDE this set is skipped (we
     // never force a model on a run); a member's description is looked up here too.
     let range_pairs = range_pairs(&model_range);
 
-    // 3. Build the assistant-backed role members: for each ENABLED assistant whose
+    // 3. Build the preset-backed role members: for each ENABLED preset whose
     //    preferred model falls in range, fold its persona (read_rule, fail-soft) /
     //    skills / model into an enriched FleetMember. Fail-soft on a list error —
     //    a run with just the bare model members is still valid.
-    let role_members = build_assistant_members(&deps, &summaries, &range_pairs).await;
+    let role_members = build_preset_members(&deps, &summaries, &range_pairs).await;
 
     // Path A: bind the run to the CALLING conversation (the master agent's chat)
     // when there is one. Parse the id once: empty ⇒ no lead (MCP / no-session),
@@ -915,7 +916,7 @@ fn planning_started_message(interactive: bool) -> String {
 
 /// The set of concrete `(provider_id, model)` pairs a run may execute over,
 /// extracted from the (already-expanded) `Single`/`Range` model range. An
-/// assistant whose preferred model is not one of these is skipped.
+/// preset whose preferred model is not one of these is skipped.
 fn range_pairs(range: &ModelRange) -> Vec<(String, String)> {
     match range {
         ModelRange::Single { model } => vec![(model.provider_id.clone(), model.model.clone())],
@@ -928,13 +929,14 @@ fn range_pairs(range: &ModelRange) -> Vec<(String, String)> {
     }
 }
 
-/// The minimal assistant data the role-member builder needs (decoupled from the
-/// async `AssistantService` so the build logic is pure + unit-testable).
-struct AssistantData {
+/// The minimal preset data the role-member builder needs. Production values
+/// carry a server-resolved immutable snapshot; `None` is only used by pure
+/// compatibility tests of the routing helper.
+struct PresetData {
     id: String,
     name: String,
     description: Option<String>,
-    /// The assistant's preferred model NAMES, in priority order.
+    /// The preset's preferred model NAMES, in priority order.
     models: Vec<String>,
     enabled_skills: Vec<String>,
     disabled_builtin_skills: Vec<String>,
@@ -942,17 +944,18 @@ struct AssistantData {
     scenario_tags: Vec<String>,
     /// Persona/rule text (already read server-side via `read_rule`); empty → None.
     persona: String,
+    snapshot: Option<ResolvedPresetSnapshot>,
 }
 
-/// Resolve an assistant's preferred model to the FIRST `(provider_id, model)`
-/// that is BOTH (a) one of the assistant's preferred model names and (b) present
+/// Resolve an preset's preferred model to the FIRST `(provider_id, model)`
+/// that is BOTH (a) one of the preset's preferred model names and (b) present
 /// in the run's range. Returns `None` when the assistant has no model in range —
 /// the caller SKIPS it (we never force a model on a run).
 ///
 /// `range_pairs` is the run's concrete pairs (provider_id, model). A model NAME
 /// can map to several providers; we honor the assistant's priority order, and
 /// for a given preferred name pick the first range pair that uses it.
-fn resolve_assistant_model(
+fn resolve_preset_model(
     preferred_models: &[String],
     range_pairs: &[(String, String)],
 ) -> Option<(String, String)> {
@@ -964,12 +967,12 @@ fn resolve_assistant_model(
     None
 }
 
-/// Build one enriched [`FleetMember`] from an assistant + its resolved in-range
+/// Build one enriched [`FleetMember`] from a preset + its resolved in-range
 /// model. Folds the persona (fail-soft → `None` on empty), skills, description,
 /// and a conservative derived capability profile into the snapshot member so the
 /// orchestrator worker (Task 3) reads everything from the snapshot with no
 /// assistant-crate dependency.
-fn derive_role_member(a: &AssistantData, provider_id: String, model: String) -> FleetMember {
+fn derive_role_member(a: &PresetData, provider_id: String, model: String) -> FleetMember {
     let persona = a.persona.trim();
     // Conservative tag/description-derived profile (no modalities — `derive_capability`
     // has no model name). Phase 2: merge the model NAME's inferred modalities (e.g.
@@ -988,7 +991,14 @@ fn derive_role_member(a: &AssistantData, provider_id: String, model: String) -> 
     }
     FleetMember {
         id: generate_prefixed_id("rmbr"),
-        agent_id: a.id.clone(),
+        agent_id: a
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.resolved_agent_id.clone())
+            .unwrap_or_default(),
+        preset_id: Some(a.id.clone()),
+        preset_revision: a.snapshot.as_ref().map(|snapshot| snapshot.preset_revision),
+        preset_snapshot: a.snapshot.clone(),
         provider_id: Some(provider_id),
         model: Some(model),
         role_hint: Some(a.name.clone()),
@@ -1003,23 +1013,40 @@ fn derive_role_member(a: &AssistantData, provider_id: String, model: String) -> 
     }
 }
 
-/// Pure core: turn the ENABLED assistants into enriched role members, skipping
+/// Pure core: turn the enabled presets into enriched role members, skipping
 /// any whose preferred models are all out of the run's range. Unit-tested
-/// directly; the async wrapper supplies the assistant list + personas.
-fn build_role_members_from_assistants(
-    assistants: &[AssistantData],
+/// directly; the async wrapper supplies the preset list + personas.
+fn build_role_members_from_presets(
+    presets: &[PresetData],
     range_pairs: &[(String, String)],
 ) -> Vec<FleetMember> {
-    assistants
+    presets
         .iter()
         .filter_map(|a| {
-            let (provider_id, model) = resolve_assistant_model(&a.models, range_pairs)?;
+            let resolved_pair = a
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.resolved_model.as_ref())
+                .and_then(|resolved| {
+                    range_pairs
+                        .iter()
+                        .find(|(provider_id, model)| {
+                            model == &resolved.model
+                                && resolved
+                                    .provider_id
+                                    .as_ref()
+                                    .is_none_or(|expected| expected == provider_id)
+                        })
+                        .cloned()
+                });
+            let (provider_id, model) = resolved_pair
+                .or_else(|| resolve_preset_model(&a.models, range_pairs))?;
             Some(derive_role_member(a, provider_id, model))
         })
         .collect()
 }
 
-/// Async wrapper: list the ENABLED assistants, read each one's persona
+/// Async wrapper: list the enabled presets, read each one's instructions
 /// (`read_rule`, default locale, fail-soft → empty), and build the role members.
 ///
 /// Also emits "description decorations" for the bare model-range members: a
@@ -1035,7 +1062,7 @@ fn build_role_members_from_assistants(
 /// hard requirement; a run with just the bare model members is still valid. A
 /// `read_rule` error for a single assistant degrades that assistant's persona to
 /// empty (`None` system_prompt), never failing the whole build.
-async fn build_assistant_members(
+async fn build_preset_members(
     deps: &GatewayDeps,
     summaries: &[ProviderSummary],
     range_pairs: &[(String, String)],
@@ -1055,6 +1082,9 @@ async fn build_assistant_members(
             Some(FleetMember {
                 id: generate_prefixed_id("rmbr"),
                 agent_id: String::new(),
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 provider_id: Some(pid.clone()),
                 model: Some(model.clone()),
                 role_hint: None,
@@ -1082,36 +1112,63 @@ async fn build_assistant_members(
         })
         .collect();
 
-    let responses = match deps.assistant_service.list().await {
+    let responses = match deps.preset_service.list().await {
         Ok(list) => list,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to list assistants for orchestration role members; using bare model members only");
+            tracing::warn!(error = %e, "failed to list presets for orchestration role members; using bare model members only");
             return out;
         }
     };
 
-    let mut data: Vec<AssistantData> = Vec::new();
-    for r in responses.into_iter().filter(|r| r.enabled) {
-        // Read the persona server-side (default locale → None). Fail-soft.
-        let persona = deps
-            .assistant_service
-            .read_rule(&r.id, None)
+    let mut data: Vec<PresetData> = Vec::new();
+    for r in responses
+        .into_iter()
+        .filter(|r| r.enabled && r.auto_selectable)
+    {
+        let snapshot = match deps
+            .preset_service
+            .resolve(
+                &r.id,
+                PresetTarget::ClusterMember,
+                None,
+                PresetOverrides::default(),
+            )
             .await
-            .unwrap_or_default();
-        data.push(AssistantData {
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(preset_id = %r.id, %error, "skipping unresolved orchestration preset");
+                continue;
+            }
+        };
+        let Some(resolved_model) = snapshot.resolved_model.as_ref() else {
+            continue;
+        };
+        let in_range = range_pairs.iter().any(|(provider_id, model)| {
+            model == &resolved_model.model
+                && resolved_model
+                    .provider_id
+                    .as_ref()
+                    .is_none_or(|expected| expected == provider_id)
+        });
+        if !in_range {
+            continue;
+        }
+        data.push(PresetData {
             id: r.id,
             name: r.name,
-            description: r.description,
-            models: r.models,
-            enabled_skills: r.enabled_skills,
-            disabled_builtin_skills: r.disabled_builtin_skills,
+            description: snapshot.routing_description.clone().or(r.description),
+            models: vec![resolved_model.model.clone()],
+            enabled_skills: snapshot.included_skills.clone(),
+            disabled_builtin_skills: snapshot.excluded_auto_skills.clone(),
             audience_tags: r.audience_tags,
             scenario_tags: r.scenario_tags,
-            persona,
+            persona: snapshot.instructions.clone(),
+            snapshot: Some(snapshot),
         });
     }
 
-    out.extend(build_role_members_from_assistants(&data, range_pairs));
+    out.extend(build_role_members_from_presets(&data, range_pairs));
     out
 }
 
@@ -2230,10 +2287,10 @@ mod tests {
         }
     }
 
-    // ── P4 Task 2: assistant → role member resolution ─────────────────────
+    // ── Preset → role member resolution ────────────────────────────────────
 
-    fn assistant_data(id: &str, name: &str, models: &[&str], persona: &str) -> AssistantData {
-        AssistantData {
+    fn preset_data(id: &str, name: &str, models: &[&str], persona: &str) -> PresetData {
+        PresetData {
             id: id.to_string(),
             name: name.to_string(),
             description: Some(format!("{name} 描述")),
@@ -2243,43 +2300,44 @@ mod tests {
             audience_tags: vec!["developer".to_string()],
             scenario_tags: vec!["coding".to_string()],
             persona: persona.to_string(),
+            snapshot: None,
         }
     }
 
-    // resolve_assistant_model: honors the assistant's model priority and picks
+    // resolve_preset_model: honors the preset's model priority and picks
     // the first preferred model that is present in the run's range.
     #[test]
-    fn resolve_assistant_model_picks_first_in_range() {
+    fn resolve_preset_model_picks_first_in_range() {
         let range = vec![
             ("p1".to_string(), "m1".to_string()),
             ("p2".to_string(), "m2".to_string()),
         ];
         // Prefers "m2" (in range) over "mX" (not in range): first preferred-in-range wins.
-        let got = resolve_assistant_model(&["mX".to_string(), "m2".to_string()], &range);
+        let got = resolve_preset_model(&["mX".to_string(), "m2".to_string()], &range);
         assert_eq!(got, Some(("p2".to_string(), "m2".to_string())));
 
         // No preferred model is in range → None (caller skips the assistant).
-        let none = resolve_assistant_model(&["mZ".to_string()], &range);
+        let none = resolve_preset_model(&["mZ".to_string()], &range);
         assert_eq!(none, None);
 
         // No preferred models at all → None.
-        assert_eq!(resolve_assistant_model(&[], &range), None);
+        assert_eq!(resolve_preset_model(&[], &range), None);
     }
 
-    // (KEYSTONE, pure) build_role_members_from_assistants: an assistant whose
+    // (KEYSTONE, pure) build_role_members_from_presets: an preset whose
     // preferred model is in range becomes an enriched member (agent_id=id,
     // role_hint=name, system_prompt=persona, enabled_skills, description, derived
-    // capability); an assistant whose models are all out of range is SKIPPED.
+    // capability); an preset whose models are all out of range is SKIPPED.
     #[test]
     fn build_role_members_in_range_enriched_out_of_range_skipped() {
         let range = vec![("p1".to_string(), "m1".to_string())];
-        let assistants = vec![
-            assistant_data("asst_in", "研究员", &["m1"], "你是一名研究员"),
+        let presets = vec![
+            preset_data("asst_in", "研究员", &["m1"], "你是一名研究员"),
             // out of range: prefers m9, which is not in the run's range.
-            assistant_data("asst_out", "写手", &["m9"], "你是一名写手"),
+            preset_data("asst_out", "写手", &["m9"], "你是一名写手"),
         ];
 
-        let members = build_role_members_from_assistants(&assistants, &range);
+        let members = build_role_members_from_presets(&presets, &range);
         assert_eq!(members.len(), 1, "only the in-range assistant becomes a member");
         let m = &members[0];
         assert_eq!(m.agent_id, "asst_in", "agent_id = assistant id");
@@ -2301,8 +2359,8 @@ mod tests {
     #[test]
     fn build_role_member_blank_persona_is_none() {
         let range = vec![("p1".to_string(), "m1".to_string())];
-        let assistants = vec![assistant_data("asst_x", "X", &["m1"], "   ")];
-        let members = build_role_members_from_assistants(&assistants, &range);
+        let presets = vec![preset_data("asst_x", "X", &["m1"], "   ")];
+        let members = build_role_members_from_presets(&presets, &range);
         assert_eq!(members.len(), 1);
         assert!(members[0].system_prompt.is_none(), "blank persona → None");
     }

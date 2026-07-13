@@ -7,7 +7,7 @@
 /**
  * 渠道行寻址目标（多机器人模型）。
  *
- * Addresses one channel row (`assistant_plugins` row) for the per-owner
+ * Addresses one channel row (`channel_plugins` row) for the per-owner
  * multi-bot flows:
  * - `channelId` present → update that row (`achn_` prefixed id, or a legacy
  *   platform-name id migrated from the single-bot era);

@@ -18,9 +18,9 @@ export type GuidActiveSkill = {
 
 export interface ComposerEntryStripProps {
   isPresetAgent: boolean;
-  assistantLabel?: string;
-  assistantAvatar?: { kind: 'image' | 'emoji' | 'icon'; value?: string };
-  onSummon: () => void;
+  presetLabel?: string;
+  presetAvatar?: { kind: 'image' | 'emoji' | 'icon'; value?: string };
+  onChoosePreset: () => void;
   onAdjustSkills: () => void;
   onFree: () => void;
   activeSkillCount?: number;
@@ -35,9 +35,9 @@ export interface ComposerEntryStripProps {
  * ComposerEntryStrip — top-edge entry bar inside the chat composer.
  *
  * Two states:
- * - Default (isPresetAgent=false): [agent 集群] [召唤助手] [使用 Skills + inline count]
+ * - Default (isPresetAgent=false): [agent 集群] [使用设定] [使用 Skills + inline count]
  *   (free play is the implicit default — no dedicated pill needed)
- * - Summoned (isPresetAgent=true): [agent 集群] [persona token: avatar + label + close]
+ * - Preset selected (isPresetAgent=true): [agent 集群] [persona token: avatar + label + close]
  *   [使用 Skills + inline count] ... [自由发挥]
  *
  * 「agent 集群」（需求1）是一个 toggle：选中后发送即在新会话 extra 落
@@ -46,9 +46,9 @@ export interface ComposerEntryStripProps {
  */
 const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   isPresetAgent,
-  assistantLabel,
-  assistantAvatar,
-  onSummon,
+  presetLabel,
+  presetAvatar,
+  onChoosePreset,
   onAdjustSkills,
   onFree,
   activeSkillCount,
@@ -65,20 +65,20 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   const visibleSkills = useMemo(() => activeSkills.slice(0, 4), [activeSkills]);
   const overflowSkillCount = Math.max(0, activeSkills.length - visibleSkills.length);
 
-  // --- Avatar renderer (mirrors GuidPage selectedAssistantAvatar pattern) ---
+  // --- Avatar renderer (mirrors GuidPage selectedPresetAvatar pattern) ---
   const renderAvatar = () => {
-    if (!assistantAvatar) return <Robot theme='outline' size={16} fill='currentColor' />;
-    switch (assistantAvatar.kind) {
+    if (!presetAvatar) return <Robot theme='outline' size={16} fill='currentColor' />;
+    switch (presetAvatar.kind) {
       case 'image':
         return (
           <img
-            src={assistantAvatar.value}
+            src={presetAvatar.value}
             alt=''
             className='w-20px h-20px rounded-6px object-contain'
           />
         );
       case 'emoji':
-        return <span className='text-14px leading-none'>{assistantAvatar.value}</span>;
+        return <span className='text-14px leading-none'>{presetAvatar.value}</span>;
       case 'icon':
       default:
         return <Robot theme='outline' size={16} fill='currentColor' />;
@@ -201,7 +201,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
       </span>
     );
 
-  // --- 「agent 集群」toggle（需求1，两种状态都渲染在最左 = 召唤助手左边）---
+  // --- 「agent 集群」toggle（需求1，两种状态都渲染在最左 = 使用设定左边）---
   const clusterButton = onToggleCluster ? (
     <button
       type='button'
@@ -218,7 +218,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </button>
   ) : null;
 
-  // --- Summoned state ---
+  // --- Preset selected state ---
   if (isPresetAgent) {
     return (
       <div className={styles.entryStrip}>
@@ -230,7 +230,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
           <span className={styles.entryAvatar}>
             {renderAvatar()}
           </span>
-          <span className={styles.entryButtonText}>{assistantLabel || t('guid.entry.summon', { defaultValue: '召唤助手' })}</span>
+          <span className={styles.entryButtonText}>{presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' })}</span>
           <button
             type='button'
             className={styles.entryDismiss}
@@ -260,17 +260,17 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   // --- Default state ---
   return (
     <div className={styles.entryStrip}>
-      {/* agent 集群 toggle（最左 = 召唤助手左边） */}
+      {/* agent 集群 toggle（最左 = 使用设定左边） */}
       {clusterButton}
 
-      {/* Summon assistant */}
+      {/* Choose preset */}
       <button
         type='button'
         className={`${styles.entryButton} ${styles.entryButtonInteractive}`}
-        onClick={onSummon}
+        onClick={onChoosePreset}
       >
         <Robot theme='outline' size={15} fill='currentColor' />
-        <span className={styles.entryButtonText}>{t('guid.entry.summon', { defaultValue: '召唤助手' })}</span>
+        <span className={styles.entryButtonText}>{t('guid.entry.usePreset', { defaultValue: '使用设定' })}</span>
       </button>
 
       {/* Skills */}

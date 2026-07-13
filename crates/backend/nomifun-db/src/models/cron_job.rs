@@ -14,6 +14,10 @@ pub struct CronJobRow {
     pub execution_mode: String,
     /// JSON: serialized `CronAgentConfig`.
     pub agent_config: Option<String>,
+    /// Preset lineage and immutable resolved launch configuration.
+    pub preset_id: Option<String>,
+    pub preset_revision: Option<i64>,
+    pub preset_snapshot: Option<String>,
     /// Target conversation; NULL for a new_conversation job before first fire
     /// (FK to conversations, ON DELETE SET NULL).
     pub conversation_id: Option<i64>,
@@ -72,6 +76,9 @@ mod tests {
             payload_message: "Generate daily report".into(),
             execution_mode: "new_conversation".into(),
             agent_config: Some(r#"{"backend":"openai"}"#.into()),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             conversation_id: Some(101),
             conversation_title: Some("Reports".into()),
             agent_type: "openai".into(),
@@ -116,6 +123,9 @@ mod tests {
             payload_message: "ping".into(),
             execution_mode: "existing".into(),
             agent_config: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             conversation_id: Some(1),
             conversation_title: None,
             agent_type: "acp".into(),

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use nomifun_db::models::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+use nomifun_db::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
 use nomifun_db::{
     DbError, IChannelRepository, SqliteChannelRepository, UpdatePluginStatusParams, init_database_memory,
 };
@@ -15,6 +15,52 @@ async fn repo() -> (Arc<dyn IChannelRepository>, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
     let r = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
     (r as Arc<dyn IChannelRepository>, db)
+}
+
+#[tokio::test]
+async fn channel_schema_has_only_canonical_tables_and_valid_foreign_keys() {
+    let (_repo, db) = repo().await;
+
+    let canonical_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'table' AND name IN \
+         ('channel_plugins', 'channel_users', 'channel_sessions', 'channel_pairing_codes')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(canonical_count.0, 4);
+
+    let legacy_count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'table' AND name IN \
+         ('assistant_plugins', 'assistant_users', 'assistant_sessions', 'assistant_pairing_codes')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_count.0, 0);
+
+    let fk_errors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM pragma_foreign_key_check")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(fk_errors.0, 0);
+
+    let session_fk_targets: Vec<(String,)> =
+        sqlx::query_as("SELECT \"table\" FROM pragma_foreign_key_list('channel_sessions')")
+            .fetch_all(db.pool())
+            .await
+            .unwrap();
+    let session_fk_targets: std::collections::HashSet<String> =
+        session_fk_targets.into_iter().map(|row| row.0).collect();
+    assert_eq!(
+        session_fk_targets,
+        ["channel_plugins", "channel_users", "conversations"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
 }
 
 fn make_plugin(id: &str, plugin_type: &str) -> ChannelPluginRow {
@@ -35,9 +81,9 @@ fn make_plugin(id: &str, plugin_type: &str) -> ChannelPluginRow {
     }
 }
 
-fn make_user(id: &str, platform_uid: &str, platform: &str) -> AssistantUserRow {
+fn make_user(id: &str, platform_uid: &str, platform: &str) -> ChannelUserRow {
     let now = nomifun_common::now_ms();
-    AssistantUserRow {
+    ChannelUserRow {
         id: id.into(),
         platform_user_id: platform_uid.into(),
         platform_type: platform.into(),
@@ -53,8 +99,8 @@ fn make_user(id: &str, platform_uid: &str, platform: &str) -> AssistantUserRow {
 /// passes a different channel id explicitly.
 const TEST_CHANNEL: &str = "tg-1";
 
-/// Seeds an `assistant_plugins` row so `assistant_sessions.channel_id`
-/// (FK → assistant_plugins(id), added in the seq/primary-key refactor) can
+/// Seeds an `channel_plugins` row so `channel_sessions.channel_id`
+/// (FK → channel_plugins(id), added in the seq/primary-key refactor) can
 /// reference it. `channel_id` is the verbatim routing key matched in
 /// `get_or_create_session`, so it cannot be nulled out without breaking the
 /// reuse/isolation semantics these tests exercise — the parent row must exist
@@ -64,9 +110,9 @@ async fn seed_channel(repo: &Arc<dyn IChannelRepository>, id: &str) {
     repo.upsert_plugin(&make_plugin(id, "telegram")).await.unwrap();
 }
 
-fn make_session(id: &str, user_id: &str, chat_id: &str) -> AssistantSessionRow {
+fn make_session(id: &str, user_id: &str, chat_id: &str) -> ChannelSessionRow {
     let now = nomifun_common::now_ms();
-    AssistantSessionRow {
+    ChannelSessionRow {
         id: id.into(),
         user_id: user_id.into(),
         agent_type: "gemini".into(),
@@ -79,9 +125,9 @@ fn make_session(id: &str, user_id: &str, chat_id: &str) -> AssistantSessionRow {
     }
 }
 
-fn make_pairing(code: &str, platform_uid: &str, expires_offset_ms: i64) -> PairingCodeRow {
+fn make_pairing(code: &str, platform_uid: &str, expires_offset_ms: i64) -> ChannelPairingCodeRow {
     let now = nomifun_common::now_ms();
-    PairingCodeRow {
+    ChannelPairingCodeRow {
         code: code.into(),
         platform_user_id: platform_uid.into(),
         platform_type: "telegram".into(),

@@ -306,6 +306,8 @@
     "nameHint": "伙伴的称呼，会出现在聊天与桌面伙伴里",
     "providerPlaceholder": "选择服务商",
     "modelPlaceholder": "选择模型",
+    "preset": "复用设定",
+    "presetHint": "一键应用已保存的 Agent、模型、Skill 与知识范围配置。",
     "persona": "人格",
     "personaHint": "决定 {{companionName}} 说话的性格与语气",
     "personaLively": "活泼",

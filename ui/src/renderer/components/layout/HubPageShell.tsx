@@ -21,7 +21,7 @@ interface HubPageShellProps {
 
 /**
  * HubPageShell — shared chrome for the homepage "hub" destinations (Model
- * Management, Assistant & Skill, MCP). Mirrors the scroll container + centered content
+ * Management, Presets, Skills, MCP). Mirrors the scroll container + centered content
  * column of `SettingsPageWrapper`, and provides the `page` view-mode context so
  * the embedded settings content components (which were originally authored for
  * the settings modal) lay out correctly — but without the settings-specific

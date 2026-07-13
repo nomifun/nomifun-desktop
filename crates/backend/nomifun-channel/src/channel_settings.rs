@@ -13,8 +13,8 @@ const DEFAULT_AGENT_TYPE: &str = "nomi";
 /// Per-plugin agent/model configuration read from `client_preferences`.
 ///
 /// Keys follow the pattern established by the old Electron frontend:
-/// - `assistant.{platform}.agent`       → JSON `{"backend":"claude","name":"Claude"}`
-/// - `assistant.{platform}.defaultModel` → JSON `{"id":"provider_id","use_model":"model_name"}`
+/// - `channels.{platform}.agent`       → JSON `{"backend":"claude","name":"Claude"}`
+/// - `channels.{platform}.defaultModel` → JSON `{"id":"provider_id","use_model":"model_name"}`
 pub struct ChannelSettingsService {
     pref_repo: Arc<dyn IClientPreferenceRepository>,
 }
@@ -141,7 +141,7 @@ impl ChannelSettingsService {
         }))
     }
     /// Reads the companion bound to a platform's master agent from
-    /// `client_preferences` (key `assistant.{platform}.companionId`).
+    /// `client_preferences` (key `channels.{platform}.companionId`).
     ///
     /// Returns `None` when the key is absent or stores an empty string —
     /// "no explicit binding, use the default companion". Tolerates both a JSON
@@ -168,7 +168,7 @@ impl ChannelSettingsService {
     }
 
     /// Writes (or clears) the companion bound to a platform's master agent
-    /// (key `assistant.{platform}.companionId`). `None` / empty string deletes the
+    /// (key `channels.{platform}.companionId`). `None` / empty string deletes the
     /// key — back to "default companion" semantics.
     ///
     /// Persistence only: the channel routes layer pairs this with the same
@@ -194,23 +194,23 @@ impl ChannelSettingsService {
 }
 
 fn agent_key(platform: PluginType) -> String {
-    format!("assistant.{platform}.agent")
+    format!("channels.{platform}.agent")
 }
 
 fn master_agent_companion_key(platform: PluginType) -> String {
-    format!("assistant.{platform}.companionId")
+    format!("channels.{platform}.companionId")
 }
 
 fn model_key(platform: PluginType) -> String {
-    format!("assistant.{platform}.defaultModel")
+    format!("channels.{platform}.defaultModel")
 }
 
 fn route_to_requirement_key(platform: PluginType) -> String {
-    format!("assistant.{platform}.routeToRequirement")
+    format!("channels.{platform}.routeToRequirement")
 }
 
 fn requirement_tag_key(platform: PluginType) -> String {
-    format!("assistant.{platform}.requirementTag")
+    format!("channels.{platform}.requirementTag")
 }
 
 fn default_agent_config() -> ResolvedAgentConfig {
@@ -377,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_acp_from_preferences() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.telegram.agent",
+            "channels.telegram.agent",
             r#"{"backend":"codex","name":"Codex"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn agent_config_nomi_has_no_backend() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.lark.agent",
+            "channels.lark.agent",
             r#"{"backend":"nomi","name":"Nomi"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -405,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_new_format_acp() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.telegram.agent",
+            "channels.telegram.agent",
             r#"{"agent_type":"acp","backend":"claude","name":"Claude"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -418,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_new_format_nomi() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.lark.agent",
+            "channels.lark.agent",
             r#"{"agent_type":"nomi","name":"Nomi"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -431,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reads_new_format_openclaw() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.weixin.agent",
+            "channels.weixin.agent",
             r#"{"agent_type":"openclaw-gateway","name":"OpenClaw"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -455,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn model_config_reads_from_preferences() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.weixin.defaultModel",
+            "channels.weixin.defaultModel",
             r#"{"id":"490fdb4e","use_model":"global.anthropic.claude-opus-4-6-v1"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -468,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn model_config_returns_none_for_empty_values() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.telegram.defaultModel",
+            "channels.telegram.defaultModel",
             r#"{"id":"","use_model":null}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -489,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn companion_id_reads_json_string_value() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "assistant.telegram.companionId",
+            "channels.telegram.companionId",
             "\"companion_abc\"",
         )]));
         let svc = ChannelSettingsService::new(repo);
@@ -501,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn companion_id_reads_raw_unquoted_value() {
-        let repo = Arc::new(MockPrefRepo::with_data(vec![("assistant.lark.companionId", "companion_raw")]));
+        let repo = Arc::new(MockPrefRepo::with_data(vec![("channels.lark.companionId", "companion_raw")]));
         let svc = ChannelSettingsService::new(repo);
         assert_eq!(
             svc.get_master_agent_companion_id(PluginType::Lark).await.unwrap().as_deref(),
@@ -512,9 +512,9 @@ mod tests {
     #[tokio::test]
     async fn companion_id_empty_string_treated_as_unset() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![
-            ("assistant.telegram.companionId", "\"\""),
-            ("assistant.lark.companionId", "\"  \""),
-            ("assistant.weixin.companionId", "null"),
+            ("channels.telegram.companionId", "\"\""),
+            ("channels.lark.companionId", "\"  \""),
+            ("channels.weixin.companionId", "null"),
         ]));
         let svc = ChannelSettingsService::new(repo);
         assert!(svc.get_master_agent_companion_id(PluginType::Telegram).await.unwrap().is_none());

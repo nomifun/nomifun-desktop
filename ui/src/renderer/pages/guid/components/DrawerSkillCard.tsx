@@ -1,9 +1,9 @@
 /**
- * DrawerSkillCard — Multi-select skill card for SummonDrawer.
+ * DrawerSkillCard — Multi-select skill card for PresetPickerDrawer.
  * Displays initials avatar, name, source/auto-inject badge, description,
  * tag chips, and a right-side checkbox.
  */
-import type { SkillInfo } from '@/renderer/pages/settings/AssistantSettings/types';
+import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckSmall } from '@icon-park/react';

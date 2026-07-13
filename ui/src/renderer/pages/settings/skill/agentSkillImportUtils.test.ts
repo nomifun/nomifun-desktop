@@ -57,14 +57,14 @@ describe('agent skill import utilities', () => {
     ]);
   });
 
-  test('merges imported names into current assistant selection without duplicates', () => {
+  test('merges imported names into current preset selection without duplicates', () => {
     expect(mergeImportedSkillNames(['publish'], ['research', 'publish', 'research'])).toEqual([
       'publish',
       'research',
     ]);
   });
 
-  test('summarizes migration progress for library and assistant flows', () => {
+  test('summarizes migration progress for library and preset flows', () => {
     const rows = buildAgentSkillRows(sources, new Set(['publish']));
 
     expect(summarizeAgentSkillImport(rows, rows.slice(0, 2))).toEqual({
@@ -74,7 +74,7 @@ describe('agent skill import utilities', () => {
     });
   });
 
-  test('adds newly imported and existing custom skills to assistant custom list only', () => {
+  test('adds newly imported and existing custom skills to preset custom list only', () => {
     expect(
       customSkillNamesForImportedAgentSkills(
         [

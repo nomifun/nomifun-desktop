@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn record_rebases_backward_after_sequence_reset() {
+    fn record_rebchs_backward_after_sequence_reset() {
         // Idle-week scenario: watermark at 100_000, Telegram restarts the
         // sequence at a random lower id. The update is processed and the
         // watermark follows the NEW sequence — skipping here would drop

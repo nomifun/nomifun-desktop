@@ -6,7 +6,7 @@
 
 import { CUSTOM_AVATAR_IMAGE_MAP } from '../constants';
 import type { AvailableAgent } from '../types';
-import type { Assistant } from '@/common/types/agent/assistantTypes';
+import type { Preset } from '@/common/types/agent/presetTypes';
 import { IconClose } from '@arco-design/web-react/icon';
 import { Down, Robot } from '@icon-park/react';
 import React from 'react';
@@ -23,7 +23,7 @@ export type AgentSwitcherItem = {
 type PresetAgentTagProps = {
   agentInfo: AvailableAgent;
   /** Backend-merged preset catalog used to resolve a localized name. */
-  assistants: Assistant[];
+  presets: Preset[];
   localeKey: string;
   onClose: () => void;
   agentLogo?: string | null;
@@ -33,7 +33,7 @@ type PresetAgentTagProps = {
 
 const PresetAgentTag: React.FC<PresetAgentTagProps> = ({
   agentInfo,
-  assistants,
+  presets,
   localeKey,
   onClose,
   agentLogo,
@@ -48,8 +48,8 @@ const PresetAgentTag: React.FC<PresetAgentTagProps> = ({
     avatarImage &&
     (/\.(svg|png|jpe?g|webp|gif)$/i.test(avatarImage) || /^(https?:|file:\/\/|data:|\/)/i.test(avatarImage))
   );
-  const assistant = assistants.find((a) => a.id === agentInfo.custom_agent_id);
-  const name = assistant?.name_i18n?.[localeKey] || assistant?.name || agentInfo.name;
+  const preset = presets.find((a) => a.id === agentInfo.preset_id);
+  const name = preset?.name_i18n?.[localeKey] || preset?.name || agentInfo.name;
 
   const hasSwitcher = Boolean(agentSwitcherItems && agentSwitcherItems.length > 0 && onAgentSwitch);
 

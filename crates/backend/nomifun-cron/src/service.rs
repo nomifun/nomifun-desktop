@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use nomifun_api_types::{
     CreateCronJobRequest, CronJobResponse, CronJobRunResponse, CronScheduleDto, HasSkillResponse,
@@ -45,6 +46,7 @@ pub struct CronService {
     executor: Arc<JobExecutor>,
     emitter: CronEventEmitter,
     data_dir: PathBuf,
+    preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
 }
 
 impl CronService {
@@ -61,14 +63,75 @@ impl CronService {
             executor,
             emitter,
             data_dir,
+            preset_service: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn with_preset_service(&self, service: Arc<nomifun_preset::PresetService>) {
+        if let Ok(mut guard) = self.preset_service.write() {
+            *guard = Some(service);
+        }
+    }
+
+    async fn resolve_preset_config(
+        &self,
+        config: &mut nomifun_api_types::CronAgentConfigDto,
+    ) -> Result<(), CronError> {
+        let Some(preset_id) = config.preset_id.clone() else { return Ok(()) };
+        let service = self
+            .preset_service
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+            .ok_or_else(|| CronError::Scheduler("preset service is not wired".into()))?;
+        let snapshot = service
+            .resolve(
+                &preset_id,
+                nomifun_api_types::PresetTarget::Cron,
+                None,
+                nomifun_api_types::PresetOverrides::default(),
+            )
+            .await?;
+        config.name = snapshot.preset_name.clone();
+        config.custom_agent_id = snapshot.resolved_agent_id.clone();
+        let is_nomi = snapshot
+            .resolved_agent_type
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("nomi"));
+        if !is_nomi
+            && let Some(backend) = snapshot
+                .resolved_agent_backend
+                .clone()
+                .or(snapshot.resolved_agent_type.clone())
+        {
+            // ACP jobs use this field for the concrete agent backend.
+            config.backend = backend;
+        }
+        if let Some(model) = snapshot.resolved_model.as_ref() {
+            if is_nomi && let Some(provider_id) = model.provider_id.as_ref() {
+                // Nomi jobs use this historically-overloaded field for the
+                // provider row id. Do not overwrite ACP backends with it.
+                config.backend = provider_id.clone();
+            }
+            config.model_id = Some(model.model.clone());
+        }
+        config.preset_revision = Some(snapshot.preset_revision);
+        config.preset_snapshot = Some(snapshot);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
     // CRUD
     // -----------------------------------------------------------------------
 
-    pub async fn add_job(&self, req: CreateCronJobRequest) -> Result<CronJob, CronError> {
+    pub async fn add_job(&self, mut req: CreateCronJobRequest) -> Result<CronJob, CronError> {
+        if let Some(config) = req.agent_config.as_mut() {
+            // Only `preset_id` is trusted from the client; always replace an
+            // incoming snapshot with a fresh server-side resolution.
+            config.preset_snapshot = None;
+            config.preset_revision = None;
+            self.resolve_preset_config(config).await?;
+        }
         let schedule = schedule_from_dto(&req.schedule);
         validate_schedule(&schedule)?;
 
@@ -103,9 +166,10 @@ impl CronService {
             backend: c.backend,
             name: c.name,
             cli_path: c.cli_path,
-            is_preset: c.is_preset,
             custom_agent_id: c.custom_agent_id,
-            preset_agent_type: c.preset_agent_type,
+            preset_id: c.preset_id,
+            preset_revision: c.preset_revision,
+            preset_snapshot: c.preset_snapshot,
             mode: c.mode,
             model_id: c.model_id,
             config_options: c.config_options,
@@ -157,8 +221,13 @@ impl CronService {
     pub async fn update_job(
         &self,
         job_id: &str,
-        req: UpdateCronJobRequest,
+        mut req: UpdateCronJobRequest,
     ) -> Result<CronJob, CronError> {
+        if let Some(config) = req.agent_config.as_mut() {
+            config.preset_snapshot = None;
+            config.preset_revision = None;
+            self.resolve_preset_config(config).await?;
+        }
         let existing_row = self
             .repo
             .get_by_id(job_id)
@@ -200,9 +269,10 @@ impl CronService {
                 backend: config_dto.backend.clone(),
                 name: config_dto.name.clone(),
                 cli_path: config_dto.cli_path.clone(),
-                is_preset: config_dto.is_preset,
                 custom_agent_id: config_dto.custom_agent_id.clone(),
-                preset_agent_type: config_dto.preset_agent_type.clone(),
+                preset_id: config_dto.preset_id.clone(),
+                preset_revision: config_dto.preset_revision,
+                preset_snapshot: config_dto.preset_snapshot.clone(),
                 mode: config_dto.mode.clone(),
                 model_id: config_dto.model_id.clone(),
                 config_options: config_dto.config_options.clone(),
@@ -1273,15 +1343,13 @@ fn build_agent_config_from_conversation(
             .unwrap_or_else(|| row.r#type.clone())
     };
 
-    let preset_assistant_id = get_string(&extra, &["preset_assistant_id", "presetAssistantId"]);
-    let custom_agent_id =
-        get_string(&extra, &["custom_agent_id", "customAgentId"]).or(preset_assistant_id.clone());
-    let is_preset = preset_assistant_id.as_ref().map(|_| true);
-    let preset_agent_type = if preset_assistant_id.is_some() {
-        Some(backend.clone())
-    } else {
-        None
-    };
+    let preset_id = get_string(&extra, &["preset_id", "presetId"]);
+    let custom_agent_id = get_string(&extra, &["custom_agent_id", "customAgentId"]);
+    let preset_revision = extra.get("preset_revision").and_then(serde_json::Value::as_i64);
+    let preset_snapshot = extra
+        .get("preset_snapshot")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
 
     let agent_type_enum =
         serde_json::from_value::<AgentType>(serde_json::Value::String(row.r#type.clone())).ok();
@@ -1301,9 +1369,10 @@ fn build_agent_config_from_conversation(
                 .and_then(|value| value.as_str())
                 .map(ToOwned::to_owned)
         }),
-        is_preset,
         custom_agent_id,
-        preset_agent_type,
+        preset_id,
+        preset_revision,
+        preset_snapshot,
         mode: Some(full_auto_mode),
         model_id: get_string(&extra, &["current_model_id", "currentModelId"]).or_else(|| {
             model.and_then(|value| {
@@ -1478,9 +1547,10 @@ fn build_update_params(job: &CronJob, req: &UpdateCronJobRequest) -> UpdateCronJ
             backend: c.backend.clone(),
             name: c.name.clone(),
             cli_path: c.cli_path.clone(),
-            is_preset: c.is_preset,
             custom_agent_id: c.custom_agent_id.clone(),
-            preset_agent_type: c.preset_agent_type.clone(),
+            preset_id: c.preset_id.clone(),
+            preset_revision: c.preset_revision,
+            preset_snapshot: c.preset_snapshot.clone(),
             mode: c.mode.clone(),
             model_id: c.model_id.clone(),
             config_options: c.config_options.clone(),
@@ -1506,6 +1576,20 @@ fn build_update_params(job: &CronJob, req: &UpdateCronJobRequest) -> UpdateCronJ
         payload_message: req.message.clone(),
         execution_mode: req.execution_mode.clone(),
         agent_config,
+        preset_id: req
+            .agent_config
+            .as_ref()
+            .map(|config| config.preset_id.clone()),
+        preset_revision: req
+            .agent_config
+            .as_ref()
+            .map(|config| config.preset_revision),
+        preset_snapshot: req.agent_config.as_ref().map(|config| {
+            config
+                .preset_snapshot
+                .as_ref()
+                .and_then(|snapshot| serde_json::to_string(snapshot).ok())
+        }),
         conversation_id: None,
         conversation_title: req.conversation_title.as_ref().map(|t| Some(t.clone())),
         agent_type: None,
@@ -1660,9 +1744,10 @@ mod tests {
             backend: backend.to_owned(),
             name: "provider".into(),
             cli_path: None,
-            is_preset: None,
             custom_agent_id: None,
-            preset_agent_type: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             mode: None,
             model_id: Some("gpt-4o".into()),
             config_options: None,

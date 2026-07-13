@@ -3744,6 +3744,9 @@ async fn get_backfills_legacy_row_and_persists() {
     // conversation that the service has never touched.
     let legacy_row = ConversationRow {
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         id: 1,
         user_id: "user-1".into(),
         name: "legacy".into(),
@@ -3795,6 +3798,9 @@ async fn list_backfills_mixed_rows() {
     // Row 1: legacy (needs backfill).
     let legacy = ConversationRow {
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         id: 1,
         user_id: "u".into(),
         name: "a".into(),
@@ -3816,6 +3822,9 @@ async fn list_backfills_mixed_rows() {
     // Row 2: already migrated.
     let modern = ConversationRow {
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         id: 2,
         user_id: "u".into(),
         name: "b".into(),
@@ -4097,6 +4106,9 @@ async fn seed_nomi_failover_conversation(
 ) -> i64 {
     let row = ConversationRow {
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         id: 0,
         user_id: "user_1".into(),
         name: "failover".into(),
@@ -4543,6 +4555,9 @@ async fn seed_acp_failover_conversation(
 ) -> i64 {
     let row = ConversationRow {
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         id: 0,
         user_id: "user_1".into(),
         name: "acp-failover".into(),

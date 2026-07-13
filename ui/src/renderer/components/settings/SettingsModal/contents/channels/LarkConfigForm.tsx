@@ -245,7 +245,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
   const handleApprovePairing = async (code: string) => {
     try {
       await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.assistant.pairingApproved', 'Pairing approved'));
+      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
       await loadPendingPairings();
       await loadAuthorizedUsers();
     } catch (error: unknown) {
@@ -257,7 +257,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
   const handleRejectPairing = async (code: string) => {
     try {
       await channel.rejectPairing.invoke({ code });
-      Message.info(t('settings.assistant.pairingRejected', 'Pairing rejected'));
+      Message.info(t('settings.channels.pairingRejected', 'Pairing rejected'));
       await loadPendingPairings();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -268,7 +268,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
   const handleRevokeUser = async (user_id: string) => {
     try {
       await channel.revokeUser.invoke({ user_id });
-      Message.success(t('settings.assistant.userRevoked', 'User access revoked'));
+      Message.success(t('settings.channels.userRevoked', 'User access revoked'));
       await loadAuthorizedUsers();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -325,7 +325,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
         {credentialsLocked ? (
           <Tooltip
             content={t(
-              'settings.assistant.tokenLocked',
+              'settings.channels.tokenLocked',
               'Please close the Channel and delete all authorized users before modifying the configuration'
             )}
           >
@@ -383,7 +383,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
         {credentialsLocked ? (
           <Tooltip
             content={t(
-              'settings.assistant.tokenLocked',
+              'settings.channels.tokenLocked',
               'Please close the Channel and delete all authorized users before modifying the configuration'
             )}
           >
@@ -450,7 +450,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
             {credentialsLocked ? (
               <Tooltip
                 content={t(
-                  'settings.assistant.tokenLocked',
+                  'settings.channels.tokenLocked',
                   'Please close the Channel and delete all authorized users before modifying the configuration'
                 )}
               >
@@ -494,7 +494,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
             {credentialsLocked ? (
               <Tooltip
                 content={t(
-                  'settings.assistant.tokenLocked',
+                  'settings.channels.tokenLocked',
                   'Please close the Channel and delete all authorized users before modifying the configuration'
                 )}
               >
@@ -574,7 +574,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
           )}
           {pluginStatus?.connected && (
             <div className='text-14px text-t-secondary space-y-8px'>
-              <p className='m-0 font-500'>{t('settings.assistant.nextSteps', 'Next Steps')}:</p>
+              <p className='m-0 font-500'>{t('settings.channels.nextSteps', 'Next Steps')}:</p>
               <p className='m-0'>
                 <strong>1.</strong> {t('settings.lark.step1', 'Open Feishu/Lark and find your bot application')}
               </p>
@@ -590,7 +590,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
               </p>
               <p className='m-0'>
                 <strong>4.</strong>{' '}
-                {t('settings.lark.step4', 'Once approved, you can start chatting with the AI assistant through Lark!')}
+                {t('settings.lark.step4', 'Once approved, you can start chatting with the AI agent through Lark!')}
               </p>
             </div>
           )}
@@ -606,7 +606,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       {pluginStatus?.enabled && authorizedUsers.length === 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.pendingPairings', 'Pending Pairing Requests')}
+            title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')}
             action={
               <Button
                 size='mini'
@@ -625,7 +625,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
               <Spin />
             </div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.assistant.noPendingPairings', 'No pending pairing requests')} />
+            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (
@@ -635,7 +635,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                       <span className='text-14px font-500 text-t-primary'>
                         {pairing.display_name || t('common.unknownUser')}
                       </span>
-                      <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
+                      <Tooltip content={t('settings.channels.copyCode', 'Copy pairing code')}>
                         <button
                           className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer'
                           onClick={() => copyToClipboard(pairing.code)}
@@ -645,10 +645,10 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                       </Tooltip>
                     </div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.pairingCode', 'Code')}:{' '}
+                      {t('settings.channels.pairingCode', 'Code')}:{' '}
                       <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
+                      {t('settings.channels.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
                     </div>
                   </div>
                   <div className='flex items-center gap-8px'>
@@ -658,7 +658,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                       icon={<CheckOne size={14} />}
                       onClick={() => handleApprovePairing(pairing.code)}
                     >
-                      {t('settings.assistant.approve', 'Approve')}
+                      {t('settings.channels.approve', 'Approve')}
                     </Button>
                     <Button
                       type='secondary'
@@ -667,7 +667,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                       icon={<CloseOne size={14} />}
                       onClick={() => handleRejectPairing(pairing.code)}
                     >
-                      {t('settings.assistant.reject', 'Reject')}
+                      {t('settings.channels.reject', 'Reject')}
                     </Button>
                   </div>
                 </div>
@@ -681,7 +681,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       {pluginStatus?.enabled && authorizedUsers.length > 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.authorizedUsers', 'Authorized Users')}
+            title={t('settings.channels.authorizedUsers', 'Authorized Users')}
             action={
               <Button
                 size='mini'
@@ -700,7 +700,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
               <Spin />
             </div>
           ) : authorizedUsers.length === 0 ? (
-            <Empty description={t('settings.assistant.noAuthorizedUsers', 'No authorized users yet')} />
+            <Empty description={t('settings.channels.noAuthorizedUsers', 'No authorized users yet')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {authorizedUsers.map((user) => (
@@ -708,12 +708,12 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
                   <div className='flex-1'>
                     <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.platform', 'Platform')}: {user.platformType}
+                      {t('settings.channels.platform', 'Platform')}: {user.platformType}
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
+                      {t('settings.channels.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
                     </div>
                   </div>
-                  <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
+                  <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
                     <Button
                       type='text'
                       status='danger'

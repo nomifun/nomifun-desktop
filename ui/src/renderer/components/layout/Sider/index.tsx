@@ -15,7 +15,8 @@ import { isDesktopShell } from '@renderer/utils/platform';
 import { useKnowledgeInboxPending } from '@renderer/pages/knowledge/useKnowledge';
 import {
   SiderAssetLibraryEntry,
-  SiderAssistantSkillsEntry,
+  SiderPresetEntry,
+  SiderSkillsEntry,
   SiderConversationEntry,
   SiderKnowledgeEntry,
   SiderMcpEntry,
@@ -46,7 +47,7 @@ interface SiderProps {
  * reached via the "会话" entry. The rail holds top-level destinations grouped
  * by small-text section headers (`SiderSectionHeader`): 常用 (会话 / 桌面伙伴),
  * 对外服务 (对外伙伴), 数据空间 (知识库), 自动化 (定时任务 / 需求平台),
- * 增强工具 (助手&Skill / MCP), and a bottom-pinned 设置 group
+ * 增强工具 (设定 / Skill / MCP), and a bottom-pinned 设置 group
  * (模型&Agent + the footer).
  */
 const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
@@ -93,7 +94,8 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const handleNomiClick = () => navTo('/nomi');
   const handleWorkshopClick = () => navTo('/workshop');
   const handlePublicServiceClick = () => navTo('/public-companions');
-  const handleAssistantSkillsClick = () => navTo('/assistants?tab=assistants');
+  const handlePresetClick = () => navTo('/presets');
+  const handleSkillsClick = () => navTo('/skills');
   const handleMcpClick = () => navTo('/mcp');
   const handleOpenCapabilitiesClick = () => navTo('/open-capabilities');
   const handleModelHubClick = () => navTo('/models');
@@ -241,13 +243,20 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* 增强工具 — extension capabilities */}
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
-            {/* Assistant & Skill — assistant presets plus reusable skill packages */}
-            <SiderAssistantSkillsEntry
+            {/* Presets and skills are separate concepts and destinations. */}
+            <SiderPresetEntry
               isMobile={isMobile}
-              isActive={pathname.startsWith('/assistants')}
+              isActive={pathname.startsWith('/presets')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
-              onClick={handleAssistantSkillsClick}
+              onClick={handlePresetClick}
+            />
+            <SiderSkillsEntry
+              isMobile={isMobile}
+              isActive={pathname.startsWith('/skills')}
+              collapsed={collapsed}
+              siderTooltipProps={siderTooltipProps}
+              onClick={handleSkillsClick}
             />
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry

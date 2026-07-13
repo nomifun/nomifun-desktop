@@ -8,8 +8,8 @@ fn asset_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
 }
 
-fn builtin_assistants_root() -> PathBuf {
-    asset_root().join("builtin-assistants")
+fn builtin_presets_root() -> PathBuf {
+    asset_root().join("builtin-presets")
 }
 
 fn builtin_skills_root() -> PathBuf {
@@ -33,27 +33,27 @@ fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn assistant_asset_templates_have_all_supported_locale_files() {
+fn preset_asset_templates_have_all_supported_locale_files() {
     let manifest: Value =
-        serde_json::from_str(&read_to_string(builtin_assistants_root().join("assistants.json"))).unwrap();
-    let assistants = manifest["assistants"]
+        serde_json::from_str(&read_to_string(builtin_presets_root().join("presets.json"))).unwrap();
+    let presets = manifest["presets"]
         .as_array()
-        .expect("assistants.json must contain assistants array");
+        .expect("presets.json must contain presets array");
 
-    for assistant in assistants {
+    for preset in presets {
         for field in ["rule_file", "skill_file"] {
-            let Some(template) = assistant[field].as_str() else {
+            let Some(template) = preset[field].as_str() else {
                 continue;
             };
             if !template.contains("{locale}") {
                 continue;
             }
             for locale in ["en-US", "zh-CN", "ru-RU"] {
-                let path = builtin_assistants_root().join(template.replace("{locale}", locale));
+                let path = builtin_presets_root().join(template.replace("{locale}", locale));
                 assert!(
                     path.is_file(),
-                    "assistant {} declares {field}={template}, but {} is missing",
-                    assistant["id"],
+                    "preset {} declares {field}={template}, but {} is missing",
+                    preset["id"],
                     path.display()
                 );
             }
@@ -62,22 +62,22 @@ fn assistant_asset_templates_have_all_supported_locale_files() {
 }
 
 #[test]
-fn assistant_markdown_does_not_reference_non_materialized_helper_paths() {
-    let mut assistant_markdown_files = Vec::new();
+fn preset_markdown_does_not_reference_non_materialized_helper_paths() {
+    let mut preset_markdown_files = Vec::new();
     collect_markdown_files(
-        &builtin_assistants_root().join("rules"),
-        &mut assistant_markdown_files,
+        &builtin_presets_root().join("rules"),
+        &mut preset_markdown_files,
     );
     collect_markdown_files(
-        &builtin_assistants_root().join("skills"),
-        &mut assistant_markdown_files,
+        &builtin_presets_root().join("skills"),
+        &mut preset_markdown_files,
     );
 
-    for path in assistant_markdown_files {
+    for path in preset_markdown_files {
         let content = read_to_string(&path);
         assert!(
-            !content.contains("assistant/"),
-            "{} references the non-materialized assistant resource tree",
+            !content.contains("preset/"),
+            "{} references the non-materialized preset resource tree",
             path.display()
         );
         for old_office_path in ["skills/pptx", "skills/docx", "skills/xlsx"] {
@@ -91,18 +91,18 @@ fn assistant_markdown_does_not_reference_non_materialized_helper_paths() {
 }
 
 #[test]
-fn ui_ux_pro_max_assistant_points_to_materializable_skill_assets() {
-    let manifest_path = builtin_assistants_root().join("assistants.json");
+fn ui_ux_pro_max_preset_points_to_materializable_skill_assets() {
+    let manifest_path = builtin_presets_root().join("presets.json");
     let manifest: Value = serde_json::from_str(&read_to_string(&manifest_path)).unwrap();
-    let assistants = manifest["assistants"]
+    let presets = manifest["presets"]
         .as_array()
-        .expect("assistants.json must contain assistants array");
-    let assistant = assistants
+        .expect("presets.json must contain presets array");
+    let preset = presets
         .iter()
-        .find(|assistant| assistant["id"] == "ui-ux-pro-max")
-        .expect("ui-ux-pro-max assistant must be present");
+        .find(|preset| preset["id"] == "ui-ux-pro-max")
+        .expect("ui-ux-pro-max preset must be present");
 
-    let enabled_skills: HashSet<_> = assistant["enabled_skills"]
+    let enabled_skills: HashSet<_> = preset["enabled_skills"]
         .as_array()
         .expect("ui-ux-pro-max enabled_skills must be an array")
         .iter()
@@ -115,17 +115,17 @@ fn ui_ux_pro_max_assistant_points_to_materializable_skill_assets() {
         .collect();
     assert!(
         enabled_skills.contains("ui-ux-pro-max"),
-        "ui-ux-pro-max assistant must enable its bundled skill"
+        "ui-ux-pro-max preset must enable its bundled skill"
     );
 
     for locale in ["en-US", "zh-CN", "ru-RU"] {
-        let rule_path = builtin_assistants_root()
+        let rule_path = builtin_presets_root()
             .join("rules")
             .join(format!("ui-ux-pro-max.{locale}.md"));
         let rule = read_to_string(&rule_path);
         assert!(
-            !rule.contains("assistant/ui-ux-pro-max"),
-            "{} still points to the non-materialized assistant resource tree",
+            !rule.contains("preset/ui-ux-pro-max"),
+            "{} still points to the non-materialized preset resource tree",
             rule_path.display()
         );
         assert!(

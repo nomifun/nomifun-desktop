@@ -768,10 +768,10 @@ export const usePreviewContext = () => {
 /**
  * 非抛错版本：在没有 PreviewProvider 时返回 null，而不是抛异常。
  * 供可能渲染在 ChatLayout（预览 provider）之外的消费者使用（如 Markdown 里的
- * mermaid 块出现在桌宠/知识库/助手等表面时），避免白屏崩溃。
+ * mermaid 块出现在桌宠/知识库/设定等表面时），避免白屏崩溃。
  * Non-throwing variant: returns null when there is no PreviewProvider instead of
  * throwing. For consumers that may render outside ChatLayout's preview provider
- * (e.g. a mermaid block inside Markdown shown on companion/knowledge/assistant
+ * (e.g. a mermaid block inside Markdown shown on companion/knowledge/preset
  * surfaces), so they don't white-screen the window.
  */
 export const usePreviewContextOptional = (): PreviewContextValue | null => {

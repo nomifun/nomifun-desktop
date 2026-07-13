@@ -16,7 +16,7 @@
     "retry_count": "Retry Count",
     "error_details": "Error Details",
     "quick_switch_title": "💡 **Quick Switch Options:**",
-    "quick_switch_content": "When current service encounters network restrictions, you can:\n\n1. **Switch AI Assistant Immediately**: Select other available assistants from the left panel\n2. **Check Service Status**: Availability of different AI services may vary by region\n3. **Network Optimization**: Use stable network environment to improve connection success rate\n4. **Retry Later**: Network restrictions are usually temporary\n\n**Tip**: It's recommended to configure multiple AI services as alternatives to ensure work continuity.",
+    "quick_switch_content": "When current service encounters network restrictions, you can:\n\n1. **Switch AI Agent Immediately**: Select another available Agent from the left panel\n2. **Check Service Status**: Availability of different AI services may vary by region\n3. **Network Optimization**: Use a stable network environment to improve connection success rate\n4. **Retry Later**: Network restrictions are usually temporary\n\n**Tip**: It's recommended to configure multiple AI services as alternatives to ensure work continuity.",
     "recovery_actions": {
       "cloudflare_blocked": [
         "• Use VPN or proxy service",

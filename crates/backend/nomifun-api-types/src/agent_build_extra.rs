@@ -59,7 +59,7 @@ pub struct AcpBuildExtra {
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
-    pub preset_assistant_id: Option<String>,
+    pub preset_id: Option<String>,
     #[serde(default)]
     pub session_mode: Option<String>,
     #[serde(default)]
@@ -188,7 +188,7 @@ pub struct OpenClawBuildExtra {
     #[serde(default)]
     pub skills: Vec<String>,
     #[serde(default)]
-    pub preset_assistant_id: Option<String>,
+    pub preset_id: Option<String>,
     #[serde(default)]
     pub cron_job_id: Option<String>,
     #[serde(default, rename = "sessionKey")]

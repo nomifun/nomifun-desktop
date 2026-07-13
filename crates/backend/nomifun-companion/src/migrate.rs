@@ -255,6 +255,7 @@ pub fn migrate_legacy_layout(data_dir: &Path) -> std::io::Result<Option<String>>
             // Legacy installs predate the DIY figure feature.
             custom_figure: None,
         },
+        applied_preset: None,
         created_at: now_ms(),
     };
     profile.save(&staging_companions.join(&companion_id))?;

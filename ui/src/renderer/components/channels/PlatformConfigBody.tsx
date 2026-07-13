@@ -62,7 +62,7 @@ export const CHANNEL_PLATFORMS: ReadonlyArray<{ id: MasterAgentPlatform; logo: s
 
 /** Per-platform i18n keys reused from the legacy channel settings page. */
 export const CREDENTIALS_REQUIRED_KEY: Record<MasterAgentPlatform, string> = {
-  telegram: 'settings.assistant.tokenRequired',
+  telegram: 'settings.channels.tokenRequired',
   discord: 'settings.discord.tokenRequired',
   slack: 'settings.slack.credentialsRequired',
   matrix: 'settings.matrix.credentialsRequired',
@@ -77,7 +77,7 @@ export const CREDENTIALS_REQUIRED_KEY: Record<MasterAgentPlatform, string> = {
 };
 
 export const PLUGIN_ENABLED_KEY: Record<MasterAgentPlatform, string> = {
-  telegram: 'settings.assistant.pluginEnabled',
+  telegram: 'settings.channels.pluginEnabled',
   discord: 'settings.discord.pluginEnabled',
   slack: 'settings.slack.pluginEnabled',
   matrix: 'settings.matrix.pluginEnabled',
@@ -92,7 +92,7 @@ export const PLUGIN_ENABLED_KEY: Record<MasterAgentPlatform, string> = {
 };
 
 export const PLUGIN_DISABLED_KEY: Record<MasterAgentPlatform, string> = {
-  telegram: 'settings.assistant.pluginDisabled',
+  telegram: 'settings.channels.pluginDisabled',
   discord: 'settings.discord.pluginDisabled',
   slack: 'settings.slack.pluginDisabled',
   matrix: 'settings.matrix.pluginDisabled',

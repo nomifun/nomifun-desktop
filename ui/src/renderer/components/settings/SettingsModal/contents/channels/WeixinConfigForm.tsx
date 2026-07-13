@@ -167,7 +167,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
   const handleApprovePairing = async (code: string) => {
     try {
       await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.assistant.pairingApproved', 'Pairing approved'));
+      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
       await loadPendingPairings();
       await loadAuthorizedUsers();
     } catch (error) {
@@ -178,7 +178,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
   const handleRejectPairing = async (code: string) => {
     try {
       await channel.rejectPairing.invoke({ code });
-      Message.info(t('settings.assistant.pairingRejected', 'Pairing rejected'));
+      Message.info(t('settings.channels.pairingRejected', 'Pairing rejected'));
       await loadPendingPairings();
     } catch (error) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -188,7 +188,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
   const handleRevokeUser = async (user_id: string) => {
     try {
       await channel.revokeUser.invoke({ user_id });
-      Message.success(t('settings.assistant.userRevoked', 'User access revoked'));
+      Message.success(t('settings.channels.userRevoked', 'User access revoked'));
       await loadAuthorizedUsers();
     } catch (error) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -367,7 +367,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
       {/* Next Steps Guide - shown when connected but no authorized users yet */}
       {pluginStatus?.connected && authorizedUsers.length === 0 && (
         <div className='bg-[rgba(var(--primary-rgb),0.08)] rd-12px p-16px border border-[rgba(var(--primary-rgb),0.2)]'>
-          <SectionHeader title={t('settings.assistant.nextSteps', 'Next Steps')} />
+          <SectionHeader title={t('settings.channels.nextSteps', 'Next Steps')} />
           <div className='text-14px text-t-secondary space-y-8px'>
             <p className='m-0'>
               <strong>1.</strong> {t('settings.weixin.step1', 'Find and send a message to your bot in WeChat')}
@@ -383,7 +383,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
               <strong>3.</strong>{' '}
               {t(
                 'settings.weixin.step3',
-                'Once approved, you can start chatting with the AI assistant through WeChat!'
+                'Once approved, you can start chatting with the AI agent through WeChat!'
               )}
             </p>
           </div>
@@ -394,7 +394,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
       {pluginStatus?.connected && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.pendingPairings', 'Pending Pairing Requests')}
+            title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')}
             action={
               <Button
                 size='mini'
@@ -412,7 +412,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
               <Spin />
             </div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.assistant.noPendingPairings', 'No pending pairing requests')} />
+            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (
@@ -422,7 +422,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                       <span className='text-14px font-500 text-t-primary'>
                         {pairing.display_name || t('common.unknownUser')}
                       </span>
-                      <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
+                      <Tooltip content={t('settings.channels.copyCode', 'Copy pairing code')}>
                         <Button
                           type='text'
                           size='mini'
@@ -432,10 +432,10 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                       </Tooltip>
                     </div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.pairingCode', 'Code')}:{' '}
+                      {t('settings.channels.pairingCode', 'Code')}:{' '}
                       <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.expiresIn', 'Expires in')}:{' '}
+                      {t('settings.channels.expiresIn', 'Expires in')}:{' '}
                       {getRemainingTime(pairing.expiresAt, t('common.unit.minute_short'))}
                     </div>
                   </div>
@@ -446,7 +446,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                       icon={<CheckOne size={14} />}
                       onClick={() => handleApprovePairing(pairing.code)}
                     >
-                      {t('settings.assistant.approve', 'Approve')}
+                      {t('settings.channels.approve', 'Approve')}
                     </Button>
                     <Button
                       type='secondary'
@@ -455,7 +455,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                       icon={<CloseOne size={14} />}
                       onClick={() => handleRejectPairing(pairing.code)}
                     >
-                      {t('settings.assistant.reject', 'Reject')}
+                      {t('settings.channels.reject', 'Reject')}
                     </Button>
                   </div>
                 </div>
@@ -469,7 +469,7 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
       {authorizedUsers.length > 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <SectionHeader
-            title={t('settings.assistant.authorizedUsers', 'Authorized Users')}
+            title={t('settings.channels.authorizedUsers', 'Authorized Users')}
             action={
               <Button
                 size='mini'
@@ -493,10 +493,10 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
                   <div className='flex-1'>
                     <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
+                      {t('settings.channels.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
                     </div>
                   </div>
-                  <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
+                  <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
                     <Button
                       type='text'
                       status='danger'

@@ -25,12 +25,6 @@ type TranslateFn = (key: string, options?: { defaultValue?: string }) => string;
 export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
   const builtinMap: Record<string, NavItem> = {
     model: { id: 'model', label: t('settings.model'), icon: <LinkCloud theme='outline' size='16' />, path: 'model' },
-    assistants: {
-      id: 'assistants',
-      label: t('settings.assistants', { defaultValue: 'Assistants' }),
-      icon: <Robot theme='outline' size='16' />,
-      path: 'assistants',
-    },
     agent: {
       id: 'agent',
       label: t('settings.agents', { defaultValue: 'Agents' }),

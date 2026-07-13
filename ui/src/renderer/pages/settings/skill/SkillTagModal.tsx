@@ -1,24 +1,24 @@
 /**
  * SkillTagModal — Assigns tags to a single skill. An Arco Modal titled with the
- * skill name, holding two AssistantTagPicker rows (Audience / Skill Scenario)
- * over the SHARED assistant tag vocabulary. Selections are prefilled from the
+ * skill name, holding two PresetTagPicker rows (Audience / Skill Scenario)
+ * over the SHARED preset tag vocabulary. Selections are prefilled from the
  * skill's currently-resolved tags and held in local state until Save, which
  * PUTs to /api/skills/{name}/tags and then calls onSaved so the parent reloads.
  *
- * Inline tag creation flows through onCreateTag (useAssistantTags().createTag),
- * keeping the skill and assistant pages on one vocabulary.
+ * Inline tag creation flows through onCreateTag (usePresetTags().createTag),
+ * keeping the skill and preset pages on one vocabulary.
  *
  * Theme variables only; `<div onClick>`/Arco controls (no <button>).
  */
 import { ipcBridge } from '@/common';
-import type { AssistantTag, CreateAssistantTagRequest } from '@/common/types/agent/assistantTypes';
-import type { SkillInfo } from '@/renderer/pages/settings/AssistantSettings/types';
+import type { PresetTag, CreatePresetTagRequest } from '@/common/types/agent/presetTypes';
+import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 import type { ArcoMessageInstance } from '@/renderer/utils/ui/useArcoMessage';
-// Shared tag UI — reused verbatim from the assistant page so both surfaces
+// Shared tag UI — reused verbatim from the preset page so both surfaces
 // share one chip language and one vocabulary.
-import AssistantTagPicker, {
-  type AssistantTagPickerHandle,
-} from '@/renderer/pages/settings/AssistantSettings/AssistantTagPicker';
+import PresetTagPicker, {
+  type PresetTagPickerHandle,
+} from '@/renderer/pages/settings/PresetSettings/PresetTagPicker';
 import { Button, Modal } from '@arco-design/web-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -27,9 +27,9 @@ type SkillTagModalProps = {
   visible: boolean;
   skill: SkillInfo | null;
   onClose: () => void;
-  audienceTags: AssistantTag[];
-  scenarioTags: AssistantTag[];
-  onCreateTag: (req: CreateAssistantTagRequest) => Promise<AssistantTag>;
+  audienceTags: PresetTag[];
+  scenarioTags: PresetTag[];
+  onCreateTag: (req: CreatePresetTagRequest) => Promise<PresetTag>;
   localeKey: string;
   /** Called after a successful save so the parent can reload the skill list. */
   onSaved: () => void;
@@ -51,8 +51,8 @@ const SkillTagModal: React.FC<SkillTagModalProps> = ({
   const [audience, setAudience] = useState<string[]>([]);
   const [scenario, setScenario] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
-  const audiencePickerRef = useRef<AssistantTagPickerHandle>(null);
-  const scenarioPickerRef = useRef<AssistantTagPickerHandle>(null);
+  const audiencePickerRef = useRef<PresetTagPickerHandle>(null);
+  const scenarioPickerRef = useRef<PresetTagPickerHandle>(null);
 
   // Re-seed local selection whenever a new skill opens.
   useEffect(() => {
@@ -130,10 +130,10 @@ const SkillTagModal: React.FC<SkillTagModalProps> = ({
         })}
       </p>
       <div className='flex flex-col gap-18px'>
-        <AssistantTagPicker
+        <PresetTagPicker
           ref={audiencePickerRef}
           dimension='audience'
-          label={t('settings.assistantTagAudience', { defaultValue: 'Audience' })}
+          label={t('settings.presetTagAudience', { defaultValue: 'Audience' })}
           tags={audienceTags}
           value={audience}
           onChange={setAudience}
@@ -142,10 +142,10 @@ const SkillTagModal: React.FC<SkillTagModalProps> = ({
           readOnly={false}
           commitOnBlur
         />
-        <AssistantTagPicker
+        <PresetTagPicker
           ref={scenarioPickerRef}
           dimension='scenario'
-          label={t('settings.assistantTagScenario', { defaultValue: 'Skill Scenario' })}
+          label={t('settings.presetTagScenario', { defaultValue: 'Skill Scenario' })}
           tags={scenarioTags}
           value={scenario}
           onChange={setScenario}

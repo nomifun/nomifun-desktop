@@ -36,7 +36,7 @@ docs/
 └── images/               截图清单与图片资源
 ```
 
-当前顶层用户界面包括会话、终端、模型管理、助手、MCP、开放能力、
+当前顶层用户界面包括会话、终端、模型管理、设定、MCP、开放能力、
 需求/AutoWork、定时任务、伙伴、知识库，以及 feature-gated 的
 computer/browser 自动化能力。前端路由真相来源是
 `ui/src/renderer/components/layout/Router.tsx`。

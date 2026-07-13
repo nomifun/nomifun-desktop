@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::collector::{self, Collector, SharedConfig};
 use crate::archiver::Archiver;
-use crate::companion::CompanionThreads;
+use crate::companion::{CompanionThreads, build_companion_system_prompt};
 use crate::events::CompanionEventEmitter;
 use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
 use crate::gamify::level_for_xp;
@@ -424,6 +424,40 @@ impl CompanionService {
             .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))
     }
 
+    /// Apply a server-resolved preset without replacing companion identity or
+    /// learned state. The frozen snapshot is persisted on the profile so new
+    /// companion sessions and remote channel turns reuse the same capability
+    /// template even if the source preset is edited later.
+    pub async fn apply_preset_snapshot(
+        &self,
+        id: &str,
+        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+    ) -> Result<CompanionProfileConfig, AppError> {
+        if snapshot.target != nomifun_api_types::PresetTarget::Companion {
+            return Err(AppError::BadRequest(
+                "preset snapshot target must be companion".into(),
+            ));
+        }
+        let mut patch = serde_json::json!({ "applied_preset": snapshot });
+        if let Some(model) = patch
+            .get("applied_preset")
+            .and_then(|value| value.get("resolved_model"))
+            .filter(|value| !value.is_null())
+        {
+            let provider_id = model.get("provider_id").and_then(serde_json::Value::as_str);
+            let model_name = model.get("model").and_then(serde_json::Value::as_str);
+            if let (Some(provider_id), Some(model_name)) = (provider_id, model_name) {
+                patch["model"] = serde_json::json!({
+                    "provider_id": provider_id,
+                    "model": model_name,
+                });
+            }
+        }
+        let profile = self.patch_companion(id, patch).await?;
+        self.propagate_preset_to_companion(&profile).await;
+        Ok(profile)
+    }
+
     /// RFC 7396 partial update of one companion's profile. When the patch changes the
     /// model into a new configured value, the new model (唯一事实源 =
     /// profile.model) is propagated to the companion's single companion conversation
@@ -499,6 +533,33 @@ impl CompanionService {
         };
         if let Err(e) = companion.set_model(&profile.id, &conversation_id, &model).await {
             tracing::warn!(error = %e, companion_id = %profile.id, "propagate model to companion conversation failed");
+        }
+    }
+
+    /// Best-effort live propagation for an existing companion session. New
+    /// sessions already consume `profile.applied_preset` in `create()`.
+    async fn propagate_preset_to_companion(&self, profile: &CompanionProfileConfig) {
+        let Some(snapshot) = profile.applied_preset.as_ref() else { return };
+        let Ok(companion) = self.companion() else { return };
+        let conversation_id = match companion.create(&profile.id, None).await {
+            Ok(thread) => thread.conversation_id,
+            Err(error) => {
+                tracing::warn!(%error, companion_id = %profile.id, "ensure companion session for preset propagation failed");
+                return;
+            }
+        };
+        let system_prompt = build_companion_system_prompt(
+            &self.store,
+            profile,
+            None,
+            self.config.read().await.smart_orchestration,
+        )
+        .await;
+        if let Err(error) = companion
+            .set_preset(&profile.id, &conversation_id, system_prompt, snapshot)
+            .await
+        {
+            tracing::warn!(%error, companion_id = %profile.id, "propagate preset to companion conversation failed");
         }
     }
 

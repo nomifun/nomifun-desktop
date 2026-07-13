@@ -8,7 +8,7 @@
  * RequirementListRow — a single refined row in the requirements workspace list
  * (replaces the old dense Arco Table row). Layout, left→right:
  *   checkbox · `#id` badge (tabular-nums) · title + 1-2 line content snippet
- *   · tag chip (mirrors AssistantCard chip) · StatusPill · hover-revealed
+ *   · tag chip (mirrors PresetCard chip) · StatusPill · hover-revealed
  *   edit/delete actions.
  *
  * The whole row is a `<div role="button">` whose background click opens the
@@ -129,7 +129,7 @@ const RequirementListRow: React.FC<RequirementListRowProps> = ({
         )}
       </div>
 
-      {/* Tag chip — mirrors the AssistantCard pill. Hides first on narrow widths. */}
+      {/* Tag chip — mirrors the PresetCard pill. Hides first on narrow widths. */}
       {item.tag && (
         <span
           className={[
