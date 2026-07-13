@@ -1013,9 +1013,7 @@ impl ConversationService {
                 workspace_changed,
                 "Conversation updated, killing agent task so the change takes effect on the next message"
             );
-            if let Err(e) = task_manager.kill(id, None) {
-                warn!(error = %ErrorChain(&e), "Failed to kill agent after model/workspace change");
-            }
+            task_manager.kill_and_wait(id, None).await;
         }
 
         // Re-fetch to return the updated version

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nomi_agent::bootstrap::AgentBootstrap;
 use nomi_agent::companion_tools::{
@@ -24,8 +25,8 @@ use nomifun_common::{
     AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, TimestampMs, now_ms,
 };
 use serde_json::Value;
-use tokio::sync::{Mutex, Notify, broadcast};
-use tracing::{debug, error, info};
+use tokio::sync::{Mutex, broadcast};
+use tracing::{debug, error, info, warn};
 
 use crate::agent_runtime::AgentRuntime;
 use crate::capability::backend_output_sink::BackendOutputSink;
@@ -61,9 +62,18 @@ pub struct NomiAgentManager {
     mcp_managers: Vec<Arc<McpManager>>,
     approval_manager: Arc<ToolApprovalManager>,
     confirmations: Arc<std::sync::RwLock<Vec<Confirmation>>>,
-    /// Signalled by `cancel()` to abort an in-flight `engine.run()` via
-    /// `tokio::select!` in `send_message()`.
-    cancel_notify: Arc<Notify>,
+    /// Durable per-turn cancellation token. Unlike `Notify`, cancellation is
+    /// retained when kill arrives before `send_message` reaches its select.
+    turn_cancel: std::sync::Mutex<tokio_util::sync::CancellationToken>,
+    /// Serializes turn admission with permanent task shutdown.
+    lifecycle_gate: std::sync::Mutex<()>,
+    /// Holds for the complete send lifecycle. A second send waits here and
+    /// re-checks `closing` only after the active turn has unwound, preventing
+    /// it from replacing the active turn's cancellation token.
+    turn_gate: Mutex<()>,
+    /// Permanent once `kill` is requested; prevents a raced clone from
+    /// admitting another turn after task-manager eviction.
+    closing: AtomicBool,
     /// Mid-turn steering interjections pushed by `steer()` and drained by the
     /// engine at its loop boundaries. Shared (clone of this Arc handed to the
     /// engine via `set_steering_inbox` each turn). `std::sync::Mutex` — locked
@@ -563,7 +573,10 @@ impl NomiAgentManager {
             mcp_managers: result.mcp_managers,
             approval_manager,
             confirmations,
-            cancel_notify: Arc::new(Notify::new()),
+            turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            lifecycle_gate: std::sync::Mutex::new(()),
+            turn_gate: Mutex::new(()),
+            closing: AtomicBool::new(false),
             steering_inbox: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             distill_dir,
             image_read_root,
@@ -573,25 +586,41 @@ impl NomiAgentManager {
         })
     }
 
-    fn request_stop(&self, reason: Option<AgentKillReason>, operation: &'static str) {
+    fn request_stop(
+        &self,
+        reason: Option<AgentKillReason>,
+        operation: &'static str,
+        close_permanently: bool,
+    ) {
+        let _lifecycle = self
+            .lifecycle_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if close_permanently {
+            self.closing.store(true, Ordering::Release);
+        }
         let was_running = self.runtime.status() == Some(ConversationStatus::Running);
+
+        self.turn_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancel();
 
         if let Ok(mut confs) = self.confirmations.write() {
             confs.clear();
         }
 
         if was_running {
-            // An in-flight engine.run() exists: wake its select! so the turn's
-            // None branch aborts cleanly and emits the terminal event.
-            self.cancel_notify.notify_waiters();
+            // The durable token above wakes either the cooperative engine or
+            // the non-cooperative select branch. The active turn emits its own
+            // terminal event after unwinding.
         } else {
             // Idle / Pending / between turns: there is no in-flight run to wake,
             // so notify_waiters would be a no-op AND no terminal event would ever
             // be broadcast — a relay subscribed to this conversation would hang
             // forever in a 'running' spinner. Emit the terminal event directly.
             // Idempotent via AgentRuntime's absorbing-state guard (a later real
-            // Finish is absorbed), and we deliberately do NOT notify_waiters here
-            // so no stale cancellation signal leaks into the next turn. (F0.2)
+            // Finish is absorbed). A later reusable turn receives a fresh token.
             self.runtime
                 .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
         }
@@ -639,8 +668,26 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
             msg_id = %data.msg_id,
             "Nomi send_message started"
         );
-        self.runtime.bump_activity();
-        self.runtime.reset_for_new_turn(ConversationStatus::Running);
+        let _turn = self.turn_gate.lock().await;
+        let turn_cancel = {
+            let _lifecycle = self
+                .lifecycle_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.closing.load(Ordering::Acquire) {
+                return Err(AgentSendError::from_app_error(AppError::Conflict(
+                    "Agent task is shutting down; retry on the replacement task".to_owned(),
+                )));
+            }
+            let token = tokio_util::sync::CancellationToken::new();
+            *self
+                .turn_cancel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = token.clone();
+            self.runtime.bump_activity();
+            self.runtime.reset_for_new_turn(ConversationStatus::Running);
+            token
+        };
 
         // Backstop: guarantee a terminal event even if this turn unwinds
         // abnormally (engine panic / early-return). Disarmed on the normal path
@@ -711,20 +758,11 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                 // consistent. Trades a little mid-tool stop-latency (the run is
                 // awaited, not dropped) for that consistency; the engine checks the
                 // token between turns and while awaiting the model stream.
-                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel = turn_cancel.clone();
                 engine.set_cancel_token(Some(cancel.clone()));
-                let notify = self.cancel_notify.clone();
-                let canceller = {
-                    let cancel = cancel.clone();
-                    tokio::spawn(async move {
-                        notify.notified().await;
-                        cancel.cancel();
-                    })
-                };
                 let res = engine
                     .run_with_content(current_content, &data.msg_id)
                     .await;
-                canceller.abort();
                 engine.set_cancel_token(None); // reset for the next reused turn
                 if cancel.is_cancelled() {
                     info!(
@@ -738,7 +776,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
             } else {
                 tokio::select! {
                     res = engine.run_with_content(current_content, &data.msg_id) => Some(res),
-                    _ = self.cancel_notify.notified() => {
+                    _ = turn_cancel.cancelled() => {
                         info!(
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.run() cancelled by stop signal"
@@ -920,12 +958,12 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
     }
 
     async fn cancel(&self) -> Result<(), AppError> {
-        self.request_stop(None, "cancel");
+        self.request_stop(None, "cancel", false);
         Ok(())
     }
 
     fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> {
-        self.request_stop(reason, "kill");
+        self.request_stop(reason, "kill", true);
         Ok(())
     }
 }
@@ -962,7 +1000,17 @@ impl NomiAgentManager {
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let _ = crate::agent_task::IAgentTask::kill(self, reason);
-        Box::pin(std::future::ready(()))
+        let runtime = self.runtime.clone();
+        Box::pin(async move {
+            const TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+            if !runtime.wait_until_finished(TEARDOWN_TIMEOUT).await {
+                warn!(
+                    conversation_id = %runtime.conversation_id(),
+                    timeout_ms = TEARDOWN_TIMEOUT.as_millis(),
+                    "Timed out waiting for Nomi turn teardown; allowing task replacement"
+                );
+            }
+        })
     }
 
     /// Register the native cron tools (cron_create / cron_list / cron_delete)
@@ -1081,7 +1129,7 @@ impl NomiAgentManager {
         );
         // Signal any in-flight engine.run() to abort so we don't clear
         // mid-turn; the engine lock below then waits for it to release.
-        self.request_stop(None, "clear_context");
+        self.request_stop(None, "clear_context", false);
         let mut engine = self.engine.lock().await;
         engine.clear_context();
         Ok(())
@@ -1097,7 +1145,7 @@ impl NomiAgentManager {
             conversation_id = %self.runtime.conversation_id(),
             "Rewinding last Nomi turn"
         );
-        self.request_stop(None, "rewind_last_turn");
+        self.request_stop(None, "rewind_last_turn", false);
         let mut engine = self.engine.lock().await;
         if !engine.rewind_last_turn() {
             return Err(AppError::BadRequest(
@@ -1150,18 +1198,6 @@ mod tests {
     use nomi_types::llm::{LlmEvent, LlmRequest};
     use nomi_types::message::{ContentBlock, Role, StopReason};
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    async fn assert_no_stop_signal(agent: &NomiAgentManager) {
-        let notified = agent.cancel_notify.notified();
-        tokio::pin!(notified);
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut notified)
-                .await
-                .is_err(),
-            "idle stop must not leave a stale cancellation signal for the next turn"
-        );
-    }
 
     fn make_test_config() -> NomiResolvedConfig {
         NomiResolvedConfig {
@@ -1250,6 +1286,36 @@ mod tests {
         }
     }
 
+    struct BlockingProvider {
+        calls: AtomicUsize,
+        called: tokio::sync::Semaphore,
+        senders: std::sync::Mutex<Vec<tokio::sync::mpsc::Sender<LlmEvent>>>,
+    }
+
+    impl BlockingProvider {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                called: tokio::sync::Semaphore::new(0),
+                senders: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BlockingProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            self.senders.lock().expect("sender lock poisoned").push(tx);
+            self.called.add_permits(1);
+            Ok(rx)
+        }
+    }
+
     fn make_test_engine_config() -> Config {
         let mut config = Config::resolve(&CliArgs {
             provider: Some("anthropic".into()),
@@ -1305,7 +1371,10 @@ mod tests {
             mcp_managers: Vec::new(),
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
-            cancel_notify: Arc::new(Notify::new()),
+            turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            lifecycle_gate: std::sync::Mutex::new(()),
+            turn_gate: Mutex::new(()),
+            closing: AtomicBool::new(false),
             steering_inbox: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             distill_dir: None,
             image_read_root: None,
@@ -1387,7 +1456,10 @@ mod tests {
             mcp_managers: Vec::new(),
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
-            cancel_notify: Arc::new(Notify::new()),
+            turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+            lifecycle_gate: std::sync::Mutex::new(()),
+            turn_gate: Mutex::new(()),
+            closing: AtomicBool::new(false),
             steering_inbox: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             distill_dir: None,
             image_read_root: None,
@@ -1690,27 +1762,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nomi_agent_kill_running_turn_sends_stop_signal() {
+    async fn nomi_agent_kill_running_turn_cancels_turn_token() {
         let agent = NomiAgentManager::new("conv-1".into(), "/project".into(), make_test_config(), None, None, None, None, Vec::new(), None, None, Vec::new(), false, None)
             .await
             .unwrap();
         agent.runtime.reset_for_new_turn(ConversationStatus::Running);
 
-        let notified = agent.cancel_notify.notified();
-        tokio::pin!(notified);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut notified)
-                .await
-                .is_err()
-        );
+        let token = agent
+            .turn_cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(!token.is_cancelled());
 
         agent
             .kill(Some(AgentKillReason::ConversationDeleted))
             .expect("kill should request stop");
 
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut notified)
-            .await
-            .expect("running kill should wake in-flight turn");
+        assert!(token.is_cancelled(), "running kill must cancel the active turn token");
     }
 
     #[tokio::test]
@@ -1723,7 +1792,92 @@ mod tests {
             .kill(Some(AgentKillReason::ConversationDeleted))
             .expect("idle kill should be harmless");
 
-        assert_no_stop_signal(&agent).await;
+        assert!(agent.closing.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn nomi_agent_kill_is_durable_and_rejects_raced_turn_admission() {
+        let agent = make_agent_with_provider(Arc::new(ScriptedProvider::new(vec![])));
+
+        agent
+            .kill(Some(AgentKillReason::ConversationDeleted))
+            .expect("kill should close the task");
+
+        assert!(agent.closing.load(Ordering::Acquire));
+        assert!(
+            agent
+                .turn_cancel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_cancelled(),
+            "kill cancellation must remain observable even without a registered waiter"
+        );
+        let error = agent
+            .send_message(SendMessageData {
+                content: "must not start".into(),
+                msg_id: "raced-after-kill".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .expect_err("closed manager must reject a raced clone");
+        assert!(
+            error
+                .stream_error()
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("shutting down"))
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_cancels_active_turn_and_rejects_second_queued_send() {
+        let provider = Arc::new(BlockingProvider::new());
+        let agent = Arc::new(make_agent_with_provider(provider.clone()));
+        let first = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "first".into(),
+                        msg_id: "first".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+        provider.called.acquire().await.unwrap().forget();
+
+        let second = {
+            let agent = Arc::clone(&agent);
+            tokio::spawn(async move {
+                agent
+                    .send_message(SendMessageData {
+                        content: "second".into(),
+                        msg_id: "second".into(),
+                        files: Vec::new(),
+                        inject_skills: Vec::new(),
+                        origin: None,
+                    })
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        agent
+            .kill(Some(AgentKillReason::ConversationDeleted))
+            .expect("kill should close every admitted send");
+
+        let first_result = tokio::time::timeout(std::time::Duration::from_millis(200), first)
+            .await
+            .expect("active turn must observe kill")
+            .unwrap();
+        assert!(first_result.is_ok());
+        assert!(second.await.unwrap().is_err(), "queued send must see closing task");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1775,8 +1929,14 @@ mod tests {
             Ok(AgentStreamEvent::Finish(_)) => {}
             other => panic!("expected Finish on idle cancel, got {:?}", other),
         }
-        // ...but it must NOT leave a stale cancellation signal for the next turn.
-        assert_no_stop_signal(&agent).await;
+        // A later reusable turn replaces this cancelled token during admission.
+        assert!(
+            agent
+                .turn_cancel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_cancelled()
+        );
     }
 
     #[tokio::test]

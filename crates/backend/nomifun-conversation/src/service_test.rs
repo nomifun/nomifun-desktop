@@ -930,7 +930,7 @@ async fn update_extra_merge() {
 
 #[tokio::test]
 async fn update_model() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
 
     // Top-level model updates are only valid on nomi conversations
     // (Task 8 enforces the nomi-only rule in update).
@@ -946,11 +946,18 @@ async fn update_model() {
         "model": { "provider_id": "p2", "model": "new-model" }
     }))
     .unwrap();
+    let mock = Arc::new(MockTaskManager::new());
+    let task_mgr: Arc<dyn IWorkerTaskManager> = mock.clone();
     let updated = svc.update("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
 
     let model = updated.model.unwrap();
     assert_eq!(model.provider_id, "p2");
     assert_eq!(model.model, "new-model");
+    assert_eq!(
+        mock.kill_and_wait_count(),
+        1,
+        "model update must await old agent teardown"
+    );
 }
 
 #[tokio::test]
@@ -1405,6 +1412,7 @@ struct MockTaskManager {
     agents: Mutex<std::collections::HashMap<String, AgentInstance>>,
     kill_records: Mutex<Vec<(String, Option<AgentKillReason>)>>,
     kill_count: AtomicUsize,
+    kill_and_wait_count: AtomicUsize,
 }
 
 impl MockTaskManager {
@@ -1413,6 +1421,7 @@ impl MockTaskManager {
             agents: Mutex::new(std::collections::HashMap::new()),
             kill_records: Mutex::new(Vec::new()),
             kill_count: AtomicUsize::new(0),
+            kill_and_wait_count: AtomicUsize::new(0),
         }
     }
 
@@ -1422,6 +1431,10 @@ impl MockTaskManager {
 
     fn kill_count(&self) -> usize {
         self.kill_count.load(Ordering::SeqCst)
+    }
+
+    fn kill_and_wait_count(&self) -> usize {
+        self.kill_and_wait_count.load(Ordering::SeqCst)
     }
 
     fn kill_records(&self) -> Vec<(String, Option<AgentKillReason>)> {
@@ -1511,6 +1524,7 @@ impl IWorkerTaskManager for MockTaskManager {
         conversation_id: &str,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.kill_and_wait_count.fetch_add(1, Ordering::SeqCst);
         let _ = self.kill(conversation_id, reason);
         Box::pin(std::future::ready(()))
     }
