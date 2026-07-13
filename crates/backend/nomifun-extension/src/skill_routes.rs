@@ -576,10 +576,10 @@ async fn sync_skill_market_rankings(
 }
 
 const CLAWHUB_SOURCE: &str = "clawhub";
-const SKILLS_SH_SOURCE: &str = "skills_sh";
+const SKILLHUB_SOURCE: &str = "skillhub";
 const CLAWHUB_RANKING_URL: &str = "https://clawhub.ai/";
-const SKILLS_SH_RANKING_URL: &str = "https://www.skills.sh/";
-// Skills.sh is currently just under 1 MiB. Keep a bounded amount of headroom
+const SKILLHUB_RANKING_URL: &str = "https://www.skills.sh/";
+// The SkillHub page is currently just under 1 MiB. Keep a bounded amount of headroom
 // for normal page growth while still preventing an unbounded response body.
 const MAX_MARKET_BODY_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MARKET_ITEMS_PER_SOURCE: usize = 40;
@@ -594,10 +594,10 @@ async fn fetch_skill_market_rankings(sources: Vec<String>) -> Result<SkillMarket
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let include_clawhub = selected.contains(&CLAWHUB_SOURCE);
-    let include_skills_sh = selected.contains(&SKILLS_SH_SOURCE);
+    let include_skillhub = selected.contains(&SKILLHUB_SOURCE);
     // The sources are independent. Fetch them concurrently so one slow market
     // cannot make the user wait for two sequential timeout windows.
-    let (clawhub_result, skills_sh_result) = tokio::join!(
+    let (clawhub_result, skillhub_result) = tokio::join!(
         async {
             if include_clawhub {
                 Some(fetch_market_source(&client, CLAWHUB_SOURCE).await)
@@ -606,8 +606,8 @@ async fn fetch_skill_market_rankings(sources: Vec<String>) -> Result<SkillMarket
             }
         },
         async {
-            if include_skills_sh {
-                Some(fetch_market_source(&client, SKILLS_SH_SOURCE).await)
+            if include_skillhub {
+                Some(fetch_market_source(&client, SKILLHUB_SOURCE).await)
             } else {
                 None
             }
@@ -618,7 +618,7 @@ async fn fetch_skill_market_rankings(sources: Vec<String>) -> Result<SkillMarket
     let mut errors = Vec::new();
     for (source, result) in [
         (CLAWHUB_SOURCE, clawhub_result),
-        (SKILLS_SH_SOURCE, skills_sh_result),
+        (SKILLHUB_SOURCE, skillhub_result),
     ] {
         if let Some(result) = result {
             match result {
@@ -637,7 +637,7 @@ async fn fetch_skill_market_rankings(sources: Vec<String>) -> Result<SkillMarket
 
 fn normalize_market_sources(sources: Vec<String>) -> Result<Vec<&'static str>, AppError> {
     if sources.is_empty() {
-        return Ok(vec![CLAWHUB_SOURCE, SKILLS_SH_SOURCE]);
+        return Ok(vec![CLAWHUB_SOURCE, SKILLHUB_SOURCE]);
     }
 
     let mut selected = Vec::new();
@@ -646,7 +646,7 @@ fn normalize_market_sources(sources: Vec<String>) -> Result<Vec<&'static str>, A
         let normalized = source.trim().to_ascii_lowercase();
         let source = match normalized.as_str() {
             CLAWHUB_SOURCE => CLAWHUB_SOURCE,
-            SKILLS_SH_SOURCE => SKILLS_SH_SOURCE,
+            SKILLHUB_SOURCE => SKILLHUB_SOURCE,
             other => return Err(AppError::BadRequest(format!("unsupported skill market source: {other}"))),
         };
         if seen.insert(source) {
@@ -662,7 +662,7 @@ async fn fetch_market_source(
 ) -> Result<Vec<SkillMarketItemResponse>, AppError> {
     let url = match source {
         CLAWHUB_SOURCE => CLAWHUB_RANKING_URL,
-        SKILLS_SH_SOURCE => SKILLS_SH_RANKING_URL,
+        SKILLHUB_SOURCE => SKILLHUB_RANKING_URL,
         _ => return Err(AppError::BadRequest("unsupported skill market source".into())),
     };
 
@@ -685,7 +685,7 @@ async fn fetch_market_source(
     let html = String::from_utf8_lossy(&bytes);
     Ok(match source {
         CLAWHUB_SOURCE => parse_clawhub_rankings(&html),
-        SKILLS_SH_SOURCE => parse_skills_sh_rankings(&html),
+        SKILLHUB_SOURCE => parse_skillhub_rankings(&html),
         _ => Vec::new(),
     })
 }
@@ -740,25 +740,25 @@ fn parse_clawhub_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
     parsed
 }
 
-fn parse_skills_sh_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
+fn parse_skillhub_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
     let mut seen = HashSet::new();
     let mut parsed = Vec::new();
 
     for (href, text) in market_anchors(html) {
-        let Some(url) = market_url(SKILLS_SH_SOURCE, &href) else {
+        let Some(url) = market_url(SKILLHUB_SOURCE, &href) else {
             continue;
         };
-        let Some((owner, slug)) = skills_sh_owner_slug(&url) else {
+        let Some((owner, slug)) = skillhub_owner_slug(&url) else {
             continue;
         };
-        let id = format!("{SKILLS_SH_SOURCE}:{owner}/skills/{slug}");
+        let id = format!("{SKILLHUB_SOURCE}:{owner}/skills/{slug}");
         if !seen.insert(id.clone()) {
             continue;
         }
 
-        let name = extract_skills_sh_name(&text, &owner, &slug);
+        let name = extract_skillhub_name(&text, &owner, &slug);
         let stats = extract_stats(&text);
-        let description = extract_skills_sh_description(&text, &owner, &name, stats.as_deref());
+        let description = extract_skillhub_description(&text, &owner, &name, stats.as_deref());
         let (tags, audience_tags, scenario_tags) = infer_market_tags(&format!("{name} {description}"));
         let install_command = if owner.contains('.') {
             format!("npx skills add https://www.skills.sh/{owner}/skills/{slug}")
@@ -768,7 +768,7 @@ fn parse_skills_sh_rankings(html: &str) -> Vec<SkillMarketItemResponse> {
         let rank = parsed.len() + 1;
         parsed.push(SkillMarketItemResponse {
             id,
-            source: SKILLS_SH_SOURCE.into(),
+            source: SKILLHUB_SOURCE.into(),
             rank,
             name,
             description,
@@ -813,7 +813,7 @@ fn market_url(source: &str, href: &str) -> Option<String> {
     } else if href.starts_with('/') {
         match source {
             CLAWHUB_SOURCE => format!("https://clawhub.ai{href}"),
-            SKILLS_SH_SOURCE => format!("https://www.skills.sh{href}"),
+            SKILLHUB_SOURCE => format!("https://www.skills.sh{href}"),
             _ => return None,
         }
     } else {
@@ -822,7 +822,7 @@ fn market_url(source: &str, href: &str) -> Option<String> {
 
     match source {
         CLAWHUB_SOURCE if url.starts_with("https://clawhub.ai/") => Some(url),
-        SKILLS_SH_SOURCE if url.starts_with("https://www.skills.sh/") || url.starts_with("https://skills.sh/") => {
+        SKILLHUB_SOURCE if url.starts_with("https://www.skills.sh/") || url.starts_with("https://skills.sh/") => {
             Some(url.replacen("https://skills.sh/", "https://www.skills.sh/", 1))
         }
         _ => None,
@@ -841,7 +841,7 @@ fn clawhub_owner_slug(url: &str) -> Option<(String, String)> {
     None
 }
 
-fn skills_sh_owner_slug(url: &str) -> Option<(String, String)> {
+fn skillhub_owner_slug(url: &str) -> Option<(String, String)> {
     let segments = market_path_segments(url, "https://www.skills.sh")?;
     if segments.len() >= 3 && segments.get(1).is_some_and(|s| s == "skills") {
         return valid_owner_slug(&segments[0], &segments[2]);
@@ -907,7 +907,7 @@ fn extract_clawhub_description(text: &str, owner: &str, name: &str) -> String {
     }
 }
 
-fn extract_skills_sh_name(text: &str, owner: &str, slug: &str) -> String {
+fn extract_skillhub_name(text: &str, owner: &str, slug: &str) -> String {
     let repo_marker = format!("{owner}/skills");
     let before_repo = text.split(&repo_marker).next().unwrap_or(text);
     let candidate = clean_market_text(
@@ -921,14 +921,14 @@ fn extract_skills_sh_name(text: &str, owner: &str, slug: &str) -> String {
     }
 }
 
-fn extract_skills_sh_description(text: &str, owner: &str, name: &str, stats: Option<&str>) -> String {
+fn extract_skillhub_description(text: &str, owner: &str, name: &str, stats: Option<&str>) -> String {
     let without_stats = stats.map_or_else(|| text.to_string(), |s| text.replace(s, ""));
     let without_repo = without_stats.replace(&format!("{owner}/skills"), "");
     let cleaned = clean_market_text(&without_repo.replace(name, ""), 180);
     if cleaned.len() >= 18 {
         cleaned
     } else {
-        format!("Ranked Skills.sh skill from {owner}/skills.")
+        format!("Ranked SkillHub skill from {owner}/skills.")
     }
 }
 
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_skills_sh_rankings_extracts_skills_command() {
+    fn parse_skillhub_rankings_extracts_skills_command() {
         let html = r#"
           <a href="/vercel-labs/skills/find-skills">
             <span>find-skills</span>
@@ -1163,9 +1163,9 @@ mod tests {
             <span>2.5M installs</span>
           </a>
         "#;
-        let items = parse_skills_sh_rankings(html);
+        let items = parse_skillhub_rankings(html);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].source, SKILLS_SH_SOURCE);
+        assert_eq!(items[0].source, SKILLHUB_SOURCE);
         assert_eq!(
             items[0].install_command,
             "npx skills add https://github.com/vercel-labs/skills --skill find-skills"
@@ -1176,15 +1176,15 @@ mod tests {
     /// in normal CI because it requires public network access and those sites
     /// are outside NomiFun's availability control.
     #[tokio::test]
-    #[ignore = "requires public ClawHub and Skills.sh access"]
+    #[ignore = "requires public ClawHub and SkillHub access"]
     async fn live_market_pages_still_match_the_ranking_contract() {
-        let response = fetch_skill_market_rankings(vec![CLAWHUB_SOURCE.into(), SKILLS_SH_SOURCE.into()])
+        let response = fetch_skill_market_rankings(vec![CLAWHUB_SOURCE.into(), SKILLHUB_SOURCE.into()])
             .await
             .unwrap();
 
         assert!(response.errors.is_empty(), "live fetch errors: {:?}", response.errors);
         assert!(response.items.iter().any(|item| item.source == CLAWHUB_SOURCE));
-        assert!(response.items.iter().any(|item| item.source == SKILLS_SH_SOURCE));
+        assert!(response.items.iter().any(|item| item.source == SKILLHUB_SOURCE));
         assert!(response.items.iter().all(|item| {
             item.url.starts_with("https://")
                 && (item.install_command.starts_with("openclaw skills install @")

@@ -718,7 +718,7 @@ export const dialog = {
 // File System — routed to /api/fs/* and /api/skills/*
 // ---------------------------------------------------------------------------
 
-export type SkillMarketSource = 'clawhub' | 'skills_sh';
+export type SkillMarketSource = 'clawhub' | 'skillhub';
 
 export interface ISkillMarketItem {
   id: string;

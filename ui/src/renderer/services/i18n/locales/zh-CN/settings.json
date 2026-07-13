@@ -70,7 +70,7 @@
   },
   "skillsMarket": {
     "title": "技能市场",
-    "description": "浏览 ClawHub 与 Skills.sh 当前榜单，并把经过检查的安装草稿交给 Nomi。",
+    "description": "浏览 ClawHub 与 SkillHub 当前榜单，并把经过检查的安装草稿交给 Nomi。",
     "syncSuccess": "技能市场已更新",
     "syncEmpty": "未采集到榜单数据。",
     "syncError": "更新技能市场失败",

@@ -24,8 +24,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 
 const CARD_GRID_COLS = 'repeat(auto-fill, minmax(min(232px, 100%), 1fr))';
-const CACHE_KEY = 'nomifun.skillMarket.rankings.v2';
-const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v2';
+const CACHE_KEY = 'nomifun.skillMarket.rankings.v3';
+const AUTO_SYNC_KEY = 'nomifun.skillMarket.autoSynced.v3';
 
 type SkillMarketCache = {
   fetched_at?: number;
@@ -33,7 +33,7 @@ type SkillMarketCache = {
   errors?: unknown;
 };
 
-const sourceLabel = (source: SkillMarketSource): string => (source === 'clawhub' ? 'ClawHub' : 'Skills.sh');
+const sourceLabel = (source: SkillMarketSource): string => (source === 'clawhub' ? 'ClawHub' : 'SkillHub');
 const sourceMarketUrl = (source: SkillMarketSource): string =>
   source === 'clawhub' ? 'https://clawhub.ai/' : 'https://www.skills.sh/';
 
@@ -134,7 +134,7 @@ const SkillMarketSettings: React.FC = () => {
   );
 
   const sourceCounts = useMemo(() => {
-    const counts: Record<SkillMarketSource, number> = { clawhub: 0, skills_sh: 0 };
+    const counts: Record<SkillMarketSource, number> = { clawhub: 0, skillhub: 0 };
     for (const item of items) counts[item.source] += 1;
     return counts;
   }, [items]);
@@ -186,7 +186,7 @@ const SkillMarketSettings: React.FC = () => {
                 </h2>
                 <p className='mt-8px mb-0 max-w-[680px] text-14px text-t-secondary leading-relaxed'>
                   {t('settings.skillsMarket.description', {
-                    defaultValue: '同步 ClawHub 与 Skills.sh 最新榜单，选择技能后交给 Nomi 生成安装确认草稿。',
+                    defaultValue: '同步 ClawHub 与 SkillHub 最新榜单，选择技能后交给 Nomi 生成安装确认草稿。',
                   })}
                 </p>
               </div>
