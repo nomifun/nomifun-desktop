@@ -99,6 +99,7 @@ const AssistantCard: React.FC<AssistantCardProps> = ({
         <div className='flex-shrink-0 -mt-1px' onClick={(e) => e.stopPropagation()}>
           <Switch
             size='small'
+            className='compact-dark-switch'
             data-testid={`switch-enabled-${assistant.id}`}
             checked={assistantIsExtension ? true : assistant.enabled !== false}
             disabled={assistantIsExtension}

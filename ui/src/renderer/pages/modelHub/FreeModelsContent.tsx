@@ -209,6 +209,7 @@ const FreeModelsContent: React.FC = () => {
               <span className='text-13px text-t-secondary'>{t('settings.modelHub.free.serviceEnabled')}</span>
               <Switch
                 size='small'
+                className='compact-dark-switch'
                 aria-label={t('settings.modelHub.free.serviceEnabled')}
                 checked={status?.enabled ?? false}
                 loading={pendingAction === 'service'}
@@ -483,6 +484,7 @@ const FreeModelsContent: React.FC = () => {
                               <div className='shrink-0' onClick={(event) => event.stopPropagation()}>
                                 <Switch
                                   size='small'
+                                  className='compact-dark-switch'
                                   aria-label={t('settings.modelHub.free.modelToggleLabel', {
                                     model: model.name || model.id,
                                   })}

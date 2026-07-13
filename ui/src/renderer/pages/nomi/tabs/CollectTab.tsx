@@ -83,6 +83,8 @@ const CollectTab: React.FC<Props> = ({ shared }) => {
           return (
             <div key={key} className='flex items-center gap-12px bg-fill-2 rd-10px px-12px py-10px'>
               <Switch
+                size='small'
+                className='compact-dark-switch'
                 checked={sharedConfig.collect[key]}
                 onChange={(checked) => {
                   void patchSharedConfig({ collect: { [key]: checked } }).catch((e) =>
