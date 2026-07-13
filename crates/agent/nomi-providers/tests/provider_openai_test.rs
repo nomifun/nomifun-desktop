@@ -101,7 +101,7 @@ impl Respond for OpenAiFailedSanitizedResendResponder {
                     "reason": "TOOL_SCHEMA_INVALID"
                 }
             })),
-            1 => ResponseTemplate::new(503).set_body_string("sanitized resend unavailable"),
+            1..=3 => ResponseTemplate::new(503).set_body_string("sanitized resend unavailable"),
             _ => {
                 let chunk = json!({
                     "choices": [{ "delta": { "content": "Recovered" }, "finish_reason": null }]
@@ -183,7 +183,7 @@ async fn openai_gateway_does_not_schema_retry_an_unrelated_500() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
-        .expect(1)
+        .expect(3)
         .mount(&server)
         .await;
     let provider = OpenAIProvider::new(
@@ -207,7 +207,7 @@ async fn openai_gateway_does_not_remember_a_failed_sanitized_resend() {
         .respond_with(OpenAiFailedSanitizedResendResponder {
             attempt: Arc::new(AtomicUsize::new(0)),
         })
-        .expect(3)
+        .expect(5)
         .mount(&server)
         .await;
     let provider = OpenAIProvider::new(
@@ -237,7 +237,10 @@ async fn openai_gateway_does_not_remember_a_failed_sanitized_resend() {
                 .is_some()
         })
         .collect();
-    assert_eq!(has_root_one_of, vec![true, false, true]);
+    assert_eq!(
+        has_root_one_of,
+        vec![true, false, false, false, true]
+    );
     server.verify().await;
 }
 
