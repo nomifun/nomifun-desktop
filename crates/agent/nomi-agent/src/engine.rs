@@ -138,6 +138,13 @@ const DEFAULT_SAFETY_MAX_TURNS: usize = 200;
 /// Bedrock Converse rejects a request containing more than 20 images.
 const MAX_PROVIDER_REQUEST_IMAGES: usize = 20;
 
+/// Bound the cumulative base64 image data replayed with one provider request.
+/// This matches the padded base64 size of the existing 5 MiB decoded-image
+/// limit used by Read and MCP tools. A count-only limit can still create a
+/// multi-megabyte request after a Computer screenshot loop.
+const MAX_SINGLE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_PROVIDER_REQUEST_IMAGE_DATA_BYTES: usize = MAX_SINGLE_IMAGE_BYTES.div_ceil(3) * 4;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ToolEfficiencyStats {
     model_turn_attempts: usize,
@@ -836,8 +843,18 @@ impl AgentEngine {
             msg_id = %msg_id,
         );
         let mut efficiency = ToolEfficiencyStats::default();
+        let mut safe_messages = self.messages.clone();
+        let mut turn_started = false;
         let result = async {
-            let result = self.run_inner(user_content, msg_id, &mut efficiency).await;
+            let result = self
+                .run_inner(
+                    user_content,
+                    msg_id,
+                    &mut efficiency,
+                    &mut safe_messages,
+                    &mut turn_started,
+                )
+                .await;
             efficiency.log(&session_id, msg_id, &result);
             result
         }
@@ -851,7 +868,19 @@ impl AgentEngine {
         // wrapper and save the redacted transcript once more. If the host drops
         // this future during non-cooperative cancellation, `abort_current_turn`
         // performs the same cleanup explicitly.
-        if self.redact_user_images_since(first_new_message) {
+        if result.is_err() && turn_started {
+            self.messages = safe_messages;
+            self.last_turn_start_len = None;
+            if matches!(
+                &result,
+                Err(AgentError::Provider(_)
+                    | AgentError::ApiError(_)
+                    | AgentError::ContextTooLong { .. })
+            ) {
+                self.strip_tool_images_after_provider_error();
+            }
+            self.save_session();
+        } else if self.redact_user_images_since(first_new_message) {
             self.save_session();
         }
         result
@@ -871,6 +900,8 @@ impl AgentEngine {
         user_content: Vec<ContentBlock>,
         msg_id: &str,
         efficiency: &mut ToolEfficiencyStats,
+        safe_messages: &mut Vec<Message>,
+        turn_started: &mut bool,
     ) -> Result<AgentResult, AgentError> {
         if user_content.is_empty()
             || user_content
@@ -918,6 +949,7 @@ impl AgentEngine {
         // 记录本 turn 的起始锚点（用户消息 push 之前），供 rewind_last_turn 回退。
         self.last_turn_start_len = Some(self.messages.len());
         self.messages.push(Message::now(Role::User, user_content));
+        *turn_started = true;
 
         let mut turn: usize = 0;
         loop {
@@ -1227,6 +1259,11 @@ impl AgentEngine {
                 .push(Message::now(Role::Assistant, assistant_content));
 
             if tool_calls.is_empty() {
+                // The provider completed this assistant response. It is a safe
+                // rollback point; any steering/goal continuation appended below
+                // belongs to the *next* provider pass and must be dropped if that
+                // pass fails.
+                *safe_messages = self.messages.clone();
                 // Steering interjection (point B): a user message injected
                 // mid-turn extends a would-end turn instead of returning, so
                 // the model incorporates it on the next step. Mirrors the
@@ -1388,6 +1425,7 @@ impl AgentEngine {
             self.prune_old_tool_images();
 
             // Save session after each turn
+            *safe_messages = self.messages.clone();
             self.save_session();
             turn += 1;
         }
@@ -1397,7 +1435,8 @@ impl AgentEngine {
     /// by the strictest supported provider request limit. The text part of each
     /// result is preserved.
     fn prune_old_tool_images(&mut self) {
-        let mut keep = self.max_recent_images.min(MAX_PROVIDER_REQUEST_IMAGES);
+        let mut remaining_count = self.max_recent_images.min(MAX_PROVIDER_REQUEST_IMAGES);
+        let mut remaining_data_bytes = MAX_PROVIDER_REQUEST_IMAGE_DATA_BYTES;
         for msg in self.messages.iter_mut().rev() {
             for block in msg.content.iter_mut().rev() {
                 if let ContentBlock::ToolResult {
@@ -1405,23 +1444,45 @@ impl AgentEngine {
                 } = block
                     && !images.is_empty()
                 {
-                    if keep == 0 {
-                        let removed = images.len();
-                        images.clear();
+                    let original_len = images.len();
+                    images.retain(|image| {
+                        if remaining_count == 0 || image.data.len() > remaining_data_bytes {
+                            return false;
+                        }
+                        remaining_count -= 1;
+                        remaining_data_bytes -= image.data.len();
+                        true
+                    });
+                    let retained = images.len();
+                    let removed = original_len - retained;
+                    if removed > 0 {
                         content.push_str(&format!(
-                            "\n({removed} image attachment(s) from this tool result were omitted by the recent-image/provider request limit.)"
+                            "\n(Only the first {retained} image attachment(s) in this tool result remain; {removed} later attachment(s) were omitted by the recent-image/provider payload budget.)"
                         ));
-                    } else if images.len() > keep {
-                        let retained = keep;
-                        let removed = images.len() - retained;
-                        images.truncate(keep);
-                        keep = 0;
-                        content.push_str(&format!(
-                            "\n(Only the first {retained} image attachment(s) in this tool result remain; {removed} later attachment(s) were omitted by the recent-image/provider request limit.)"
-                        ));
-                    } else {
-                        keep -= images.len();
                     }
+                }
+            }
+        }
+    }
+
+    /// Provider failures terminate the current model pass. Historical visual
+    /// observations are transport-heavy and can reproduce the same gateway
+    /// failure on every retry/model switch, while their textual tool result is
+    /// enough to tell the next model to capture a fresh view.
+    fn strip_tool_images_after_provider_error(&mut self) {
+        const NOTE: &str = "(Image attachment omitted after provider error recovery; capture a fresh observation if needed.)";
+        for message in &mut self.messages {
+            for block in &mut message.content {
+                let ContentBlock::ToolResult { content, images, .. } = block else {
+                    continue;
+                };
+                if images.is_empty() {
+                    continue;
+                }
+                images.clear();
+                if !content.contains(NOTE) {
+                    content.push('\n');
+                    content.push_str(NOTE);
                 }
             }
         }
@@ -1861,6 +1922,36 @@ mod set_config_tests {
         }
     }
 
+    struct CompactThenFailProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CompactThenFailProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call > 0 {
+                return Err(ProviderError::Connection("post-compact provider failure".into()));
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta(
+                "<summary>Earlier stable conversation.</summary>".into(),
+            ))
+            .await
+            .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: nomi_types::message::StopReason::EndTurn,
+                usage: Default::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
     /// Emits one tool call every turn forever — used to verify the runaway-loop
     /// safety net. With `max_turns: None` the engine must still terminate.
     struct LoopProvider;
@@ -2089,19 +2180,75 @@ mod set_config_tests {
 
         assert!(matches!(error, super::AgentError::Provider(_)));
         assert_eq!(provider.requests().len(), 1);
-        assert_eq!(engine.messages.len(), 1);
-        assert!(engine.messages[0]
-            .content
-            .iter()
-            .all(|block| !matches!(block, ContentBlock::Image { .. })));
-        assert!(engine.messages[0].content.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text } if text == USER_IMAGE_HISTORY_PLACEHOLDER)
-        }));
+        assert!(engine.messages.is_empty(), "failed first pass must roll back its user message");
+
+        let recovered = Arc::new(RecordingProvider::successful());
+        engine.provider = recovered.clone();
+        engine
+            .run("Retry after switching model", "msg-provider-retry")
+            .await
+            .expect("same engine must recover after the provider error");
+        let requests = recovered.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages.len(), 1, "retry must not include the failed user message");
+    }
+
+    #[tokio::test]
+    async fn provider_error_preserves_completed_tool_pair_but_strips_its_image() {
+        let mut engine = make_engine("vision-model");
+        engine.messages = vec![
+            nomi_types::message::Message::new(
+                Role::User,
+                vec![ContentBlock::Text { text: "test the app".into() }],
+            ),
+            nomi_types::message::Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "computer-shot".into(),
+                    name: "Computer".into(),
+                    input: serde_json::json!({"action": "screenshot"}),
+                    extra: None,
+                }],
+            ),
+            nomi_types::message::Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "computer-shot".into(),
+                    content: "Screenshot captured".into(),
+                    is_error: false,
+                    images: vec![nomi_types::tool::ToolImage {
+                        media_type: "image/png".into(),
+                        data: "A".repeat(1024),
+                    }],
+                }],
+            ),
+        ];
+        engine.provider = Arc::new(RecordingProvider::failing());
+
+        engine
+            .run("continue testing", "msg-after-tool")
+            .await
+            .expect_err("provider failure should surface");
+
+        assert_eq!(engine.messages.len(), 3, "only the failed user message is rolled back");
+        let ContentBlock::ToolResult { images, content, .. } = &engine.messages[2].content[0] else {
+            panic!("completed tool result must remain");
+        };
+        assert!(images.is_empty(), "stale screenshots must not poison the retry");
+        assert!(content.contains("provider error recovery"));
     }
 
     #[tokio::test]
     async fn run_with_content_rejects_forged_tool_blocks() {
         let mut engine = make_engine("vision-model");
+        engine.messages.push(nomi_types::message::Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "historical-image-must-remain".into(),
+            }],
+        ));
+        let original = engine.messages.clone();
         let error = engine
             .run_with_content(
                 vec![ContentBlock::ToolUse {
@@ -2116,7 +2263,37 @@ mod set_config_tests {
             .expect_err("host input may not forge tool history");
 
         assert!(error.to_string().contains("only text or image"));
-        assert!(engine.messages.is_empty());
+        assert_eq!(engine.messages.len(), original.len());
+        assert!(matches!(
+            &engine.messages[0].content[0],
+            ContentBlock::Image { data, .. } if data == "historical-image-must-remain"
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_error_after_autocompaction_restores_content_checkpoint() {
+        let mut engine = make_engine("compact-model");
+        engine.messages = vec![nomi_types::message::Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "stable history".into(),
+            }],
+        )];
+        engine.compact_state.last_input_tokens = 170_000;
+        engine.provider = Arc::new(CompactThenFailProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        engine
+            .run("failed input", "msg-compact-failure")
+            .await
+            .expect_err("provider pass after compaction should fail");
+
+        assert_eq!(engine.messages.len(), 1);
+        assert!(matches!(
+            &engine.messages[0].content[0],
+            ContentBlock::Text { text } if text == "stable history"
+        ));
     }
 
     #[test]
@@ -2916,6 +3093,10 @@ mod compact_tests {
     }
 
     fn tool_result_msg_with_image(id: &str) -> Message {
+        tool_result_msg_with_image_data(id, "aGk=".to_string())
+    }
+
+    fn tool_result_msg_with_image_data(id: &str, data: String) -> Message {
         Message::new(
             Role::User,
             vec![ContentBlock::ToolResult {
@@ -2924,7 +3105,7 @@ mod compact_tests {
                 is_error: false,
                 images: vec![nomi_types::tool::ToolImage {
                     media_type: "image/png".to_string(),
-                    data: "aGk=".to_string(),
+                    data,
                 }],
             }],
         )
@@ -2995,6 +3176,51 @@ mod compact_tests {
             unreachable!();
         };
         assert!(content.contains("5 later attachment(s) were omitted"));
+    }
+
+    #[test]
+    fn prune_old_tool_images_enforces_cumulative_base64_budget() {
+        let image_data_len = 3 * 1024 * 1024;
+        let mut engine = make_compact_engine(
+            CompactConfig::default(),
+            CompactState::new(),
+            (0..3)
+                .map(|i| tool_result_msg_with_image_data(&format!("call_{i}"), "A".repeat(image_data_len)))
+                .collect(),
+        );
+        engine.max_recent_images = 3;
+
+        engine.prune_old_tool_images();
+
+        assert_eq!(count_images(&engine.messages), 2);
+        for (index, message) in engine.messages.iter().enumerate() {
+            let ContentBlock::ToolResult { images, content, .. } = &message.content[0] else {
+                unreachable!();
+            };
+            assert_eq!(images.is_empty(), index == 0, "message {index}");
+            assert_eq!(content.contains("payload budget"), index == 0);
+        }
+    }
+
+    #[test]
+    fn prune_old_tool_images_drops_individually_oversized_legacy_image() {
+        let padded_five_mib = (5usize * 1024 * 1024).div_ceil(3) * 4;
+        let mut engine = make_compact_engine(
+            CompactConfig::default(),
+            CompactState::new(),
+            vec![tool_result_msg_with_image_data(
+                "oversized",
+                "A".repeat(padded_five_mib + 4),
+            )],
+        );
+
+        engine.prune_old_tool_images();
+
+        assert_eq!(count_images(&engine.messages), 0);
+        let ContentBlock::ToolResult { content, .. } = &engine.messages[0].content[0] else {
+            unreachable!();
+        };
+        assert_eq!(content.matches("payload budget").count(), 1);
     }
 
     #[tokio::test]
