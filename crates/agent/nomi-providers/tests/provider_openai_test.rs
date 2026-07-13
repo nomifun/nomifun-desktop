@@ -1,15 +1,16 @@
 use std::time::Duration;
 
 use nomi_config::compat::ProviderCompat;
-use nomi_providers::LlmProvider;
+use nomi_providers::{LlmProvider, ProviderError};
 use nomi_providers::openai::OpenAIProvider;
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role, StopReason};
+use nomi_types::tool::ToolDef;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use wiremock::matchers::{header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -53,6 +54,115 @@ fn build_sse_body(data_lines: &[&str]) -> String {
     }
     body.push_str("data: [DONE]\n\n");
     body
+}
+
+#[derive(Clone)]
+struct OpenAiBedrockSchemaResponder;
+
+impl Respond for OpenAiBedrockSchemaResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let schema = &body["tools"][0]["function"]["parameters"];
+        if schema.get("oneOf").is_some() {
+            return ResponseTemplate::new(500).set_body_json(json!({
+                "error": {
+                    "message": "input_schema does not support oneOf, allOf, or anyOf at the top level",
+                    "reason": "TOOL_SCHEMA_INVALID"
+                }
+            }));
+        }
+        let chunk = json!({
+            "choices": [{ "delta": { "content": "Recovered" }, "finish_reason": null }]
+        })
+        .to_string();
+        let finish = json!({
+            "choices": [{ "delta": {}, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1 }
+        })
+        .to_string();
+        ResponseTemplate::new(200)
+            .set_body_raw(build_sse_body(&[&chunk, &finish]), "text/event-stream")
+    }
+}
+
+fn request_with_composed_tool_schema() -> LlmRequest {
+    let mut request = make_request();
+    request.tools.push(ToolDef {
+        name: "Read".into(),
+        description: "Read one or more files".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "file_path": { "type": "string" },
+                "file_paths": { "type": "array", "items": { "type": "string" } }
+            },
+            "oneOf": [
+                { "required": ["file_path"] },
+                { "required": ["file_paths"] }
+            ]
+        }),
+        deferred: false,
+    });
+    request
+}
+
+#[tokio::test]
+async fn openai_gateway_recovers_and_remembers_bedrock_schema_requirement() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(OpenAiBedrockSchemaResponder)
+        .expect(3)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let request = request_with_composed_tool_schema();
+    for _ in 0..2 {
+        let events = collect_events(provider.stream(&request).await.unwrap()).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TextDelta(text) if text == "Recovered"))
+        );
+    }
+    let received = server.received_requests().await.unwrap();
+    let has_root_one_of: Vec<bool> = received
+        .iter()
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body["tools"][0]["function"]["parameters"]
+                .get("oneOf")
+                .is_some()
+        })
+        .collect();
+    assert_eq!(has_root_one_of, vec![true, false, false]);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn openai_gateway_does_not_schema_retry_an_unrelated_500() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+    );
+    let error = provider
+        .stream(&request_with_composed_tool_schema())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ProviderError::Api { status: 500, .. }));
+    server.verify().await;
 }
 
 async fn start_server_after_initial_connect_refusal(sse_body: String) -> String {
