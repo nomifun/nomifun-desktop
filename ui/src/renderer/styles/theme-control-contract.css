@@ -33,6 +33,21 @@
   background-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
 }
 
+/* Requirements list/board toggle: selected state must stay unmistakable on
+ * dark neutral themes, where a low-contrast surface change is easy to miss. */
+.requirements-view-toggle [role='tab'][aria-selected='true'] {
+  background-color: var(--control-selected-bg, var(--color-primary)) !important;
+  color: var(--control-selected-fg, var(--color-white)) !important;
+  font-weight: 600 !important;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--control-selected-fg, var(--color-white)) 42%, transparent),
+    0 2px 6px color-mix(in srgb, #000 28%, transparent) !important;
+}
+
+.requirements-view-toggle [role='tab'][aria-selected='false'] {
+  color: var(--color-text-2) !important;
+}
+
 /* Requirements workspace selection: a scoped, complete selected fill with an
  * inset indicator. This contract is injected after runtime theme CSS, so the
  * selected state stays legible with every preset. */
