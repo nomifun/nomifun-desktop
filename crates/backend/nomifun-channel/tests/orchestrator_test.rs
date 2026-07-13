@@ -23,7 +23,7 @@ use nomifun_common::{
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::runtime_state::ConversationRuntimeStateService;
 use nomifun_conversation::skill_resolver::{ResolvedAgentSkill, SkillResolver};
-use nomifun_db::models::{AssistantUserRow, ChannelPluginRow};
+use nomifun_db::models::{ChannelUserRow, ChannelPluginRow};
 use nomifun_db::{
     IChannelRepository, SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteChannelRepository,
     SqliteClientPreferenceRepository, SqliteConversationRepository,
@@ -118,7 +118,7 @@ async fn unauthorized_user_gets_pairing_response() {
     let executor = Arc::new(ActionExecutor::new(pairing, Arc::clone(&session_mgr), settings, "acp"));
 
     // The pairing code created for the unauthorized user carries an FK
-    // channel_id → assistant_plugins(id), so the bot channel must exist first.
+    // channel_id → channel_plugins(id), so the bot channel must exist first.
     repo.upsert_plugin(&ChannelPluginRow {
         id: TEST_CHANNEL.into(),
         r#type: "telegram".into(),
@@ -330,8 +330,8 @@ async fn build_harness() -> Harness {
         "nomi",
     ));
 
-    // Every test message arrives through TEST_CHANNEL ("tg-1"). assistant_sessions
-    // now has an FK channel_id → assistant_plugins(id), so the plugin row must
+    // Every test message arrives through TEST_CHANNEL ("tg-1"). channel_sessions
+    // now has an FK channel_id → channel_plugins(id), so the plugin row must
     // exist before any session is created. bot_key=None avoids the
     // UNIQUE(type, bot_key) index.
     channel_repo
@@ -354,7 +354,7 @@ async fn build_harness() -> Harness {
 
     // Authorize the test user so messages reach the dispatch path.
     channel_repo
-        .create_user(&AssistantUserRow {
+        .create_user(&ChannelUserRow {
             id: "user_tg_42".into(),
             platform_user_id: "tg_42".into(),
             platform_type: "telegram".into(),

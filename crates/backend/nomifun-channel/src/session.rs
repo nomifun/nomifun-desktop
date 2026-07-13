@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use nomifun_common::{generate_prefixed_id, now_ms};
 use nomifun_db::IChannelRepository;
-use nomifun_db::models::AssistantSessionRow;
+use nomifun_db::models::ChannelSessionRow;
 use tracing::{debug, info};
 
 use crate::error::ChannelError;
@@ -38,10 +38,10 @@ impl SessionManager {
         channel_id: &str,
         agent_type: &str,
         workspace: Option<&str>,
-    ) -> Result<AssistantSessionRow, ChannelError> {
+    ) -> Result<ChannelSessionRow, ChannelError> {
         let now = now_ms();
-        let new_row = AssistantSessionRow {
-            id: generate_prefixed_id("ases"),
+        let new_row = ChannelSessionRow {
+            id: generate_prefixed_id("chs"),
             user_id: user_id.to_owned(),
             agent_type: agent_type.to_owned(),
             conversation_id: None,
@@ -69,7 +69,7 @@ impl SessionManager {
     }
 
     /// Returns all active sessions.
-    pub async fn get_active_sessions(&self) -> Result<Vec<AssistantSessionRow>, ChannelError> {
+    pub async fn get_active_sessions(&self) -> Result<Vec<ChannelSessionRow>, ChannelError> {
         let sessions = self.repo.get_all_sessions().await?;
         Ok(sessions)
     }
@@ -85,7 +85,7 @@ impl SessionManager {
         channel_id: &str,
         agent_type: &str,
         workspace: Option<&str>,
-    ) -> Result<AssistantSessionRow, ChannelError> {
+    ) -> Result<ChannelSessionRow, ChannelError> {
         // Delete old session if it exists
         self.repo
             .delete_session_by_user_chat(user_id, chat_id, channel_id)
@@ -93,8 +93,8 @@ impl SessionManager {
 
         // Create a fresh session
         let now = now_ms();
-        let new_row = AssistantSessionRow {
-            id: generate_prefixed_id("ases"),
+        let new_row = ChannelSessionRow {
+            id: generate_prefixed_id("chs"),
             user_id: user_id.to_owned(),
             agent_type: agent_type.to_owned(),
             conversation_id: None,
@@ -159,12 +159,12 @@ impl SessionManager {
     }
 
     /// Looks up a session by its unique ID.
-    pub async fn get_session_by_id(&self, session_id: &str) -> Result<Option<AssistantSessionRow>, ChannelError> {
+    pub async fn get_session_by_id(&self, session_id: &str) -> Result<Option<ChannelSessionRow>, ChannelError> {
         Ok(self.repo.get_session(session_id).await?)
     }
 
     /// The 对外伙伴 (public agent) bound to a bot channel row (`None` when the
-    /// row is unbound or absent). Per-bot: reads `assistant_plugins.public_agent_id`
+    /// row is unbound or absent). Per-bot: reads `channel_plugins.public_agent_id`
     /// for `channel_id`. Used by the inbound path to decide whether a bot
     /// auto-serves unknown senders (public-agent-bound bots do; companion-bound
     /// and unbound bots keep the pairing gate).
@@ -203,14 +203,14 @@ impl SessionManager {
 mod tests {
     use super::*;
     use nomifun_common::TimestampMs;
-    use nomifun_db::models::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+    use nomifun_db::models::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
     use nomifun_db::{DbError, IChannelRepository, UpdatePluginStatusParams};
     use std::sync::Mutex;
 
     // ── Mock IChannelRepository ────────────────────────────────────────
 
     struct MockRepo {
-        sessions: Mutex<Vec<AssistantSessionRow>>,
+        sessions: Mutex<Vec<ChannelSessionRow>>,
     }
 
     impl MockRepo {
@@ -220,7 +220,7 @@ mod tests {
             }
         }
 
-        fn get_sessions(&self) -> Vec<AssistantSessionRow> {
+        fn get_sessions(&self) -> Vec<ChannelSessionRow> {
             self.sessions.lock().unwrap().clone()
         }
     }
@@ -254,7 +254,7 @@ mod tests {
         }
 
         // -- User CRUD (unused stubs) --
-        async fn get_all_users(&self) -> Result<Vec<AssistantUserRow>, DbError> {
+        async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(vec![])
         }
         async fn get_user_by_platform(
@@ -262,10 +262,10 @@ mod tests {
             _platform_user_id: &str,
             _platform_type: &str,
             _channel_id: &str,
-        ) -> Result<Option<AssistantUserRow>, DbError> {
+        ) -> Result<Option<ChannelUserRow>, DbError> {
             Ok(None)
         }
-        async fn create_user(&self, _row: &AssistantUserRow) -> Result<(), DbError> {
+        async fn create_user(&self, _row: &ChannelUserRow) -> Result<(), DbError> {
             Ok(())
         }
         async fn update_user_last_active(&self, _id: &str, _last_active: TimestampMs) -> Result<(), DbError> {
@@ -276,11 +276,11 @@ mod tests {
         }
 
         // -- Session CRUD --
-        async fn get_all_sessions(&self) -> Result<Vec<AssistantSessionRow>, DbError> {
+        async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
             Ok(self.sessions.lock().unwrap().clone())
         }
 
-        async fn get_session(&self, id: &str) -> Result<Option<AssistantSessionRow>, DbError> {
+        async fn get_session(&self, id: &str) -> Result<Option<ChannelSessionRow>, DbError> {
             let sessions = self.sessions.lock().unwrap();
             Ok(sessions.iter().find(|s| s.id == id).cloned())
         }
@@ -290,8 +290,8 @@ mod tests {
             user_id: &str,
             chat_id: &str,
             channel_id: &str,
-            new_row: &AssistantSessionRow,
-        ) -> Result<AssistantSessionRow, DbError> {
+            new_row: &ChannelSessionRow,
+        ) -> Result<ChannelSessionRow, DbError> {
             let mut sessions = self.sessions.lock().unwrap();
             // Look for existing session by channel_id + user_id + chat_id
             // (mirrors the sqlite implementation's lookup key).
@@ -363,13 +363,13 @@ mod tests {
         }
 
         // -- Pairing codes (unused stubs) --
-        async fn create_pairing(&self, _row: &PairingCodeRow) -> Result<(), DbError> {
+        async fn create_pairing(&self, _row: &ChannelPairingCodeRow) -> Result<(), DbError> {
             Ok(())
         }
-        async fn get_pending_pairings(&self) -> Result<Vec<PairingCodeRow>, DbError> {
+        async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError> {
             Ok(vec![])
         }
-        async fn get_pairing_by_code(&self, _code: &str) -> Result<Option<PairingCodeRow>, DbError> {
+        async fn get_pairing_by_code(&self, _code: &str) -> Result<Option<ChannelPairingCodeRow>, DbError> {
             Ok(None)
         }
         async fn update_pairing_status(&self, _code: &str, _status: &str) -> Result<(), DbError> {
@@ -460,13 +460,13 @@ mod tests {
             .await
             .unwrap();
         let s2 = mgr
-            .get_or_create_session("user1", "chat1", "achn_2", "gemini", None)
+            .get_or_create_session("user1", "chat1", "chn_2", "gemini", None)
             .await
             .unwrap();
 
         assert_ne!(s1.id, s2.id);
         assert_eq!(s1.channel_id.as_deref(), Some("tg-1"));
-        assert_eq!(s2.channel_id.as_deref(), Some("achn_2"));
+        assert_eq!(s2.channel_id.as_deref(), Some("chn_2"));
         assert_eq!(repo.get_sessions().len(), 2);
 
         // Same channel again → reuse, no third session.

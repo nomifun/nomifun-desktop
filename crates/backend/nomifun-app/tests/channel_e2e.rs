@@ -12,7 +12,7 @@ use tower::ServiceExt;
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
 /// Seed a `tg-1` telegram bot channel so pairing/user rows satisfy the
-/// FK channel_id → assistant_plugins(id) added in migration 004.
+/// FK channel_id → channel_plugins(id) added in migration 004.
 async fn seed_telegram_channel(repo: &std::sync::Arc<dyn nomifun_db::IChannelRepository>) {
     use nomifun_common::now_ms;
     use nomifun_db::models::ChannelPluginRow;
@@ -411,7 +411,7 @@ async fn pairing_approve_creates_user() {
         std::sync::Arc::new(nomifun_db::SqliteChannelRepository::new(pool));
     let pairing_svc = nomifun_channel::pairing::PairingService::new(repo.clone(), services.event_bus.clone());
 
-    // The pairing/user rows carry an FK channel_id → assistant_plugins(id), so
+    // The pairing/user rows carry an FK channel_id → channel_plugins(id), so
     // the telegram bot channel must exist before request_pairing runs.
     seed_telegram_channel(&repo).await;
 
@@ -506,7 +506,7 @@ async fn pairing_reject_removes_from_pending() {
         std::sync::Arc::new(nomifun_db::SqliteChannelRepository::new(pool));
     let pairing_svc = nomifun_channel::pairing::PairingService::new(repo.clone(), services.event_bus.clone());
 
-    // FK channel_id → assistant_plugins(id): seed the bot channel first.
+    // FK channel_id → channel_plugins(id): seed the bot channel first.
     seed_telegram_channel(&repo).await;
 
     let code = pairing_svc

@@ -24,11 +24,15 @@ describe('capability hub navigation', () => {
     expect(enSettings.openCapabilities.railTitle).toBe('Remote & Open');
   });
 
-  test('groups assistants and skills together and keeps MCP in enhanced tools', () => {
+  test('keeps presets, skills, and MCP as independent enhanced-tool destinations', () => {
     const siderSource = readSource(new URL('./index.tsx', import.meta.url));
 
-    expect(siderSource.includes('SiderAssistantSkillsEntry')).toBe(true);
-    expect(siderSource.includes("navTo('/assistants?tab=assistants')")).toBe(true);
+    expect(siderSource.includes('SiderPresetEntry')).toBe(true);
+    expect(siderSource.includes("navTo('/presets')")).toBe(true);
+    expect(siderSource.includes("pathname.startsWith('/presets')")).toBe(true);
+    expect(siderSource.includes('SiderSkillsEntry')).toBe(true);
+    expect(siderSource.includes("navTo('/skills')")).toBe(true);
+    expect(siderSource.includes("pathname.startsWith('/skills')")).toBe(true);
     expect(siderSource.includes('SiderMcpEntry')).toBe(true);
     expect(siderSource.includes("navTo('/mcp')")).toBe(true);
     expect(siderSource.includes("pathname.startsWith('/mcp')")).toBe(true);
@@ -38,7 +42,6 @@ describe('capability hub navigation', () => {
     expect(siderSource.includes("pathname.startsWith('/open-capabilities') || pathname.startsWith('/mcp')")).toBe(false);
 
     expect(siderSource.includes('SiderExtensionsEntry')).toBe(false);
-    expect(siderSource.includes('SiderAssistantsEntry')).toBe(false);
   });
 
   test('routes Open Capabilities and preserves MCP legacy destinations', () => {
@@ -50,6 +53,8 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes('getHashRouteRedirectUrl')).toBe(true);
     expect(routerSource.includes("return `${origin}/#${pathname}${search}`")).toBe(true);
     expect(routerSource.includes("path='/mcp'")).toBe(true);
+    expect(routerSource.includes("path='/presets'")).toBe(true);
+    expect(routerSource.includes("path='/skills'")).toBe(true);
     expect(routerSource.includes('LegacyExtensionsRedirect')).toBe(true);
     expect(routerSource.includes("path='/extensions'")).toBe(true);
   });

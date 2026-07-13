@@ -39,15 +39,15 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
         cron_skills_dir: root.join("cron").join("skills"),
         builtin_skills_dir: builtin_dir.clone(),
         builtin_rules_dir: root.join("builtin-rules"),
-        assistant_rules_dir: root.join("assistant-rules"),
-        assistant_skills_dir: root.join("assistant-skills"),
+        preset_rules_dir: root.join("preset-rules"),
+        preset_skills_dir: root.join("preset-skills"),
     };
     for dir in [
         &paths.user_skills_dir,
         &builtin_dir,
         &paths.builtin_rules_dir,
-        &paths.assistant_rules_dir,
-        &paths.assistant_skills_dir,
+        &paths.preset_rules_dir,
+        &paths.preset_skills_dir,
     ] {
         std::fs::create_dir_all(dir).unwrap();
     }

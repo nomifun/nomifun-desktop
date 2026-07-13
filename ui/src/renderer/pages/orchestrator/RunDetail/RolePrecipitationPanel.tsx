@@ -8,27 +8,30 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { AddUser, Check, Down, Experiment, Up } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { CreateAssistantRequest } from '@/common/types/agent/assistantTypes';
+import type { CreatePresetRequest } from '@/common/types/agent/presetTypes';
 import type { TRunDetail } from '@/common/types/orchestrator/orchestratorTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 
 /**
  * A role candidate distilled from a completed run's tasks: a distinct
  * `task.role` plus the models that actually worked it and the union of those
- * workers' skill sets. One candidate → one suggested 助手 (assistant).
+ * workers' skill sets. One candidate becomes one reusable preset.
  */
 interface RoleCandidate {
-  /** The role name; becomes the assistant's name. */
+  /** The role name; becomes the preset's name. */
   name: string;
   /** Short synthesized one-liner shown on the card + saved as the description. */
   description: string;
   /** Distinct models that worked this role (resolved via assignments). */
   models: string[];
+  modelPreferences: Array<{ provider_id?: string; model: string; required: false }>;
+  agentIds: string[];
+  instructions: string;
   /** Union of `enabled_skills` over the role's workers. */
   enabledSkills: string[];
   /** Union of `disabled_builtin_skills` over the role's workers. */
   disabledBuiltinSkills: string[];
-  /** True when an 助手 with this name already exists (case-insensitive). */
+  /** True when a preset with this name already exists (case-insensitive). */
   exists: boolean;
 }
 
@@ -45,8 +48,8 @@ function collect(set: Set<string>, items: readonly string[] | undefined): void {
  * RolePrecipitationPanel — when a Run finishes, its planner-named roles are the
  * organisation's accidental org-chart: roles that actually got work done, paired
  * with the models that did it. This panel surfaces each distinct role as a
- * one-click 「保存为助手」 suggestion so the user can precipitate (沉淀) a
- * proven role into a reusable assistant without re-typing models/skills.
+ * one-click "Save as preset" suggestion so the user can precipitate a
+ * proven role into a reusable preset without re-typing models/skills.
  *
  * Candidate derivation (per distinct, non-empty `task.role`):
  *  - `models` — distinct `member.model` resolved through
@@ -55,19 +58,19 @@ function collect(set: Set<string>, items: readonly string[] | undefined): void {
  *  - `description` — a short line (role + brief from task titles, or a worker's
  *    own `description` when present).
  *
- * Existing assistants are loaded once and matched by name (case-insensitive,
+ * Existing presets are loaded once and matched by name (case-insensitive,
  * trimmed) so already-precipitated roles are shown disabled rather than offered
  * again. If there are no roles (an older run) or every role already exists, the
  * panel renders nothing — it never intrudes on the canvas.
  *
  * The persona rule text is intentionally NOT written back here; the user edits
- * it later on the assistant page (carry-forward, see Task 3 brief).
+ * it later on the preset page (carry-forward, see Task 3 brief).
  */
 const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) => {
   const { t } = useTranslation();
   const [message, ctx] = useArcoMessage();
   const [collapsed, setCollapsed] = useState(false);
-  /** Names of assistants that already exist, lower-cased + trimmed. */
+  /** Names of presets that already exist, lower-cased + trimmed. */
   const [existingNames, setExistingNames] = useState<Set<string> | null>(null);
   /** Role names the user has just saved this session (for the ✓ saved state). */
   const [savedNames, setSavedNames] = useState<Set<string>>(() => new Set());
@@ -123,6 +126,8 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
       titles: string[];
       memberDescription?: string;
       models: Set<string>;
+      modelPreferences: Map<string, { provider_id?: string; model: string; required: false }>;
+      agentIds: Set<string>;
       enabledSkills: Set<string>;
       disabledBuiltinSkills: Set<string>;
     }
@@ -137,6 +142,8 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
           name: role,
           titles: [],
           models: new Set<string>(),
+          modelPreferences: new Map(),
+          agentIds: new Set<string>(),
           enabledSkills: new Set<string>(),
           disabledBuiltinSkills: new Set<string>(),
         };
@@ -147,7 +154,12 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
       const member = memberByTask.get(task.id);
       if (member) {
         const model = member.model?.trim();
-        if (model) acc.models.add(model);
+        if (model) {
+          acc.models.add(model);
+          const providerId = member.provider_id?.trim() || undefined;
+          acc.modelPreferences.set(`${providerId ?? ''}::${model}`, { provider_id: providerId, model, required: false });
+        }
+        if (member.agent_id?.trim()) acc.agentIds.add(member.agent_id.trim());
         collect(acc.enabledSkills, member.enabled_skills);
         collect(acc.disabledBuiltinSkills, member.disabled_builtin_skills);
         const desc = member.description?.trim();
@@ -172,6 +184,9 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
           name: acc.name,
           description,
           models: Array.from(acc.models),
+          modelPreferences: Array.from(acc.modelPreferences.values()),
+          agentIds: Array.from(acc.agentIds),
+          instructions: acc.memberDescription || description,
           enabledSkills: Array.from(acc.enabledSkills),
           disabledBuiltinSkills: Array.from(acc.disabledBuiltinSkills),
           exists: existingNames?.has(lowerName) ?? false,
@@ -180,18 +195,18 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [detail.tasks, memberByTask, existingNames, t]);
 
-  // There are roles to precipitate at all — gate the one-time assistant fetch on
+  // There are roles to precipitate at all — gate the one-time preset fetch on
   // this so older (role-less) runs never make the request.
   const hasRoles = candidates.length > 0;
 
-  // Load the existing assistants once (when there is at least one role) so we
+  // Load the existing presets once (when there is at least one role) so we
   // can mark already-precipitated roles instead of offering a duplicate.
   useEffect(() => {
     if (!hasRoles || existingNames !== null) return;
     let cancelled = false;
     void (async () => {
       try {
-        const list = await ipcBridge.assistants.list.invoke();
+        const list = await ipcBridge.presets.list.invoke();
         if (cancelled) return;
         const names = new Set<string>();
         for (const a of list ?? []) collect(names, [a.name.toLowerCase()]);
@@ -214,15 +229,20 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
         return next;
       });
       try {
-        const payload: CreateAssistantRequest = {
+        const payload: CreatePresetRequest = {
           name: candidate.name,
           description: candidate.description,
-          models: candidate.models,
-          enabled_skills: candidate.enabledSkills,
-          disabled_builtin_skills: candidate.disabledBuiltinSkills,
-          preset_agent_type: 'nomi',
+          routing_description: candidate.description,
+          instructions: candidate.instructions,
+          targets: ['conversation', 'cluster_member'],
+          agent_preferences: candidate.agentIds.map((agent_id) => ({ agent_id, required: false })),
+          model_preferences: candidate.modelPreferences,
+          included_skills: candidate.enabledSkills.map((skill_name) => ({ skill_name, required: false })),
+          excluded_auto_skills: candidate.disabledBuiltinSkills,
+          fallback_allowed: true,
+          knowledge_policy: { enabled: false, mode: 'inherit', writeback: false, grounded: false },
         };
-        await ipcBridge.assistants.create.invoke(payload);
+        await ipcBridge.presets.create.invoke(payload);
         setSavedNames((prev) => {
           const next = new Set(prev);
           next.add(candidate.name);
@@ -242,7 +262,7 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
     [message, t]
   );
 
-  // Render nothing for role-less runs or once every role is already an assistant.
+  // Render nothing for role-less runs or once every role is already an preset.
   // (Locally-saved roles still render — disabled with a ✓ — so the user gets the
   // satisfying confirmation; only roles that pre-existed before this panel
   // opened are hidden entirely.)
@@ -342,12 +362,12 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
                   )}
                 </div>
 
-                {/* Save-as-assistant control */}
+                {/* Save-as-preset control */}
                 <div
                   role='button'
                   tabIndex={saved || saving ? -1 : 0}
                   aria-disabled={saved || saving}
-                  aria-label={t('orchestrator.run.precipitate.saveAsAssistant')}
+                  aria-label={t('orchestrator.run.precipitate.saveAsPreset')}
                   onClick={saved || saving ? undefined : () => void handleSave(candidate)}
                   onKeyDown={(e) => {
                     if ((e.key === 'Enter' || e.key === ' ') && !saved && !saving) {
@@ -379,7 +399,7 @@ const RolePrecipitationPanel: React.FC<{ detail: TRunDetail }> = ({ detail }) =>
                   ) : (
                     <>
                       <AddUser theme='outline' size='13' strokeWidth={3} />
-                      <span>{t('orchestrator.run.precipitate.saveAsAssistant')}</span>
+                      <span>{t('orchestrator.run.precipitate.saveAsPreset')}</span>
                     </>
                   )}
                 </div>

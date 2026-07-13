@@ -634,7 +634,7 @@ const DagCanvas: React.FC<DagCanvasProps> = ({
   return (
     <div className='size-full min-h-0 flex flex-col'>
       {/* Role precipitation — when the run is done, suggest saving its used
-          roles as assistants. Lives as a `shrink-0` sibling above the canvas so
+          roles as reusable presets. Lives as a `shrink-0` sibling above the canvas so
           the react-flow region keeps its `flex-1 min-h-0` sizing intact. The
           panel renders nothing when there are no roles / all already exist. */}
       {(detail.run.status === 'completed' || detail.run.status === 'completed_with_failures') && (

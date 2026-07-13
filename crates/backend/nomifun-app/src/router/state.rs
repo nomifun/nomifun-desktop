@@ -9,21 +9,21 @@ use std::time::Instant;
 use nomifun_ai_agent::{
     AgentRouterState, AgentService, IWorkerTaskManager, RemoteAgentRouterState, RemoteAgentService,
 };
-use nomifun_assistant::{AssistantRouterState, AssistantService, BuiltinAssistantRegistry};
+use nomifun_preset::{BuiltinPresetRegistry, PresetRouterState, PresetService};
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{OnConversationDelete, OnTerminalDelete};
 use nomifun_conversation::{ConversationRouterState, ConversationService};
 use nomifun_cron::{CronEventEmitter, CronRouterState};
 use nomifun_db::{
-    IAcpSessionRepository, IAgentMetadataRepository, IAssistantOverrideRepository, IAssistantRepository,
-    IAssistantTagRepository, IIdmmInterventionRepository, IProviderRepository, SqliteAcpSessionRepository,
-    SqliteAgentMetadataRepository, SqliteAssistantOverrideRepository, SqliteAssistantRepository,
-    SqliteAssistantTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
+    IAcpSessionRepository, IAgentMetadataRepository, IPresetRepository, IPresetStateRepository,
+    IPresetTagRepository, IIdmmInterventionRepository, IProviderRepository, SqliteAcpSessionRepository,
+    SqliteAgentMetadataRepository, SqlitePresetRepository, SqlitePresetStateRepository,
+    SqlitePresetTagRepository, SqliteClientPreferenceRepository, SqliteConversationRepository,
     SqliteIdmmInterventionRepository, SqliteProviderRepository, SqliteRemoteAgentRepository, SqliteSettingsRepository,
 };
 use nomifun_extension::{
-    AssistantRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
+    PresetRuleDispatcher, ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, ExternalPathsManager,
     HubIndexManager, HubInstaller, HubRouterState, SkillRouterState, resolve_install_target_dir_for_data_dir,
     resolve_scan_paths_for_data_dir, resolve_state_file_path,
 };
@@ -97,7 +97,7 @@ pub struct ModuleStates {
     pub terminal: TerminalRouterState,
     pub office: OfficeRouterState,
     pub shell: ShellRouterState,
-    pub assistant: AssistantRouterState,
+    pub preset: PresetRouterState,
 }
 
 fn default_allowed_roots(work_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
@@ -158,8 +158,9 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         "startup: extension registry initialized"
     );
 
-    let assistant = build_assistant_state(services, ext_state.registry.clone());
-    let cron = build_cron_state(services);
+    let preset = build_preset_state(services, ext_state.registry.clone());
+    let cron = build_cron_state(services, preset.service.clone());
+    cron.cron_service.with_preset_service(preset.service.clone());
     cron.cron_service.init().await;
     // Register the process CronService so the agent's native cron tools (wired
     // via AgentFactoryDeps.cron_sink_factory) can reach it. (Phase 4)
@@ -173,8 +174,8 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     // Extension-contributed rows will land in `agent_metadata` in a
     // later step; for now we rely on the builtin + internal seed rows.
 
-    let dispatcher: Arc<dyn AssistantRuleDispatcher> = assistant.service.clone();
-    skill_state.assistant_dispatcher = Some(dispatcher);
+    let dispatcher: Arc<dyn PresetRuleDispatcher> = preset.service.clone();
+    skill_state.preset_dispatcher = Some(dispatcher);
 
     let (channel_state, channel_components) = build_channel_state(services, ext_state.registry.clone()).await;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
@@ -201,10 +202,18 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     // arm supervision on the orchestrator engine's dedicated ConversationService.
     let orchestrator_idmm_hook: Arc<dyn nomifun_conversation::ConversationSupervisionHook> =
         Arc::new(idmm_state.service.manager().clone());
-    let companion_state = build_companion_state(services, channel_components.manager.clone());
+    let companion_state = build_companion_state(
+        services,
+        channel_components.manager.clone(),
+        preset.service.clone(),
+    )
+        .with_preset_service(preset.service.clone())
+        .with_knowledge_service(services.knowledge_service.clone());
+    let conversation = build_conversation_state(services, Some(cron.cron_service.clone()));
+    conversation.service.with_preset_service(preset.service.clone());
     let states = ModuleStates {
         system: build_system_state(services),
-        conversation: build_conversation_state(services, Some(cron.cron_service.clone())),
+        conversation,
         remote_agent: build_remote_agent_state(services),
         agent: AgentRouterState {
             agent_registry: services.agent_registry.clone(),
@@ -222,7 +231,8 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
         companion: companion_state,
-        public_agent: PublicAgentRouterState::new(services.public_agent_service.clone()),
+        public_agent: PublicAgentRouterState::new(services.public_agent_service.clone())
+            .with_preset_service(preset.service.clone()),
         workshop: build_workshop_state(services),
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
@@ -235,12 +245,16 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         // decisions/open-questions instead of stalling. The wiring lives entirely
         // in this app layer (no orchestrator→idmm dependency — the hook is a
         // `nomifun_conversation` trait the orchestrator's conv_service accepts).
-        orchestrator: build_orchestrator_state(services, orchestrator_idmm_hook),
+        orchestrator: build_orchestrator_state(
+            services,
+            orchestrator_idmm_hook,
+            preset.service.clone(),
+        ),
         secret: build_secret_state(services),
         terminal: build_terminal_state(services),
         office: build_office_state(services),
         shell: build_shell_state(services),
-        assistant,
+        preset,
     };
 
     // RC1 fix — arm IDMM supervision on the instances that actually serve the
@@ -266,33 +280,26 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     (states, channel_components)
 }
 
-/// Build the default `AssistantRouterState` from application services.
-pub fn build_assistant_state(services: &AppServices, extension_registry: ExtensionRegistry) -> AssistantRouterState {
+/// Build the process-wide preset catalog and resolver singleton.
+pub fn build_preset_state(services: &AppServices, extension_registry: ExtensionRegistry) -> PresetRouterState {
     let pool = services.database.pool().clone();
-    let repo: Arc<dyn IAssistantRepository> = Arc::new(SqliteAssistantRepository::new(pool.clone()));
-    let override_repo: Arc<dyn IAssistantOverrideRepository> =
-        Arc::new(SqliteAssistantOverrideRepository::new(pool.clone()));
-    let tag_repo: Arc<dyn IAssistantTagRepository> = Arc::new(SqliteAssistantTagRepository::new(pool.clone()));
-    // Used by `AssistantService::resolve_default_agent_type` to infer a
-    // working `preset_agent_type` from the configured provider list when
-    // the caller does not supply one (ELECTRON-1J1 / 1KV).
+    let repo: Arc<dyn IPresetRepository> = Arc::new(SqlitePresetRepository::new(pool.clone()));
+    let state_repo: Arc<dyn IPresetStateRepository> = Arc::new(SqlitePresetStateRepository::new(pool.clone()));
+    let tag_repo: Arc<dyn IPresetTagRepository> = Arc::new(SqlitePresetTagRepository::new(pool.clone()));
+    let agent_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(SqliteAgentMetadataRepository::new(pool.clone()));
     let provider_repo: Arc<dyn IProviderRepository> = Arc::new(SqliteProviderRepository::new(pool));
-    let builtin = Arc::new(BuiltinAssistantRegistry::load());
-    // Pin user_data_dir to the runtime-resolved data directory so dev /
-    // packaged / multi-instance launches all keep their assistant rule files
-    // alongside the matching SQLite database (avoiding the historical bug
-    // where dev wrote rules to the release `~/.nomifun/` while the db lived
-    // under `~/.nomifun-dev/`).
-    let service = Arc::new(AssistantService::new(
+    let builtin = Arc::new(BuiltinPresetRegistry::load());
+    let service = Arc::new(PresetService::new(
         repo,
-        override_repo,
+        state_repo,
         tag_repo,
+        agent_repo,
         provider_repo,
         builtin,
         extension_registry,
         services.data_dir.clone(),
     ));
-    AssistantRouterState { service }
+    PresetRouterState { service }
 }
 
 /// Build the default `SystemRouterState` from application services.
@@ -1275,6 +1282,7 @@ impl LeadReporter for OrchestratorLeadReporter {
 pub fn build_orchestrator_state(
     services: &AppServices,
     idmm_hook: Arc<dyn nomifun_conversation::ConversationSupervisionHook>,
+    preset_service: Arc<nomifun_preset::PresetService>,
 ) -> OrchestratorRouterState {
     let pool = services.database.pool().clone();
     let fleet_repo: Arc<dyn nomifun_db::IFleetRepository> =
@@ -1283,7 +1291,8 @@ pub fn build_orchestrator_state(
         Arc::new(nomifun_db::SqliteOrchWorkspaceRepository::new(pool.clone()));
     let run_repo: Arc<dyn nomifun_db::IRunRepository> =
         Arc::new(nomifun_db::SqliteRunRepository::new(pool.clone()));
-    let fleet = nomifun_orchestrator::FleetService::new(fleet_repo.clone());
+    let fleet = nomifun_orchestrator::FleetService::new(fleet_repo.clone())
+        .with_preset_service(preset_service.clone());
     let workspace = nomifun_orchestrator::WorkspaceService::new(ws_repo.clone());
 
     // Realtime emitter shares the app's broadcast bus.
@@ -1317,6 +1326,8 @@ pub fn build_orchestrator_state(
         Arc::new(SqliteProviderRepository::new(pool.clone())),
         Arc::new(SqliteClientPreferenceRepository::new(pool.clone())),
     );
+    conv_service.with_knowledge_service(services.knowledge_service.clone());
+    conv_service.with_preset_service(preset_service);
     // P3b: arm IDMM supervision on the worker's ConversationService so each worker
     // (autonomous nomi yolo) turn fires `on_turn_start` and IDMM auto-resolves
     // decisions/open-questions instead of stalling to timeout. `with_supervision_hook`
@@ -1549,6 +1560,7 @@ fn spawn_idmm_record_janitor(records: Arc<dyn IIdmmInterventionRepository>) {
 pub fn build_companion_state(
     services: &AppServices,
     channel_manager: Arc<nomifun_channel::manager::ChannelManager>,
+    preset_service: Arc<nomifun_preset::PresetService>,
 ) -> CompanionRouterState {
     let pool = services.database.pool().clone();
     let conv_repo: Arc<dyn nomifun_db::IConversationRepository> =
@@ -1576,6 +1588,7 @@ pub fn build_companion_state(
     // mounts the companion-level knowledge binding ('companion', companionId) at task start —
     // same injection as the main conversation assembly.
     conv_service.with_knowledge_service(services.knowledge_service.clone());
+    conv_service.with_preset_service(preset_service);
     // Phase 3: companion turns run the same nomi send loop, so wire failover too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
@@ -1676,7 +1689,10 @@ impl nomifun_companion::service::CompanionCleanupHook for CompanionChannelModelS
 }
 
 /// Build the default `CronRouterState` from application services.
-pub fn build_cron_state(services: &AppServices) -> CronRouterState {
+pub fn build_cron_state(
+    services: &AppServices,
+    preset_service: Arc<nomifun_preset::PresetService>,
+) -> CronRouterState {
     let pool = services.database.pool().clone();
     let cron_repo: Arc<dyn nomifun_db::ICronRepository> = Arc::new(nomifun_db::SqliteCronRepository::new(pool.clone()));
 
@@ -1704,6 +1720,7 @@ pub fn build_cron_state(services: &AppServices) -> CronRouterState {
     // Cron-spawned conversations mount their bound knowledge bases too —
     // same injection as the main conversation assembly.
     conv_service.with_knowledge_service(services.knowledge_service.clone());
+    conv_service.with_preset_service(preset_service);
     // Phase 3: cron-spawned nomi conversations run the send loop too.
     conv_service.with_failover_deps(
         Arc::new(SqliteProviderRepository::new(services.database.pool().clone())),
@@ -1837,7 +1854,7 @@ pub async fn build_extension_states(
     let skill_state = SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        assistant_dispatcher: None,
+        preset_dispatcher: None,
         skill_tag_repo,
         builtin_skill_tags,
     };

@@ -6,7 +6,7 @@
 
 /**
  * KnowledgeCard — A grid item for the knowledge base list.
- * Mirrors AssistantCard visual language (rounded-16px bordered surface, soft hover)
+ * Mirrors PresetCard visual language (rounded-16px bordered surface, soft hover)
  * with knowledge-specific additions: kind icon + badge, status tags, user tag chips,
  * meta row, pending-inbox badge, and hover-revealed actions.
  *

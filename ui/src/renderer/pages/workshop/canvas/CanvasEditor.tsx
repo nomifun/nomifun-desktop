@@ -1126,7 +1126,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
   // their coordinators can't write into a torn-down flow instance.
   useEffect(() => () => abortAllLoopRuns(), []);
 
-  // ── 画布助手 (agent ops) — apply queued agent operations while the canvas is open ──
+  // ── 画布 Agent (agent ops) — apply queued agent operations while the canvas is open ──
   // Poll the backend op queue and route each op through the same react-flow
   // mutation primitives a user's edits use (so history + autosave apply). The
   // poll registers this canvas as "open", keeping backend writes queued for us.
@@ -1176,7 +1176,7 @@ const CanvasInner: React.FC<CanvasEditorProps> = ({ canvasId, initialDoc, onSave
     updateNodeData,
     deleteNode: removeNode,
     onApplied: (count) =>
-      message.info(t('workshopAssistant.applied.ops', { count, defaultValue: 'Nomi 更新了画布（{{count}} 项操作）' })),
+      message.info(t('workshopAgent.applied.ops', { count, defaultValue: 'Nomi 更新了画布（{{count}} 项操作）' })),
   });
 
   // ── Render ──────────────────────────────────────────────────────────────────

@@ -68,6 +68,55 @@ impl PublicAgentService {
         Ok(next)
     }
 
+    /// Apply a resolved preset while preserving the public companion's brand,
+    /// greeting, service policy, audit history and serving state. Security
+    /// clamps are enforced later by the agent factory and are never sourced
+    /// from the preset.
+    pub async fn apply_preset_snapshot(
+        &self,
+        id: &str,
+        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+    ) -> Result<PublicAgentConfig, AppError> {
+        if snapshot.target != nomifun_api_types::PresetTarget::PublicCompanion {
+            return Err(AppError::BadRequest(
+                "preset snapshot target must be public_companion".into(),
+            ));
+        }
+        let mut patch = serde_json::json!({ "applied_preset": snapshot });
+        if let Some(model) = patch
+            .get("applied_preset")
+            .and_then(|value| value.get("resolved_model"))
+            .filter(|value| !value.is_null())
+        {
+            if let (Some(provider_id), Some(model_name)) = (
+                model.get("provider_id").and_then(Value::as_str),
+                model.get("model").and_then(Value::as_str),
+            ) {
+                patch["model"] = serde_json::json!({
+                    "provider_id": provider_id,
+                    "model": model_name,
+                    "use_model": model_name,
+                });
+            }
+        }
+        if let Some(snapshot) = patch.get("applied_preset").cloned() {
+            if let Some(ids) = snapshot.get("knowledge_base_ids") {
+                patch["knowledge_base_ids"] = ids.clone();
+            }
+            if snapshot
+                .get("knowledge_policy")
+                .and_then(|policy| policy.get("grounded"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                // A strict preset can tighten a public companion. A non-strict
+                // preset may never weaken an existing grounded service.
+                patch["grounded_mode"] = Value::Bool(true);
+            }
+        }
+        self.patch(id, patch).await
+    }
+
     pub async fn delete(&self, id: &str) -> Result<(), AppError> {
         self.registry.remove(id).await.map(|_| ())
     }

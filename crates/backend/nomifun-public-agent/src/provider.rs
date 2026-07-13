@@ -24,6 +24,11 @@ impl PublicAgentConfig {
             name: self.name.clone(),
             greeting: self.greeting.clone(),
             tone: self.tone.clone(),
+            preset_instructions: self
+                .applied_preset
+                .as_ref()
+                .map(|snapshot| snapshot.instructions.clone())
+                .unwrap_or_default(),
             service_policy: self.service_policy.clone(),
             grounded_mode: self.grounded_mode,
             knowledge_base_ids: self.knowledge_base_ids.clone(),

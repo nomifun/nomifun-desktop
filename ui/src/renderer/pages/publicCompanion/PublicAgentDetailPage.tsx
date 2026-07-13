@@ -62,7 +62,7 @@ const PublicAgentDetailPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const [message, holder] = useArcoMessage();
 
-  const { agent, loading, patch } = usePublicAgent(id);
+  const { agent, loading, patch, reload } = usePublicAgent(id);
 
   const sectionParam = searchParams.get('section');
   const active: SectionKey = useMemo(
@@ -185,7 +185,7 @@ const PublicAgentDetailPage: React.FC = () => {
 
               <div className='flex-1 min-w-0 w-full'>
                 {active === 'overview' && (
-                  <OverviewSection agent={agent} patch={patch} message={message} onDeleted={backToRoster} />
+                  <OverviewSection agent={agent} patch={patch} reload={reload} message={message} onDeleted={backToRoster} />
                 )}
                 {active === 'identity' && <IdentitySection agent={agent} patch={patch} message={message} />}
                 {active === 'knowledge' && <KnowledgeSection agent={agent} patch={patch} message={message} />}

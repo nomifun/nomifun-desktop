@@ -560,7 +560,7 @@ Rules:\n\
 - \"member_index\" is the 0-based index into the provided MEMBERS list, if you want to pre-assign the task to a member; omit it to let the engine route automatically.\n\
 - Each member row carries a \"desc\" column: the user-authored description of that member's model. PREFER the member whose \"desc\" best matches the task and set \"member_index\" accordingly; \"desc=-\" means no description is available.\n\
 - MATCH THE MODEL TO TASK DIFFICULTY (性价比 / cost-effectiveness): you are the 主模型 designing which model runs each task from the user's range. Assign cheaper/faster models to simple, mechanical, well-specified, or bulk tasks, and reserve the stronger/pricier models for hard, ambiguous, or reasoning-heavy tasks — do NOT route every task to the strongest model. Judge each member's relative cost/capability from its \"desc\" and \"strengths\"; the FIRST member is the 主模型 (a capable default when unsure). The goal is the best overall result per unit cost, not maximum power on every node.\n\
-- \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable assistants. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
+- \"role\" is a SHORT Chinese role name naming the kind of work this task is (例如 规划/前端/后端/测试/设计/文档/研究). Give every task a role so the roles a run used can later be distilled into reusable presets. Keep it to 2–4 字; reuse the same role name across tasks of the same kind.\n\
 - \"kind\" is the task's EXECUTION MODE; omit it (or use \"agent\") for a normal single-agent task — this is the DEFAULT and should be the vast majority of tasks. The other values are:\n\
   - \"synthesis\": a task that MERGES/synthesizes its dependency tasks' outputs into one coherent final result. Use it for a closing step like 「综合/合并上述产出，写出最终的 X」: set \"kind\":\"synthesis\" and make \"depends_on\" list every task whose output it should merge. A synthesis task needs no tools of its own — it reasons over the upstream results you give it.\n\
   - \"verify\": a NO-AGENT aggregator that VALIDATES an earlier task's result by majority/quorum vote of independent skeptics, then GATES the work that depends on it. Use it when a result must be checked before downstream work proceeds (correctness-critical output, a plan/spec others will build on). To set up a verify gate emit, for the task T you want to validate:\n\
@@ -653,7 +653,7 @@ fn build_plan_user_prompt(
     let mut out = String::new();
     out.push_str("GOAL:\n");
     out.push_str(goal);
-    out.push_str("\n\nMEMBERS (index, agent_id, role_hint, strengths, desc):\n");
+    out.push_str("\n\nMEMBERS (index, member_ref, role_hint, strengths, desc):\n");
     if members.is_empty() {
         out.push_str("(none — plan without pre-assigning member_index)\n");
     } else {
@@ -666,8 +666,8 @@ fn build_plan_user_prompt(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "-".to_string());
             // Description column. PRIMARY source (P4 Task 3, Change 3): the
-            // member's own `description` — Task 2 populates it for assistant-backed
-            // members (the assistant's description) and decorates bare model-range
+            // member's own `description` — Task 2 populates it for preset-backed
+            // members (the preset's routing description) and decorates bare model-range
             // members that have a provider model description. FALLBACK (P3): the
             // `(provider_id, model)` → provider-`model_descriptions` map, kept for
             // bare members whose `description` was not decorated (no provider desc
@@ -680,9 +680,15 @@ fn build_plan_user_prompt(
                     .unwrap_or("-"),
                 _ => "-",
             });
+            let member_ref = m
+                .preset_id
+                .as_ref()
+                .map(|id| format!("preset:{id}"))
+                .or_else(|| (!m.agent_id.is_empty()).then(|| format!("agent:{}", m.agent_id)))
+                .unwrap_or_else(|| "model".to_string());
             out.push_str(&format!(
                 "{i}. {} | role={role} | strengths={strengths} | desc={desc}\n",
-                m.agent_id
+                member_ref
             ));
         }
     }
@@ -1661,6 +1667,9 @@ mod tests {
         let member = FleetMember {
             id: "fm_1".to_string(),
             agent_id: "agent_research".to_string(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: None,
             model: None,
             role_hint: Some("researcher".to_string()),
@@ -1681,7 +1690,7 @@ mod tests {
         };
         let prompt = build_plan_user_prompt("Research X", &[member], &DescriptionMap::new());
         assert!(prompt.contains("Research X"));
-        assert!(prompt.contains("0. agent_research"));
+        assert!(prompt.contains("0. agent:agent_research"));
         assert!(prompt.contains("role=researcher"));
         assert!(prompt.contains("search/synthesis"));
         // No description available for this member → desc column is the "-" sentinel.
@@ -1805,6 +1814,9 @@ mod tests {
         FleetMember {
             id: "fm".to_string(),
             agent_id: "agent".to_string(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: provider_id.map(str::to_string),
             model: model.map(str::to_string),
             role_hint: None,

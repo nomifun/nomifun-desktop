@@ -22,21 +22,30 @@ pub struct Fleet {
 /// One member of a fleet: an agent reference plus its routing hints, capability
 /// profile, and constraints.
 ///
-/// **Enrichment (P4 Task 2).** The trailing four fields carry an assistant's
-/// resolved persona into the run's self-contained fleet snapshot, so the
-/// orchestrator engine/worker never need an assistant-crate dependency: they
+/// The trailing fields carry a preset's resolved execution configuration into
+/// the run's self-contained fleet snapshot, so the orchestrator engine/worker
 /// read everything from the snapshot. All four are `#[serde(default)]` so old
 /// snapshots (and bare model-range members) deserialize unchanged:
 /// - `description` — the role/model description fed to the description-driven
-///   planner (P3). Set for both assistant-backed AND bare model members.
-/// - `system_prompt` — the assistant's persona/rule text; the worker uses it as
+///   planner (P3). Set for both preset-backed AND bare model members.
+/// - `system_prompt` — the preset's instruction text; the worker uses it as
 ///   `preset_rules` (consumed in Task 3). `None` for bare model members.
-/// - `enabled_skills` / `disabled_builtin_skills` — the assistant's skill set;
+/// - `enabled_skills` / `disabled_builtin_skills` — the preset's skill set;
 ///   the worker applies them (Task 3). Empty for bare model members.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetMember {
     pub id: String,
+    /// Concrete executor catalog id. Empty for a preset-backed member until
+    /// the preset resolver selects an executor.
     pub agent_id: String,
+    /// Reusable configuration identity, kept separate from `agent_id` so a
+    /// preset is never mistaken for an executable agent.
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    #[serde(default)]
+    pub preset_revision: Option<i64>,
+    #[serde(default)]
+    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role_hint: Option<String>,
@@ -48,13 +57,13 @@ pub struct FleetMember {
     /// breaks `produce`.
     #[serde(default)]
     pub description: Option<String>,
-    /// Assistant persona (rule text); the worker uses it as `preset_rules`.
+    /// Preset instructions (rule text); the worker uses it as `preset_rules`.
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// Assistant skills the worker enables.
+    /// Preset skills the worker enables.
     #[serde(default)]
     pub enabled_skills: Vec<String>,
-    /// Assistant's disabled built-in skills.
+    /// Preset-disabled built-in skills.
     #[serde(default)]
     pub disabled_builtin_skills: Vec<String>,
 }
@@ -78,7 +87,7 @@ pub struct MemberConstraints {
     pub allowed_task_kinds: Option<Vec<String>>,
 }
 
-/// Derive a conservative [`CapabilityProfile`] for an assistant-backed member
+/// Derive a conservative [`CapabilityProfile`] for an preset-backed member
 /// from its tags + description (P4 Task 2).
 ///
 /// This is intentionally light: the description-driven LLM planner reading
@@ -192,6 +201,10 @@ pub struct UpdateFleetRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetMemberInput {
     pub agent_id: String,
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    #[serde(default)]
+    pub preset_overrides: Option<crate::PresetOverrides>,
     #[serde(default)]
     pub provider_id: Option<String>,
     #[serde(default)]
@@ -513,7 +526,7 @@ pub struct CreateAdhocRunRequest {
     #[serde(default)]
     pub pinned_roles: Vec<String>,
     /// Pre-constructed role members (P4 Task 2): the caps_orchestrator layer
-    /// resolves each ENABLED assistant into an enriched [`FleetMember`]
+    /// resolves each ENABLED preset into an enriched [`FleetMember`]
     /// (persona/skills/model folded in) and passes them here. `RunService`
     /// merges these with the bare model-range members (dedup by
     /// `(provider_id, model, agent_id)`) into the run's fleet snapshot.
@@ -563,7 +576,7 @@ pub struct PlannedTask {
     pub rationale: Option<String>,
     /// Short Chinese role the planner named for this task (e.g. 规划/前端/后端/
     /// 测试/设计/文档). Persisted onto the task (P5 沉淀捕获) so a later UI can
-    /// distill the roles a run used into reusable assistants. `#[serde(default)]`
+    /// distill the roles a run used into reusable presets. `#[serde(default)]`
     /// so old plans without it deserialize to `None`.
     #[serde(default)]
     pub role: Option<String>,
@@ -603,6 +616,8 @@ mod tests {
             max_parallel: Some(3),
             members: vec![FleetMemberInput {
                 agent_id: "agent_abc".to_string(),
+                preset_id: None,
+                preset_overrides: None,
                 provider_id: Some("provider_xyz".to_string()),
                 model: Some("claude-opus".to_string()),
                 role_hint: Some("lead".to_string()),
@@ -948,6 +963,9 @@ mod tests {
             fleet_members: vec![FleetMember {
                 id: "fm_1".to_string(),
                 agent_id: "agent_a".to_string(),
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 provider_id: None,
                 model: None,
                 role_hint: None,
@@ -1081,6 +1099,9 @@ mod tests {
         let m = FleetMember {
             id: "rmbr_1".to_string(),
             agent_id: "asst_research".to_string(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: Some("p1".to_string()),
             model: Some("m1".to_string()),
             role_hint: Some("研究员".to_string()),
@@ -1124,6 +1145,9 @@ mod tests {
             role_members: vec![FleetMember {
                 id: "rmbr_x".to_string(),
                 agent_id: "asst_x".to_string(),
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 provider_id: Some("p".to_string()),
                 model: Some("m".to_string()),
                 role_hint: Some("X".to_string()),

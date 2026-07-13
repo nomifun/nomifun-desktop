@@ -838,6 +838,8 @@ mod tests {
                     max_parallel: None,
                     members: vec![FleetMemberInput {
                         agent_id: "agent_a".to_string(),
+                        preset_id: None,
+                        preset_overrides: None,
                         provider_id: None,
                         model: None,
                         role_hint: None,
@@ -1764,6 +1766,8 @@ mod tests {
                     max_parallel: None,
                     members: vec![FleetMemberInput {
                         agent_id: "agent_a".to_string(),
+                        preset_id: None,
+                        preset_overrides: None,
                         provider_id: None,
                         model: None,
                         role_hint: None,

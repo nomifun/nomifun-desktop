@@ -7,7 +7,7 @@
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
 import { CapabilityIconCluster } from '@/renderer/components/capability/CapabilityIcon';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
-import { usePresetAssistantInfo } from '@/renderer/hooks/agent/usePresetAssistantInfo';
+import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import ConversationHoverCard from '@/renderer/pages/conversation/components/ConversationHoverCard';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -53,7 +53,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
     idmmState,
   } = props;
   const { t } = useTranslation();
-  const { info: assistantInfo } = usePresetAssistantInfo(conversation);
+  const { info: presetInfo } = usePresetInfo(conversation);
   const isPinned = isConversationPinned(conversation);
   const cronStatus = getJobStatus(conversation.id);
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
@@ -69,18 +69,18 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
     const pinnedHoverFade = isPinned ? 'group-hover:opacity-0 transition-opacity' : '';
     const composedClass = classNames(pinnedHoverFade);
 
-    if (assistantInfo) {
-      if (assistantInfo.isEmoji) {
+    if (presetInfo) {
+      if (presetInfo.isEmoji) {
         return (
           <span className={classNames('text-16px leading-none flex-shrink-0', composedClass)}>
-            {assistantInfo.logo}
+            {presetInfo.logo}
           </span>
         );
       }
       return (
         <img
-          src={assistantInfo.logo}
-          alt={assistantInfo.name}
+          src={presetInfo.logo}
+          alt={presetInfo.name}
           className={classNames('w-16px h-16px rounded-50% flex-shrink-0', composedClass)}
         />
       );

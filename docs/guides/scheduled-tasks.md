@@ -82,8 +82,8 @@ Pick the agent that runs each fire. Three flavours show up in the picker:
   end-to-end.
 - **Nomi (built-in)** — uses Nomi's own engine with your selected
   provider/model.
-- **Preset assistants** — pre-configured agent personalities; the job
-  records the assistant id.
+- **Presets** — reusable launch configurations; the job records the preset id,
+  revision, and resolved snapshot.
 
 The **Advanced** section lets you override the workspace (working
 directory the agent runs in), the model, and arbitrary `config_options`

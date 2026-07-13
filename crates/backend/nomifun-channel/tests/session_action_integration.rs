@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{generate_id, now_ms};
-use nomifun_db::models::{AssistantUserRow, ChannelPluginRow};
+use nomifun_db::models::{ChannelUserRow, ChannelPluginRow};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
 use nomifun_realtime::EventBroadcaster;
 
@@ -59,8 +59,8 @@ async fn setup() -> (
     let settings = Arc::new(ChannelSettingsService::new(pref_repo));
     let executor = ActionExecutor::new(pairing_arc, session_mgr_arc, settings, "gemini");
 
-    // Every test message arrives through the "tg-1" channel. assistant_sessions
-    // now has an FK channel_id → assistant_plugins(id), so the plugin row must
+    // Every test message arrives through the "tg-1" channel. channel_sessions
+    // now has an FK channel_id → channel_plugins(id), so the plugin row must
     // exist before any session is created. bot_key=None avoids the
     // UNIQUE(type, bot_key) index.
     repo.upsert_plugin(&ChannelPluginRow {
@@ -85,10 +85,10 @@ async fn setup() -> (
     (session_mgr, executor, pairing, repo)
 }
 
-/// Create an assistant_users record (required for FK on sessions).
+/// Create a channel_users record (required for FK on sessions).
 async fn create_user(repo: &Arc<dyn IChannelRepository>, platform_user_id: &str, platform_type: &str) -> String {
     let user_id = generate_id();
-    let row = AssistantUserRow {
+    let row = ChannelUserRow {
         id: user_id.clone(),
         platform_user_id: platform_user_id.to_owned(),
         platform_type: platform_type.to_owned(),

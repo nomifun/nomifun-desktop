@@ -66,6 +66,9 @@ pub struct PublicAgentRuntime {
     pub greeting: String,
     /// Tone & style guidelines (free-text; injected into the persona prompt).
     pub tone: String,
+    /// Instructions from the frozen preset applied to this public companion.
+    /// They shape behavior but never alter the public-service security clamp.
+    pub preset_instructions: String,
     /// Service policy / 服务守则 (business scope, forbidden topics, compliance).
     /// Injected as a HARD system directive.
     pub service_policy: String,

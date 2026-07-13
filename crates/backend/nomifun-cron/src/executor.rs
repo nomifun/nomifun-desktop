@@ -482,14 +482,23 @@ impl JobExecutor {
             model,
             source: None,
             channel_chat_id: None,
+            preset_id: job.agent_config.as_ref().and_then(|config| config.preset_id.clone()),
+            preset_overrides: None,
             extra,
         };
 
-        let response = self
-            .conversation_service
-            .create(&user_id, req)
-            .await
-            .map_err(CronError::from_conversation_create)?;
+        let response = if let Some(snapshot) = job
+            .agent_config
+            .as_ref()
+            .and_then(|config| config.preset_snapshot.clone())
+        {
+            self.conversation_service
+                .create_from_preset_snapshot(&user_id, req, snapshot)
+                .await
+        } else {
+            self.conversation_service.create(&user_id, req).await
+        }
+        .map_err(CronError::from_conversation_create)?;
 
         // The service returns the integer key; cron carries conversation ids as
         // `String` through the rest of its agent path (Option A), so stringify
@@ -1252,11 +1261,16 @@ async fn build_task_extra(
                 "custom_agent_id".to_owned(),
                 serde_json::Value::String(custom_agent_id.clone()),
             );
-            if config.is_preset.unwrap_or(false) {
-                extra.insert(
-                    "preset_assistant_id".to_owned(),
-                    serde_json::Value::String(custom_agent_id.clone()),
-                );
+        }
+        if let Some(preset_id) = &config.preset_id {
+            extra.insert("preset_id".to_owned(), serde_json::Value::String(preset_id.clone()));
+        }
+        if let Some(revision) = config.preset_revision {
+            extra.insert("preset_revision".to_owned(), serde_json::Value::Number(revision.into()));
+        }
+        if let Some(snapshot) = &config.preset_snapshot {
+            if let Ok(value) = serde_json::to_value(snapshot) {
+                extra.insert("preset_snapshot".to_owned(), value);
             }
         }
         if let Some(mode) = &config.mode {
@@ -1344,11 +1358,16 @@ async fn build_conversation_extra(
                 "custom_agent_id".to_owned(),
                 serde_json::Value::String(custom_agent_id.clone()),
             );
-            if config.is_preset.unwrap_or(false) {
-                extra.insert(
-                    "preset_assistant_id".to_owned(),
-                    serde_json::Value::String(custom_agent_id.clone()),
-                );
+        }
+        if let Some(preset_id) = &config.preset_id {
+            extra.insert("preset_id".to_owned(), serde_json::Value::String(preset_id.clone()));
+        }
+        if let Some(revision) = config.preset_revision {
+            extra.insert("preset_revision".to_owned(), serde_json::Value::Number(revision.into()));
+        }
+        if let Some(snapshot) = &config.preset_snapshot {
+            if let Ok(value) = serde_json::to_value(snapshot) {
+                extra.insert("preset_snapshot".to_owned(), value);
             }
         }
         if let Some(mode) = &config.mode {
@@ -1493,9 +1512,10 @@ mod tests {
                 backend: "acp".into(),
                 name: "Claude".into(),
                 cli_path: Some("/usr/bin/claude".into()),
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("claude-sonnet-4".into()),
                 config_options: None,
@@ -1780,9 +1800,10 @@ mod tests {
                 backend: "4056cdea".into(),
                 name: "OpenAI".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("gpt-5".into()),
                 config_options: None,
@@ -1804,9 +1825,10 @@ mod tests {
                 backend: "4056cdea".into(),
                 name: "OpenAI".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: None,
                 config_options: None,
@@ -1840,9 +1862,10 @@ mod tests {
                 backend: "   ".into(),
                 name: "Bogus".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("gpt-5".into()),
                 config_options: None,
@@ -1914,9 +1937,10 @@ mod tests {
                 backend: "claude".into(),
                 name: "Claude".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("claude-sonnet-4-6".into()),
                 config_options: None,
@@ -1941,9 +1965,10 @@ mod tests {
                 backend: "4056cdea".into(),
                 name: "OpenAI".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("gpt-5".into()),
                 config_options: None,
@@ -2039,9 +2064,10 @@ mod tests {
                 backend: "claude".into(),
                 name: "Claude".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("claude-sonnet-4-6".into()),
                 config_options: None,
@@ -2068,9 +2094,10 @@ mod tests {
                 backend: "4056cdea".into(),
                 name: "OpenAI".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: Some("gpt-5".into()),
                 config_options: None,
@@ -2097,9 +2124,10 @@ mod tests {
                 backend: "claude".into(),
                 name: "Claude".into(),
                 cli_path: None,
-                is_preset: None,
                 custom_agent_id: None,
-                preset_agent_type: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 mode: None,
                 model_id: None,
                 config_options: None,
@@ -2984,6 +3012,9 @@ mod tests {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 0,
                 updated_at: 0,
             }))
@@ -3130,6 +3161,9 @@ mod tests {
                     pinned: false,
                     pinned_at: None,
                     cron_job_id: None,
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
                     created_at: 0,
                     updated_at: 0,
                 },

@@ -43,11 +43,19 @@ pub struct CronAgentConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_preset: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_agent_id: Option<String>,
+    /// Reusable configuration preset selected for this scheduled task. This is
+    /// deliberately independent from `custom_agent_id`, which identifies an
+    /// executable custom ACP/OpenClaw/Nanobot agent rather than a preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_agent_type: Option<String>,
+    pub preset_id: Option<String>,
+    /// Frozen preset revision used when the task was saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_revision: Option<i64>,
+    /// Frozen resolved preset payload. Scheduled execution must not silently
+    /// drift when a reusable preset is edited later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -401,9 +409,9 @@ mod tests {
             "backend": "acp",
             "name": "Claude Agent",
             "cli_path": "/usr/bin/claude",
-            "is_preset": true,
             "custom_agent_id": "agent-1",
-            "preset_agent_type": "claude",
+            "preset_id": "preset-1",
+            "preset_revision": 3,
             "mode": "auto",
             "model_id": "claude-sonnet-4-6",
             "config_options": {"key": "value"},
@@ -413,8 +421,9 @@ mod tests {
         assert_eq!(c.backend, "acp");
         assert_eq!(c.name, "Claude Agent");
         assert_eq!(c.cli_path.as_deref(), Some("/usr/bin/claude"));
-        assert_eq!(c.is_preset, Some(true));
         assert_eq!(c.custom_agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(c.preset_id.as_deref(), Some("preset-1"));
+        assert_eq!(c.preset_revision, Some(3));
         assert_eq!(c.model_id.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(c.config_options.as_ref().unwrap()["key"], "value");
     }
@@ -426,7 +435,7 @@ mod tests {
         assert_eq!(c.backend, "openai");
         assert_eq!(c.name, "GPT");
         assert!(c.cli_path.is_none());
-        assert!(c.is_preset.is_none());
+        assert!(c.preset_id.is_none());
         assert!(c.config_options.is_none());
     }
 
@@ -436,9 +445,10 @@ mod tests {
             backend: "acp".into(),
             name: "Test".into(),
             cli_path: None,
-            is_preset: None,
             custom_agent_id: None,
-            preset_agent_type: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             mode: None,
             model_id: None,
             config_options: None,
@@ -447,7 +457,7 @@ mod tests {
         };
         let json = serde_json::to_value(&c).unwrap();
         assert!(json.get("cli_path").is_none());
-        assert!(json.get("is_preset").is_none());
+        assert!(json.get("preset_id").is_none());
         assert!(json.get("config_options").is_none());
     }
 
@@ -457,9 +467,10 @@ mod tests {
             backend: "acp".into(),
             name: "Agent".into(),
             cli_path: Some("/bin/x".into()),
-            is_preset: Some(false),
             custom_agent_id: Some("c1".into()),
-            preset_agent_type: None,
+            preset_id: Some("preset-1".into()),
+            preset_revision: Some(7),
+            preset_snapshot: None,
             mode: Some("plan".into()),
             model_id: Some("m1".into()),
             config_options: Some(HashMap::from([("a".into(), "b".into())])),
@@ -502,9 +513,10 @@ mod tests {
                     backend: "acp".into(),
                     name: "Claude".into(),
                     cli_path: None,
-                    is_preset: None,
                     custom_agent_id: None,
-                    preset_agent_type: None,
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
                     mode: None,
                     model_id: None,
                     config_options: None,

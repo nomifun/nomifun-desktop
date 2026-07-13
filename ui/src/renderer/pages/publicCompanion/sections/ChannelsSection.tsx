@@ -37,7 +37,7 @@ interface Props {
  * 陌生人经该渠道自动被安全接待。
  *
  * Per-public-agent multi-bot manager over the same channel model as the desktop
- * companion's RemoteConnectSection. Each bot is one `assistant_plugins` row; a bot
+ * companion's RemoteConnectSection. Each bot is one `channel_plugins` row; a bot
  * "belongs to this agent" when `row.publicAgentId === agent.id`. The card for a
  * platform branches on whether this agent owns a row, an unbound row exists, or
  * only rows bound to other objects exist. Pending pairing requests surface as a

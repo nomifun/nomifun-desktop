@@ -10,8 +10,8 @@ NomiFun 有两种容易混淆的扩展机制：
 | 能力 | 页面 |
 | --- | --- |
 | MCP server | `/mcp` |
-| 技能 | `/assistants?tab=skills` |
-| 助手 | `/assistants?tab=assistants` |
+| 技能 | `/skills` |
+| 设定 | `/presets` |
 | 对外能力暴露 | `/open-capabilities` |
 
 旧 Settings URL 会重定向到这些页面。
@@ -68,7 +68,7 @@ agent 配置。
 
 ## 技能
 
-打开 `/assistants?tab=skills`。
+打开 `/skills`。
 
 ![技能页](../images/mcp-03-skills.png)
 
@@ -94,12 +94,12 @@ materialize。
 | 导入 / 导出 / 删除 | `POST /api/skills/import`, `POST /api/skills/import-symlink`, `POST /api/skills/export-symlink`, `DELETE /api/skills/{name}` |
 | 扫描 / 探测路径 | `POST /api/skills/scan`, `GET /api/skills/detect-paths`, `GET /api/skills/detect-external` |
 | 为 agent materialize | `POST /api/skills/materialize-for-agent` |
-| 助手规则/技能文件 | `/api/skills/assistant-rule/*`, `/api/skills/assistant-skill/*` |
+| 设定指令 | `/api/skills/preset-rule/*` |
 | 外部路径 | `GET`, `POST`, `DELETE /api/skills/external-paths` |
 | 技能市场 | `POST /api/skills/market/enable`, `POST /api/skills/market/disable` |
 
 ## 相关
 
-- [助手](./assistants.zh.md)
+- [设定](./presets.zh.md)
 - [远程能力 API](./remote-capability-api.zh.md)
 - [终端](./terminal.zh.md)

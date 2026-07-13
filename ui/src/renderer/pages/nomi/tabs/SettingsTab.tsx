@@ -13,6 +13,7 @@ import { customFigureMetaOf } from '@renderer/pages/companion/characters/customM
 import CharacterPicker from '../CharacterPicker';
 import { figureToCustomPatch } from '../useFigures';
 import type { useCompanion } from '../useNomi';
+import PresetApplyControl from '@/renderer/components/preset/PresetApplyControl';
 
 interface Props {
   companion: ReturnType<typeof useCompanion>;
@@ -121,6 +122,22 @@ const SettingsTab: React.FC<Props> = ({ companion, onDeleted }) => {
               appearance: { custom_figure: figureToCustomPatch(fig) },
             })
           }
+        />
+      )}
+      {row(
+        t('nomi.settings.preset'),
+        t('nomi.settings.presetHint'),
+        <PresetApplyControl
+          target='companion'
+          appliedPreset={profile.applied_preset}
+          onApply={async (presetId, locale) => {
+            await ipcBridge.companion.applyPreset.invoke({
+              companion_id: profile.id,
+              preset_id: presetId,
+              locale,
+            });
+            await companion.refresh();
+          }}
         />
       )}
       {row(

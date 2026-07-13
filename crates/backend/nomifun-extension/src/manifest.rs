@@ -191,10 +191,13 @@ fn normalize_contributes(value: &mut Value) {
     move_key(obj, "channelPlugins", "channel_plugins");
     move_key(obj, "settingsTabs", "settings_tabs");
     move_key(obj, "modelProviders", "model_providers");
+    // One-time manifest upgrade for extensions authored before presets became
+    // a first-class contribution type.
+    move_key(obj, "assistants", "presets");
 
     normalize_array_entries(obj.get_mut("acp_adapters"), normalize_acp_adapter);
     normalize_array_entries(obj.get_mut("mcp_servers"), normalize_mcp_server);
-    normalize_array_entries(obj.get_mut("assistants"), normalize_assistant);
+    normalize_array_entries(obj.get_mut("presets"), normalize_preset);
     normalize_array_entries(obj.get_mut("agents"), normalize_agent);
     normalize_array_entries(obj.get_mut("skills"), normalize_skill);
     normalize_array_entries(obj.get_mut("channel_plugins"), normalize_channel_plugin);
@@ -246,7 +249,7 @@ fn normalize_mcp_server(value: &mut Value) {
     }
 }
 
-fn normalize_assistant(value: &mut Value) {
+fn normalize_preset(value: &mut Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
@@ -263,12 +266,12 @@ fn normalize_assistant(value: &mut Value) {
 }
 
 fn normalize_agent(value: &mut Value) {
-    normalize_assistant(value);
+    normalize_preset(value);
     let Some(obj) = value.as_object_mut() else {
         return;
     };
 
-    move_key(obj, "presetAgentType", "agent_type");
+    move_key(obj, "agentType", "agent_type");
 }
 
 fn normalize_skill(value: &mut Value) {

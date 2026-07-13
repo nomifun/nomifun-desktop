@@ -112,7 +112,7 @@ impl ActionExecutor {
 
     /// Main entry point: handle an incoming message from any platform.
     ///
-    /// `channel_id` is the `assistant_plugins` row the message arrived
+    /// `channel_id` is the `channel_plugins` row the message arrived
     /// through — sessions are scoped to it so two bots in the same chat
     /// stay isolated.
     ///
@@ -145,7 +145,7 @@ impl ActionExecutor {
                 // strangers run under the owner/system identity (the clamp is the
                 // boundary, not the user id); their per-chat conversation gives
                 // per-stranger isolation. This bypass is gated STRICTLY on the BOT
-                // (per-bot `assistant_plugins.public_agent_id`, keyed by the arriving
+                // (per-bot `channel_plugins.public_agent_id`, keyed by the arriving
                 // `channel_id`) being bound to a public agent — companion-bound and
                 // unbound bots keep the pairing approval gate UNCHANGED.
                 if self
@@ -155,7 +155,7 @@ impl ActionExecutor {
                     .is_some()
                 {
                     // Auto-register the stranger as a channel user (no pairing code) so
-                    // the session FK (assistant_sessions.user_id → assistant_users.id) is
+                    // the session FK (channel_sessions.user_id → channel_users.id) is
                     // satisfied. The agent itself runs under the owner/system identity
                     // (set in ChannelMessageService); the PublicService clamp is the real
                     // boundary, and the per-chat conversation gives per-stranger isolation.
@@ -634,7 +634,7 @@ impl ActionExecutor {
         action: &UnifiedAction,
         internal_user_id: &str,
         channel_id: &str,
-    ) -> Result<nomifun_db::models::AssistantSessionRow, ChannelError> {
+    ) -> Result<nomifun_db::models::ChannelSessionRow, ChannelError> {
         let agent_config = self.settings.get_agent_config(action.context.platform).await?;
         self.session_mgr
             .get_or_create_session(
@@ -650,7 +650,7 @@ impl ActionExecutor {
 
 // ── Helper builders ─────────────────────────────────────────────────
 
-/// Short display form of an `ases_{uuidv7}` session id for IM replies.
+/// Short display form of an `chs_{uuidv7}` session id for IM replies.
 /// The head (prefix + timestamp) is common across sessions; the random
 /// tail is the distinctive part, so truncate from the front.
 fn short_session_id(id: &str) -> String {
@@ -784,7 +784,7 @@ mod action_tests {
     use nomifun_api_types::WebSocketMessage;
     use nomifun_common::{TimestampMs, now_ms};
     use nomifun_db::models::{
-        AssistantSessionRow, AssistantUserRow, ChannelPluginRow, ClientPreference, PairingCodeRow,
+        ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ClientPreference, ChannelPairingCodeRow,
     };
     use nomifun_db::{DbError, IChannelRepository, IClientPreferenceRepository, UpdatePluginStatusParams};
     use nomifun_realtime::EventBroadcaster;
@@ -801,9 +801,9 @@ mod action_tests {
     // ── Mock IChannelRepository ────────────────────────────────────────
 
     struct MockRepo {
-        users: Mutex<Vec<AssistantUserRow>>,
-        sessions: Mutex<Vec<AssistantSessionRow>>,
-        pairings: Mutex<Vec<PairingCodeRow>>,
+        users: Mutex<Vec<ChannelUserRow>>,
+        sessions: Mutex<Vec<ChannelSessionRow>>,
+        pairings: Mutex<Vec<ChannelPairingCodeRow>>,
         plugins: Mutex<Vec<ChannelPluginRow>>,
     }
 
@@ -818,7 +818,7 @@ mod action_tests {
         }
 
         fn add_authorized_user(&self, platform_user_id: &str, platform_type: &str) {
-            let user = AssistantUserRow {
+            let user = ChannelUserRow {
                 id: format!("user_{platform_user_id}"),
                 platform_user_id: platform_user_id.to_owned(),
                 platform_type: platform_type.to_owned(),
@@ -878,7 +878,7 @@ mod action_tests {
             Ok(())
         }
 
-        async fn get_all_users(&self) -> Result<Vec<AssistantUserRow>, DbError> {
+        async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
             Ok(self.users.lock().unwrap().clone())
         }
         async fn get_user_by_platform(
@@ -886,7 +886,7 @@ mod action_tests {
             platform_user_id: &str,
             platform_type: &str,
             channel_id: &str,
-        ) -> Result<Option<AssistantUserRow>, DbError> {
+        ) -> Result<Option<ChannelUserRow>, DbError> {
             let users = self.users.lock().unwrap();
             Ok(users
                 .iter()
@@ -897,7 +897,7 @@ mod action_tests {
                 })
                 .cloned())
         }
-        async fn create_user(&self, row: &AssistantUserRow) -> Result<(), DbError> {
+        async fn create_user(&self, row: &ChannelUserRow) -> Result<(), DbError> {
             self.users.lock().unwrap().push(row.clone());
             Ok(())
         }
@@ -908,10 +908,10 @@ mod action_tests {
             Ok(())
         }
 
-        async fn get_all_sessions(&self) -> Result<Vec<AssistantSessionRow>, DbError> {
+        async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
             Ok(self.sessions.lock().unwrap().clone())
         }
-        async fn get_session(&self, id: &str) -> Result<Option<AssistantSessionRow>, DbError> {
+        async fn get_session(&self, id: &str) -> Result<Option<ChannelSessionRow>, DbError> {
             let sessions = self.sessions.lock().unwrap();
             Ok(sessions.iter().find(|s| s.id == id).cloned())
         }
@@ -920,8 +920,8 @@ mod action_tests {
             user_id: &str,
             chat_id: &str,
             channel_id: &str,
-            new_row: &AssistantSessionRow,
-        ) -> Result<AssistantSessionRow, DbError> {
+            new_row: &ChannelSessionRow,
+        ) -> Result<ChannelSessionRow, DbError> {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(existing) = sessions.iter_mut().find(|s| {
                 s.user_id == user_id
@@ -974,15 +974,15 @@ mod action_tests {
             Ok(())
         }
 
-        async fn create_pairing(&self, row: &PairingCodeRow) -> Result<(), DbError> {
+        async fn create_pairing(&self, row: &ChannelPairingCodeRow) -> Result<(), DbError> {
             self.pairings.lock().unwrap().push(row.clone());
             Ok(())
         }
-        async fn get_pending_pairings(&self) -> Result<Vec<PairingCodeRow>, DbError> {
+        async fn get_pending_pairings(&self) -> Result<Vec<ChannelPairingCodeRow>, DbError> {
             let pairings = self.pairings.lock().unwrap();
             Ok(pairings.iter().filter(|p| p.status == "pending").cloned().collect())
         }
-        async fn get_pairing_by_code(&self, code: &str) -> Result<Option<PairingCodeRow>, DbError> {
+        async fn get_pairing_by_code(&self, code: &str) -> Result<Option<ChannelPairingCodeRow>, DbError> {
             let pairings = self.pairings.lock().unwrap();
             Ok(pairings.iter().find(|p| p.code == code).cloned())
         }
@@ -1205,15 +1205,15 @@ mod action_tests {
         }
 
         // Regression guard (FK 787): auto-serve must REGISTER the stranger in
-        // assistant_users, because assistant_sessions.user_id foreign-keys to it.
-        // The earlier bug returned the owner's `users` id (not an assistant_users
+        // channel_users, because channel_sessions.user_id foreign-keys to it.
+        // The earlier bug returned the owner's `users` id (not a channel_users
         // id), which violated the FK on session creation.
         assert!(
             repo.get_user_by_platform("tg_stranger", "telegram", "tg-1")
                 .await
                 .unwrap()
                 .is_some(),
-            "auto-served stranger must be auto-registered as an assistant_users row (the session FK target)"
+            "auto-served stranger must be auto-registered as a channel_users row (the session FK target)"
         );
     }
 
@@ -1225,7 +1225,7 @@ mod action_tests {
         // intact. (channel_public_agent_id returns None for a row with no
         // public_agent_id, and here there's no row at all.)
         let (executor, _repo) =
-            setup_with_prefs(&[("assistant.telegram.companionId", "\"companion_1\"")]);
+            setup_with_prefs(&[("channels.telegram.companionId", "\"companion_1\"")]);
 
         let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
         let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();

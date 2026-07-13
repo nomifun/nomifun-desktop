@@ -373,6 +373,8 @@ async fn run_cancel_through_route_persists_cancelled() {
                 max_parallel: None,
                 members: vec![FleetMemberInput {
                     agent_id: "agent_a".to_string(),
+                    preset_id: None,
+                    preset_overrides: None,
                     provider_id: Some("prov_x".to_string()),
                     model: Some("claude-opus-4-8".to_string()),
                     role_hint: None,
@@ -588,6 +590,8 @@ async fn seed_fleet_and_ws(state: &OrchestratorRouterState, prefix: &str) -> (St
                 max_parallel: None,
                 members: vec![FleetMemberInput {
                     agent_id: "agent_a".to_string(),
+                    preset_id: None,
+                    preset_overrides: None,
                     provider_id: Some("prov_x".to_string()),
                     model: Some("claude-opus-4-8".to_string()),
                     role_hint: None,

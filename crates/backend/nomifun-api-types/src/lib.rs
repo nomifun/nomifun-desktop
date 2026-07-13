@@ -4,7 +4,6 @@ mod acp_prompt_hook;
 mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
-mod assistant;
 mod auth;
 mod channel;
 mod confirmation;
@@ -29,6 +28,7 @@ pub mod model_task;
 mod office;
 mod orchestrator;
 mod provider;
+mod preset;
 mod remote_agent;
 mod requirement;
 mod response;
@@ -63,11 +63,12 @@ pub use agent_error::{
     AgentErrorResolutionTarget, AgentStreamErrorData,
 };
 pub use exposure::{ExposureClamp, ExposureMode, SAFE_PUBLIC_SERVICE_TOOLS, exposure_clamp};
-pub use assistant::{
-    AssistantResponse, AssistantSource, AssistantTagDimension, AssistantTagResponse,
-    CreateAssistantRequest, CreateAssistantTagRequest, ImportAssistantsRequest,
-    ImportAssistantsResult, ImportError, SetAssistantStateRequest, UpdateAssistantRequest,
-    UpdateAssistantTagRequest,
+pub use preset::{
+    AgentPreference, CreatePresetRequest, CreatePresetTagRequest, ImportPresetsRequest,
+    ImportPresetsResult, KnowledgeBaseBinding, ModelPreference, PresetImportError,
+    PresetKnowledgePolicy, PresetOverrides, PresetResponse, PresetSource, PresetTagDimension,
+    PresetTagResponse, PresetTarget, ResolvePresetRequest, ResolvedPresetSnapshot,
+    SetPresetStateRequest, SkillBinding, UpdatePresetRequest, UpdatePresetTagRequest,
 };
 pub use auth::{
     AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser,
@@ -216,11 +217,11 @@ pub use shell::{
 pub use skill::{
     AddExternalPathRequest, BuiltinAutoSkillResponse, DeleteSkillRequest, ExportSkillRequest,
     ExternalSkillSourceResponse, ImportSkillRequest, ImportSkillResponse, MaterializeSkillsRequest,
-    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadAssistantRuleRequest,
+    MaterializeSkillsResponse, MaterializedSkillRef, NamedPathResponse, ReadPresetRuleRequest,
     ReadBuiltinResourceRequest, ReadSkillInfoRequest, ReadSkillInfoResponse,
     RemoveExternalPathRequest, ScanForSkillsRequest, ScanForSkillsResponse, ScannedSkillResponse,
     SetSkillTagsRequest, SkillListItemResponse, SkillPathsResponse, SkillSourceResponse,
-    WriteAssistantRuleRequest,
+    WritePresetRuleRequest,
 };
 pub use system::{
     ClientPreferencesResponse, SystemSettingsResponse, UpdateClientPreferencesRequest,

@@ -67,7 +67,7 @@ NomiFun 的数字伙伴从「单个 nomi」升级为**多伙伴家庭**：你可
 
 ## 渠道绑定伙伴
 
-每个 IM 平台（Telegram / Lark / 钉钉 / 微信）可以各绑一个伙伴来接待远程消息：打开该伙伴的 **Remote** tab（`/nomi?companion=<id>&tab=remote`），在那里连接或改绑 bot。未绑定渠道行时仍会读取旧的平台级偏好 `assistant.{platform}.companionId` 作为兼容回退。未绑定时回退**默认伙伴**；切换绑定会重置该渠道的活跃会话（下一条消息由新伙伴接待）；被绑定的伙伴若被删除，自动回退默认伙伴并同样重置会话。详见 [Channels 指南](./channels.zh.md)的「主 Agent 模式」一节。
+每个 IM 平台（Telegram / Lark / 钉钉 / 微信）可以各绑一个伙伴来接待远程消息：打开该伙伴的 **Remote** tab（`/nomi?companion=<id>&tab=remote`），在那里连接或改绑 bot。平台级绑定写入 `channels.{platform}.companionId`。未绑定时回退**默认伙伴**；切换绑定会重置该渠道的活跃会话（下一条消息由新伙伴接待）；被绑定的伙伴若被删除，自动回退默认伙伴并同样重置会话。详见 [Channels 指南](./channels.zh.md)的「主 Agent 模式」一节。
 
 > companionId 不授予任何权限（记忆本就共享）：它只决定 persona / 模型 / 知识库挂载，与授予网关工具的 `desktopGateway` 标记性质不同。
 

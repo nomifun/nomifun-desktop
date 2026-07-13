@@ -59,8 +59,8 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Conversations | `/api/conversations/*`, `/api/messages/search` | authenticated | [`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs), [`routes_aux.rs`](../../crates/backend/nomifun-conversation/src/routes_aux.rs) |
 | Agents (local CLI agents) | `/api/agents/*` | authenticated | [`nomifun-ai-agent/src/routes/agent.rs`](../../crates/backend/nomifun-ai-agent/src/routes/agent.rs) |
 | Remote agents | `/api/remote-agents/*` | authenticated | [`nomifun-ai-agent/src/routes/remote.rs`](../../crates/backend/nomifun-ai-agent/src/routes/remote.rs) |
-| Assistants | `/api/assistants/*` | authenticated | [`nomifun-assistant/src/routes.rs`](../../crates/backend/nomifun-assistant/src/routes.rs) |
-| Assistant tags | `/api/assistant-tags/*` | authenticated | same as above |
+| Presets | `/api/presets/*` | authenticated | [`nomifun-preset/src/routes.rs`](../../crates/backend/nomifun-preset/src/routes.rs) |
+| Preset tags | `/api/preset-tags/*` | authenticated | same as above |
 | MCP servers | `/api/mcp/*` | authenticated | [`nomifun-mcp/src/routes.rs`](../../crates/backend/nomifun-mcp/src/routes.rs) |
 | Skills | `/api/skills/*` | authenticated | [`nomifun-extension/src/skill_routes.rs`](../../crates/backend/nomifun-extension/src/skill_routes.rs) |
 | Extensions | `/api/extensions/*` | authenticated | [`nomifun-extension/src/routes.rs`](../../crates/backend/nomifun-extension/src/routes.rs) |

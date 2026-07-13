@@ -123,7 +123,7 @@ function getDescriptionInitialValue(job: ICronJob): string {
 function getAgentKeyFromJob(job: ICronJob, cliAgents: { backend?: string; agent_type: string }[]): string | undefined {
   const config = job.metadata.agent_config;
   if (config) {
-    if (config.is_preset && config.custom_agent_id) return `preset:${config.custom_agent_id}`;
+    if (config.preset_id) return `preset:${config.preset_id}`;
     const matched = cliAgents.find((a) => (a.backend || a.agent_type) === config.backend);
     if (matched) return `cli:${config.backend}`;
   }
@@ -144,7 +144,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const { t } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
-  const { cliAgents, presetAssistants } = useConversationAgents();
+  const { cliAgents, presets: presetPresets } = useConversationAgents();
   const { providers, getAvailableModels } = useModelProviderList();
   const [frequency, setFrequency] = useState<FrequencyType>('manual');
   const [time, setTime] = useState('09:00');
@@ -250,11 +250,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     const agentKind = selectedAgent.substring(0, colonIdx);
     const agentId = selectedAgent.substring(colonIdx + 1);
     if (agentKind === 'preset') {
-      const assistant = presetAssistants.find((a) => a.id === agentId);
-      return assistant?.preset_agent_type;
+      const preset = presetPresets.find((a) => a.id === agentId);
+      const preferredAgentId = preset?.preferred_agent_id || preset?.agent_preferences[0]?.agent_id;
+      const preferredAgent = cliAgents.find((agent) => agent.id === preferredAgentId);
+      return preferredAgent?.backend || preferredAgent?.agent_type;
     }
     return agentId;
-  }, [selectedAgent, presetAssistants]);
+  }, [selectedAgent, presetPresets, cliAgents]);
 
   const isGeminiMode = resolvedBackend === 'gemini' || resolvedBackend === 'nomi';
 
@@ -443,19 +445,14 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         resolvedAgentType = backend as ICreateCronJobParams['agent_type'];
       }
     } else if (agentKind === 'preset') {
-      const assistant = presetAssistants.find((a) => a.id === agentId);
-      if (assistant) {
-        const presetBackend = assistant.preset_agent_type;
+      const preset = presetPresets.find((a) => a.id === agentId);
+      if (preset) {
+        const preferredAgentId = preset.preferred_agent_id || preset.agent_preferences[0]?.agent_id;
+        const preferredAgent = cliAgents.find((agent) => agent.id === preferredAgentId);
+        const presetBackend = preferredAgent?.backend || preferredAgent?.agent_type || 'nomi';
         resolvedAgentType = presetBackend as string;
         agent_config = {
-          backend: presetBackend as string,
-          name: assistant.name,
-          is_preset: true,
-          custom_agent_id: assistant.id,
-          preset_agent_type: presetBackend,
-          mode: getFullAutoMode(presetBackend),
-          model_id,
-          config_options,
+          preset_id: preset.id,
           workspace,
           clear_context_each_run: clearContextEachRun,
         };
@@ -599,15 +596,15 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
               }
             }
           } else if (type === 'preset') {
-            const assistant = presetAssistants.find((a) => a.id === id);
-            if (assistant) {
-              name = assistant.name;
-              const avatarImage = assistant.avatar ? CUSTOM_AVATAR_IMAGE_MAP[assistant.avatar] : undefined;
-              const isEmoji = assistant.avatar && !avatarImage && !assistant.avatar.endsWith('.svg');
+            const preset = presetPresets.find((a) => a.id === id);
+            if (preset) {
+              name = preset.name;
+              const avatarImage = preset.avatar ? CUSTOM_AVATAR_IMAGE_MAP[preset.avatar] : undefined;
+              const isEmoji = preset.avatar && !avatarImage && !preset.avatar.endsWith('.svg');
               if (avatarImage) {
-                logo = <img src={avatarImage} alt={assistant.name} className='w-16px h-16px object-contain' />;
+                logo = <img src={avatarImage} alt={preset.name} className='w-16px h-16px object-contain' />;
               } else if (isEmoji) {
-                logo = <span className='text-14px leading-16px'>{assistant.avatar}</span>;
+                logo = <span className='text-14px leading-16px'>{preset.avatar}</span>;
               }
             }
           }
@@ -644,22 +641,22 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             })}
           </OptGroup>
         )}
-        {presetAssistants.length > 0 && (
-          <OptGroup label={t('conversation.dropdown.presetAssistants')}>
-            {presetAssistants.map((assistant) => {
-              const avatarImage = assistant.avatar ? CUSTOM_AVATAR_IMAGE_MAP[assistant.avatar] : undefined;
-              const isEmoji = assistant.avatar && !avatarImage && !assistant.avatar.endsWith('.svg');
+        {presetPresets.length > 0 && (
+          <OptGroup label={t('conversation.dropdown.presetPresets')}>
+            {presetPresets.map((preset) => {
+              const avatarImage = preset.avatar ? CUSTOM_AVATAR_IMAGE_MAP[preset.avatar] : undefined;
+              const isEmoji = preset.avatar && !avatarImage && !preset.avatar.endsWith('.svg');
               return (
-                <Option key={`preset:${assistant.id}`} value={`preset:${assistant.id}`}>
+                <Option key={`preset:${preset.id}`} value={`preset:${preset.id}`}>
                   <div className='flex items-center gap-8px'>
                     {avatarImage ? (
-                      <img src={avatarImage} alt={assistant.name} className='w-16px h-16px object-contain' />
+                      <img src={avatarImage} alt={preset.name} className='w-16px h-16px object-contain' />
                     ) : isEmoji ? (
-                      <span className='text-14px leading-16px'>{assistant.avatar}</span>
+                      <span className='text-14px leading-16px'>{preset.avatar}</span>
                     ) : (
                       <Robot size='16' />
                     )}
-                    <span>{assistant.name}</span>
+                    <span>{preset.name}</span>
                   </div>
                 </Option>
               );

@@ -6,7 +6,7 @@
 
 import React from 'react';
 import useSWR from 'swr';
-import { usePresetAssistantInfo } from '@renderer/hooks/agent/usePresetAssistantInfo';
+import { usePresetInfo } from '@renderer/hooks/agent/usePresetInfo';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 
 type Props = {
@@ -19,7 +19,7 @@ type Props = {
 
 /**
  * Avatar shown next to a teammate's message bubble. Prefers the sender's preset
- * assistant icon (emoji or svg) over the generic backend logo so preset-backed
+ * icon (emoji or svg) over the generic backend logo so preset-backed
  * teammates keep their persona when messaging others.
  */
 const TeammateMessageAvatar: React.FC<Props> = ({ senderName, senderConversationId, backendLogo }) => {
@@ -28,7 +28,7 @@ const TeammateMessageAvatar: React.FC<Props> = ({ senderName, senderConversation
   const { data: conversation } = useSWR(senderConversationId ? ['team-conversation', senderConversationId] : null, () =>
     getConversationOrNull(senderConversationId!)
   );
-  const { info: presetInfo } = usePresetAssistantInfo(conversation ?? undefined);
+  const { info: presetInfo } = usePresetInfo(conversation ?? undefined);
 
   if (presetInfo) {
     if (presetInfo.isEmoji) {

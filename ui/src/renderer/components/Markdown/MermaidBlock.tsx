@@ -50,10 +50,10 @@ const withResponsiveSvg = (svg: string): string => {
 function MermaidBlock({ code, style, showOpenInPanelButton = true }: MermaidBlockProps) {
   const { t } = useTranslation();
   // 可选地消费预览上下文：mermaid 块可能渲染在 ChatLayout（预览 provider）之外
-  // 的表面（桌宠 / 知识库 / 助手 / 更新说明等），此时 context 为 null，仍内联渲染
+  // 的表面（桌宠 / 知识库 / 设定 / 更新说明等），此时 context 为 null，仍内联渲染
   // 图表，仅隐藏「在预览面板打开」入口。
   // Optionally consume the preview context: a mermaid block can render outside
-  // ChatLayout's preview provider (companion / knowledge / assistants / release
+  // ChatLayout's preview provider (companion / knowledge / presets / release
   // notes), where context is null — we still render the diagram inline and only
   // hide the "open in preview panel" affordance.
   const previewContext = usePreviewContextOptional();

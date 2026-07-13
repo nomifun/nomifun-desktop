@@ -7,13 +7,20 @@ mod repository;
 pub use database::{Database, init_database, init_database_memory};
 pub use error::DbError;
 pub use models::{
-    AgentMetadataRow, AssistantOverrideRow, AssistantRow, AssistantTagRow, ConnectorCredentialRow,
-    ConversationArtifactRow, CreateAssistantParams, CreateAssistantTagParams,
+    AgentMetadataRow, ConnectorCredentialRow,
+    ConversationArtifactRow,
     CreateKnowledgeTagParams, CreationTaskRow, CronJobRunRow, KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, UpdateAgentHandshakeParams,
-    UpdateAssistantParams, UpdateAssistantTagParams, UpdateKnowledgeTagParams,
-    UpsertAgentMetadataParams, UpsertOverrideParams, UpsertSkillTagParams, WebhookRow,
+    UpdateKnowledgeTagParams,
+    UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
     WorkshopAssetRow, WorkshopCanvasRow,
+};
+pub use models::{
+    CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
+    PresetKnowledgeBaseRow, PresetKnowledgePolicyRow, PresetLocalizationRow,
+    PresetModelPreferenceRow, PresetRecord, PresetRow, PresetSkillBindingRow,
+    PresetTagBindingRow, PresetTagRow, PresetUserStateRow, PresetWriteParams,
+    UpdatePresetTagParams, UpsertPresetStateParams,
 };
 pub use models::{ModelProfileRow, UpsertModelProfileParams};
 pub use repository::channel::UpdatePluginStatusParams;
@@ -27,16 +34,14 @@ pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
 pub use repository::{
     CreateAcpSessionParams, CreateTerminalParams, GLOBAL_CAP, IAcpSessionRepository,
-    IAgentMetadataRepository, IAssistantOverrideRepository, IAssistantRepository,
-    IAssistantTagRepository, IAttachmentRepository, IChannelRepository,
+    IAgentMetadataRepository, IAttachmentRepository, IChannelRepository,
     IClientPreferenceRepository, ICompanionTokenRepository, IConnectorCredentialRepository,
     IConversationRepository, ICronRepository, IIdmmInterventionRepository, IKnowledgeRepository,
     IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository, IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
     ListRequirementsParams, PER_TARGET_CAP, PersistedSessionState, SaveRuntimeStateParams,
-    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAssistantOverrideRepository,
-    SqliteAssistantRepository, SqliteAssistantTagRepository, SqliteAttachmentRepository,
+    SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAttachmentRepository,
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteCompanionTokenRepository,
     SqliteConnectorCredentialRepository, SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
@@ -44,6 +49,10 @@ pub use repository::{
     SqliteRemoteAgentRepository, SqliteRequirementRepository, SqliteSettingsRepository,
     SqliteSkillTagRepository, SqliteTagSettingRepository, SqliteTerminalRepository,
     SqliteUserRepository, SqliteWebhookRepository, TTL_MS,
+};
+pub use repository::{
+    IPresetRepository, IPresetStateRepository, IPresetTagRepository,
+    SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository,
 };
 // Orchestration (智能编排) repository traits + sqlite impls + params.
 pub use repository::{

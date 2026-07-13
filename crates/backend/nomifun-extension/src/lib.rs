@@ -25,7 +25,7 @@ pub mod types;
 pub mod watcher;
 mod zip_safe;
 
-pub use classifier::{AssistantClassifier, AssistantRuleDispatcher};
+pub use classifier::{PresetClassifier, PresetRuleDispatcher};
 pub use constants::*;
 pub use dependency::{DependencyIssue, DependencyValidationResult, validate_dependencies};
 pub use error::ExtensionError;
@@ -58,6 +58,6 @@ pub use skill_service::{
 };
 pub use skill_service::{builtin_skills_corpus_fingerprint, builtin_skills_materialize_version};
 pub use skill_service::{
-    delete_assistant_rule, delete_assistant_skill, read_assistant_rule, read_assistant_skill, write_assistant_rule,
-    write_assistant_skill,
+    delete_preset_rule, delete_preset_skill, read_preset_rule, read_preset_skill, write_preset_rule,
+    write_preset_skill,
 };

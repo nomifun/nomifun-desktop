@@ -95,7 +95,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements (intentionally **no foreign key** to conversations — the loop survives conversation deletion) |
 | `ICronRepository` | `SqliteCronRepository` | Scheduled tasks and their timezone-normalized expressions |
 | `ITerminalRepository` | `SqliteTerminalRepository` | Terminal session metadata |
-| `IAssistantRepository` / `IAssistantOverrideRepository` | `SqliteAssistantRepository` / `SqliteAssistantOverrideRepository` | Assistants and per-installation overrides |
+| `IPresetRepository` / `IPresetStateRepository` | `SqlitePresetRepository` / `SqlitePresetRepository` | Relational presets and per-user selection state |
 | `IChannelRepository` | `SqliteChannelRepository` | External chat-channel plugin configs (Telegram / Lark / DingTalk / WeChat) |
 | `IClientPreferenceRepository` | `SqliteClientPreferenceRepository` | Per-client preferences |
 | `ITagSettingRepository` | `SqliteTagSettingRepository` | Tag-based grouping (used by AutoWork) |

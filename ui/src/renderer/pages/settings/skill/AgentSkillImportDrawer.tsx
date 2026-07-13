@@ -33,7 +33,7 @@ type AgentSkillImportDrawerProps = {
   onClose: () => void;
   existingSkillNames?: string[];
   onImported?: (skills: ImportedAgentSkill[]) => Promise<void> | void;
-  mode?: 'library' | 'assistant';
+  mode?: 'library' | 'preset';
   loadSources?: () => Promise<ExternalAgentSkillSource[]>;
   importSkills?: (rows: AgentSkillImportRow[]) => Promise<ImportedAgentSkill[]>;
 };
@@ -139,10 +139,10 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
       }
       await onImported?.(imported);
       message.success(
-        mode === 'assistant'
-          ? t('settings.agentSkillImport.assistantSuccess', {
+        mode === 'preset'
+          ? t('settings.agentSkillImport.presetSuccess', {
               count: imported.length,
-              defaultValue: `Added ${imported.length} skills to this assistant`,
+              defaultValue: `Added ${imported.length} skills to this preset`,
             })
           : t('settings.agentSkillImport.librarySuccess', {
               count: imported.length,
@@ -201,8 +201,8 @@ const AgentSkillImportDrawer: React.FC<AgentSkillImportDrawerProps> = ({
               icon={<ImportAndExport size={14} fill='currentColor' />}
               data-testid='btn-confirm-agent-skill-import'
             >
-              {mode === 'assistant'
-                ? t('settings.agentSkillImport.addToAssistant', { defaultValue: 'Add to assistant' })
+              {mode === 'preset'
+                ? t('settings.agentSkillImport.addToPreset', { defaultValue: 'Add to preset' })
                 : t('settings.agentSkillImport.importSelected', { defaultValue: 'Import selected' })}
             </Button>
           </div>

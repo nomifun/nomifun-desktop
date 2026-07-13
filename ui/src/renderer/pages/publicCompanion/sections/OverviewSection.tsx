@@ -13,10 +13,12 @@ import type { ArcoMessageInstance } from '@renderer/utils/ui/useArcoMessage';
 import { ipcBridge } from '@/common';
 import { SectionCard, StatusPill } from '../components';
 import PublicAgentModelPicker from '../PublicAgentModelPicker';
+import PresetApplyControl from '@/renderer/components/preset/PresetApplyControl';
 
 interface Props {
   agent: IPublicAgent;
   patch: (p: IPublicAgentPatch) => Promise<IPublicAgent | undefined>;
+  reload: () => Promise<void>;
   message: ArcoMessageInstance;
   onDeleted: () => void;
 }
@@ -39,7 +41,7 @@ const StatTile: React.FC<{ icon: React.ReactNode; value: React.ReactNode; label:
 );
 
 /** 概览 —— 状态、关键指标、启停开关、危险区（删除）。 */
-const OverviewSection: React.FC<Props> = ({ agent, patch, message, onDeleted }) => {
+const OverviewSection: React.FC<Props> = ({ agent, patch, reload, message, onDeleted }) => {
   const { t } = useTranslation();
   const modelReady = Boolean(agent.model.provider_id && agent.model.model);
 
@@ -101,6 +103,23 @@ const OverviewSection: React.FC<Props> = ({ agent, patch, message, onDeleted }) 
 
   return (
     <div className='flex flex-col gap-16px'>
+      <SectionCard
+        icon={<SafeRetrieval theme='outline' size='16' fill='currentColor' className='block' style={{ lineHeight: 0 }} />}
+        title={t('publicCompanion.overview.presetTitle', { defaultValue: '复用设定' })}
+        desc={t('publicCompanion.overview.presetDesc', {
+          defaultValue: '一键复刻 Agent、模型、Skill、知识范围和服务指令；应用时固化为快照。',
+        })}
+      >
+        <PresetApplyControl
+          target='public_companion'
+          appliedPreset={agent.applied_preset}
+          onApply={async (presetId, locale) => {
+            await ipcBridge.publicAgent.applyPreset.invoke({ id: agent.id, preset_id: presetId, locale });
+            await reload();
+          }}
+        />
+      </SectionCard>
+
       {/* 对话模型 —— 一切回复的前置条件，置顶就地可配（本域唯一入口）。未指定则用系统默认。 */}
       <SectionCard
         icon={<Message theme='outline' size='16' fill='currentColor' className='block' style={{ lineHeight: 0 }} />}

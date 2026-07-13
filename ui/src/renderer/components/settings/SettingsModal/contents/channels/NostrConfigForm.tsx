@@ -113,7 +113,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
   const handleApprovePairing = async (code: string) => {
     try {
       await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.assistant.pairingApproved', 'Pairing approved'));
+      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
       await loadPendingPairings();
       await loadAuthorizedUsers();
     } catch (error: unknown) {
@@ -150,7 +150,7 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
         <div className='text-12px text-t-tertiary'>{t('settings.nostr.tokensDesc', 'Provide a Nostr private key (nsec or hex) — it is the bot identity — and a comma-separated list of relay URLs. Encrypted (NIP-04) direct messages only.')}</div>
         <div>
           <Button type='outline' loading={testLoading} onClick={handleTestConnection} disabled={credentialsLocked}>
-            {t('settings.assistant.testConnection', 'Test')}
+            {t('settings.channels.testConnection', 'Test')}
           </Button>
         </div>
       </div>
@@ -158,24 +158,24 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
       {pluginStatus?.enabled && authorizedUsers.length === 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <div className='flex items-center justify-between mb-12px'>
-            <h3 className='text-14px font-500 text-t-primary m-0'>{t('settings.assistant.pendingPairings', 'Pending Pairing Requests')}</h3>
+            <h3 className='text-14px font-500 text-t-primary m-0'>{t('settings.channels.pendingPairings', 'Pending Pairing Requests')}</h3>
             <Button size='mini' type='text' icon={<Refresh size={14} />} loading={pairingLoading} onClick={loadPendingPairings}>{t('common.refresh', 'Refresh')}</Button>
           </div>
           {pairingLoading ? (
             <div className='flex justify-center py-24px'><Spin /></div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.assistant.noPendingPairings', 'No pending pairing requests')} />
+            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (
                 <div key={pairing.code} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
                   <div className='flex-1'>
                     <div className='text-14px font-500 text-t-primary'>{pairing.display_name || t('common.unknownUser')}</div>
-                    <div className='text-12px text-t-tertiary mt-4px'>{t('settings.assistant.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code> · {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}</div>
+                    <div className='text-12px text-t-tertiary mt-4px'>{t('settings.channels.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code> · {t('settings.channels.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}</div>
                   </div>
                   <div className='flex items-center gap-8px'>
-                    <Button type='primary' size='small' icon={<CheckOne size={14} />} onClick={() => handleApprovePairing(pairing.code)}>{t('settings.assistant.approve', 'Approve')}</Button>
-                    <Button type='secondary' size='small' status='danger' icon={<CloseOne size={14} />} onClick={() => handleRejectPairing(pairing.code)}>{t('settings.assistant.reject', 'Reject')}</Button>
+                    <Button type='primary' size='small' icon={<CheckOne size={14} />} onClick={() => handleApprovePairing(pairing.code)}>{t('settings.channels.approve', 'Approve')}</Button>
+                    <Button type='secondary' size='small' status='danger' icon={<CloseOne size={14} />} onClick={() => handleRejectPairing(pairing.code)}>{t('settings.channels.reject', 'Reject')}</Button>
                   </div>
                 </div>
               ))}
@@ -187,14 +187,14 @@ const NostrConfigForm: React.FC<NostrConfigFormProps> = ({ pluginStatus, channel
       {pluginStatus?.enabled && authorizedUsers.length > 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
           <div className='flex items-center justify-between mb-12px'>
-            <h3 className='text-14px font-500 text-t-primary m-0'>{t('settings.assistant.authorizedUsers', 'Authorized Users')}</h3>
+            <h3 className='text-14px font-500 text-t-primary m-0'>{t('settings.channels.authorizedUsers', 'Authorized Users')}</h3>
             <Button size='mini' type='text' icon={<Refresh size={14} />} loading={usersLoading} onClick={loadAuthorizedUsers}>{t('common.refresh', 'Refresh')}</Button>
           </div>
           <div className='flex flex-col gap-12px'>
             {authorizedUsers.map((user) => (
               <div key={user.id} className='flex items-center justify-between bg-fill-2 rd-8px p-12px'>
                 <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
-                <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
+                <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
                   <Button type='text' status='danger' size='small' icon={<Delete size={16} />} onClick={() => handleRevokeUser(user.id)} />
                 </Tooltip>
               </div>

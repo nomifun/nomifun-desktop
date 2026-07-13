@@ -76,8 +76,7 @@ Cron 语法速查 (5 字段 —— 秒字段会自动添加)：
   上检测到的任何一个)。该任务记录后端标签并端到端使用 ACP。
 - **Nomi (内置)** —— 使用 Nomi 自有引擎以及你选择的
   provider/model。
-- **Preset assistant** —— 预先配置的 agent 人格；该任务记录
-  assistant id。
+- **设定** —— 可复用的启动配置；任务记录设定 id、revision 与解析快照。
 
 **Advanced** 部分让你覆盖 workspace (agent 的工作目录)、model
 以及任意的 `config_options` 键值对，它们会被转发给 agent 工厂。

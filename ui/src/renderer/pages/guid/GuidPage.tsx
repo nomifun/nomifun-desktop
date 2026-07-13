@@ -18,7 +18,7 @@ import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 import { CUSTOM_AVATAR_IMAGE_MAP } from './constants';
 import AgentPillBar from './components/AgentPillBar';
 import ComposerEntryStrip, { type GuidActiveSkill } from './components/ComposerEntryStrip';
-import GuidAssistantEditorHost from './components/GuidAssistantEditorHost';
+import GuidPresetEditorHost from './components/GuidPresetEditorHost';
 import { AgentPillBarSkeleton } from './components/GuidSkeleton';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
@@ -30,7 +30,7 @@ import GuidModelSelector from './components/GuidModelSelector';
 import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, { MentionSelectorBadge } from './components/MentionDropdown';
 import QuickActionButtons from './components/QuickActionButtons';
-import SummonDrawer from './components/SummonDrawer';
+import PresetPickerDrawer from './components/PresetPickerDrawer';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
@@ -54,7 +54,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { mutate as swrMutate } from 'swr';
-import type { Assistant } from '@/common/types/agent/assistantTypes';
+import type { Preset } from '@/common/types/agent/presetTypes';
 import styles from './index.module.css';
 
 const GuidPage: React.FC = () => {
@@ -70,7 +70,7 @@ const GuidPage: React.FC = () => {
   }, []);
   const location = useLocation();
   const guidContainerRef = useRef<HTMLDivElement>(null);
-  const openAssistantDetailsRef = useRef<(() => void) | null>(null);
+  const openPresetDetailsRef = useRef<(() => void) | null>(null);
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
 
   const localeKey = resolveLocaleKey(i18n.language);
@@ -78,7 +78,7 @@ const GuidPage: React.FC = () => {
 
   // --- Drawer state ---
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [drawerMode, setDrawerMode] = useState<'assistant' | 'skills'>('assistant');
+  const [drawerMode, setDrawerMode] = useState<'preset' | 'skills'>('preset');
   // 「agent 集群」模式（需求1）：composer 顶部 toggle。选中后发送即在新会话 extra
   // 落 agent_cluster_mode=true——主 agent 对每个任务刻意评估是否开多 agent 集群，
   // 太简单则先向用户说明使用简单模式的原因。仅 nomi 主 agent 路径消费。
@@ -92,7 +92,7 @@ const GuidPage: React.FC = () => {
   // All available skills (builtin auto-injected + user-imported custom) merged
   // into one catalog for the action-row menu. Auto-injected skills default to
   // checked; the rest are opt-in per conversation (or pre-checked when the
-  // active assistant declares them in `enabled_skills`).
+  // active preset declares them in `included_skills`).
   const [allSkills, setAllSkills] = useState<Array<{ name: string; description: string; isAuto: boolean }>>([]);
   const [guidDisabledBuiltinSkills, setGuidDisabledBuiltinSkills] = useState<string[] | undefined>(undefined);
   const [guidEnabledSkills, setGuidEnabledSkills] = useState<string[] | undefined>(undefined);
@@ -195,14 +195,14 @@ const GuidPage: React.FC = () => {
   }, [activeCollaborators, mainModelRef]);
   const orchestratorApprovalMode = clusterApprovalMode;
 
-  const navState = location.state as { resetAssistant?: boolean; selectedAgentKey?: string } | null;
-  const resetAssistantRequested = navState?.resetAssistant === true;
+  const navState = location.state as { resetPreset?: boolean; selectedAgentKey?: string } | null;
+  const resetPresetRequested = navState?.resetPreset === true;
   const preselectAgentKey = navState?.selectedAgentKey;
   const agentSelection = useGuidAgentSelection({
     modelList: modelSelection.modelList,
     isGoogleAuth: modelSelection.isGoogleAuth,
     localeKey,
-    resetAssistant: resetAssistantRequested,
+    resetPreset: resetPresetRequested,
     preselectAgentKey,
     locationKey: location.key,
   });
@@ -248,9 +248,6 @@ const GuidPage: React.FC = () => {
     // Agent helpers
     findAgentByKey: agentSelection.findAgentByKey,
     getEffectiveAgentType: agentSelection.getEffectiveAgentType,
-    resolvePresetRulesAndSkills: agentSelection.resolvePresetRulesAndSkills,
-    resolveEnabledSkills: agentSelection.resolveEnabledSkills,
-    resolveDisabledBuiltinSkills: agentSelection.resolveDisabledBuiltinSkills,
     guidDisabledBuiltinSkills,
     guidEnabledSkills,
     availableMcpServers,
@@ -390,9 +387,9 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleSelectAssistant = useCallback(
-    (assistantId: string) => {
-      agentSelection.setSelectedAgentKey(assistantId);
+  const handleSelectPreset = useCallback(
+    (presetId: string) => {
+      agentSelection.setSelectedAgentKey(presetId);
       mention.setMentionOpen(false);
       mention.setMentionQuery(null);
       mention.setMentionSelectorOpen(false);
@@ -409,38 +406,32 @@ const GuidPage: React.FC = () => {
 
   // Typewriter placeholder
   const typewriterPlaceholder = useTypewriterPlaceholder(t('conversation.welcome.placeholder'));
-  const selectedAssistantRecord = useMemo(() => {
-    if (!agentSelection.is_presetAgent || !agentSelection.selectedAgentInfo?.custom_agent_id) return undefined;
-    const selectedId = agentSelection.selectedAgentInfo.custom_agent_id;
-    const strippedId = selectedId.replace(/^builtin-/, '');
-    const candidates = new Set([selectedId, `builtin-${strippedId}`, strippedId]);
-    return agentSelection.assistants.find((item) => candidates.has(item.id));
-  }, [agentSelection.assistants, agentSelection.is_presetAgent, agentSelection.selectedAgentInfo?.custom_agent_id]);
+  const selectedPresetRecord = useMemo(() => {
+    if (!agentSelection.is_presetAgent || !agentSelection.selectedAgentInfo?.preset_id) return undefined;
+    return agentSelection.presets.find((item) => item.id === agentSelection.selectedAgentInfo?.preset_id);
+  }, [agentSelection.presets, agentSelection.is_presetAgent, agentSelection.selectedAgentInfo?.preset_id]);
 
-  // Sync disabledBuiltinSkills + enabledSkills from preset assistant config
+  // Sync disabledBuiltinSkills + enabledSkills from preset preset config
   useEffect(() => {
-    if (agentSelection.is_presetAgent && selectedAssistantRecord) {
-      setGuidDisabledBuiltinSkills(selectedAssistantRecord.disabled_builtin_skills ?? []);
-      setGuidEnabledSkills(selectedAssistantRecord.enabled_skills ?? []);
+    if (agentSelection.is_presetAgent && selectedPresetRecord) {
+      setGuidDisabledBuiltinSkills(selectedPresetRecord.excluded_auto_skills);
+      setGuidEnabledSkills(selectedPresetRecord.included_skills.map((item) => item.skill_name));
     } else {
       setGuidDisabledBuiltinSkills(undefined);
       setGuidEnabledSkills(undefined);
     }
-  }, [agentSelection.is_presetAgent, selectedAssistantRecord]);
+  }, [agentSelection.is_presetAgent, selectedPresetRecord]);
 
   const heroTitle = useMemo(() => {
     if (!agentSelection.is_presetAgent) return t('conversation.welcome.title');
-    const i18nName = selectedAssistantRecord?.name_i18n?.[localeKey];
+    const i18nName = selectedPresetRecord?.name_i18n?.[localeKey];
     if (i18nName) return i18nName;
     return mention.selectedAgentLabel || t('conversation.welcome.title');
-  }, [agentSelection.is_presetAgent, selectedAssistantRecord, localeKey, mention.selectedAgentLabel, t]);
-  const selectedAssistantAvatar = useMemo(() => {
+  }, [agentSelection.is_presetAgent, selectedPresetRecord, localeKey, mention.selectedAgentLabel, t]);
+  const selectedPresetAvatar = useMemo(() => {
     if (!agentSelection.is_presetAgent) return null;
-    const selectedId = agentSelection.selectedAgentInfo?.custom_agent_id;
-    const strippedId = selectedId?.replace(/^builtin-/, '');
-    const candidates = new Set(selectedId && strippedId ? [selectedId, `builtin-${strippedId}`, strippedId] : []);
-    const selectedAssistant = agentSelection.assistants.find((item) => candidates.has(item.id));
-    const avatarValue = selectedAssistant?.avatar?.trim() || agentSelection.selectedAgentInfo?.avatar?.trim();
+    const selectedPreset = agentSelection.presets.find((item) => item.id === agentSelection.selectedAgentInfo?.preset_id);
+    const avatarValue = selectedPreset?.avatar?.trim() || agentSelection.selectedAgentInfo?.avatar?.trim();
     if (!avatarValue) return { kind: 'icon' as const };
     const mappedAvatar = CUSTOM_AVATAR_IMAGE_MAP[avatarValue];
     const resolvedAvatar = resolveExtensionAssetUrl(avatarValue);
@@ -454,13 +445,13 @@ const GuidPage: React.FC = () => {
     }
     return { kind: 'emoji' as const, value: avatarValue };
   }, [
-    agentSelection.assistants,
+    agentSelection.presets,
     agentSelection.is_presetAgent,
     agentSelection.selectedAgentInfo?.avatar,
-    agentSelection.selectedAgentInfo?.custom_agent_id,
+    agentSelection.selectedAgentInfo?.preset_id,
   ]);
   // Reset guid-local UI state before paint so same-route navigations do not
-  // briefly show the previous draft or preset assistant layout.
+  // briefly show the previous draft or preset preset layout.
   useLayoutEffect(() => {
     guidInput.setInput('');
     guidInput.setFiles([]);
@@ -479,7 +470,7 @@ const GuidPage: React.FC = () => {
     location.state,
   ]);
 
-  // Clear resetAssistant from location.state after the hook has consumed it,
+  // Clear resetPreset from location.state after the hook has consumed it,
   // so that re-renders don't re-trigger the reset logic.
   //
   // Must go through React Router's navigate — raw window.history.replaceState
@@ -488,19 +479,20 @@ const GuidPage: React.FC = () => {
   // next hard reload, the browser would then request '/guid' directly from
   // the dev server (which has no SPA fallback) and 404.
   useEffect(() => {
-    if (!resetAssistantRequested && !preselectAgentKey) return;
+    if (!resetPresetRequested && !preselectAgentKey) return;
     navigate(`${location.pathname}${location.search}${location.hash}`, { replace: true, state: null });
-  }, [resetAssistantRequested, preselectAgentKey, location.pathname, location.search, location.hash, navigate]);
+  }, [resetPresetRequested, preselectAgentKey, location.pathname, location.search, location.hash, navigate]);
 
-  const currentPresetAgentType = selectedAssistantRecord?.preset_agent_type || 'gemini';
-  // Mirrors AssistantEditDrawer's Main Agent options — detected execution
+  const currentPresetAgentId =
+    selectedPresetRecord?.preferred_agent_id || selectedPresetRecord?.agent_preferences[0]?.agent_id;
+  // Mirrors PresetEditDrawer's Main Agent options — detected execution
   // engines from AgentPillBar's data source, so avatars resolve the same way.
   const agentSwitcherItems = useMemo(() => {
-    if (!agentSelection.availableAgents) return [];
+    if (!agentSelection.availableAgents || !selectedPresetRecord) return [];
     return agentSelection.availableAgents
       .filter((a) => !a.is_preset && a.agent_type !== 'remote')
       .map((a) => {
-        const key = a.backend || a.agent_type;
+        const key = a.id || a.backend || a.agent_type;
         const extensionAvatar = a.isExtension ? resolveExtensionAssetUrl(a.avatar) : undefined;
         const logo =
           extensionAvatar ||
@@ -514,11 +506,11 @@ const GuidPage: React.FC = () => {
           key,
           label: a.name,
           logo,
-          isCurrent: key === currentPresetAgentType,
+          isCurrent: key === currentPresetAgentId,
           isExtension: a.isExtension,
         };
       });
-  }, [agentSelection.availableAgents, currentPresetAgentType]);
+  }, [agentSelection.availableAgents, currentPresetAgentId, selectedPresetRecord]);
 
   const effectiveAgentRecord = useMemo(() => {
     return agentSelection.availableAgents?.find(
@@ -537,40 +529,31 @@ const GuidPage: React.FC = () => {
       }),
     [effectiveAgentRecord, agentSelection.currentEffectiveAgentInfo.agent_type]
   );
-  const handlePresetAgentTypeSwitch = useCallback(
-    async (nextType: string) => {
-      // Only preset assistants (is_preset=true) expose `custom_agent_id` here, so this id is
-      // always backed by the `/api/assistants` store. ACP custom agents are a separate store
-      // (`ipcBridge.acpConversation.updateCustomAgent`) and do not carry `preset_agent_type`.
-      // See commit 13858579d on main for the legacy single-store fix that this split already covers.
-      const assistantId = agentSelection.selectedAgentInfo?.custom_agent_id;
-      if (!assistantId || nextType === currentPresetAgentType) return;
+  const handlePresetAgentSwitch = useCallback(
+    async (nextAgentId: string) => {
+      const presetId = agentSelection.selectedAgentInfo?.preset_id;
+      if (!presetId || nextAgentId === currentPresetAgentId) return;
       try {
-        // Optimistically patch the shared `assistants.list` SWR cache so the hero
-        // avatar/logo reflect the new preset_agent_type on the same frame as the
-        // click. Without this, downstream memos (selectedAssistantRecord →
-        // currentEffectiveAgentInfo → effectiveAgentLogo) lag a network roundtrip
-        // behind the user action.
         await swrMutate(
-          'assistants.list',
-          (prev: Assistant[] | undefined) =>
-            prev?.map((a) => (a.id === assistantId ? { ...a, preset_agent_type: nextType } : a)),
+          'presets.list',
+          (prev: Preset[] | undefined) =>
+            prev?.map((item) => (item.id === presetId ? { ...item, preferred_agent_id: nextAgentId } : item)),
           { revalidate: false }
         );
-        await ipcBridge.assistants.update.invoke({ id: assistantId, preset_agent_type: nextType });
-        await Promise.all([swrMutate('assistants.list'), agentSelection.refreshCustomAgents()]);
+        await ipcBridge.presets.setState.invoke({ id: presetId, preferred_agent_id: nextAgentId });
+        await Promise.all([swrMutate('presets.list'), agentSelection.refreshCustomAgents()]);
         const agent_name =
-          agentSelection.availableAgents?.find((a) => (a.backend || a.agent_type) === nextType)?.name || nextType;
+          agentSelection.availableAgents?.find((a) => a.id === nextAgentId)?.name || nextAgentId;
         Message.success(t('guid.switchedToAgent', { agent: agent_name }));
       } catch (error) {
-        console.error('[GuidPage] Failed to switch preset agent type:', error);
+        console.error('[GuidPage] Failed to switch preset agent preference:', error);
         Message.error(t('common.failed', { defaultValue: 'Failed' }));
       }
     },
-    [agentSelection, currentPresetAgentType, t]
+    [agentSelection, currentPresetAgentId, selectedPresetRecord, t]
   );
 
-  // Resolve the effective agent type once — covers both direct selection and preset assistants
+  // Resolve the effective agent type once — covers both direct selection and preset presets
   const effectiveAgentType = agentSelection.is_presetAgent
     ? agentSelection.currentEffectiveAgentInfo.agent_type
     : agentSelection.selectedAgent;
@@ -659,13 +642,13 @@ const GuidPage: React.FC = () => {
       onModeSelect={agentSelection.setSelectedMode}
       is_presetAgent={agentSelection.is_presetAgent}
       selectedAgentInfo={agentSelection.selectedAgentInfo}
-      assistants={agentSelection.assistants}
+      presets={agentSelection.presets}
       localeKey={localeKey}
       onClosePresetTag={() => agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey)}
       agentLogo={effectiveAgentLogo}
       agentSwitcherItems={agentSwitcherItems}
       onAgentSwitch={(key) => {
-        handlePresetAgentTypeSwitch(key).catch((err) => console.error('Failed to switch agent type:', err));
+        handlePresetAgentSwitch(key).catch((err) => console.error('Failed to switch preset agent:', err));
       }}
       mcpServers={availableMcpServers}
       selectedMcpServerIds={guidSelectedMcpServerIds ?? []}
@@ -705,7 +688,7 @@ const GuidPage: React.FC = () => {
   }, []);
 
   const handleRegisterOpenDetails = useCallback((openDetails: (() => void) | null) => {
-    openAssistantDetailsRef.current = openDetails;
+    openPresetDetailsRef.current = openDetails;
   }, []);
 
   return (
@@ -732,7 +715,7 @@ const GuidPage: React.FC = () => {
                 selectedAgentKey={agentSelection.selectedAgentKey}
                 getAgentKey={agentSelection.getAgentKey}
                 onSelectAgent={handleSelectAgentFromPillBar}
-                suppressSelectionAnimation={resetAssistantRequested}
+                suppressSelectionAnimation={resetPresetRequested}
               />
             ) : null}
 
@@ -771,9 +754,9 @@ const GuidPage: React.FC = () => {
               entryStrip={
                 <ComposerEntryStrip
                   isPresetAgent={agentSelection.is_presetAgent}
-                  assistantLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
-                  assistantAvatar={selectedAssistantAvatar ?? undefined}
-                  onSummon={() => { setDrawerMode('assistant'); setDrawerOpen(true); }}
+                  presetLabel={heroTitle !== t('conversation.welcome.title') ? heroTitle : undefined}
+                  presetAvatar={selectedPresetAvatar ?? undefined}
+                  onChoosePreset={() => { setDrawerMode('preset'); setDrawerOpen(true); }}
                   onAdjustSkills={handleOpenSkillsDrawer}
                   onFree={() => { agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey); }}
                   activeSkillCount={activeSkillCount}
@@ -787,8 +770,8 @@ const GuidPage: React.FC = () => {
             <GuidResourceCards />
 
             {/* Editor host (modals + example prompts + fallback notice) */}
-            <GuidAssistantEditorHost
-              assistants={agentSelection.assistants}
+            <GuidPresetEditorHost
+              presets={agentSelection.presets}
               localeKey={localeKey}
               selectedAgentKey={agentSelection.selectedAgentKey}
               selectedAgentInfo={agentSelection.selectedAgentInfo}
@@ -804,15 +787,15 @@ const GuidPage: React.FC = () => {
           <GuidCompanionPosterPreview />
         </div>
 
-        {/* SummonDrawer (right-side) */}
-        <SummonDrawer
+        {/* PresetPickerDrawer (right-side) */}
+        <PresetPickerDrawer
           visible={drawerOpen}
           mode={drawerMode}
           onModeChange={setDrawerMode}
           onClose={() => setDrawerOpen(false)}
-          assistants={agentSelection.assistants}
+          presets={agentSelection.presets}
           localeKey={localeKey}
-          onSelectAssistant={(id) => { handleSelectAssistant(`custom:${id}`); setDrawerOpen(false); }}
+          onSelectPreset={(id) => { handleSelectPreset(`preset:${id}`); setDrawerOpen(false); }}
           onFree={() => { agentSelection.setSelectedAgentKey(agentSelection.defaultAgentKey); setDrawerOpen(false); }}
           allSkills={allSkills}
           enabledSkills={guidEnabledSkills ?? []}

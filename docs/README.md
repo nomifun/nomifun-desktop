@@ -38,7 +38,7 @@ docs/
 ```
 
 Current top-level user surfaces include conversations, terminals, model
-management, assistants, MCP, open capabilities, requirements/AutoWork,
+management, presets, MCP, open capabilities, requirements/AutoWork,
 scheduled tasks, companions, knowledge, and feature-gated computer/browser
 automation. The frontend source of truth is
 `ui/src/renderer/components/layout/Router.tsx`.

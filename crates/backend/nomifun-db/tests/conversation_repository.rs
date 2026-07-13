@@ -27,6 +27,9 @@ fn make_conversation(suffix: &str) -> ConversationRow {
         pinned: false,
         pinned_at: None,
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         created_at: now,
         updated_at: now,
     }

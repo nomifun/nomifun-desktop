@@ -23,7 +23,7 @@ pub const STATE_PERSIST_DEBOUNCE_MS: u64 = 500;
 pub const RESERVED_NAME_PREFIXES: &[&str] = &["nomi-", "internal-", "builtin-", "system-"];
 
 /// Preset agent type identifiers.
-pub const PRESET_AGENT_TYPES: &[&str] = &["gemini", "claude", "codex", "codebuddy", "opencode"];
+pub const SUPPORTED_AGENT_BACKENDS: &[&str] = &["gemini", "claude", "codex", "codebuddy", "opencode"];
 
 // ---------------------------------------------------------------------------
 // Lifecycle hook timeouts (seconds)
@@ -65,17 +65,17 @@ pub const BUILTIN_SKILLS_DIR_NAME: &str = "builtin-skills";
 pub const BUILTIN_RULES_DIR_NAME: &str = "builtin-rules";
 
 /// Subdirectory inside the built-in skills corpus whose children are
-/// auto-injected into every assistant. Historical name was `_builtin`;
+/// auto-injected into every preset. Historical name was `_builtin`;
 /// renamed to `auto-inject` as part of the 2026-04-23 built-in skill
 /// migration (skills are now embedded in the backend binary via
 /// `include_dir!`).
 pub const BUILTIN_AUTO_SKILLS_SUBDIR: &str = "auto-inject";
 
-/// Default subdirectory name for assistant-level rules.
-pub const ASSISTANT_RULES_DIR_NAME: &str = "assistant-rules";
+/// Default subdirectory name for preset-level rules.
+pub const PRESET_RULES_DIR_NAME: &str = "preset-rules";
 
-/// Default subdirectory name for assistant-level skills.
-pub const ASSISTANT_SKILLS_DIR_NAME: &str = "assistant-skills";
+/// Default subdirectory name for preset-level skills.
+pub const PRESET_SKILLS_DIR_NAME: &str = "preset-skills";
 
 /// Filename that identifies a skill directory.
 pub const SKILL_MANIFEST_FILE: &str = "SKILL.md";
@@ -126,9 +126,9 @@ mod tests {
     }
 
     #[test]
-    fn test_preset_agent_types_non_empty() {
-        assert!(!PRESET_AGENT_TYPES.is_empty());
-        assert!(PRESET_AGENT_TYPES.contains(&"claude"));
+    fn test_supported_agent_backends_non_empty() {
+        assert!(!SUPPORTED_AGENT_BACKENDS.is_empty());
+        assert!(SUPPORTED_AGENT_BACKENDS.contains(&"claude"));
     }
 
     #[test]

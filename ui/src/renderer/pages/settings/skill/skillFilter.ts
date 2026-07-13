@@ -1,10 +1,10 @@
 /**
- * Faceted filter for the Skills Hub grid. Mirrors the assistant page's
- * `filterAssistantsByTags` semantics: search text (name + description) AND
+ * Faceted filter for the Skills Hub grid. Mirrors the preset page's
+ * `filterPresetsByTags` semantics: search text (name + description) AND
  * audience-facet AND scenario-facet. Within a facet, a skill matches if it
  * carries ANY of the selected keys (OR). An empty facet imposes no constraint.
  */
-import type { SkillInfo } from '@/renderer/pages/settings/AssistantSettings/types';
+import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 import { resolveSkillDisplay } from './skillDisplay';
 
 /** Selected tag keys per dimension. Empty array = no constraint on that dimension. */

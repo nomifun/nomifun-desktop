@@ -24,7 +24,7 @@ tabs, MCP servers, and local scripts. NomiFun pulls them into one workspace:
 - **Backend-driven automation.** Scheduled tasks, AutoWork requirements,
   terminal sessions, channel integrations, and completion notifications are
   durable backend services, not foreground browser-tab state.
-- **Extensible capability layer.** MCP servers, skills, assistants, browser use,
+- **Extensible capability layer.** MCP servers, skills, presets, browser use,
   computer use, and public remote capability fronts can be composed per runtime.
 - **Local-first deployment.** Run it as a Tauri desktop app or a self-hosted web
   server. You provide the model/API credentials and decide where the data lives.
@@ -58,7 +58,7 @@ For implementation details, see [Architecture Overview](../architecture/overview
 - **Home & conversations** (`/guid`): start and continue AI sessions.
 - **Terminals**: PTY-backed agent or shell sessions inside the app.
 - **Models**: providers, local agent detection, global IDMM/failover settings.
-- **Assistant & Skill**: assistant personas and skill management.
+- **Presets & Skills**: reusable launch configurations and focused capability management.
 - **MCP**: local MCP server configuration.
 - **Open Capabilities**: WebUI remote access, remote MCP, and REST capability
   exposure.

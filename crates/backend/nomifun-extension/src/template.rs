@@ -165,10 +165,10 @@ mod tests {
         let dir = std::env::temp_dir().join("ext_test_file_ref");
         std::fs::create_dir_all(&dir).unwrap();
         let file_path = dir.join("prompt.md");
-        std::fs::write(&file_path, "You are a helpful assistant.").unwrap();
+        std::fs::write(&file_path, "You are a helpful preset.").unwrap();
 
         let result = resolve_file_reference("@file:prompt.md", &dir).unwrap();
-        assert_eq!(result, "You are a helpful assistant.");
+        assert_eq!(result, "You are a helpful preset.");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

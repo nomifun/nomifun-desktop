@@ -1,6 +1,5 @@
 mod acp_session;
 mod agent_metadata;
-mod assistant;
 mod attachment;
 mod channel;
 mod client_preference;
@@ -18,6 +17,7 @@ mod model_profile;
 mod oauth_token;
 mod orchestrator;
 mod provider;
+mod preset;
 mod remote_agent;
 mod requirement;
 mod skill_tag;
@@ -30,13 +30,8 @@ mod workshop;
 
 pub use acp_session::AcpSessionRow;
 pub use agent_metadata::{AgentMetadataRow, UpdateAgentHandshakeParams, UpsertAgentMetadataParams};
-pub use assistant::{
-    AssistantOverrideRow, AssistantRow, AssistantTagRow, CreateAssistantParams,
-    CreateAssistantTagParams, UpdateAssistantParams, UpdateAssistantTagParams,
-    UpsertOverrideParams,
-};
 pub use attachment::AttachmentRow;
-pub use channel::{AssistantSessionRow, AssistantUserRow, ChannelPluginRow, PairingCodeRow};
+pub use channel::{ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ChannelPairingCodeRow};
 pub use client_preference::ClientPreference;
 pub use companion_token::CompanionApiTokenRow;
 pub use connector_credential::ConnectorCredentialRow;
@@ -58,6 +53,7 @@ pub use orchestrator::{
     OrchWorkspaceRow,
 };
 pub use provider::Provider;
+pub use preset::*;
 pub use remote_agent::RemoteAgentRow;
 pub use requirement::{RequirementRow, RequirementRowUpdate, RequirementTagRow};
 pub use skill_tag::{SkillTagRow, UpsertSkillTagParams};

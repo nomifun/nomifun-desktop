@@ -4415,6 +4415,8 @@ mod tests {
     fn sample_member(agent_id: &str) -> FleetMemberInput {
         FleetMemberInput {
             agent_id: agent_id.to_string(),
+            preset_id: None,
+            preset_overrides: None,
             provider_id: Some("prov_x".to_string()),
             model: Some("claude-opus-4-8".to_string()),
             role_hint: Some("researcher".to_string()),

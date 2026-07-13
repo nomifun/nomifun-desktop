@@ -254,7 +254,7 @@ impl WorkerRunner for ConversationWorkerRunner {
             use_model: Some(model),
         };
 
-        let extra = build_worker_extra(
+        let mut extra = build_worker_extra(
             run_id,
             task_id,
             brief,
@@ -265,24 +265,33 @@ impl WorkerRunner for ConversationWorkerRunner {
             role,
             delegation_depth,
         );
+        if let Some(snapshot) = member.preset_snapshot.as_ref() {
+            extra["preset_id"] = Value::String(snapshot.preset_id.clone());
+            extra["preset_revision"] = Value::Number(snapshot.preset_revision.into());
+            extra["preset_snapshot"] = serde_json::to_value(snapshot)
+                .map_err(|e| AppError::Internal(format!("failed to encode preset snapshot: {e}")))?;
+        }
 
         // Create the worker conversation. yolo: unattended orchestrator runs have
         // no approval UI; desktopGateway: full platform tool set. We call create()
         // directly (not via the HTTP route), so the extra keys are honored.
-        let conv = self
-            .conv
-            .create(
-                &self.user_id,
-                CreateConversationRequest {
+        let request = CreateConversationRequest {
                     r#type: AgentType::Nomi,
                     name: Some(format!("Run {run_id} · {task_id}")),
                     model: Some(pwm),
                     source: None,
                     channel_chat_id: None,
+                    preset_id: None,
+                    preset_overrides: None,
                     extra,
-                },
-            )
-            .await?;
+                };
+        let conv = if let Some(snapshot) = member.preset_snapshot.clone() {
+            self.conv
+                .create_from_preset_snapshot(&self.user_id, request, snapshot)
+                .await?
+        } else {
+            self.conv.create(&self.user_id, request).await?
+        };
         let id = conv.id.to_string();
 
         // Report the freshly-created conversation id BEFORE send/await, so the
@@ -474,20 +483,20 @@ impl ConversationWorkerRunner {
 /// live ConversationService.
 ///
 /// **Persona inheritance (P4 Task 3, Change 1):** when the member is
-/// assistant-backed it carries the assistant's persona/rule text in
+/// preset-backed it carries the preset's resolved instructions in
 /// `system_prompt` (Task 2 snapshot). We set it as `extra.preset_rules` — the
 /// nomi factory (`factory/nomi.rs`) merges `preset_rules` AFTER `system_prompt`,
-/// yielding `brief\n\npersona`, so the supervisor brief leads and the assistant
-/// persona follows. We deliberately do NOT overwrite `extra.system_prompt`
+/// yielding `brief\n\ninstructions`, so the supervisor brief leads and the preset
+/// follows. We deliberately do NOT overwrite `extra.system_prompt`
 /// (that is the brief). A blank/whitespace-only persona is dropped (no key).
 ///
 /// **Skills inheritance (P4 Task 3, Change 2):** the worker calls
 /// `ConversationService::create` directly (line above), so the create handler's
 /// skill machinery runs on this `extra`: it consumes the request-only
-/// `preset_enabled_skills` (assistant's enabled skills) and
-/// `exclude_auto_inject_skills` (assistant's disabled builtins), computes the
+/// `preset_enabled_skills` (preset's included skills) and
+/// `exclude_auto_inject_skills` (preset's exclusions), computes the
 /// initial `skills` snapshot via `compute_initial_skills`, and freezes it into
-/// `extra.skills`. So we just forward the assistant's two skill lists here as
+/// `extra.skills`. So we just forward the preset's two skill lists here as
 /// the canonical request-only keys; the existing handler does the rest (no
 /// handler/factory changes). Empty lists are emitted as empty arrays — harmless
 /// (the create handler treats them as "no preset / no exclusion").
@@ -521,14 +530,14 @@ fn build_worker_extra(
         "system_prompt": brief,
         // Request-only skill-shaping inputs consumed by ConversationService::create:
         // preset_enabled_skills ∪ (auto_inject − exclude_auto_inject_skills) → extra.skills.
-        // The assistant's enabled/disabled-builtin snapshot rides through verbatim.
+        // The preset's included/excluded snapshot rides through verbatim.
         "preset_enabled_skills": enabled_skills,
         "exclude_auto_inject_skills": disabled_builtin_skills,
     });
     if let Some(tools) = restricted {
         extra["allowed_tools"] = json!(tools);
     }
-    // Persona: assistant rule text appended after the brief by the nomi factory.
+    // Preset instructions are appended after the brief by the nomi factory.
     if let Some(persona) = persona.map(str::trim).filter(|s| !s.is_empty()) {
         extra["preset_rules"] = json!(persona);
     }
@@ -1011,6 +1020,9 @@ mod tests {
         FleetMember {
             id: "fm_1".to_owned(),
             agent_id: "agent_x".to_owned(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: provider_id.map(str::to_owned),
             model: model.map(str::to_owned),
             role_hint: None,

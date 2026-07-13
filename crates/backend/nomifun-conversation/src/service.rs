@@ -133,6 +133,10 @@ pub struct ConversationService {
     /// mounted into the workspace at task start and surfaced to the agent
     /// via `extra.knowledge_mounts` / `extra.knowledge_writeback`.
     knowledge_service: Arc<RwLock<Option<Arc<nomifun_knowledge::KnowledgeService>>>>,
+    /// Unified preset resolver. When a create request carries `preset_id`, the
+    /// server resolves and freezes the preset before any model/skill/knowledge
+    /// shaping runs; clients cannot inject a forged snapshot.
+    preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     /// Per-conversation timestamp (ms) of the most recent USER-initiated
     /// cancel (`POST /api/conversations/{id}/cancel`). AutoWork's orchestrator
@@ -183,6 +187,7 @@ impl ConversationService {
             cron_service: Arc::new(RwLock::new(None)),
             mcp_server_repo: Arc::new(RwLock::new(None)),
             knowledge_service: Arc::new(RwLock::new(None)),
+            preset_service: Arc::new(RwLock::new(None)),
             runtime_state: Arc::new(ConversationRuntimeStateService::default()),
             user_cancel_stamps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
 
@@ -214,6 +219,12 @@ impl ConversationService {
 
     pub fn with_knowledge_service(&self, service: Arc<nomifun_knowledge::KnowledgeService>) {
         if let Ok(mut guard) = self.knowledge_service.write() {
+            *guard = Some(service);
+        }
+    }
+
+    pub fn with_preset_service(&self, service: Arc<nomifun_preset::PresetService>) {
+        if let Ok(mut guard) = self.preset_service.write() {
             *guard = Some(service);
         }
     }
@@ -383,11 +394,35 @@ impl ConversationService {
     ///
     /// Generates a `conv_{uuidv7}` ID, sets status to `pending`, defaults
     /// source to `nomifun`, and broadcasts `conversation.listChanged(created)`.
-    #[tracing::instrument(skip_all, fields(user_id = %user_id, agent_type = ?req.r#type))]
     pub async fn create(
         &self,
         user_id: &str,
         req: CreateConversationRequest,
+    ) -> Result<ConversationResponse, AppError> {
+        self.create_inner(user_id, req, None).await
+    }
+
+    /// Trusted in-process creation path for long-lived consumers that already
+    /// hold a frozen snapshot (cron, orchestrator workers, companions). This
+    /// never re-resolves the catalog, so an existing target cannot drift to a
+    /// newer preset revision. It is intentionally not exposed by HTTP DTOs.
+    pub async fn create_from_preset_snapshot(
+        &self,
+        user_id: &str,
+        mut req: CreateConversationRequest,
+        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+    ) -> Result<ConversationResponse, AppError> {
+        req.preset_id = None;
+        req.preset_overrides = None;
+        self.create_inner(user_id, req, Some(snapshot)).await
+    }
+
+    #[tracing::instrument(skip_all, fields(user_id = %user_id, agent_type = ?req.r#type))]
+    async fn create_inner(
+        &self,
+        user_id: &str,
+        mut req: CreateConversationRequest,
+        trusted_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
     ) -> Result<ConversationResponse, AppError> {
         let now = now_ms();
         let source = req.source.unwrap_or(ConversationSource::Nomifun);
@@ -404,6 +439,87 @@ impl ConversationService {
         }
 
         let mut extra = req.extra;
+        let preset_id = req.preset_id.take().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let preset_overrides = req.preset_overrides.take().unwrap_or_default();
+        let mut resolved_preset_snapshot = trusted_snapshot;
+        // Snapshot/lineage are server-owned first-class columns. Never trust a
+        // similarly named value hidden in the open-ended `extra` bag.
+        if let Some(object) = extra.as_object_mut() {
+            object.remove("preset_id");
+            object.remove("preset_overrides");
+            object.remove("preset_snapshot");
+            object.remove("preset_revision");
+        }
+
+        // A preset id is the only client-supplied reference. Resolution is
+        // backend-authoritative and produces an immutable execution snapshot;
+        // any incoming `preset_snapshot` is discarded before resolving.
+        if resolved_preset_snapshot.is_none() && let Some(preset_id) = preset_id {
+            let service = self
+                .preset_service
+                .read()
+                .ok()
+                .and_then(|guard| guard.as_ref().cloned())
+                .ok_or_else(|| AppError::Internal("preset service is not wired".into()))?;
+            resolved_preset_snapshot = Some(service
+                .resolve(
+                    &preset_id,
+                    nomifun_api_types::PresetTarget::Conversation,
+                    None,
+                    preset_overrides,
+                )
+                .await?);
+        }
+
+        if let Some(snapshot) = resolved_preset_snapshot.as_ref() {
+            if let Some(agent_id) = snapshot.resolved_agent_id.as_ref()
+                && let Some(agent) = self.agent_metadata_repo.get(agent_id).await?
+            {
+                req.r#type = serde_json::from_value(serde_json::Value::String(agent.agent_type.clone()))
+                    .map_err(|_| AppError::BadRequest(format!("preset resolved unknown agent type '{}'", agent.agent_type)))?;
+                if let Some(obj) = extra.as_object_mut() {
+                    obj.insert("agent_id".into(), serde_json::Value::String(agent.id));
+                    if let Some(backend) = agent.backend {
+                        obj.insert("backend".into(), serde_json::Value::String(backend));
+                    }
+                }
+            }
+            if let Some(model) = snapshot.resolved_model.as_ref() {
+                if req.r#type == AgentType::Nomi {
+                    let provider_id = model.provider_id.as_ref().ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "preset model '{}' has no resolved provider",
+                            model.model
+                        ))
+                    })?;
+                    req.model = Some(nomifun_common::ProviderWithModel {
+                        provider_id: provider_id.clone(),
+                        model: model.model.clone(),
+                        use_model: Some(model.model.clone()),
+                    });
+                } else if let Some(obj) = extra.as_object_mut() {
+                    // ACP executors own their provider connection; the preset
+                    // contributes only the agent-visible model id.
+                    obj.insert(
+                        "current_model_id".into(),
+                        serde_json::Value::String(model.model.clone()),
+                    );
+                    req.model = None;
+                }
+            }
+            if let Some(obj) = extra.as_object_mut() {
+                let instructions_embedded = obj
+                    .get("preset_instructions_embedded")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if !instructions_embedded && !snapshot.instructions.trim().is_empty() {
+                    obj.insert("preset_rules".into(), serde_json::Value::String(snapshot.instructions.clone()));
+                }
+                obj.insert("preset_enabled_skills".into(), serde_json::to_value(&snapshot.included_skills).unwrap_or_default());
+                obj.insert("exclude_auto_inject_skills".into(), serde_json::to_value(&snapshot.excluded_auto_skills).unwrap_or_default());
+                obj.insert("preset_knowledge_binding".into(), serde_json::Value::Bool(true));
+            }
+        }
 
         // nomi source-of-truth rule: top-level `model` wins. If an older client
         // still packs `extra.model`, strip it before persist so the stored row
@@ -623,6 +739,28 @@ impl ConversationService {
             .and_then(|value| value.as_str())
             .or_else(|| extra.get("cronJobId").and_then(|value| value.as_str()))
             .map(ToOwned::to_owned);
+        let preset_snapshot_value = resolved_preset_snapshot
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| AppError::Internal(format!("Failed to serialize preset snapshot: {e}")))?;
+        let preset_snapshot = preset_snapshot_value
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| AppError::BadRequest(format!("Invalid preset_snapshot: {e}")))?;
+        let preset_id = preset_snapshot_value
+            .as_ref()
+            .and_then(|value| value.get("preset_id"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| extra.get("preset_id").and_then(serde_json::Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned);
+        let preset_revision = preset_snapshot_value
+            .as_ref()
+            .and_then(|value| value.get("preset_revision"))
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| extra.get("preset_revision").and_then(serde_json::Value::as_i64));
 
         let row = nomifun_db::models::ConversationRow {
             // Placeholder: the integer PK is allocated by SQLite inside
@@ -645,11 +783,54 @@ impl ConversationService {
             pinned: false,
             pinned_at: None,
             cron_job_id,
+            preset_id,
+            preset_revision,
+            preset_snapshot,
             created_at: now,
             updated_at: now,
         };
 
         let new_id = self.conversation_repo.create(&row).await?;
+
+        // Materialize the preset's knowledge policy as an explicit target
+        // binding. This deliberately bypasses workpath inheritance at runtime:
+        // selecting a preset must reproduce its KB scope without mutating or
+        // silently sharing the user's general workspace binding.
+        if let Some(snapshot_value) = preset_snapshot_value.as_ref()
+            && let Ok(snapshot) = serde_json::from_value::<nomifun_api_types::ResolvedPresetSnapshot>(
+                snapshot_value.clone(),
+            )
+            && let Some(service) = self
+                .knowledge_service
+                .read()
+                .ok()
+                .and_then(|guard| guard.as_ref().cloned())
+        {
+            let conversation_id = new_id.to_string();
+            let (target_kind, target_id) = knowledge_binding_target(&extra, &conversation_id);
+            let mode = match snapshot.knowledge_policy.mode.as_str() {
+                "direct" => "direct",
+                _ => "staged",
+            };
+            service
+                .set_binding(
+                    target_kind,
+                    target_id,
+                    nomifun_knowledge::KnowledgeBinding {
+                        enabled: snapshot.knowledge_policy.enabled,
+                        writeback: snapshot.knowledge_policy.writeback,
+                        writeback_mode: mode.to_owned(),
+                        writeback_eagerness: snapshot
+                            .knowledge_policy
+                            .eagerness
+                            .unwrap_or_else(|| "conservative".to_owned()),
+                        // Presets never self-authorize unattended channel writes.
+                        channel_write_enabled: false,
+                        kb_ids: snapshot.knowledge_base_ids,
+                    },
+                )
+                .await?;
+        }
 
         // Now that the row exists, provision the auto (temp) workspace: create
         // the tokenized directory, wire skill symlinks (temp workspaces only),
@@ -983,6 +1164,40 @@ impl ConversationService {
             let new_ws = merged_extra.as_deref().and_then(ws_of);
             old_ws != new_ws
         };
+        let preset_changed = req
+            .extra
+            .as_ref()
+            .is_some_and(|extra| extra.get("preset_snapshot").is_some())
+            && merged_extra.as_deref() != Some(existing.extra.as_str());
+        let merged_extra_value = merged_extra
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        let preset_id_update = req.extra.as_ref().and_then(|extra| {
+            extra.get("preset_id").map(|_| {
+                merged_extra_value
+                    .as_ref()
+                    .and_then(|value| value.get("preset_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+        });
+        let preset_revision_update = req.extra.as_ref().and_then(|extra| {
+            extra.get("preset_revision").map(|_| {
+                merged_extra_value
+                    .as_ref()
+                    .and_then(|value| value.get("preset_revision"))
+                    .and_then(serde_json::Value::as_i64)
+            })
+        });
+        let preset_snapshot_update = req.extra.as_ref().and_then(|extra| {
+            extra.get("preset_snapshot").map(|_| {
+                merged_extra_value
+                    .as_ref()
+                    .and_then(|value| value.get("preset_snapshot"))
+                    .filter(|value| !value.is_null())
+                    .and_then(|value| serde_json::to_string(value).ok())
+            })
+        });
 
         let model_json = req
             .model
@@ -1002,15 +1217,19 @@ impl ConversationService {
             extra: merged_extra,
             status: None,
             cron_job_id: None,
+            preset_id: preset_id_update,
+            preset_revision: preset_revision_update,
+            preset_snapshot: preset_snapshot_update,
             updated_at: Some(now),
         };
 
         self.conversation_repo.update(parse_conv_id(id)?, &updates).await?;
 
-        if model_changed || workspace_changed {
+        if model_changed || workspace_changed || preset_changed {
             info!(
                 model_changed,
                 workspace_changed,
+                preset_changed,
                 "Conversation updated, killing agent task so the change takes effect on the next message"
             );
             task_manager.kill_and_wait(id, None).await;
@@ -2647,7 +2866,12 @@ impl ConversationService {
         // back to the legacy `('conversation', id)` binding on a full miss.
         // Companion sessions keep their `('companion', companionId)` binding unchanged — they
         // are not per-workspace.
-        let outcome = if target_kind == "conversation" {
+        let preset_binding = build_opts
+            .extra
+            .get("preset_knowledge_binding")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let outcome = if target_kind == "conversation" && !preset_binding {
             let wp_key = nomifun_knowledge::session_workpath_key(&workspace, &self.workspace_root);
             service
                 .ensure_mounts_for_session(&wp_key, target_kind, &target_id, &workspace)
@@ -3477,9 +3701,9 @@ fn knowledge_mounts_signature(outcome: &nomifun_knowledge::MountOutcome) -> Stri
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-struct AssistantLineage<'a> {
+struct PresetLineage<'a> {
     agent_type: &'a str,
-    preset_assistant_id: &'a str,
+    preset_id: &'a str,
     custom_agent_id: &'a str,
     agent_id: &'a str,
     agent_name: &'a str,
@@ -3488,14 +3712,14 @@ struct AssistantLineage<'a> {
     session_mode: &'a str,
 }
 
-impl<'a> AssistantLineage<'a> {
+impl<'a> PresetLineage<'a> {
     fn from_response_and_extra(response: &'a ConversationResponse, extra: &'a serde_json::Value) -> Self {
         fn s<'a>(extra: &'a serde_json::Value, key: &str) -> &'a str {
             extra.get(key).and_then(serde_json::Value::as_str).unwrap_or("")
         }
         Self {
             agent_type: response.r#type.serde_name(),
-            preset_assistant_id: s(extra, "preset_assistant_id"),
+            preset_id: s(extra, "preset_id"),
             custom_agent_id: s(extra, "custom_agent_id"),
             agent_id: s(extra, "agent_id"),
             agent_name: s(extra, "agent_name"),
@@ -3506,7 +3730,7 @@ impl<'a> AssistantLineage<'a> {
     }
 
     fn has_any_identity(&self) -> bool {
-        !self.preset_assistant_id.is_empty()
+        !self.preset_id.is_empty()
             || !self.custom_agent_id.is_empty()
             || !self.agent_id.is_empty()
             || !self.agent_name.is_empty()
@@ -3514,25 +3738,25 @@ impl<'a> AssistantLineage<'a> {
 }
 
 fn log_conversation_created(response: &ConversationResponse, extra: &serde_json::Value) {
-    let lineage = AssistantLineage::from_response_and_extra(response, extra);
+    let lineage = PresetLineage::from_response_and_extra(response, extra);
     if lineage.has_any_identity() {
         info!(
             conversation_id = %response.id,
             agent_type = lineage.agent_type,
-            preset_assistant_id = lineage.preset_assistant_id,
+            preset_id = lineage.preset_id,
             custom_agent_id = lineage.custom_agent_id,
             agent_id = lineage.agent_id,
             agent_name = lineage.agent_name,
             backend = lineage.backend,
             current_model_id = lineage.current_model_id,
             session_mode = lineage.session_mode,
-            "Conversation created from assistant"
+            "Conversation created from preset"
         );
     } else {
         info!(
             conversation_id = %response.id,
             agent_type = lineage.agent_type,
-            "Conversation created (no assistant)"
+            "Conversation created (no preset)"
         );
     }
 }
@@ -3718,6 +3942,9 @@ mod tests {
             pinned: false,
             pinned_at: None,
             channel_chat_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             created_at: 0,
             modified_at: 0,
             extra: json!({}),
@@ -3725,7 +3952,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_lineage_extracts_acp_builtin_fields() {
+    fn preset_lineage_extracts_acp_builtin_fields() {
         use nomifun_common::AgentType;
         let response = response_with_type(AgentType::Acp);
         let extra = json!({
@@ -3735,38 +3962,38 @@ mod tests {
             "current_model_id": "opus",
             "session_mode": "default",
         });
-        let lineage = AssistantLineage::from_response_and_extra(&response, &extra);
+        let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_type, "acp");
         assert_eq!(lineage.agent_id, "abc-123");
         assert_eq!(lineage.agent_name, "Claude Code");
         assert_eq!(lineage.backend, "claude");
         assert_eq!(lineage.current_model_id, "opus");
         assert_eq!(lineage.session_mode, "default");
-        assert_eq!(lineage.preset_assistant_id, "");
+        assert_eq!(lineage.preset_id, "");
         assert_eq!(lineage.custom_agent_id, "");
         assert!(lineage.has_any_identity());
     }
 
     #[test]
-    fn assistant_lineage_extracts_nomi_preset_id() {
+    fn preset_lineage_extracts_nomi_preset_id() {
         use nomifun_common::AgentType;
         let response = response_with_type(AgentType::Nomi);
-        let extra = json!({ "preset_assistant_id": "preset-xyz" });
-        let lineage = AssistantLineage::from_response_and_extra(&response, &extra);
+        let extra = json!({ "preset_id": "preset-xyz" });
+        let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_type, "nomi");
-        assert_eq!(lineage.preset_assistant_id, "preset-xyz");
+        assert_eq!(lineage.preset_id, "preset-xyz");
         assert!(lineage.has_any_identity());
     }
 
     #[test]
-    fn assistant_lineage_extracts_acp_custom_agent_id() {
+    fn preset_lineage_extracts_acp_custom_agent_id() {
         use nomifun_common::AgentType;
         let response = response_with_type(AgentType::Acp);
         let extra = json!({
             "custom_agent_id": "custom-1",
             "backend": "openrouter",
         });
-        let lineage = AssistantLineage::from_response_and_extra(&response, &extra);
+        let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_type, "acp");
         assert_eq!(lineage.custom_agent_id, "custom-1");
         assert_eq!(lineage.backend, "openrouter");
@@ -3774,24 +4001,24 @@ mod tests {
     }
 
     #[test]
-    fn assistant_lineage_no_identity_when_extra_lacks_assistant_fields() {
+    fn preset_lineage_no_identity_when_extra_lacks_assistant_fields() {
         use nomifun_common::AgentType;
         let response = response_with_type(AgentType::Acp);
         let extra = json!({ "workspace": "/project" });
-        let lineage = AssistantLineage::from_response_and_extra(&response, &extra);
+        let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_type, "acp");
         assert!(!lineage.has_any_identity());
     }
 
     #[test]
-    fn assistant_lineage_treats_non_string_fields_as_missing() {
+    fn preset_lineage_treats_non_string_fields_as_missing() {
         use nomifun_common::AgentType;
         let response = response_with_type(AgentType::Acp);
         let extra = json!({
             "agent_id": 42,
             "agent_name": null,
         });
-        let lineage = AssistantLineage::from_response_and_extra(&response, &extra);
+        let lineage = PresetLineage::from_response_and_extra(&response, &extra);
         assert_eq!(lineage.agent_id, "");
         assert_eq!(lineage.agent_name, "");
         assert!(!lineage.has_any_identity());

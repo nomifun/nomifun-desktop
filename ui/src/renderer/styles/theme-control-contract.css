@@ -52,7 +52,7 @@
  * inset indicator. This contract is injected after runtime theme CSS, so the
  * selected state stays legible with every preset. */
 .requirements-selection-checkbox .arco-checkbox-mask,
-.assistant-skill-selection-checkbox .arco-checkbox-mask {
+.preset-skill-selection-checkbox .arco-checkbox-mask {
   overflow: hidden;
   transition:
     background-color 160ms ease-out,
@@ -61,7 +61,7 @@
 }
 
 .requirements-selection-checkbox .arco-checkbox-mask-icon,
-.assistant-skill-selection-checkbox .arco-checkbox-mask-icon {
+.preset-skill-selection-checkbox .arco-checkbox-mask-icon {
   position: absolute;
   inset: 0;
   width: 8px;
@@ -75,27 +75,27 @@
 
 .requirements-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
 .requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask,
-.assistant-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
-.assistant-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask {
+.preset-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask,
+.preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask {
   background-color: var(--control-selected-bg, var(--color-primary)) !important;
   border-color: var(--control-selected-bg, var(--color-primary)) !important;
 }
 
 .requirements-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon,
-.assistant-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon {
+.preset-skill-selection-checkbox.arco-checkbox-checked .arco-checkbox-mask-icon {
   transform: scale(1);
 }
 
 .requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-.assistant-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
+.preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
   background-color: var(--control-selected-fg, var(--color-white)) !important;
   transition: transform 160ms ease-out;
 }
 
 .requirements-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
 .requirements-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask,
-.assistant-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
-.assistant-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
+.preset-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-checked .arco-checkbox-mask,
+.preset-skill-selection-checkbox.arco-checkbox-disabled.arco-checkbox-indeterminate .arco-checkbox-mask {
   border-color: var(--control-disabled-selected-bg, var(--color-primary-light-3)) !important;
 }
 
@@ -103,9 +103,9 @@
   .requirements-selection-checkbox .arco-checkbox-mask,
   .requirements-selection-checkbox .arco-checkbox-mask-icon,
   .requirements-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after,
-  .assistant-skill-selection-checkbox .arco-checkbox-mask,
-  .assistant-skill-selection-checkbox .arco-checkbox-mask-icon,
-  .assistant-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
+  .preset-skill-selection-checkbox .arco-checkbox-mask,
+  .preset-skill-selection-checkbox .arco-checkbox-mask-icon,
+  .preset-skill-selection-checkbox.arco-checkbox-indeterminate .arco-checkbox-mask::after {
     transition: none;
   }
 }

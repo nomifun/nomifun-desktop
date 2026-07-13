@@ -156,7 +156,7 @@ impl RunService {
         // Synthesize the fleet from the model range (Single/Range only; Auto and
         // empty ranges are rejected — pinned_roles is parsed but ignored in P1),
         // then merge in any pre-constructed role members (P4 Task 2: the
-        // caps_orchestrator layer resolves ENABLED assistants into enriched
+        // caps_orchestrator layer resolves ENABLED presets into enriched
         // FleetMembers and passes them via `role_members`). Dedup by
         // `(provider_id, model, agent_id)` so an assistant pinned to the same
         // `(provider, model)` as a bare range member does not produce a duplicate
@@ -2294,6 +2294,9 @@ fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppE
         .map(|(i, (provider_id, model))| FleetMember {
             id: generate_prefixed_id("rmbr"),
             agent_id: String::new(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: Some(provider_id.to_string()),
             model: Some(model.to_string()),
             role_hint: None,
@@ -2324,17 +2327,17 @@ fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppE
 
 /// Merge the bare model-range members with the pre-constructed role
 /// (assistant-backed) members into a single snapshot, deduping by
-/// `(provider_id, model, agent_id)`.
+/// `(provider_id, model, agent_id, preset_id)`.
 ///
 /// **Order:** role members FIRST (keeping their relative order), then the bare
 /// range members appended after; `sort_order` is rewritten to the final position
 /// so the snapshot stays densely ordered and the `member_index` math (which
 /// indexes into this vec during planning) stays correct.
 ///
-/// **Dedup key** is the full `(provider_id, model, agent_id)` triple, FIRST
+/// **Dedup key** is the full `(provider_id, model, agent_id, preset_id)` tuple, FIRST
 /// occurrence wins. Two consequences:
-/// - An assistant-backed member is `(p, m, "<assistant id>")` while a bare range
-///   member is `(p, m, "")`, so an assistant pinned to a model already in the
+/// - A preset-backed member is `(p, m, "", Some("<preset id>"))` while a bare range
+///   member is `(p, m, "", None)`, so a preset pinned to a model already in the
 ///   range is a DISTINCT routing target (it adds persona/skills) — both are kept.
 /// - A role member with an EMPTY `agent_id` (a caps-built "description-decorated"
 ///   bare member) shares the bare range member's `(p, m, "")` key. Because role
@@ -2342,15 +2345,20 @@ fn build_members_from_range(range: &ModelRange) -> Result<Vec<FleetMember>, AppE
 ///   user-authored `description`) WINS over the plain range-built one — this is
 ///   how the bare members get their descriptions for the planner.
 ///
-/// This keeps the keystone behavior (enabled assistants become candidate role
+/// This keeps the keystone behavior (eligible presets become candidate role
 /// members alongside the bare models) while never minting two identical targets.
 fn merge_members(range_members: Vec<FleetMember>, role_members: Vec<FleetMember>) -> Vec<FleetMember> {
-    let mut seen: std::collections::HashSet<(Option<String>, Option<String>, String)> =
+    let mut seen: std::collections::HashSet<(Option<String>, Option<String>, String, Option<String>)> =
         std::collections::HashSet::new();
     let mut out: Vec<FleetMember> = Vec::with_capacity(range_members.len() + role_members.len());
     // Role members first so a caps-built copy wins on a true collision.
     for m in role_members.into_iter().chain(range_members.into_iter()) {
-        let key = (m.provider_id.clone(), m.model.clone(), m.agent_id.clone());
+        let key = (
+            m.provider_id.clone(),
+            m.model.clone(),
+            m.agent_id.clone(),
+            m.preset_id.clone(),
+        );
         if seen.insert(key) {
             out.push(m);
         }
@@ -2366,7 +2374,7 @@ fn merge_members(range_members: Vec<FleetMember>, role_members: Vec<FleetMember>
 /// planner's [`pick_lead`](crate::plan) (first member with provider+model) selects
 /// it as the run's lead/planner, then re-densify `sort_order` to the new index.
 ///
-/// Prefers the BARE model member (empty `agent_id`) over an assistant-backed
+/// Prefers the BARE model member (empty `agent_id`, no `preset_id`) over a preset-backed
 /// member that merely shares the same `(provider, model)`, so the planner runs as
 /// the pure 主模型 the user picked rather than an assistant. A `None` `lead_model`
 /// or no match is a no-op — the snapshot (and thus the engine's positional default)
@@ -2381,7 +2389,7 @@ fn float_lead_member(mut members: Vec<FleetMember>, lead_model: Option<&ModelRef
     };
     let pos = members
         .iter()
-        .position(|m| is_match(m) && m.agent_id.is_empty())
+        .position(|m| is_match(m) && m.agent_id.is_empty() && m.preset_id.is_none())
         .or_else(|| members.iter().position(is_match));
     if let Some(pos) = pos {
         if pos != 0 {
@@ -2721,9 +2729,16 @@ fn member_row_to_dto(row: FleetMemberRow) -> FleetMember {
         .constraints
         .as_deref()
         .and_then(|raw| serde_json::from_str(raw).ok());
+    let preset_snapshot = row
+        .preset_snapshot
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
     FleetMember {
         id: row.id,
         agent_id: row.agent_id,
+        preset_id: row.preset_id,
+        preset_revision: row.preset_revision,
+        preset_snapshot,
         provider_id: row.provider_id,
         model: row.model,
         role_hint: row.role_hint,
@@ -2822,6 +2837,8 @@ mod tests {
     ) -> FleetMemberInput {
         FleetMemberInput {
             agent_id: agent_id.to_string(),
+            preset_id: None,
+            preset_overrides: None,
             provider_id: None,
             model: None,
             role_hint: None,
@@ -3134,6 +3151,8 @@ mod tests {
                 let agent = format!("agent_{i}");
                 FleetMemberInput {
                     agent_id: agent,
+                    preset_id: None,
+                    preset_overrides: None,
                     provider_id: None,
                     model: None,
                     role_hint: None,
@@ -3166,6 +3185,8 @@ mod tests {
         let members: Vec<FleetMemberInput> = (0..4)
             .map(|i| FleetMemberInput {
                 agent_id: format!("agent_{i}"),
+                preset_id: None,
+                preset_overrides: None,
                 provider_id: None,
                 model: None,
                 role_hint: None,
@@ -3227,6 +3248,8 @@ mod tests {
         // index 1: text-only (hard-filtered out by the vision requirement).
         let vision_member = FleetMemberInput {
             agent_id: "agent_vision".to_string(),
+            preset_id: None,
+            preset_overrides: None,
             provider_id: None,
             model: None,
             role_hint: None,
@@ -3996,6 +4019,9 @@ mod tests {
         FleetMember {
             id: generate_prefixed_id("rmbr"),
             agent_id: agent_id.to_string(),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             provider_id: Some(provider_id.to_string()),
             model: Some(model.to_string()),
             role_hint: Some(name.to_string()),

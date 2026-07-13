@@ -10,7 +10,7 @@
  * Row 1: Kind filter (blank / local / web / feishu) with counts + sort control.
  * Row 2: User tag filter with colored dots, counts, + "Manage Tags" entry.
  *
- * Mirrors AssistantTagFilterBar structure. Theme variables only; `<div onClick>`
+ * Mirrors PresetTagFilterBar structure. Theme variables only; `<div onClick>`
  * for clickables (no <button>). Active chip: primary-light-1 bg / primary-6 text.
  */
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';

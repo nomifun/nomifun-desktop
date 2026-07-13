@@ -12,6 +12,7 @@ nomifun-file.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-conversation.workspace = true
+nomifun-preset.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

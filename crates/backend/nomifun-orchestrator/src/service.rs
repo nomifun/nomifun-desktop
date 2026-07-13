@@ -63,9 +63,16 @@ fn decode_constraints(raw: Option<&str>, member_id: &str) -> Option<MemberConstr
 fn member_row_to_dto(row: FleetMemberRow) -> FleetMember {
     let capability_profile = decode_capability_profile(row.capability_profile.as_deref(), &row.id);
     let constraints = decode_constraints(row.constraints.as_deref(), &row.id);
+    let preset_snapshot = row
+        .preset_snapshot
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
     FleetMember {
         id: row.id,
         agent_id: row.agent_id,
+        preset_id: row.preset_id,
+        preset_revision: row.preset_revision,
+        preset_snapshot,
         provider_id: row.provider_id,
         model: row.model,
         role_hint: row.role_hint,
@@ -97,9 +104,18 @@ fn fleet_row_to_dto(row: FleetRow, members: Vec<FleetMemberRow>) -> Fleet {
 /// Map a member input (DTO) to a repository insert struct, JSON-encoding the
 /// structured fields. `index` supplies the default `sort_order` when the input
 /// leaves it unset.
-fn member_input_to_new(input: FleetMemberInput, index: usize) -> NewFleetMember {
+fn member_input_to_new(
+    input: FleetMemberInput,
+    index: usize,
+    snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
+) -> NewFleetMember {
     NewFleetMember {
         agent_id: input.agent_id,
+        preset_id: input.preset_id,
+        preset_revision: snapshot.as_ref().map(|value| value.preset_revision),
+        preset_snapshot: snapshot
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok()),
         provider_id: input.provider_id,
         model: input.model,
         role_hint: input.role_hint,
@@ -116,11 +132,50 @@ fn member_input_to_new(input: FleetMemberInput, index: usize) -> NewFleetMember 
 #[derive(Clone)]
 pub struct FleetService {
     fleet_repo: Arc<dyn IFleetRepository>,
+    preset_service: Option<Arc<nomifun_preset::PresetService>>,
 }
 
 impl FleetService {
     pub fn new(fleet_repo: Arc<dyn IFleetRepository>) -> Self {
-        Self { fleet_repo }
+        Self { fleet_repo, preset_service: None }
+    }
+
+    pub fn with_preset_service(mut self, service: Arc<nomifun_preset::PresetService>) -> Self {
+        self.preset_service = Some(service);
+        self
+    }
+
+    async fn resolve_member_input(
+        &self,
+        mut input: FleetMemberInput,
+        index: usize,
+    ) -> Result<NewFleetMember, AppError> {
+        let snapshot = if let Some(preset_id) = input.preset_id.clone() {
+            let service = self
+                .preset_service
+                .as_ref()
+                .ok_or_else(|| AppError::Internal("preset service is not wired".into()))?;
+            let snapshot = service
+                .resolve(
+                    &preset_id,
+                    nomifun_api_types::PresetTarget::ClusterMember,
+                    None,
+                    input.preset_overrides.take().unwrap_or_default(),
+                )
+                .await?;
+            input.agent_id = snapshot.resolved_agent_id.clone().unwrap_or_default();
+            if let Some(model) = snapshot.resolved_model.as_ref() {
+                input.provider_id.clone_from(&model.provider_id);
+                input.model = Some(model.model.clone());
+            }
+            if input.role_hint.as_deref().is_none_or(str::is_empty) {
+                input.role_hint = Some(snapshot.preset_name.clone());
+            }
+            Some(snapshot)
+        } else {
+            None
+        };
+        Ok(member_input_to_new(input, index, snapshot))
     }
 
     pub async fn list(&self, user_id: &str) -> Result<Vec<Fleet>, AppError> {
@@ -165,6 +220,12 @@ impl FleetService {
                 OrchestratorError::BadRequest("a fleet must have at least one member".into()).into(),
             );
         }
+        // Resolve every member before mutating storage. A disabled/missing
+        // preset must not leave behind an empty fleet after a partial create.
+        let mut new_members = Vec::with_capacity(req.members.len());
+        for (index, member) in req.members.into_iter().enumerate() {
+            new_members.push(self.resolve_member_input(member, index).await?);
+        }
         let row = self
             .fleet_repo
             .create_fleet(CreateFleetParams {
@@ -175,12 +236,6 @@ impl FleetService {
             })
             .await
             .map_err(OrchestratorError::from)?;
-        let new_members: Vec<NewFleetMember> = req
-            .members
-            .into_iter()
-            .enumerate()
-            .map(|(i, m)| member_input_to_new(m, i))
-            .collect();
         self.fleet_repo
             .replace_members(&row.id, new_members)
             .await
@@ -205,6 +260,17 @@ impl FleetService {
         {
             return Err(OrchestratorError::BadRequest("name must not be empty".into()).into());
         }
+        // Resolve first so a bad preset cannot partially update fleet metadata
+        // while retaining stale members.
+        let new_members = if let Some(members) = req.members {
+            let mut resolved = Vec::with_capacity(members.len());
+            for (index, member) in members.into_iter().enumerate() {
+                resolved.push(self.resolve_member_input(member, index).await?);
+            }
+            Some(resolved)
+        } else {
+            None
+        };
         self.fleet_repo
             .update_fleet(
                 id,
@@ -216,12 +282,7 @@ impl FleetService {
             )
             .await
             .map_err(OrchestratorError::from)?;
-        if let Some(members) = req.members {
-            let new_members: Vec<NewFleetMember> = members
-                .into_iter()
-                .enumerate()
-                .map(|(i, m)| member_input_to_new(m, i))
-                .collect();
+        if let Some(new_members) = new_members {
             self.fleet_repo
                 .replace_members(id, new_members)
                 .await
@@ -359,6 +420,8 @@ mod tests {
     fn sample_member(agent_id: &str) -> FleetMemberInput {
         FleetMemberInput {
             agent_id: agent_id.to_string(),
+            preset_id: None,
+            preset_overrides: None,
             provider_id: Some("prov_x".to_string()),
             model: Some("claude-opus-4-8".to_string()),
             role_hint: Some("后端".to_string()),

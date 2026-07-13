@@ -183,6 +183,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -215,6 +218,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -247,6 +253,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -279,6 +288,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -311,6 +323,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -328,6 +343,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             }
@@ -364,6 +382,9 @@ impl IConversationRepository for StubConvRepo {
                 pinned: false,
                 pinned_at: None,
                 cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 created_at: 1000,
                 updated_at: 1000,
             });
@@ -613,6 +634,9 @@ async fn setup_with_conv_repo() -> (
                     pinned: false,
                     pinned_at: None,
                     cron_job_id: None,
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
                     created_at: now_ms(),
                     updated_at: now_ms(),
                 })

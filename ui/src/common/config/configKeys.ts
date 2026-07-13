@@ -99,36 +99,35 @@ export type ConfigKeyMap = {
   // clicks the mapped point. OFF by default (opt-in, vision-token cost). Read by the
   // backend agent factory.
   'agent.browserUse.visualFallback': boolean | undefined;
-  'assistant.telegram.agent':
+  'channels.telegram.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
   // Master-agent greeter companion per IM platform (mirror of the backend
   // client-preference written by POST /api/channel/settings/companion).
   // Empty/missing = no binding → no companion greets this platform's channel.
-  'assistant.telegram.companionId': string | undefined;
-  'assistant.lark.agent':
+  'channels.telegram.companionId': string | undefined;
+  'channels.lark.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'assistant.lark.companionId': string | undefined;
-  'assistant.dingtalk.agent':
+  'channels.lark.companionId': string | undefined;
+  'channels.dingtalk.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'assistant.dingtalk.companionId': string | undefined;
-  'assistant.weixin.agent':
+  'channels.dingtalk.companionId': string | undefined;
+  'channels.weixin.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'assistant.weixin.companionId': string | undefined;
-  'assistant.wecom.agent':
+  'channels.weixin.companionId': string | undefined;
+  'channels.wecom.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'assistant.wecom.companionId': string | undefined;
+  'channels.wecom.companionId': string | undefined;
   'skillsMarket.enabled': boolean | undefined;
   // One-shot completion flags for legacy → backend migrations. Kept in the
   // local config file (not the backend client-preferences bag) so a downgrade
   // to a pre-flag build still re-reads the legacy data unchanged. See
-  // `migrateProviders` / `migrateAssistantsToBackend` (ELECTRON-1KT).
+  // `migrateProviders` (ELECTRON-1KT).
   'migration.providersMigrated_v1': boolean | undefined;
-  'migration.assistantsMigrated_v1': boolean | undefined;
 };
 
 export type ConfigKey = keyof ConfigKeyMap;

@@ -9,6 +9,7 @@ nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
 nomifun-conversation.workspace = true
+nomifun-preset.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-auth.workspace = true
 axum.workspace = true

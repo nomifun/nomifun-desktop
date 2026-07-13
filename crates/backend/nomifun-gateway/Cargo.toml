@@ -36,10 +36,10 @@ nomifun-knowledge.workspace = true
 # workshop / creation only (neither deps gateway — no cycle).
 nomifun-workshop.workspace = true
 nomifun-creation.workspace = true
-# 助手 (assistants) service: caps_orchestrator folds each ENABLED assistant's
+# 助手 (presets) service: caps_orchestrator folds each ENABLED preset's
 # persona/skills/model into the run's fleet snapshot (P4 Task 2). Dependency
-# direction gateway → nomifun-assistant only (no cycle — assistant does not dep gateway).
-nomifun-assistant.workspace = true
+# direction gateway → nomifun-preset only (no cycle — preset does not depend on gateway).
+nomifun-preset.workspace = true
 # 智能编排 (orchestration) Run control-plane: RunService (create/plan/inspect/cancel)
 # + RunEngine (serial execution loop) backing the caps_orchestrator gateway tools.
 nomifun-orchestrator.workspace = true

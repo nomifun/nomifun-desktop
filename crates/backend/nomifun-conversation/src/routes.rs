@@ -60,6 +60,20 @@ fn strip_desktop_gateway_flag(extra: &mut serde_json::Value) {
     }
 }
 
+fn strip_server_owned_preset_fields(extra: &mut serde_json::Value) {
+    if let Some(map) = extra.as_object_mut() {
+        for key in [
+            "preset_id",
+            "preset_revision",
+            "preset_snapshot",
+            "preset_knowledge_binding",
+            "preset_instructions_embedded",
+        ] {
+            map.remove(key);
+        }
+    }
+}
+
 /// Grant the Desktop Gateway to a session the BACKEND has decided is entitled.
 /// Called after [`strip_desktop_gateway_flag`] (clients cannot self-authorize;
 /// the backend re-grants). Ensures `extra` is an object first.
@@ -82,6 +96,7 @@ async fn create(
 ) -> Result<(StatusCode, Json<ApiResponse<ConversationResponse>>), AppError> {
     let Json(mut req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     strip_desktop_gateway_flag(&mut req.extra);
+    strip_server_owned_preset_fields(&mut req.extra);
     // The desktop is the owner's own machine, so EVERY locally-trusted session is
     // entitled to the Desktop Gateway by default — any conversation becomes a
     // semantic super-gateway over the whole platform (the product's "0-code, any
@@ -137,6 +152,7 @@ async fn update(
         // `update` merges extra keys, so a client could otherwise smuggle the
         // gateway flag into an existing conversation.
         strip_desktop_gateway_flag(extra);
+        strip_server_owned_preset_fields(extra);
     }
     let conversation = state.service.update(&user.id, &id, req, &state.task_manager).await?;
     Ok(Json(ApiResponse::ok(conversation)))

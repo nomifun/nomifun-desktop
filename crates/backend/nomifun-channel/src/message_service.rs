@@ -7,7 +7,7 @@ use nomifun_api_types::{
 use nomifun_common::{AgentType, ConversationSource, MessagePosition, MessageType};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IChannelRepository;
-use nomifun_db::models::AssistantSessionRow;
+use nomifun_db::models::ChannelSessionRow;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -246,7 +246,7 @@ impl ChannelMessageService {
     /// relaying them to the IM platform.
     pub async fn send_to_agent(
         &self,
-        session: &AssistantSessionRow,
+        session: &ChannelSessionRow,
         text: &str,
         platform: PluginType,
     ) -> Result<SendResult, ChannelError> {
@@ -321,7 +321,7 @@ impl ChannelMessageService {
     /// auto-served safely.
     async fn send_to_public_agent(
         &self,
-        session: &AssistantSessionRow,
+        session: &ChannelSessionRow,
         text: &str,
         platform: PluginType,
         public_agent_id: &str,
@@ -441,7 +441,7 @@ impl ChannelMessageService {
     /// for per-chat isolation.
     async fn create_conversation_for_session(
         &self,
-        session: &AssistantSessionRow,
+        session: &ChannelSessionRow,
         platform: PluginType,
     ) -> Result<String, ChannelError> {
         let source = platform_to_source(platform);
@@ -507,6 +507,8 @@ impl ChannelMessageService {
             model: top_level_model,
             source: Some(source),
             channel_chat_id: session.chat_id.clone(),
+            preset_id: None,
+            preset_overrides: None,
             extra,
         };
 
@@ -536,7 +538,7 @@ impl ChannelMessageService {
     /// comes from the public agent's own config.
     async fn create_public_agent_conversation(
         &self,
-        session: &AssistantSessionRow,
+        session: &ChannelSessionRow,
         platform: PluginType,
         public_agent_id: &str,
     ) -> Result<String, ChannelError> {
@@ -573,6 +575,8 @@ impl ChannelMessageService {
             model: Some(model),
             source: Some(platform_to_source(platform)),
             channel_chat_id: session.chat_id.clone(),
+            preset_id: None,
+            preset_overrides: None,
             extra,
         };
 
@@ -598,7 +602,7 @@ impl ChannelMessageService {
     /// a dead binding degrades to the profile fallback instead of pinning
     /// sessions to a ghost. Without a channel binding, the profile resolves
     /// the legacy per-platform binding only (no default-companion fallback).
-    async fn resolve_session_companion(&self, session: &AssistantSessionRow, platform: PluginType) -> Option<String> {
+    async fn resolve_session_companion(&self, session: &ChannelSessionRow, platform: PluginType) -> Option<String> {
         let profile = self.master_profile.as_ref()?;
 
         if let Some(channel_id) = session.channel_id.as_deref() {
@@ -877,7 +881,7 @@ pub enum StreamAction {
 /// persona system prompt (built fresh per agent build by the factory's
 /// `CompanionPromptProvider`) + memory tools (`extra.companionSession`), with the
 /// platform recorded for the persona's remote-context framing and the bound
-/// companion pinned in `extra.companionId` (per-bot binding > legacy platform binding;
+/// companion pinned in `extra.companionId` (per-bot binding > platform binding;
 /// key omitted when no companion is bound — the session then has no companion persona).
 ///
 /// Unconditional: EVERY channel session is a companion master session. The former

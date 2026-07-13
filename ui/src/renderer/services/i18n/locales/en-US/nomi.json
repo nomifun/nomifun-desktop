@@ -306,6 +306,8 @@
     "nameHint": "What your companion is called — shown in chat and on the desktop companion",
     "providerPlaceholder": "Select provider",
     "modelPlaceholder": "Select model",
+    "preset": "Reusable preset",
+    "presetHint": "Apply a saved Agent, model, Skill and knowledge configuration to this companion in one step.",
     "persona": "Persona",
     "personaHint": "Shapes how {{companionName}} talks",
     "personaLively": "Lively",

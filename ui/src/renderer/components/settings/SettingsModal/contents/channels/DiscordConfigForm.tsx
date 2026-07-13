@@ -152,7 +152,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
   const handleApprovePairing = async (code: string) => {
     try {
       await channel.approvePairing.invoke({ code });
-      Message.success(t('settings.assistant.pairingApproved', 'Pairing approved'));
+      Message.success(t('settings.channels.pairingApproved', 'Pairing approved'));
       await loadPendingPairings();
       await loadAuthorizedUsers();
     } catch (error: unknown) {
@@ -163,7 +163,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
   const handleRejectPairing = async (code: string) => {
     try {
       await channel.rejectPairing.invoke({ code });
-      Message.info(t('settings.assistant.pairingRejected', 'Pairing rejected'));
+      Message.info(t('settings.channels.pairingRejected', 'Pairing rejected'));
       await loadPendingPairings();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -173,7 +173,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
   const handleRevokeUser = async (user_id: string) => {
     try {
       await channel.revokeUser.invoke({ user_id });
-      Message.success(t('settings.assistant.userRevoked', 'User access revoked'));
+      Message.success(t('settings.channels.userRevoked', 'User access revoked'));
       await loadAuthorizedUsers();
     } catch (error: unknown) {
       Message.error(error instanceof Error ? error.message : String(error));
@@ -200,13 +200,13 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
             <Tooltip content={t('settings.discord.tokenLocked', 'Disable this channel before modifying the configuration')}>
               <span>
                 <Button type='outline' loading={testLoading} onClick={handleTestConnection} disabled={credentialsLocked}>
-                  {t('settings.assistant.testConnection', 'Test')}
+                  {t('settings.channels.testConnection', 'Test')}
                 </Button>
               </span>
             </Tooltip>
           ) : (
             <Button type='outline' loading={testLoading} onClick={handleTestConnection} disabled={credentialsLocked}>
-              {t('settings.assistant.testConnection', 'Test')}
+              {t('settings.channels.testConnection', 'Test')}
             </Button>
           )}
         </div>
@@ -220,11 +220,11 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
       {/* Pending Pairings */}
       {pluginStatus?.enabled && authorizedUsers.length === 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
-          <SectionHeader title={t('settings.assistant.pendingPairings', 'Pending Pairing Requests')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={pairingLoading} onClick={loadPendingPairings}>{t('common.refresh', 'Refresh')}</Button>} />
+          <SectionHeader title={t('settings.channels.pendingPairings', 'Pending Pairing Requests')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={pairingLoading} onClick={loadPendingPairings}>{t('common.refresh', 'Refresh')}</Button>} />
           {pairingLoading ? (
             <div className='flex justify-center py-24px'><Spin /></div>
           ) : pendingPairings.length === 0 ? (
-            <Empty description={t('settings.assistant.noPendingPairings', 'No pending pairing requests')} />
+            <Empty description={t('settings.channels.noPendingPairings', 'No pending pairing requests')} />
           ) : (
             <div className='flex flex-col gap-12px'>
               {pendingPairings.map((pairing) => (
@@ -232,21 +232,21 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
                   <div className='flex-1'>
                     <div className='flex items-center gap-8px'>
                       <span className='text-14px font-500 text-t-primary'>{pairing.display_name || t('common.unknownUser')}</span>
-                      <Tooltip content={t('settings.assistant.copyCode', 'Copy pairing code')}>
+                      <Tooltip content={t('settings.channels.copyCode', 'Copy pairing code')}>
                         <button className='p-4px bg-transparent border-none text-t-tertiary hover:text-t-primary cursor-pointer' onClick={() => copyToClipboard(pairing.code)}>
                           <Copy size={14} />
                         </button>
                       </Tooltip>
                     </div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
+                      {t('settings.channels.pairingCode', 'Code')}: <code className='bg-fill-3 px-4px rd-2px'>{pairing.code}</code>
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
+                      {t('settings.channels.expiresIn', 'Expires in')}: {getRemainingTime(pairing.expiresAt)}
                     </div>
                   </div>
                   <div className='flex items-center gap-8px'>
-                    <Button type='primary' size='small' icon={<CheckOne size={14} />} onClick={() => handleApprovePairing(pairing.code)}>{t('settings.assistant.approve', 'Approve')}</Button>
-                    <Button type='secondary' size='small' status='danger' icon={<CloseOne size={14} />} onClick={() => handleRejectPairing(pairing.code)}>{t('settings.assistant.reject', 'Reject')}</Button>
+                    <Button type='primary' size='small' icon={<CheckOne size={14} />} onClick={() => handleApprovePairing(pairing.code)}>{t('settings.channels.approve', 'Approve')}</Button>
+                    <Button type='secondary' size='small' status='danger' icon={<CloseOne size={14} />} onClick={() => handleRejectPairing(pairing.code)}>{t('settings.channels.reject', 'Reject')}</Button>
                   </div>
                 </div>
               ))}
@@ -258,7 +258,7 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
       {/* Authorized Users */}
       {pluginStatus?.enabled && authorizedUsers.length > 0 && (
         <div className='bg-fill-1 rd-12px pt-16px pr-16px pb-16px pl-0'>
-          <SectionHeader title={t('settings.assistant.authorizedUsers', 'Authorized Users')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={usersLoading} onClick={loadAuthorizedUsers}>{t('common.refresh', 'Refresh')}</Button>} />
+          <SectionHeader title={t('settings.channels.authorizedUsers', 'Authorized Users')} action={<Button size='mini' type='text' icon={<Refresh size={14} />} loading={usersLoading} onClick={loadAuthorizedUsers}>{t('common.refresh', 'Refresh')}</Button>} />
           {usersLoading ? (
             <div className='flex justify-center py-24px'><Spin /></div>
           ) : (
@@ -268,12 +268,12 @@ const DiscordConfigForm: React.FC<DiscordConfigFormProps> = ({ pluginStatus, cha
                   <div className='flex-1'>
                     <div className='text-14px font-500 text-t-primary'>{user.display_name || t('common.unknownUser')}</div>
                     <div className='text-12px text-t-tertiary mt-4px'>
-                      {t('settings.assistant.platform', 'Platform')}: {user.platformType}
+                      {t('settings.channels.platform', 'Platform')}: {user.platformType}
                       <span className='mx-8px'>|</span>
-                      {t('settings.assistant.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
+                      {t('settings.channels.authorizedAt', 'Authorized')}: {formatTime(user.authorizedAt)}
                     </div>
                   </div>
-                  <Tooltip content={t('settings.assistant.revokeAccess', 'Revoke access')}>
+                  <Tooltip content={t('settings.channels.revokeAccess', 'Revoke access')}>
                     <Button type='text' status='danger' size='small' icon={<Delete size={16} />} onClick={() => handleRevokeUser(user.id)} />
                   </Tooltip>
                 </div>

@@ -16,17 +16,17 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     let ext_root = tmp.path().join("extensions");
     let ext_dir = ext_root.join("legacy-suite");
     std::fs::create_dir_all(ext_dir.join("assets")).unwrap();
-    std::fs::create_dir_all(ext_dir.join("assistants")).unwrap();
+    std::fs::create_dir_all(ext_dir.join("presets")).unwrap();
     std::fs::create_dir_all(ext_dir.join("agents")).unwrap();
     std::fs::create_dir_all(ext_dir.join("skills")).unwrap();
     std::fs::create_dir_all(ext_dir.join("themes")).unwrap();
 
     std::fs::write(ext_dir.join("assets/adapter.png"), "adapter").unwrap();
-    std::fs::write(ext_dir.join("assets/assistant.png"), "assistant").unwrap();
+    std::fs::write(ext_dir.join("assets/preset.png"), "preset").unwrap();
     std::fs::write(ext_dir.join("assets/agent.png"), "agent").unwrap();
     std::fs::write(ext_dir.join("assets/theme-cover.png"), "cover").unwrap();
     std::fs::write(ext_dir.join("assets/channel.png"), "channel").unwrap();
-    std::fs::write(ext_dir.join("assistants/context.md"), "Assistant context from file.").unwrap();
+    std::fs::write(ext_dir.join("presets/context.md"), "Preset context from file.").unwrap();
     std::fs::write(ext_dir.join("agents/context.md"), "Agent context from file.").unwrap();
     std::fs::write(ext_dir.join("skills/review.md"), "# review skill").unwrap();
     std::fs::write(ext_dir.join("themes/dark.css"), ":root { --legacy-bg: #111; }").unwrap();
@@ -95,13 +95,13 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                         ]
                     }
                 ],
-                "assistants": [
+                "presets": [
                     {
-                        "id": "legacy-assistant",
-                        "name": "Legacy Assistant",
-                        "avatar": "assets/assistant.png",
-                        "presetAgentType": "gemini",
-                        "contextFile": "assistants/context.md",
+                        "id": "legacy-preset",
+                        "name": "Legacy Preset",
+                        "avatar": "assets/preset.png",
+                        "preferredAgentId": "gemini",
+                        "contextFile": "presets/context.md",
                         "models": ["gemini-2.0-flash"],
                         "enabledSkills": ["review-skill"],
                         "prompts": ["Review the diff"]
@@ -112,7 +112,7 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                         "id": "legacy-agent",
                         "name": "Legacy Agent",
                         "avatar": "assets/agent.png",
-                        "presetAgentType": "codex",
+                        "agentType": "codex",
                         "contextFile": "agents/context.md",
                         "models": ["codex-mini"],
                         "enabledSkills": ["review-skill"],
@@ -216,12 +216,12 @@ async fn eq3_get_themes_empty() {
 }
 
 #[tokio::test]
-async fn eq4_get_assistants_empty() {
+async fn eq4_get_presets_empty() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
 
     let resp = app
-        .oneshot(get_with_token("/api/extensions/assistants", &token))
+        .oneshot(get_with_token("/api/extensions/presets", &token))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -457,31 +457,31 @@ async fn eq15_legacy_acp_skill_and_mcp_endpoints_preserve_contract() {
 }
 
 #[tokio::test]
-async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
+async fn eq16_legacy_preset_agent_and_theme_endpoints_preserve_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
 
-    let assistant_resp = app
+    let preset_resp = app
         .clone()
-        .oneshot(get_with_token("/api/extensions/assistants", &token))
+        .oneshot(get_with_token("/api/extensions/presets", &token))
         .await
         .unwrap();
-    assert_eq!(assistant_resp.status(), StatusCode::OK);
-    let assistant_json = body_json(assistant_resp).await;
-    let assistants = assistant_json["data"].as_array().unwrap();
-    assert_eq!(assistants.len(), 1);
-    assert_eq!(assistants[0]["id"], "ext-legacy-assistant");
-    assert_eq!(assistants[0]["presetAgentType"], "gemini");
-    assert_eq!(assistants[0]["enabledSkills"][0], "review-skill");
-    assert_eq!(assistants[0]["prompts"][0], "Review the diff");
-    assert_eq!(assistants[0]["models"][0], "gemini-2.0-flash");
-    assert_eq!(assistants[0]["_kind"], "assistant");
-    assert_eq!(assistants[0]["context"], "Assistant context from file.");
+    assert_eq!(preset_resp.status(), StatusCode::OK);
+    let preset_json = body_json(preset_resp).await;
+    let presets = preset_json["data"].as_array().unwrap();
+    assert_eq!(presets.len(), 1);
+    assert_eq!(presets[0]["id"], "ext-legacy-preset");
+    assert_eq!(presets[0]["preferredAgentId"], "gemini");
+    assert_eq!(presets[0]["enabledSkills"][0], "review-skill");
+    assert_eq!(presets[0]["prompts"][0], "Review the diff");
+    assert_eq!(presets[0]["models"][0], "gemini-2.0-flash");
+    assert_eq!(presets[0]["_kind"], "preset");
+    assert_eq!(presets[0]["context"], "Preset context from file.");
     assert_eq!(
-        assistants[0]["avatar"],
-        "/api/extensions/legacy-suite/assets/assets/assistant.png"
+        presets[0]["avatar"],
+        "/api/extensions/legacy-suite/assets/assets/preset.png"
     );
 
     let agent_resp = app
@@ -494,7 +494,7 @@ async fn eq16_legacy_assistant_agent_and_theme_endpoints_preserve_contract() {
     let agents = agent_json["data"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["id"], "ext-legacy-agent");
-    assert_eq!(agents[0]["presetAgentType"], "codex");
+    assert_eq!(agents[0]["agentType"], "codex");
     assert_eq!(agents[0]["enabledSkills"][0], "review-skill");
     assert_eq!(agents[0]["prompts"][0], "Ship it");
     assert_eq!(agents[0]["models"][0], "codex-mini");

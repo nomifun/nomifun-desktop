@@ -13,7 +13,7 @@ import { getCleanFileNames, FileService } from '@/renderer/services/FileService'
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import type { AvailableAgent } from '../types';
-import type { Assistant } from '@/common/types/agent/assistantTypes';
+import type { Preset } from '@/common/types/agent/presetTypes';
 import PresetAgentTag, { type AgentSwitcherItem } from './PresetAgentTag';
 import { Button, Checkbox, Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
 import { ArrowUp, Plus, Robot, Shield, UploadOne } from '@icon-park/react';
@@ -44,7 +44,7 @@ type GuidActionRowProps = {
    * Backend-merged preset catalog — drives the preset tag label lookup. Not
    * the ACP engine-config list (custom agents from the AgentRegistry).
    */
-  assistants: Assistant[];
+  presets: Preset[];
   localeKey: string;
   onClosePresetTag: () => void;
   agentLogo?: string | null;
@@ -80,7 +80,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   onModeSelect,
   is_presetAgent,
   selectedAgentInfo,
-  assistants,
+  presets,
   localeKey,
   onClosePresetTag,
   agentLogo,
@@ -287,7 +287,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           <div className={styles.actionPresetAgent}>
             <PresetAgentTag
               agentInfo={selectedAgentInfo}
-              assistants={assistants}
+              presets={presets}
               localeKey={localeKey}
               onClose={onClosePresetTag}
               agentLogo={agentLogo}

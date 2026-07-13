@@ -91,7 +91,7 @@ const IdentitySection: React.FC<Props> = ({ agent, patch, message }) => {
               maxLength={500}
               showWordLimit
               placeholder={t('publicCompanion.identity.greetingPlaceholder', {
-                defaultValue: '例如：您好，我是官网客服小助手，很高兴为您解答产品相关问题～',
+                defaultValue: '例如：您好，我是官网客服伙伴，很高兴为您解答产品相关问题～',
               })}
             />
           </FieldRow>

@@ -6,7 +6,7 @@
 
 /**
  * SourceCard — a grid item for the requirements「数据源」section. Mirrors the
- * AssistantCard visual language (rounded-16px bordered surface on bg-2, soft
+ * PresetCard visual language (rounded-16px bordered surface on bg-2, soft
  * hover, chip badges) but is purely presentational: a leading icon tile, a
  * name + status badge header, a 2-line description clamp, and a status-specific
  * footer (active → count, soon → a quiet "Connect…" affordance, planned → nothing).

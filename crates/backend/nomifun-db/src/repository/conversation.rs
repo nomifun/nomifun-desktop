@@ -274,6 +274,9 @@ pub struct ConversationRowUpdate {
     /// Set/clear the owning cron job. `Some(Some(id))` sets, `Some(None)` clears
     /// (used by the cron executor's atomic backfill on `new_conversation`).
     pub cron_job_id: Option<Option<String>>,
+    pub preset_id: Option<Option<String>>,
+    pub preset_revision: Option<Option<i64>>,
+    pub preset_snapshot: Option<Option<String>>,
     pub updated_at: Option<TimestampMs>,
 }
 

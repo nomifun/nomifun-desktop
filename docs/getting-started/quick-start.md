@@ -34,7 +34,7 @@ You can choose:
 
 - an agent/runtime,
 - a model/provider when the runtime supports it,
-- an assistant persona,
+- a reusable preset,
 - skills or MCP tools,
 - a workspace path,
 - and the first prompt.
@@ -60,7 +60,7 @@ Back on `/guid`:
 
 1. Choose an agent.
 2. Choose a model if required.
-3. Optionally choose an assistant.
+3. Optionally choose a preset.
 4. Type a prompt.
 5. Send with the button or `Ctrl/Cmd+Enter`.
 
@@ -75,7 +75,7 @@ Useful next pages:
 
 - [Terminal](../guides/terminal.md)
 - [MCP & Skills](../guides/mcp-and-skills.md)
-- [Assistants](../guides/assistants.md)
+- [Presets](../guides/presets.md)
 - [AutoWork & Requirements](../guides/autowork-requirements.md)
 - [Scheduled Tasks](../guides/scheduled-tasks.md)
 - [Web Server Deployment](../guides/web-server-deployment.md)

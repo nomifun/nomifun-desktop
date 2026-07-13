@@ -40,8 +40,9 @@ impl IConversationRepository for SqliteConversationRepository {
         let result = sqlx::query(
             "INSERT INTO conversations \
                 (user_id, name, type, extra, model, status, source, \
-                 channel_chat_id, pinned, pinned_at, cron_job_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
+                 preset_snapshot, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.user_id)
         .bind(&row.name)
@@ -54,6 +55,9 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(row.pinned)
         .bind(row.pinned_at)
         .bind(&row.cron_job_id)
+        .bind(&row.preset_id)
+        .bind(row.preset_revision)
+        .bind(&row.preset_snapshot)
         .bind(row.created_at)
         .bind(row.updated_at)
         .execute(&self.pool)
@@ -94,6 +98,18 @@ impl IConversationRepository for SqliteConversationRepository {
         if let Some(ref cron_job_id) = updates.cron_job_id {
             set_parts.push("cron_job_id = ?".to_string());
             binds.push(BindValue::OptStr(cron_job_id.clone()));
+        }
+        if let Some(ref preset_id) = updates.preset_id {
+            set_parts.push("preset_id = ?".to_string());
+            binds.push(BindValue::OptStr(preset_id.clone()));
+        }
+        if let Some(ref preset_revision) = updates.preset_revision {
+            set_parts.push("preset_revision = ?".to_string());
+            binds.push(BindValue::OptI64(*preset_revision));
+        }
+        if let Some(ref preset_snapshot) = updates.preset_snapshot {
+            set_parts.push("preset_snapshot = ?".to_string());
+            binds.push(BindValue::OptStr(preset_snapshot.clone()));
         }
         if let Some(updated_at) = updates.updated_at {
             set_parts.push("updated_at = ?".to_string());
@@ -890,6 +906,9 @@ mod tests {
             pinned: false,
             pinned_at: None,
             cron_job_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             created_at: now,
             updated_at: now,
         }

@@ -157,25 +157,25 @@ fn cr2_mcp_server_resolved_as_opaque_config() {
 }
 
 // ---------------------------------------------------------------------------
-// CR-3: Assistant resolution with @file: reference
+// CR-3: Preset resolution with @file: reference
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cr3_assistant_file_reference_resolved() {
-    let dir = std::env::temp_dir().join("cr3_assistant_resolve");
+fn cr3_preset_file_reference_resolved() {
+    let dir = std::env::temp_dir().join("cr3_preset_resolve");
     let prompts = dir.join("prompts");
     std::fs::create_dir_all(&prompts).unwrap();
-    std::fs::write(prompts.join("system.md"), "You are a helpful coding assistant.").unwrap();
+    std::fs::write(prompts.join("system.md"), "You are a helpful coding preset.").unwrap();
 
     let contributes = ExtContributes {
-        assistants: vec![ExtAssistant {
+        presets: vec![ExtPreset {
             id: "code-helper".into(),
             name: "Code Helper".into(),
-            description: Some("AI coding assistant".into()),
+            description: Some("AI coding preset".into()),
             system_prompt: Some("@file:prompts/system.md".into()),
             icon: Some("icons/code.png".into()),
             context: None,
-            preset_agent_type: Some("gemini".into()),
+            preferred_agent_id: Some("gemini".into()),
             enabled_skills: vec!["code-review".into()],
             prompts: vec!["Review this patch".into()],
             models: vec!["gemini-2.0-flash".into()],
@@ -186,17 +186,17 @@ fn cr3_assistant_file_reference_resolved() {
     let ext = make_loaded_extension("helper-ext", &dir.to_string_lossy(), contributes);
     let result = resolve_extension_contributions(&ext);
 
-    assert_eq!(result.assistants.len(), 1);
-    let assistant = &result.assistants[0];
-    assert_eq!(assistant.extension_name, "helper-ext");
+    assert_eq!(result.presets.len(), 1);
+    let preset = &result.presets[0];
+    assert_eq!(preset.extension_name, "helper-ext");
     assert_eq!(
-        assistant.system_prompt.as_deref(),
-        Some("You are a helpful coding assistant.")
+        preset.system_prompt.as_deref(),
+        Some("You are a helpful coding preset.")
     );
-    assert_eq!(assistant.preset_agent_type.as_deref(), Some("gemini"));
-    assert_eq!(assistant.enabled_skills, vec!["code-review"]);
-    assert_eq!(assistant.prompts, vec!["Review this patch"]);
-    assert_eq!(assistant.models, vec!["gemini-2.0-flash"]);
+    assert_eq!(preset.preferred_agent_id.as_deref(), Some("gemini"));
+    assert_eq!(preset.enabled_skills, vec!["code-review"]);
+    assert_eq!(preset.prompts, vec!["Review this patch"]);
+    assert_eq!(preset.models, vec!["gemini-2.0-flash"]);
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

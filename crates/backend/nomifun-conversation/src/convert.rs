@@ -64,6 +64,12 @@ pub fn row_to_response_with_extra(
     let source: Option<ConversationSource> = row.source.as_deref().map(string_to_enum).transpose()?;
 
     let model: Option<ProviderWithModel> = row.model.as_deref().map(parse_provider_with_model).transpose()?;
+    let preset_snapshot = row
+        .preset_snapshot
+        .as_deref()
+        .map(serde_json::from_str::<nomifun_api_types::ResolvedPresetSnapshot>)
+        .transpose()
+        .map_err(|error| AppError::Internal(format!("Invalid preset snapshot JSON: {error}")))?;
 
     Ok(ConversationResponse {
         id: row.id,
@@ -76,6 +82,9 @@ pub fn row_to_response_with_extra(
         pinned: row.pinned,
         pinned_at: row.pinned_at,
         channel_chat_id: row.channel_chat_id,
+        preset_id: row.preset_id,
+        preset_revision: row.preset_revision,
+        preset_snapshot,
         created_at: row.created_at,
         modified_at: row.updated_at,
         extra,
@@ -322,6 +331,9 @@ pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<Mess
         // Search rows don't project `cron_job_id`; it isn't needed for the
         // search-result conversation summary (no artifact card rendered there).
         cron_job_id: None,
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
         created_at: row.conversation_created_at,
         updated_at: row.conversation_updated_at,
     };
@@ -364,6 +376,9 @@ mod tests {
             pinned: false,
             pinned_at: None,
             cron_job_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             created_at: 1000,
             updated_at: 2000,
         }
@@ -433,6 +448,9 @@ mod tests {
             pinned: false,
             pinned_at: None,
             cron_job_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             created_at: 1000,
             updated_at: 2000,
         };
@@ -546,6 +564,9 @@ mod tests {
             pinned: true,
             pinned_at: Some(5000),
             cron_job_id: None,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             created_at: 1000,
             updated_at: 3000,
         };

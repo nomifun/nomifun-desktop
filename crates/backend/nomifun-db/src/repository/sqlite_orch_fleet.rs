@@ -134,13 +134,16 @@ impl IFleetRepository for SqliteFleetRepository {
             let mid = generate_prefixed_id("fmem");
             sqlx::query(
                 "INSERT INTO fleet_members (\
-                    id, fleet_id, agent_id, provider_id, model, role_hint, \
+                    id, fleet_id, agent_id, preset_id, preset_revision, preset_snapshot, provider_id, model, role_hint, \
                     capability_profile, constraints, sort_order, created_at, updated_at\
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&mid)
             .bind(fleet_id)
             .bind(&m.agent_id)
+            .bind(&m.preset_id)
+            .bind(m.preset_revision)
+            .bind(&m.preset_snapshot)
             .bind(&m.provider_id)
             .bind(&m.model)
             .bind(&m.role_hint)
@@ -196,6 +199,9 @@ mod tests {
             &f.id,
             vec![NewFleetMember {
                 agent_id: "agent_builtin_claude".into(),
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 provider_id: Some("prov_x".into()),
                 model: Some("claude-opus-4-8".into()),
                 role_hint: Some("后端".into()),
@@ -232,6 +238,9 @@ mod tests {
             &fleet.id,
             vec![NewFleetMember {
                 agent_id: "agent_builtin_claude".into(),
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 provider_id: Some("prov_x".into()),
                 model: Some("claude-opus-4-8".into()),
                 role_hint: Some("后端".into()),

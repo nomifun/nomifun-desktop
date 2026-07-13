@@ -49,7 +49,7 @@ async fn fixture_params(
         custom_agent_id: None,
         preset_context: preset_context.map(str::to_owned),
         skills: vec![],
-        preset_assistant_id: None,
+        preset_id: None,
         session_mode: None,
         current_model_id: None,
         cron_job_id: None,

@@ -42,7 +42,7 @@ pub fn extension_routes(state: ExtensionRouterState) -> Router {
         // Query routes
         .route("/api/extensions", get(get_loaded_extensions))
         .route("/api/extensions/themes", get(get_themes))
-        .route("/api/extensions/assistants", get(get_assistants))
+        .route("/api/extensions/presets", get(get_presets))
         .route("/api/extensions/acp-adapters", get(get_acp_adapters))
         .route("/api/extensions/agents", get(get_agents))
         .route("/api/extensions/mcp-servers", get(get_mcp_servers))
@@ -119,31 +119,31 @@ async fn get_themes(
     Ok(Json(ApiResponse::ok(value)))
 }
 
-/// `GET /api/extensions/assistants` — get all resolved assistants.
-async fn get_assistants(
+/// `GET /api/extensions/presets` — get all resolved presets.
+async fn get_presets(
     State(state): State<ExtensionRouterState>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let assistants = state.registry.get_assistants().await;
+    let presets = state.registry.get_presets().await;
     let value = serde_json::Value::Array(
-        assistants
+        presets
             .into_iter()
-            .map(|assistant| {
+            .map(|preset| {
                 serde_json::json!({
-                    "id": format!("ext-{}", assistant.id),
-                    "name": assistant.name,
-                    "description": assistant.description,
-                    "avatar": assistant.icon,
-                    "presetAgentType": assistant.preset_agent_type,
-                    "context": assistant.context.unwrap_or_default(),
-                    "models": assistant.models,
-                    "enabledSkills": assistant.enabled_skills,
-                    "prompts": assistant.prompts,
+                    "id": format!("ext-{}", preset.id),
+                    "name": preset.name,
+                    "description": preset.description,
+                    "avatar": preset.icon,
+                    "preferredAgentId": preset.preferred_agent_id,
+                    "context": preset.context.unwrap_or_default(),
+                    "models": preset.models,
+                    "enabledSkills": preset.enabled_skills,
+                    "prompts": preset.prompts,
                     "isPreset": true,
                     "isBuiltin": false,
                     "enabled": true,
                     "_source": "extension",
-                    "_extensionName": assistant.extension_name,
-                    "_kind": "assistant",
+                    "_extensionName": preset.extension_name,
+                    "_kind": "preset",
                 })
             })
             .collect(),
@@ -205,7 +205,7 @@ async fn get_agents(
                     "name": agent.name,
                     "description": agent.description,
                     "avatar": agent.icon,
-                    "presetAgentType": agent.agent_type,
+                    "agentType": agent.agent_type,
                     "context": agent.context.unwrap_or_default(),
                     "models": agent.models,
                     "enabledSkills": agent.enabled_skills,

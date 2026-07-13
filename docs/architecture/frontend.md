@@ -61,7 +61,8 @@ The source of truth is
 | `/terminal-new` | Terminal creation. |
 | `/terminal/:id` | Terminal runtime. |
 | `/models` | Model and agent management. |
-| `/assistants` | Assistant and skill hub. |
+| `/presets` | Reusable preset library. |
+| `/skills` | Skills capability library. |
 | `/mcp` | MCP server management. |
 | `/open-capabilities` | Remote/public capability exposure. |
 | `/scheduled`, `/scheduled/:job_id` | Scheduled tasks. |
@@ -72,7 +73,7 @@ The source of truth is
 
 Legacy settings paths such as `/settings/model`, `/settings/agent`,
 `/settings/capabilities`, `/settings/skills-hub`, `/settings/tools`,
-`/settings/webui`, `/settings/assistants`, and `/settings/webhook` are
+`/settings/webui` and `/settings/webhook` are
 redirects. Do not document them as primary navigation.
 
 There is no current `/team/:id` frontend route. Backend team code may still

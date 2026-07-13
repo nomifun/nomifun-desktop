@@ -13,9 +13,23 @@ export type ConfigFile = {
 
 const LEGACY_MCP_CONFIG_KEY = 'mcp.config' as const;
 
+const LEGACY_CHANNEL_KEY_MAP = {
+  'assistant.telegram.agent': 'channels.telegram.agent',
+  'assistant.lark.agent': 'channels.lark.agent',
+  'assistant.dingtalk.agent': 'channels.dingtalk.agent',
+  'assistant.weixin.agent': 'channels.weixin.agent',
+  'assistant.wecom.agent': 'channels.wecom.agent',
+} as const satisfies Record<string, ConfigKey>;
+
+type LegacyChannelConfigKey = keyof typeof LEGACY_CHANNEL_KEY_MAP;
+
 type LegacyMcpConfigFile = ConfigFile & {
   get(key: typeof LEGACY_MCP_CONFIG_KEY): Promise<unknown>;
   set(key: typeof LEGACY_MCP_CONFIG_KEY, value: unknown): Promise<unknown>;
+};
+
+type LegacyChannelConfigFile = ConfigFile & {
+  get(key: LegacyChannelConfigKey): Promise<unknown>;
 };
 
 const ALL_LEGACY_KEYS: ConfigKey[] = [
@@ -48,11 +62,11 @@ const ALL_LEGACY_KEYS: ConfigKey[] = [
   'system.cronNotificationEnabled',
   'system.keepAwake',
   'system.autoPreviewOfficeFiles',
-  'assistant.telegram.agent',
-  'assistant.lark.agent',
-  'assistant.dingtalk.agent',
-  'assistant.weixin.agent',
-  'assistant.wecom.agent',
+  'channels.telegram.agent',
+  'channels.lark.agent',
+  'channels.dingtalk.agent',
+  'channels.weixin.agent',
+  'channels.wecom.agent',
 ];
 
 export async function migrateConfigStorage(configFile: ConfigFile): Promise<void> {
@@ -71,6 +85,26 @@ export async function migrateConfigStorage(configFile: ConfigFile): Promise<void
 
   for (const [key, value] of legacyEntries) {
     if (value !== undefined && value !== null) {
+      entries[key] = value;
+    }
+  }
+
+  // Older desktop config files used the removed Assistant product namespace
+  // for Channel selections. Import those values directly into canonical keys;
+  // runtime code never reads the obsolete names.
+  const legacyChannelConfigFile = configFile as LegacyChannelConfigFile;
+  const legacyChannelEntries = await Promise.all(
+    Object.entries(LEGACY_CHANNEL_KEY_MAP).map(async ([oldKey, canonicalKey]) => {
+      try {
+        const value = await legacyChannelConfigFile.get(oldKey as LegacyChannelConfigKey);
+        return [canonicalKey, value] as const;
+      } catch {
+        return [canonicalKey, undefined] as const;
+      }
+    })
+  );
+  for (const [key, value] of legacyChannelEntries) {
+    if (!(key in entries) && value !== undefined && value !== null) {
       entries[key] = value;
     }
   }

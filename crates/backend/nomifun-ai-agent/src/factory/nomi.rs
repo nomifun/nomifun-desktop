@@ -64,9 +64,8 @@ pub(super) async fn build(
     };
     apply_exposure_clamp(&mut overrides);
 
-    // Merge preset assistant rules into system_prompt (used as custom_prompt
-    // in nomi's build_system_prompt). Mirrors the old architecture's
-    // `init_history` injection of `[Assistant System Rules]`.
+    // Merge reusable preset instructions into `system_prompt` (used as
+    // `custom_prompt` in Nomi's prompt builder).
     if let Some(rules) = overrides.preset_rules.take() {
         overrides.system_prompt = Some(match overrides.system_prompt.take() {
             Some(existing) => format!("{existing}\n\n{rules}"),
@@ -929,6 +928,10 @@ pub(crate) fn build_public_agent_prompt(runtime: &crate::factory::PublicAgentRun
     let tone = runtime.tone.trim();
     if !tone.is_empty() {
         out.push_str(&format!("\n\n【语气与风格】{tone}"));
+    }
+    let preset_instructions = runtime.preset_instructions.trim();
+    if !preset_instructions.is_empty() {
+        out.push_str(&format!("\n\n【当前服务设定】{preset_instructions}"));
     }
     let policy = runtime.service_policy.trim();
     if !policy.is_empty() {

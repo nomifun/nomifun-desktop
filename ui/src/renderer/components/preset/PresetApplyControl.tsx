@@ -1,0 +1,104 @@
+/**
+ * One-click application of a reusable preset to a durable target.
+ * Resolution, validation and snapshot persistence are exclusively backend-owned.
+ */
+import React, { useEffect, useMemo, useState } from 'react';
+import { Button, Message } from '@arco-design/web-react';
+import { useTranslation } from 'react-i18next';
+import { ipcBridge } from '@/common';
+import type { Preset, PresetTarget, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import NomiSelect from '@/renderer/components/base/NomiSelect';
+
+type Props = {
+  target: PresetTarget;
+  appliedPreset?: ResolvedPresetSnapshot;
+  onApply: (presetId: string, locale: string) => Promise<void>;
+  disabled?: boolean;
+};
+
+const PresetApplyControl: React.FC<Props> = ({ target, appliedPreset, onApply, disabled = false }) => {
+  const { t, i18n } = useTranslation();
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | undefined>(appliedPreset?.preset_id);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    void ipcBridge.presets.list
+      .invoke()
+      .then((items) => {
+        if (active) setPresets(items);
+      })
+      .catch(() => {
+        if (active) setPresets([]);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setSelectedId(appliedPreset?.preset_id);
+  }, [appliedPreset?.preset_id]);
+
+  const availablePresets = useMemo(
+    () => presets.filter((preset) => preset.enabled && preset.targets.includes(target)),
+    [presets, target]
+  );
+
+  const apply = async () => {
+    if (!selectedId) return;
+    setApplying(true);
+    try {
+      await onApply(selectedId, i18n.language);
+      Message.success(t('settings.presetApplySuccess', { defaultValue: 'Preset applied' }));
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  return (
+    <div className='flex flex-col gap-8px'>
+      <div className='flex items-center gap-8px flex-wrap'>
+        <NomiSelect
+          value={selectedId}
+          onChange={(value) => setSelectedId(value as string)}
+          disabled={disabled || loading || applying}
+          loading={loading}
+          showSearch
+          allowClear
+          className='min-w-240px flex-1'
+          placeholder={t('settings.presetApplyPlaceholder', { defaultValue: 'Choose a preset' })}
+          notFoundContent={t('settings.presetApplyEmpty', { defaultValue: 'No preset supports this target yet' })}
+        >
+          {availablePresets.map((preset) => (
+            <NomiSelect.Option key={preset.id} value={preset.id}>
+              {preset.name_i18n?.[i18n.language] || preset.name}
+            </NomiSelect.Option>
+          ))}
+        </NomiSelect>
+        <Button type='primary' loading={applying} disabled={disabled || !selectedId || loading} onClick={() => void apply()}>
+          {t('settings.presetApplyAction', { defaultValue: 'Apply preset' })}
+        </Button>
+      </div>
+      {appliedPreset && (
+        <div className='text-12px text-t-tertiary'>
+          {t('settings.presetAppliedSnapshot', {
+            defaultValue: 'Applied: {{name}} · revision {{revision}}',
+            name: appliedPreset.preset_name,
+            revision: appliedPreset.preset_revision,
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default PresetApplyControl;

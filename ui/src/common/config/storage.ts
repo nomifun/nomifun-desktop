@@ -5,6 +5,7 @@
  */
 
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
+import type { ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import { storage } from '@/platform';
 
 // 系统配置存储
@@ -92,32 +93,32 @@ export interface IConfigStorageRefer {
   'system.keepAwake'?: boolean;
   // Automatically preview newly created Office files in the current workspace
   'system.autoPreviewOfficeFiles'?: boolean;
-  // Telegram assistant agent selection / Telegram 助手所使用的 Agent
-  'assistant.telegram.agent'?: {
+  // Telegram channel agent selection / Telegram Channel 所使用的 Agent
+  'channels.telegram.agent'?: {
     backend: string;
     custom_agent_id?: string;
     name?: string;
   };
-  // Lark assistant agent selection / Lark 助手所使用的 Agent
-  'assistant.lark.agent'?: {
+  // Lark channel agent selection / Lark Channel 所使用的 Agent
+  'channels.lark.agent'?: {
     backend: string;
     custom_agent_id?: string;
     name?: string;
   };
-  // DingTalk assistant agent selection / DingTalk 助手所使用的 Agent
-  'assistant.dingtalk.agent'?: {
+  // DingTalk channel agent selection / DingTalk Channel 所使用的 Agent
+  'channels.dingtalk.agent'?: {
     backend: string;
     custom_agent_id?: string;
     name?: string;
   };
-  // WeChat assistant agent selection / WeChat 助手所使用的 Agent
-  'assistant.weixin.agent'?: {
+  // WeChat channel agent selection / WeChat Channel 所使用的 Agent
+  'channels.weixin.agent'?: {
     backend: string;
     custom_agent_id?: string;
     name?: string;
   };
-  // WeCom assistant agent selection / 企业微信助手所使用的 Agent
-  'assistant.wecom.agent'?: {
+  // WeCom channel agent selection / 企业微信 Channel 所使用的 Agent
+  'channels.wecom.agent'?: {
     backend: string;
     custom_agent_id?: string;
     name?: string;
@@ -133,14 +134,6 @@ export interface IConfigStorageRefer {
    * pre-flag build still re-reads the legacy data unchanged.
    */
   'migration.providersMigrated_v1'?: boolean;
-  /**
-   * One-shot completion flag for the legacy `assistants` → backend assistants
-   * migration in {@link migrateAssistantsToBackend}. Same rationale as
-   * `migration.providersMigrated_v1` — without it, an assistant the user
-   * deletes after migration would be re-imported on the next launch from the
-   * still-on-disk legacy field.
-   */
-  'migration.assistantsMigrated_v1'?: boolean;
 }
 
 export interface IEnvStorageRefer {
@@ -193,6 +186,10 @@ interface IChatConversation<T, Extra> {
    *  top-level conversations column; mirrored into extra by the API mapper so
    *  existing extra-readers keep working). */
   cron_job_id?: string;
+  /** Immutable preset lineage resolved and persisted by the backend. */
+  preset_id?: string;
+  preset_revision?: number;
+  preset_snapshot?: ResolvedPresetSnapshot;
 }
 
 // Token 使用统计数据类型
@@ -226,7 +223,6 @@ export type TChatConversation =
           custom_workspace?: boolean;
           agent_name?: string;
           custom_agent_id?: string; // UUID for identifying specific custom agent
-          preset_context?: string; // 智能助手的预设规则/提示词 / Preset context from smart assistant
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
@@ -238,8 +234,6 @@ export type TChatConversation =
           mcp_statuses?: IConversationMcpStatus[];
           /** Session-only MCP server snapshot persisted at creation time. */
           session_mcp_servers?: ISessionMcpServer[];
-          /** 预设助手 ID，用于在会话面板显示助手名称和头像 / Preset assistant ID for displaying name and avatar in conversation panel */
-          preset_assistant_id?: string;
           /** 是否置顶会话 / Whether this conversation is pinned */
           pinned?: boolean;
           /** 置顶时间戳（毫秒）/ Pin timestamp in milliseconds */
@@ -278,12 +272,9 @@ export type TChatConversation =
           cli_path?: string;
           custom_workspace?: boolean;
           sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access'; // Codex sandbox permission mode
-          preset_context?: string; // 智能助手的预设规则/提示词 / Preset context from smart assistant
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
-          /** 预设助手 ID，用于在会话面板显示助手名称和头像 / Preset assistant ID for displaying name and avatar in conversation panel */
-          preset_assistant_id?: string;
           /** 是否置顶会话 / Whether this conversation is pinned */
           pinned?: boolean;
           /** 置顶时间戳（毫秒）/ Pin timestamp in milliseconds */
@@ -332,8 +323,6 @@ export type TChatConversation =
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
-          /** 预设助手 ID / Preset assistant ID */
-          preset_assistant_id?: string;
           /** 是否置顶会话 / Whether this conversation is pinned */
           pinned?: boolean;
           /** 置顶时间戳（毫秒）/ Pin timestamp in milliseconds */
@@ -360,13 +349,12 @@ export type TChatConversation =
           workspace?: string;
           custom_workspace?: boolean;
           agent_name?: string;
-          preset_assistant_id?: string;
           pinned?: boolean;
           pinned_at?: number;
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           cron_job_id?: string;
-          // Other legacy-only keys (session_mode, preset_rules, etc.)
+          // Other legacy-only keys (session_mode, injected rules, etc.)
           // deliberately omitted — they're not read by the renderer.
         }
       >,
@@ -381,8 +369,6 @@ export type TChatConversation =
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
-          /** 预设助手 ID / Preset assistant ID */
-          preset_assistant_id?: string;
           /** 是否置顶会话 / Whether this conversation is pinned */
           pinned?: boolean;
           /** 置顶时间戳（毫秒）/ Pin timestamp in milliseconds */
@@ -408,8 +394,6 @@ export type TChatConversation =
           /** Skills snapshot for this conversation — authoritative list, written
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
-          /** Preset assistant ID */
-          preset_assistant_id?: string;
           /** Whether this conversation is pinned */
           pinned?: boolean;
           /** Pin timestamp in milliseconds */
@@ -428,8 +412,6 @@ export type TChatConversation =
         workspace: string;
         custom_workspace?: boolean;
         proxy?: string;
-        /** System rules injected at initialization */
-        preset_rules?: string;
         /** Skills snapshot for this conversation — authoritative list, written
          * once at creation. Join with `GET /api/skills` for descriptions. */
         skills?: string[];
@@ -441,8 +423,6 @@ export type TChatConversation =
         mcp_statuses?: IConversationMcpStatus[];
         /** Session-only MCP server snapshot persisted at creation time. */
         session_mcp_servers?: ISessionMcpServer[];
-        /** Preset assistant ID */
-        preset_assistant_id?: string;
         /** Whether this conversation is pinned */
         pinned?: boolean;
         /** Pin timestamp in milliseconds */

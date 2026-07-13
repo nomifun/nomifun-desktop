@@ -18,8 +18,8 @@ describe('Guid resource cards placement', () => {
     const primaryStageIndex = source.indexOf('className={styles.guidPrimaryStage}');
     const discoveryAreaIndex = source.indexOf('className={styles.guidDiscoveryArea}');
     const companionPreviewIndex = source.indexOf('<GuidCompanionPosterPreview', discoveryAreaIndex);
-    const editorHostIndex = source.indexOf('<GuidAssistantEditorHost', inputIndex);
-    const discoveryAreaEndIndex = source.indexOf('{/* SummonDrawer', discoveryAreaIndex);
+    const editorHostIndex = source.indexOf('<GuidPresetEditorHost', inputIndex);
+    const discoveryAreaEndIndex = source.indexOf('{/* PresetPickerDrawer', discoveryAreaIndex);
     const discoveryAreaSource = source.slice(discoveryAreaIndex, discoveryAreaEndIndex);
 
     expect(primaryStageIndex).toBeGreaterThan(-1);

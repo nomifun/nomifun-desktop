@@ -40,6 +40,12 @@ pub struct CreateConversationRequest {
     pub model: Option<ProviderWithModel>,
     pub source: Option<ConversationSource>,
     pub channel_chat_id: Option<String>,
+    /// Reusable launch configuration. The server resolves this reference and
+    /// persists immutable lineage/snapshot columns during creation.
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    #[serde(default)]
+    pub preset_overrides: Option<crate::PresetOverrides>,
     pub extra: serde_json::Value,
 }
 
@@ -200,6 +206,12 @@ pub struct ConversationResponse {
     pub pinned_at: Option<TimestampMs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
     pub created_at: TimestampMs,
     pub modified_at: TimestampMs,
     pub extra: serde_json::Value,
@@ -508,6 +520,9 @@ mod tests {
             channel_chat_id: None,
             created_at: 1712345678000,
             modified_at: 1712345678000,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             extra: json!({ "workspace": "/project" }),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -545,6 +560,9 @@ mod tests {
             channel_chat_id: None,
             created_at: 1,
             modified_at: 1,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             extra: json!({}),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -576,6 +594,9 @@ mod tests {
             channel_chat_id: Some("group:42".into()),
             created_at: 1000,
             modified_at: 2000,
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             extra: json!({}),
         };
         let serialized = serde_json::to_string(&resp).unwrap();
@@ -659,6 +680,9 @@ mod tests {
                 channel_chat_id: None,
                 created_at: 1712345678000,
                 modified_at: 1712345678000,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 extra: json!({}),
             },
         };
@@ -695,6 +719,9 @@ mod tests {
                 channel_chat_id: None,
                 created_at: 9000,
                 modified_at: 9000,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 extra: json!({}),
             },
         };
@@ -765,6 +792,9 @@ mod tests {
                 channel_chat_id: None,
                 created_at: 1000,
                 modified_at: 1000,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
                 extra: json!({}),
             }],
             total: 1,
@@ -809,6 +839,9 @@ mod tests {
                     channel_chat_id: None,
                     created_at: 5000,
                     modified_at: 5000,
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
                     extra: json!({}),
                 },
             }],

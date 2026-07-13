@@ -18,8 +18,8 @@ export type AgentBadgeProps = {
   agentLogo?: string;
   /** Whether the logo is an emoji */
   agentLogoIsEmoji?: boolean;
-  /** Assistant ID — when provided, clicking the badge navigates to AssistantSettings */
-  assistantId?: string;
+  /** Preset lineage for callers that expose configuration details. */
+  presetId?: string;
 };
 
 /** Render agent logo from custom logo, backend logo, or fallback Robot icon */

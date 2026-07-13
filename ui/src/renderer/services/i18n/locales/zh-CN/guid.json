@@ -6,7 +6,7 @@
   "autoSwitchToAgent": "Gemini 未配置，正在自动切换到 {{agent}}",
   "autoSwitchedAgent": "{{from}} 不可用，已自动切换到 {{to}}",
   "promptExamplesHint": "试试这些可点击的案例提示词：",
-  "selectAssistantHint": "选择一位助手开始任务",
+  "selectPresetHint": "选择一位设定开始任务",
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "已切换到 {{agent}}",
   "modelRequired": "请先选择模型",
@@ -54,7 +54,7 @@
   },
   "entry": {
     "free": "自由发挥",
-    "summon": "召唤助手",
+    "usePreset": "使用设定",
     "skills": "使用 Skills",
     "skillsActive": "使用 Skills · 已启用",
     "skillsAdjustAria": "调整本次会话已启用的 {{count}} 个 Skills",
@@ -72,19 +72,19 @@
     "adjustHint": "点击「使用 Skills」调整本次会话。"
   },
   "drawer": {
-    "assistantTab": "助手",
+    "presetTab": "设定",
     "skillsTab": "Skills",
-    "searchAssistant": "搜索助手名称或描述…",
+    "searchPreset": "搜索设定名称或描述…",
     "searchSkill": "搜索 Skill 名称或描述…",
-    "summon": "召唤",
+    "usePreset": "使用",
     "keepFree": "保持自由发挥",
     "applySkills": "应用到本次会话",
     "selectedCount": "已选 {{count}} 个 Skill",
     "sourceCustom": "自定义",
     "sourceBuiltin": "内置",
     "autoInject": "自动注入",
-    "assistantCount": "位助手",
+    "presetCount": "个设定",
     "skillCount": "个 Skill",
-    "assistantHint": "点卡片「召唤」即让本次会话使用该助手（单选）"
+    "presetHint": "选择一个设定，本次会话将由后端解析并固化配置快照。"
   }
 }

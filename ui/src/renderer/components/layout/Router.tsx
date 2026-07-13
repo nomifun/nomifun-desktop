@@ -8,7 +8,8 @@ import { useTrayLabels } from '@renderer/hooks/useTrayLabels';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
-const AssistantSettings = React.lazy(() => import('@renderer/pages/settings/AssistantSettings'));
+const PresetSettings = React.lazy(() => import('@renderer/pages/settings/PresetSettings'));
+const SkillsHubSettings = React.lazy(() => import('@renderer/pages/settings/SkillsHubSettings'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
@@ -59,8 +60,7 @@ const LegacyExtensionsRedirect: React.FC = () => {
     return <Navigate to={withSearch('/mcp', searchParams)} replace />;
   }
 
-  searchParams.set('tab', 'skills');
-  return <Navigate to={withSearch('/assistants', searchParams)} replace />;
+  return <Navigate to={withSearch('/skills', searchParams)} replace />;
 };
 
 // Legacy `/requirements/:id/edit` deep links → open the workspace with the
@@ -166,13 +166,13 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
         <Route path='/nomi-memory-panel' element={withRouteFallback(MemoryPanelPage)} />
         <Route element={<ProtectedLayout layout={layout} />}>
           <Route index element={<Navigate to='/guid' replace />} />
-          {/* Model Management, Assistant & Skill, and MCP — top-level homepage destinations */}
+          {/* Models, presets, skills, and MCP are independent top-level capabilities. */}
           <Route path='/models' element={withRouteFallback(ModelHubPage)} />
           <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
           <Route path='/mcp' element={withRouteFallback(McpPage)} />
           <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
-          {/* Assistants — relocated out of Settings into a top-level homepage destination */}
-          <Route path='/assistants' element={withRouteFallback(AssistantSettings)} />
+          <Route path='/presets' element={withRouteFallback(PresetSettings)} />
+          <Route path='/skills' element={withRouteFallback(SkillsHubSettings)} />
           {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
           <Route
             element={
@@ -186,11 +186,11 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/terminal-new' element={withRouteFallback(TerminalCreatePage)} />
             <Route path='/terminal/:id' element={withRouteFallback(TerminalSessionPage)} />
           </Route>
-          {/* Relocated to the homepage: Agents/Models → /models, Capabilities → Assistant & Skill / MCP */}
+          {/* Relocated to the capability rail. */}
           <Route path='/settings/model' element={<Navigate to='/models?section=models' replace />} />
           <Route path='/settings/agent' element={<Navigate to='/models?section=agents' replace />} />
-          <Route path='/settings/capabilities' element={<Navigate to='/assistants?tab=skills' replace />} />
-          <Route path='/settings/skills-hub' element={<Navigate to='/assistants?tab=skills' replace />} />
+          <Route path='/settings/capabilities' element={<Navigate to='/skills' replace />} />
+          <Route path='/settings/skills-hub' element={<Navigate to='/skills' replace />} />
           <Route path='/settings/tools' element={<Navigate to='/open-capabilities' replace />} />
           <Route path='/settings/display' element={<Navigate to='/settings/system' replace />} />
           <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
@@ -200,8 +200,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
           <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
           <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
           <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
-          {/* Relocated out of Settings → AI Core: Assistants → /assistants, Webhook → requirements 扩展能力 */}
-          <Route path='/settings/assistants' element={<Navigate to='/assistants?tab=assistants' replace />} />
           <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
           <Route path='/settings' element={<Navigate to='/settings/system' replace />} />
           <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />

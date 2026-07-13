@@ -27,6 +27,10 @@ pub fn companion_routes(state: CompanionRouterState) -> Router {
             "/api/companion/companions/{companion_id}",
             get(get_companion).patch(patch_companion).delete(delete_companion),
         )
+        .route(
+            "/api/companion/companions/{companion_id}/apply-preset",
+            post(apply_preset),
+        )
         .route("/api/companion/companions/{companion_id}/status", get(companion_status))
         .route("/api/companion/companions/{companion_id}/figure", post(upload_figure).get(get_figure))
         .route("/api/companion/matting-model", get(get_matting_model))
@@ -538,6 +542,60 @@ async fn patch_companion(
 ) -> Result<Json<ApiResponse<CompanionProfileConfig>>, AppError> {
     let Json(patch) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(state.service.patch_companion(&companion_id, patch).await?)))
+}
+
+#[derive(Deserialize)]
+struct ApplyPresetRequest {
+    preset_id: String,
+    #[serde(default)]
+    locale: Option<String>,
+    #[serde(default)]
+    overrides: nomifun_api_types::PresetOverrides,
+}
+
+async fn apply_preset(
+    State(state): State<CompanionRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Path(companion_id): Path<String>,
+    body: Result<Json<ApplyPresetRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<CompanionProfileConfig>>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let presets = state
+        .preset_service
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("preset service is not wired".into()))?;
+    let snapshot = presets
+        .resolve(
+            &req.preset_id,
+            nomifun_api_types::PresetTarget::Companion,
+            req.locale.as_deref(),
+            req.overrides,
+        )
+        .await?;
+    if let Some(knowledge) = state.knowledge_service.as_ref() {
+        let mode = if snapshot.knowledge_policy.mode == "direct" { "direct" } else { "staged" };
+        knowledge
+            .set_binding(
+                "companion",
+                &companion_id,
+                nomifun_knowledge::KnowledgeBinding {
+                    enabled: snapshot.knowledge_policy.enabled,
+                    writeback: snapshot.knowledge_policy.writeback,
+                    writeback_mode: mode.to_owned(),
+                    writeback_eagerness: snapshot
+                        .knowledge_policy
+                        .eagerness
+                        .clone()
+                        .unwrap_or_else(|| "conservative".to_owned()),
+                    channel_write_enabled: false,
+                    kb_ids: snapshot.knowledge_base_ids.clone(),
+                },
+            )
+            .await?;
+    }
+    Ok(Json(ApiResponse::ok(
+        state.service.apply_preset_snapshot(&companion_id, snapshot).await?,
+    )))
 }
 
 async fn delete_companion(

@@ -33,6 +33,10 @@ pub struct ConversationRow {
     /// The cron job that created this conversation (was `extra.cronJobId`;
     /// now a real nullable FK column to `cron_jobs`).
     pub cron_job_id: Option<String>,
+    /// Preset lineage and immutable resolved launch configuration.
+    pub preset_id: Option<String>,
+    pub preset_revision: Option<i64>,
+    pub preset_snapshot: Option<String>,
     pub created_at: TimestampMs,
     pub updated_at: TimestampMs,
 }

@@ -12,9 +12,9 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('Skill tag modal pending draft handling', () => {
   test('commits inline tag drafts before saving skill tags', () => {
     const modal = readSource(new URL('./SkillTagModal.tsx', import.meta.url));
-    const picker = readSource(new URL('../AssistantSettings/AssistantTagPicker.tsx', import.meta.url));
+    const picker = readSource(new URL('../PresetSettings/PresetTagPicker.tsx', import.meta.url));
 
-    expect(picker.includes('AssistantTagPickerHandle')).toBe(true);
+    expect(picker.includes('PresetTagPickerHandle')).toBe(true);
     expect(picker.includes('useImperativeHandle')).toBe(true);
     expect(picker.includes('flushPendingTag')).toBe(true);
     expect(picker.includes('onBlur')).toBe(true);

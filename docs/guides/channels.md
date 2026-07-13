@@ -188,7 +188,7 @@ right now"* is a single Lark message.
 
 **Turning it off.** Each platform panel has a **Master Agent mode**
 switch next to the default-model selector. It's on by default; the
-preference is stored per platform as `assistant.<platform>.masterAgent`
+preference is stored per platform as `channels.<platform>.masterAgent`
 in the client preferences (missing value = on). Switching it off
 reverts that platform to the legacy behavior — each remote chat gets a
 plain standalone conversation, with no companion persona and no gateway
@@ -199,7 +199,7 @@ mode.
 
 **Choosing which companion greets the channel.** With [multiple companions](./companions.md),
 bots are bound to companions **per channel row**: each row of
-`assistant_plugins` is one bot (the same platform can host several —
+`channel_plugins` is one bot (the same platform can host several —
 e.g. one Feishu in-house app per companion), its `companion_id` decides which companion
 answers, and the `UNIQUE(type, bot_key)` constraint structurally
 guarantees **one bot is never bound to two companions** (bot identity: Feishu
@@ -210,7 +210,7 @@ one step — the next inbound message is greeted by the new companion's persona,
 model, and knowledge mounts (the conversation carries `extra.companionId`).
 Connecting a bot from a companion's **Remote** tab creates the channel row and
 binds it to that companion in one go. A row without a companion binding falls back
-to the legacy per-platform preference `assistant.<platform>.companionId`, then
+to the per-platform preference `channels.<platform>.companionId`, then
 to the **default companion**; if the bound companion is later deleted, the channel
 falls back to the default companion and the sessions are likewise reset.
 Memory is shared across the whole companion family: no matter how many bots
@@ -228,7 +228,7 @@ conversation falls back to the bound companion's own model.
 
 Each platform has a **Default agent** and **Default model** selector
 in its config form. The platform stores them as
-`assistant.<platform>.defaultModel` in the client config, so:
+`channels.<platform>.defaultModel` in the client config, so:
 
 - a message from Telegram routes to whatever agent / model you picked
   for Telegram;

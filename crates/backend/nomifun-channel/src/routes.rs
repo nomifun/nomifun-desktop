@@ -671,8 +671,8 @@ async fn sync_channel_settings(
 /// Request body for `POST /api/channel/settings/companion`.
 ///
 /// `plugin_id` set → rebind one bot channel (the multi-bot path; only that
-/// channel's sessions are cleared). `platform` set → legacy platform-level
-/// binding (key `assistant.{platform}.companionId`, clears all sessions).
+/// channel's sessions are cleared). `platform` set → platform-level
+/// binding (key `channels.{platform}.companionId`, clears all sessions).
 /// `companion_id: None` / empty string clears the binding.
 #[derive(Debug, Deserialize)]
 struct SetChannelCompanionRequest {
@@ -687,8 +687,8 @@ struct SetChannelCompanionRequest {
 /// `POST /api/channel/settings/companion` — bind (or clear) the companion that greets a
 /// bot channel's master-agent sessions.
 ///
-/// Per-channel writes go to `assistant_plugins.companion_id` and clear only that
-/// channel's sessions; legacy platform writes keep the old preference key
+/// Per-channel writes go to `channel_plugins.companion_id` and clear only that
+/// channel's sessions; platform writes keep the per-platform preference key
 /// and clear all sessions. Both fold write + reset into one step so the
 /// reset cannot be skipped.
 async fn set_channel_master_companion(
@@ -746,7 +746,7 @@ async fn set_channel_master_companion(
 /// Request body for `POST /api/channel/settings/public-agent`.
 ///
 /// Rebinds one bot channel's 对外伙伴 (public agent) — writes
-/// `assistant_plugins.public_agent_id` and clears only that channel's sessions.
+/// `channel_plugins.public_agent_id` and clears only that channel's sessions.
 /// `public_agent_id: None` / empty string clears the binding (unbinds). Mirrors
 /// the per-bot companion binding; row-level mutually exclusive with it.
 #[derive(Debug, Deserialize)]

@@ -7,7 +7,7 @@
 /**
  * RequirementBoardCard — a compact, draggable card for the workspace board.
  *
- * Mirrors AssistantCard's surface language (rounded-16px bordered surface on
+ * Mirrors PresetCard's surface language (rounded-16px bordered surface on
  * bg-2, soft lift on hover) but stripped down for a Kanban column: a title,
  * an order-key chip, a tag chip, and — when the requirement is bound to an
  * executing session — a small session marker.

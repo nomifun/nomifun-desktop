@@ -12,7 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use nomifun_ai_agent::{agent_routes, remote_agent_routes};
 use nomifun_assets::{AssetRouterState, asset_routes};
-use nomifun_assistant::assistant_routes;
+use nomifun_preset::preset_routes;
 use nomifun_auth::{
     AuthRouterState, AuthState, TrustState, auth_middleware, auth_routes, csrf_middleware,
     security_headers_middleware, trust_resolve_middleware,
@@ -145,11 +145,8 @@ pub async fn create_router(services: &AppServices) -> Router {
         // field type so the gateway holds the one live instance.
         orchestrator_run_service: states.orchestrator.run_service.clone(),
         orchestrator_run_engine: Arc::new(states.orchestrator.engine.clone()),
-        // 助手 (assistants): the SAME service instance the `/api/assistants` routes
-        // use, so the caps_orchestrator layer reads the exact assistants (+ their
-        // enabled/override state) the UI shows when folding them into a run's fleet
-        // snapshot (P4 Task 2).
-        assistant_service: states.assistant.service.clone(),
+        // Presets: same resolver singleton as `/api/presets` and companion apply.
+        preset_service: states.preset.service.clone(),
         // P3-GW1 (route A): per-companion browser tool registry, lives in this
         // (main) process. Feature-gated — `None` would mean "browser tools not
         // available", but when the feature is on we always wire it so remote
@@ -459,9 +456,8 @@ pub fn create_router_with_all_state(
     let shell_authenticated = shell_routes(states.shell)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
-    // Assistant routes protected by auth middleware (T1a skeleton: all
-    // handlers return 500 "not implemented"; T1b wires real service)
-    let assistant_authenticated = assistant_routes(states.assistant)
+    // Preset catalog and resolver routes protected by auth middleware.
+    let preset_authenticated = preset_routes(states.preset)
         .route_layer(from_fn_with_state(auth_mw_state.clone(), auth_middleware));
 
     // Guide MCP diagnostic endpoint protected by auth middleware
@@ -602,7 +598,7 @@ pub fn create_router_with_all_state(
         .merge(terminal_authenticated)
         .merge(office_authenticated)
         .merge(shell_authenticated)
-        .merge(assistant_authenticated)
+        .merge(preset_authenticated)
         .merge(guide_mcp_authenticated)
         .merge(mcp_register_template_authenticated)
         .merge(register_knowledge_authenticated);
