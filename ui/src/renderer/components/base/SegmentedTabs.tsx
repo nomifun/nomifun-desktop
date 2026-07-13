@@ -63,7 +63,7 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
               block ? 'flex-1 min-w-0' : 'shrink-0',
               heightClass,
               active
-                ? '!bg-primary-1 !text-primary-6 shadow-[0_1px_2px_rgba(0,0,0,0.05),0_2px_8px_rgba(0,0,0,0.06)]'
+                ? '!bg-[var(--color-bg-2)] !text-[var(--color-text-1)] border border-solid border-[var(--color-border-3)] shadow-[0_1px_2px_rgba(0,0,0,0.08),0_2px_8px_rgba(0,0,0,0.12)]'
                 : 'text-t-secondary hover:text-t-primary'
             )}
           >
@@ -71,7 +71,7 @@ const SegmentedTabs: React.FC<SegmentedTabsProps> = ({ items, activeKey, onChang
               <span
                 className={classNames(
                   'flex items-center justify-center transition-colors line-height-0',
-                  active ? 'text-primary-6' : 'text-t-tertiary group-hover:text-t-secondary'
+                  active ? 'text-[var(--color-text-1)]' : 'text-t-tertiary group-hover:text-t-secondary'
                 )}
               >
                 {item.icon}
