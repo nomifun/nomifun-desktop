@@ -19,7 +19,7 @@ const MAX_VISIBLE_TAGS = 4;
 const resolveTagLabel = (tag: PresetTag, localeKey: string): string => tag.label_i18n?.[localeKey] || tag.label;
 
 const MarketSourceBadge: React.FC<{ source: ISkillMarketItem['source'] }> = ({ source }) => {
-  const label = source === 'clawhub' ? 'ClawHub' : 'Skills.sh';
+  const label = source === 'clawhub' ? 'ClawHub' : 'SkillHub';
   const className =
     source === 'clawhub'
       ? '!bg-primary-1 !text-primary-6'

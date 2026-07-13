@@ -29,7 +29,7 @@ describe('skill market helpers', () => {
     });
 
     expect(result).toEqual([item]);
-    expect(filterSkillMarketItems([item], 'skills_sh', '', { audience: [], scenario: [] })).toHaveLength(0);
+    expect(filterSkillMarketItems([item], 'skillhub', '', { audience: [], scenario: [] })).toHaveLength(0);
     expect(filterSkillMarketItems([item], 'clawhub', 'missing', { audience: [], scenario: [] })).toHaveLength(0);
     expect(filterSkillMarketItems([item], 'clawhub', '开发', { audience: [], scenario: [] })).toEqual([item]);
   });
@@ -59,8 +59,8 @@ describe('skill market helpers', () => {
   });
 
   test('translates common market descriptions for zh display', () => {
-    expect(translateMarketDescription('Ranked Skills.sh skill from vercel-labs/skills.', item)).toBe(
-      '来自 vercel-labs/skills 的 Skills.sh 榜单技能。'
+    expect(translateMarketDescription('Ranked SkillHub skill from vercel-labs/skills.', item)).toBe(
+      '来自 vercel-labs/skills 的 SkillHub 榜单技能。'
     );
     expect(translateMarketDescription('GitHub coding helper', item).includes('开发')).toBe(true);
   });

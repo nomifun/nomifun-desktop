@@ -70,7 +70,7 @@
   },
   "skillsMarket": {
     "title": "Skill Market",
-    "description": "Browse current ClawHub and Skills.sh rankings, then hand a reviewed installation draft to Nomi.",
+    "description": "Browse current ClawHub and SkillHub rankings, then hand a reviewed installation draft to Nomi.",
     "syncSuccess": "Skill Market updated",
     "syncEmpty": "No ranking data was found.",
     "syncError": "Failed to update Skill Market",

@@ -268,7 +268,7 @@ pub struct SkillMarketSyncRequest {
 pub struct SkillMarketItemResponse {
     /// Stable source-local id, e.g. `clawhub:owner/skill`.
     pub id: String,
-    /// Source slug: `clawhub` or `skills_sh`.
+    /// Source slug: `clawhub` or `skillhub`.
     pub source: String,
     pub rank: usize,
     pub name: String,

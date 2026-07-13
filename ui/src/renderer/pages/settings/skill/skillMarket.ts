@@ -1,14 +1,14 @@
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
 import type { SkillTagFilterState } from './skillFilter';
 
-export const SKILL_MARKET_SOURCES: SkillMarketSource[] = ['clawhub', 'skills_sh'];
+export const SKILL_MARKET_SOURCES: SkillMarketSource[] = ['clawhub', 'skillhub'];
 
 const MAX_NAME_LENGTH = 96;
 const MAX_DESCRIPTION_LENGTH = 220;
 const MAX_COMMAND_LENGTH = 320;
 
 export const isSkillMarketSource = (value: unknown): value is SkillMarketSource =>
-  value === 'clawhub' || value === 'skills_sh';
+  value === 'clawhub' || value === 'skillhub';
 
 export const cleanMarketText = (value: unknown, maxLength = MAX_DESCRIPTION_LENGTH): string => {
   if (typeof value !== 'string') return '';
@@ -99,8 +99,8 @@ export const translateMarketDescription = (
   if (!localeKey.toLowerCase().startsWith('zh')) return text;
   if (!text || /[\u4e00-\u9fff]/.test(text)) return text;
 
-  const skillsSh = text.match(/^Ranked Skills\.sh skill from ([\w.-]+)\/skills\.$/i);
-  if (skillsSh) return `来自 ${skillsSh[1]}/skills 的 Skills.sh 榜单技能。`;
+  const skillHub = text.match(/^Ranked SkillHub skill from ([\w.-]+)\/skills\.$/i);
+  if (skillHub) return `来自 ${skillHub[1]}/skills 的 SkillHub 榜单技能。`;
 
   const lower = text.toLowerCase();
   if (lower.includes('security') && lower.includes('skill')) {
@@ -167,7 +167,7 @@ export const buildSkillMarketConversationName = (item: ISkillMarketItem, localeK
 
 export const buildSkillMarketInstallPrompt = (item: ISkillMarketItem, localeKey = 'zh-CN'): string => {
   const name = cleanMarketText(item.name, MAX_NAME_LENGTH);
-  const source = item.source === 'clawhub' ? 'ClawHub' : 'Skills.sh';
+  const source = item.source === 'clawhub' ? 'ClawHub' : 'SkillHub';
   const isZh = localeKey.toLowerCase().startsWith('zh');
   const description = translateMarketDescription(item.description, item, localeKey);
   const lines = isZh
