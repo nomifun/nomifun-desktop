@@ -91,6 +91,16 @@ export function fromApiConversation<T>(raw: T): T {
     };
   }
 
+  // Remote-agent conversations use snake_case on the backend. Mirror the row
+  // id to the legacy camelCase key while older UI call sites are still being
+  // upgraded, so both fresh and existing conversations resolve their agent.
+  if (extra && typeof extra.remote_agent_id === 'number' && !('remoteAgentId' in extra)) {
+    extra = {
+      ...extra,
+      remoteAgentId: extra.remote_agent_id,
+    };
+  }
+
   // cron_job_id 镜像：后端把它从 extra.cronJobId 提升为顶层列；为保持既有读路径
   // （多处读 conversation.extra?.cron_job_id）不变，将顶层值镜像回 extra。
   if (typeof r.cron_job_id === 'string' && r.cron_job_id.length > 0) {

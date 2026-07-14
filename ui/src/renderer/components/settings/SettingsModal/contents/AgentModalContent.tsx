@@ -53,13 +53,11 @@ const AgentModalContent: React.FC = () => {
             <LocalAgents />
           </NomiScrollArea>
         </Tabs.TabPane>
-        {process.env.NODE_ENV === 'development' && (
-          <Tabs.TabPane key='remote' title={t('settings.agentManagement.remoteAgents')}>
-            <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow={isPageMode}>
-              <RemoteAgents />
-            </NomiScrollArea>
-          </Tabs.TabPane>
-        )}
+        <Tabs.TabPane key='remote' title={t('settings.agentManagement.remoteAgents')}>
+          <NomiScrollArea className='flex-1 min-h-0 pb-16px scrollbar-hide' disableOverflow={isPageMode}>
+            <RemoteAgents />
+          </NomiScrollArea>
+        </Tabs.TabPane>
       </Tabs>
     </div>
   );

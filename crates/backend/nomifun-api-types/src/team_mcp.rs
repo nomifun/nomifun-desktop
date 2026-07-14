@@ -145,6 +145,11 @@ impl GatewayMcpConfig {
     ];
     pub const WORK_DOMAINS: &'static [&'static str] = &[
         "conversation",
+        // Saved OpenClaw endpoints + local handshakes. The remote capability
+        // module hard-denies credential/config mutation from Channel/Remote;
+        // this domain merely makes the tools discoverable to trusted desktop
+        // Nomi sessions without widening the much broader `agent` domain.
+        "remote",
         "provider",
         "cron",
         "requirement",
@@ -165,6 +170,7 @@ impl GatewayMcpConfig {
     ];
     pub const DESKTOP_DOMAINS: &'static [&'static str] = &[
         "conversation",
+        "remote",
         "provider",
         "confirmation",
         "terminal",
@@ -181,6 +187,7 @@ impl GatewayMcpConfig {
         "skill",
         "hub",
         "agent",
+        "remote",
         "channel",
         "companion",
         "memory",
@@ -353,6 +360,22 @@ mod tests {
             GatewayMcpConfig::domains_for_profile(GatewayMcpConfig::PROFILE_WORK)
                 .unwrap()
                 .contains(&"requirement")
+        );
+        assert!(
+            GatewayMcpConfig::domains_for_profile(GatewayMcpConfig::PROFILE_WORK)
+                .unwrap()
+                .contains(&"remote"),
+            "trusted desktop Nomi sessions need the dedicated remote-control domain"
+        );
+        assert!(
+            GatewayMcpConfig::domains_for_profile(GatewayMcpConfig::PROFILE_DESKTOP)
+                .unwrap()
+                .contains(&"remote")
+        );
+        assert!(
+            GatewayMcpConfig::domains_for_profile(GatewayMcpConfig::PROFILE_ADMIN)
+                .unwrap()
+                .contains(&"remote")
         );
         // 创意工坊 tools must be exposed to the working/desktop/admin profiles
         // (companion + desktop/conversation agents drive the canvas assistant)

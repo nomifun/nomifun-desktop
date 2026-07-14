@@ -271,16 +271,18 @@ export const useGuidAgentSelection = ({
         avatar: isCustomRow ? asAgent.icon : (a as AvailableAgent).avatar,
       };
     });
-    const remoteAsAvailable: AvailableAgent[] = (remoteAgentsData || []).map((ra) => ({
-      agent_type: 'remote',
-      name: ra.name,
-      // remote_agents.id is an integer row key; the agent-selection layer is
-      // string-keyed (shares the namespace with custom ACP slugs), so stringify
-      // here and parse back to a number at the create boundary.
-      id: String(ra.id),
-      custom_agent_id: String(ra.id),
-      avatar: ra.avatar,
-    }));
+    const remoteAsAvailable: AvailableAgent[] = (remoteAgentsData || [])
+      .filter((ra) => ra.protocol === 'openclaw')
+      .map((ra) => ({
+        agent_type: 'remote',
+        name: ra.name,
+        // remote_agents.id is an integer row key; the agent-selection layer is
+        // string-keyed (shares the namespace with custom ACP slugs), so stringify
+        // here and parse back to a number at the create boundary.
+        id: String(ra.id),
+        custom_agent_id: String(ra.id),
+        avatar: ra.avatar,
+      }));
     setAvailableAgents([...normalisedDetected, ...remoteAsAvailable]);
   }, [availableAgentsData, remoteAgentsData]);
 

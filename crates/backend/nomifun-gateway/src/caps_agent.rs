@@ -4,8 +4,8 @@
 //! Backed by:
 //! - `nomifun_ai_agent::AgentService` — installed agent listing, health checks,
 //!   custom agent CRUD, enable/disable.
-//! - `nomifun_ai_agent::RemoteAgentService` — remote (A2A/MCP) agent CRUD +
-//!   connection testing.
+//! - `nomifun_ai_agent::RemoteAgentService` — remote OpenClaw Gateway CRUD,
+//!   authentication, pairing, and connection testing.
 //! - `nomifun_conversation::model_failover` — global model-failover config read/write
 //!   (stored in `client_preferences` key `agent.model_failover`).
 //!
@@ -144,8 +144,8 @@ struct RemoteAgentListParams {}
 /// Get details of a single remote agent by id.
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentGetParams {
-    /// Remote agent id (numeric, as string for consistency).
-    id: String,
+    /// Remote agent id returned by `nomi_remote_agent_list`.
+    id: i64,
 }
 
 /// Register a new remote agent.
@@ -153,16 +153,16 @@ struct RemoteAgentGetParams {
 struct RemoteAgentCreateParams {
     /// Display name.
     name: String,
-    /// Protocol: "a2a" or "mcp-sse".
+    /// Protocol. Currently "openclaw" is implemented for remote control.
     protocol: String,
     /// Agent endpoint URL.
     url: String,
-    /// Authentication type: "none", "bearer", or "header".
+    /// Authentication type: "none", "bearer", or "password".
     auth_type: String,
-    /// Auth token (required when auth_type is "bearer" or "header").
+    /// Credential (required when auth_type is "bearer" or "password").
     #[serde(default)]
     auth_token: Option<String>,
-    /// Allow connecting to HTTP (non-TLS) endpoints.
+    /// Skip certificate-chain and hostname verification for self-signed wss:// endpoints.
     #[serde(default)]
     allow_insecure: bool,
     /// Optional avatar URL.
@@ -177,7 +177,7 @@ struct RemoteAgentCreateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentUpdateParams {
     /// Remote agent id to update.
-    id: String,
+    id: i64,
     /// New display name.
     #[serde(default)]
     name: Option<String>,
@@ -208,7 +208,7 @@ struct RemoteAgentUpdateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentDeleteParams {
     /// Remote agent id to permanently delete.
-    id: String,
+    id: i64,
 }
 
 /// Test connectivity to a remote agent endpoint without persisting it.
@@ -222,9 +222,16 @@ struct RemoteAgentTestParams {
     /// Auth token for the test connection.
     #[serde(default)]
     auth_token: Option<String>,
-    /// Allow HTTP (non-TLS) endpoints.
+    /// Skip certificate-chain and hostname verification for self-signed wss:// endpoints.
     #[serde(default)]
     allow_insecure: bool,
+}
+
+/// Perform a saved OpenClaw protocol handshake and update cached status.
+#[derive(Deserialize, JsonSchema)]
+struct RemoteAgentHandshakeParams {
+    /// Remote agent id to connect and authenticate.
+    id: i64,
 }
 
 // ── Model failover param structs ────────────────────────────────────────
@@ -390,7 +397,7 @@ async fn remote_agent_list(deps: Arc<GatewayDeps>, _p: RemoteAgentListParams) ->
 }
 
 async fn remote_agent_get(deps: Arc<GatewayDeps>, p: RemoteAgentGetParams) -> Value {
-    match deps.remote_agent_service.get(&p.id).await {
+    match deps.remote_agent_service.get(&p.id.to_string()).await {
         Ok(resp) => ok(resp),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -447,14 +454,14 @@ async fn remote_agent_update(deps: Arc<GatewayDeps>, p: RemoteAgentUpdateParams)
         avatar: p.avatar,
         description: p.description,
     };
-    match deps.remote_agent_service.update(&p.id, req).await {
+    match deps.remote_agent_service.update(&p.id.to_string(), req).await {
         Ok(resp) => ok(resp),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
 async fn remote_agent_delete(deps: Arc<GatewayDeps>, p: RemoteAgentDeleteParams) -> Value {
-    match deps.remote_agent_service.delete(&p.id).await {
+    match deps.remote_agent_service.delete(&p.id.to_string()).await {
         Ok(()) => ok(json!({ "deleted": p.id })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -481,6 +488,13 @@ async fn remote_agent_test(deps: Arc<GatewayDeps>, p: RemoteAgentTestParams) -> 
 }
 
 // ── model failover handlers ─────────────────────────────────────────────
+
+async fn remote_agent_handshake(deps: Arc<GatewayDeps>, p: RemoteAgentHandshakeParams) -> Value {
+    match deps.remote_agent_service.handshake(&p.id.to_string()).await {
+        Ok(response) => ok(response),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
 
 async fn model_failover_get(deps: Arc<GatewayDeps>, _p: ModelFailoverGetParams) -> Value {
     let cfg =
@@ -624,8 +638,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<RemoteAgentListParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_list",
-            "agent",
-            "List all registered remote agents (A2A / MCP-SSE) with their connection status.",
+            "remote",
+            "List registered remote OpenClaw gateways with their connection status.",
             DangerTier::Read,
         ),
         |deps, _ctx, p| remote_agent_list(deps, p),
@@ -635,56 +649,71 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
     out.push(Capability::new::<RemoteAgentGetParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_get",
-            "agent",
-            "Get full details of a remote agent by id (includes auth token if present).",
+            "remote",
+            "Get a remote-agent configuration by id. Stored credentials are masked.",
             DangerTier::Read,
         ),
         |deps, _ctx, p| remote_agent_get(deps, p),
     ));
 
-    // 11. Create remote agent (Write)
+    // 11. Create remote agent (Sensitive, local Desktop only)
     out.push(Capability::new::<RemoteAgentCreateParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_create",
-            "agent",
-            "Register a new remote agent endpoint (A2A or MCP-SSE protocol) with optional authentication.",
-            DangerTier::Write,
-        ),
+            "remote",
+            "Register a remote OpenClaw Gateway endpoint with none, bearer-token, or password authentication.",
+            DangerTier::Sensitive,
+        )
+        .deny_on(&[Surface::Channel, Surface::Remote]),
         |deps, _ctx, p| remote_agent_create(deps, p),
     ));
 
-    // 12. Update remote agent (Write)
+    // 12. Update remote agent (Sensitive, local Desktop only)
     out.push(Capability::new::<RemoteAgentUpdateParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_update",
-            "agent",
+            "remote",
             "Update an existing remote agent's configuration. Only provided fields are changed.",
-            DangerTier::Write,
-        ),
+            DangerTier::Sensitive,
+        )
+        .deny_on(&[Surface::Channel, Surface::Remote]),
         |deps, _ctx, p| remote_agent_update(deps, p),
     ));
 
-    // 13. Delete remote agent (Destructive, deny_on Channel)
+    // 13. Delete remote agent (Destructive, local Desktop only)
     out.push(Capability::new::<RemoteAgentDeleteParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_delete",
-            "agent",
+            "remote",
             "Permanently delete a remote agent registration. Active delegations to this agent will fail.",
             DangerTier::Destructive,
         )
-        .deny_on(&[Surface::Channel]),
+        .deny_on(&[Surface::Channel, Surface::Remote]),
         |deps, _ctx, p| remote_agent_delete(deps, p),
     ));
 
-    // 14. Test remote agent connection (Read — network probe only)
+    // 14. Active network access is denied from external surfaces so this
+    // capability cannot become an unaudited internal-network probe.
     out.push(Capability::new::<RemoteAgentTestParams, _, _>(
         CapabilityMeta::new(
             "nomi_remote_agent_test",
-            "agent",
+            "remote",
             "Test connectivity to a remote agent endpoint without persisting it (dry-run handshake).",
-            DangerTier::Read,
-        ),
+            DangerTier::Sensitive,
+        )
+        .deny_on(&[Surface::Channel, Surface::Remote]),
         |deps, _ctx, p| remote_agent_test(deps, p),
+    ));
+
+    out.push(Capability::new::<RemoteAgentHandshakeParams, _, _>(
+        CapabilityMeta::new(
+            "nomi_remote_agent_handshake",
+            "remote",
+            "Authenticate a saved remote OpenClaw Gateway, perform its device/protocol handshake, and update connection status.",
+            DangerTier::Sensitive,
+        )
+        .deny_on(&[Surface::Channel, Surface::Remote]),
+        |deps, _ctx, p| remote_agent_handshake(deps, p),
     ));
 
     // ─── Model failover ──────────────────────────────────────────────────
@@ -710,4 +739,51 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         |deps, _ctx, p| model_failover_set(deps, p),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_agent_ids_use_the_numeric_list_contract() {
+        let get: RemoteAgentGetParams = serde_json::from_value(json!({ "id": 12 })).unwrap();
+        let handshake: RemoteAgentHandshakeParams =
+            serde_json::from_value(json!({ "id": 12 })).unwrap();
+
+        assert_eq!(get.id, 12);
+        assert_eq!(handshake.id, 12);
+    }
+
+    #[test]
+    fn remote_control_surface_policy_is_local_and_sensitive() {
+        let mut caps = Vec::new();
+        register(&mut caps);
+
+        for name in [
+            "nomi_remote_agent_create",
+            "nomi_remote_agent_update",
+            "nomi_remote_agent_test",
+            "nomi_remote_agent_handshake",
+        ] {
+            let cap = caps
+                .iter()
+                .find(|cap| cap.meta.name == name)
+                .unwrap_or_else(|| panic!("missing capability: {name}"));
+            assert_eq!(cap.meta.domain, "remote");
+            assert_eq!(cap.meta.danger, DangerTier::Sensitive);
+            assert!(cap.meta.deny_on.contains(&Surface::Channel));
+            assert!(cap.meta.deny_on.contains(&Surface::Remote));
+        }
+
+        for name in ["nomi_remote_agent_list", "nomi_remote_agent_get"] {
+            let cap = caps
+                .iter()
+                .find(|cap| cap.meta.name == name)
+                .unwrap_or_else(|| panic!("missing capability: {name}"));
+            assert_eq!(cap.meta.domain, "remote");
+            assert_eq!(cap.meta.danger, DangerTier::Read);
+            assert!(cap.meta.deny_on.is_empty());
+        }
+    }
 }

@@ -315,7 +315,8 @@ mod tests {
     #[test]
     fn tool_specs_for_filters_to_domains() {
         let reg = Registry::global();
-        let agentish = reg.tool_specs_for(Surface::Remote, &["agent", "conversation"]);
+        let agentish =
+            reg.tool_specs_for(Surface::Remote, &["agent", "remote", "conversation"]);
         assert!(
             !agentish.is_empty(),
             "agent/conversation domains must expose tools"
@@ -334,6 +335,11 @@ mod tests {
         // contains the agent-delegation cap, excludes a system-management cap
         let names: Vec<&str> = agentish.iter().map(|s| s.name).collect();
         assert!(names.contains(&"nomi_agent_run"));
+        assert!(names.contains(&"nomi_remote_agent_list"));
+        assert!(
+            !names.contains(&"nomi_remote_agent_handshake"),
+            "active saved-endpoint probes are hard-denied on the Remote surface"
+        );
         assert!(
             !names.contains(&"nomi_system_update_settings"),
             "system domain must be excluded"

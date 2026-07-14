@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// Negotiated protocol range. Gateway 2026.5.12+ requires v4 (chat events become a
-// discriminated union with required `deltaText` on delta frames); older Gateways still
-// speak v3. Advertising `min=3, max=4` lets the same client connect to both.
-pub const OPENCLAW_MIN_PROTOCOL_VERSION: u32 = 3;
+// Current operator/backend Gateway clients negotiate protocol v4. Older v3
+// Gateways should be upgraded rather than silently downgrading the security
+// and event contract used by remote control.
+pub const OPENCLAW_MIN_PROTOCOL_VERSION: u32 = 4;
 pub const OPENCLAW_MAX_PROTOCOL_VERSION: u32 = 4;
 
 pub const CLIENT_ID: &str = "gateway-client";
@@ -93,9 +93,12 @@ pub struct ClientInfo {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
@@ -113,23 +116,19 @@ pub struct DeviceAuthParams {
 
 #[derive(Debug, Deserialize)]
 pub struct HelloOk {
-    #[serde(default)]
-    pub protocol: Option<u32>,
-    #[serde(default)]
-    pub server: Option<ServerInfo>,
-    #[serde(default)]
-    pub policy: Option<PolicyInfo>,
-    #[serde(default)]
-    pub auth: Option<HelloAuthInfo>,
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
+    pub protocol: u32,
+    pub server: ServerInfo,
+    pub policy: PolicyInfo,
+    pub auth: HelloAuthInfo,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
-    #[serde(default)]
-    pub version: Option<String>,
-    #[serde(default)]
-    pub conn_id: Option<String>,
+    pub version: String,
+    pub conn_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,8 +136,7 @@ pub struct ServerInfo {
 pub struct PolicyInfo {
     #[serde(default)]
     pub max_payload: Option<u64>,
-    #[serde(default)]
-    pub tick_interval_ms: Option<u64>,
+    pub tick_interval_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,10 +144,10 @@ pub struct PolicyInfo {
 pub struct HelloAuthInfo {
     #[serde(default)]
     pub device_token: Option<String>,
+    pub role: String,
+    pub scopes: Vec<String>,
     #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub scopes: Option<Vec<String>>,
+    pub issued_at_ms: Option<i64>,
 }
 
 // ── Session Management ──────────────────────────────────────────────────
@@ -162,7 +160,10 @@ pub struct SessionsResolveParams {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionsResolveResponse {
-    pub key: String,
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
+    pub key: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -177,9 +178,13 @@ pub struct SessionsResetParams {
 #[serde(rename_all = "camelCase")]
 pub struct SessionsResetResponse {
     #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default)]
     pub key: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub entry: Option<Value>,
 }
 
 // ── Chat Operations ─────────────────────────────────────────────────────
@@ -253,40 +258,43 @@ pub struct AgentEvent {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApprovalRequestEvent {
-    pub request_id: String,
+pub struct ApprovalRequestedEvent {
+    pub id: String,
     #[serde(default)]
-    pub tool_call: Option<ApprovalToolCall>,
+    pub request: Option<ApprovalRequest>,
+    /// Some Gateway versions emit the reviewer-safe request fields directly
+    /// beside `id`; newer versions wrap them in `request`.
+    #[serde(flatten)]
+    pub direct_request: ApprovalRequest,
     #[serde(default)]
-    pub options: Option<Vec<ApprovalOption>>,
+    pub created_at_ms: Option<i64>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ApprovalToolCall {
+pub struct ApprovalRequest {
     #[serde(default)]
-    pub tool_call_id: Option<String>,
+    pub command: Option<String>,
     #[serde(default)]
-    pub title: Option<String>,
+    pub command_preview: Option<String>,
     #[serde(default)]
-    pub kind: Option<String>,
+    pub command_argv: Option<Vec<String>>,
     #[serde(default)]
-    pub raw_input: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalOption {
-    pub option_id: String,
-    pub name: String,
-    pub kind: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ApprovalRespondParams {
-    pub request_id: String,
-    pub option_id: String,
+    pub host: Option<String>,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub session_key: Option<String>,
+    #[serde(default)]
+    pub warning_text: Option<String>,
+    #[serde(default)]
+    pub allowed_decisions: Option<Vec<String>>,
+    #[serde(default)]
+    pub unavailable_decisions: Option<Vec<String>>,
 }
 
 // ── Challenge Event ─────────────────────────────────────────────────────
@@ -434,33 +442,49 @@ mod tests {
             device: None,
         };
         let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["minProtocol"], 3);
+        assert_eq!(json["minProtocol"], 4);
         assert_eq!(json["maxProtocol"], 4);
         assert_eq!(json["client"]["id"], "gateway-client");
         assert_eq!(json["caps"][0], "tool-events");
     }
 
     #[test]
-    fn hello_ok_deserializes_minimal() {
+    fn auth_params_serialize_device_token_as_camel_case() {
+        let auth = AuthParams {
+            token: Some("shared-token".into()),
+            device_token: Some("device-token".into()),
+            password: None,
+        };
+        let json = serde_json::to_value(auth).unwrap();
+
+        assert_eq!(json["token"], "shared-token");
+        assert_eq!(json["deviceToken"], "device-token");
+        assert!(json.get("device_token").is_none());
+    }
+
+    #[test]
+    fn hello_ok_rejects_incomplete_payload() {
         let json = serde_json::json!({});
-        let hello: HelloOk = serde_json::from_value(json).unwrap();
-        assert!(hello.protocol.is_none());
-        assert!(hello.policy.is_none());
+        assert!(serde_json::from_value::<HelloOk>(json).is_err());
     }
 
     #[test]
     fn hello_ok_deserializes_full() {
         let json = serde_json::json!({
             "type": "hello-ok",
-            "protocol": 3,
+            "protocol": 4,
             "server": { "version": "1.2.0", "connId": "conn-1" },
-            "policy": { "tickIntervalMs": 30000 },
-            "auth": { "deviceToken": "tok123", "role": "operator" },
+            "policy": { "maxPayload": 26214400, "tickIntervalMs": 30000 },
+            "auth": {
+                "deviceToken": "tok123",
+                "role": "operator",
+                "scopes": ["operator.admin"]
+            },
         });
         let hello: HelloOk = serde_json::from_value(json).unwrap();
-        assert_eq!(hello.protocol, Some(3));
-        assert_eq!(hello.policy.as_ref().unwrap().tick_interval_ms, Some(30000));
-        assert_eq!(hello.auth.as_ref().unwrap().device_token.as_deref(), Some("tok123"));
+        assert_eq!(hello.protocol, 4);
+        assert_eq!(hello.policy.tick_interval_ms, 30000);
+        assert_eq!(hello.auth.device_token.as_deref(), Some("tok123"));
     }
 
     #[test]
@@ -477,7 +501,7 @@ mod tests {
             "sessionId": "sess-42"
         });
         let resp: SessionsResolveResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.key, "sk-resolved");
+        assert_eq!(resp.key.as_deref(), Some("sk-resolved"));
         assert_eq!(resp.session_id.unwrap(), "sess-42");
     }
 
@@ -490,6 +514,27 @@ mod tests {
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["key"], "conv-1");
         assert_eq!(json["reason"], "new");
+    }
+
+    #[test]
+    fn sessions_reset_response_deserializes_current_gateway_shape() {
+        let json = serde_json::json!({
+            "ok": true,
+            "key": "agent:main:conv-1",
+            "entry": {
+                "sessionId": "sess-42"
+            }
+        });
+        let resp: SessionsResetResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.ok, Some(true));
+        assert_eq!(resp.key.as_deref(), Some("agent:main:conv-1"));
+        assert_eq!(
+            resp.entry
+                .as_ref()
+                .and_then(|entry| entry.get("sessionId"))
+                .and_then(Value::as_str),
+            Some("sess-42")
+        );
     }
 
     #[test]
@@ -510,19 +555,38 @@ mod tests {
     #[test]
     fn approval_request_deserializes() {
         let json = serde_json::json!({
-            "requestId": "req-1",
-            "toolCall": {
-                "toolCallId": "tc-1",
-                "title": "bash",
-                "kind": "execute"
+            "id": "req-1",
+            "request": {
+                "command": "git status",
+                "commandArgv": ["git", "status"],
+                "host": "gateway",
+                "allowedDecisions": ["allow-once", "deny"]
             },
-            "options": [
-                { "optionId": "allow_once", "name": "Allow", "kind": "allow_once" }
-            ]
+            "createdAtMs": 1,
+            "expiresAtMs": 2
         });
-        let event: ApprovalRequestEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(event.request_id, "req-1");
-        assert_eq!(event.tool_call.unwrap().title.unwrap(), "bash");
-        assert_eq!(event.options.unwrap().len(), 1);
+        let event: ApprovalRequestedEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(event.id, "req-1");
+        let request = event.request.unwrap();
+        assert_eq!(request.command.as_deref(), Some("git status"));
+        assert_eq!(request.allowed_decisions.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn approval_request_deserializes_direct_shape() {
+        let json = serde_json::json!({
+            "id": "req-2",
+            "command": "cargo test",
+            "sessionKey": "agent:main:test",
+            "allowedDecisions": ["allow-once", "deny"],
+            "expiresAtMs": 2
+        });
+        let event: ApprovalRequestedEvent = serde_json::from_value(json).unwrap();
+        assert!(event.request.is_none());
+        assert_eq!(event.direct_request.command.as_deref(), Some("cargo test"));
+        assert_eq!(
+            event.direct_request.session_key.as_deref(),
+            Some("agent:main:test")
+        );
     }
 }

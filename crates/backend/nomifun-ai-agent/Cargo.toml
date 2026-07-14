@@ -21,6 +21,8 @@ base64.workspace = true
 image = { workspace = true, features = ["jpeg", "webp"] }
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
+url.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hex.workspace = true

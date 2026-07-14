@@ -1,217 +1,238 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentStatus, TimestampMs,
+    AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, ErrorChain, RemoteAgentProtocol,
+    RemoteAgentStatus, TimestampMs,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
-use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::agent_runtime::AgentRuntime;
+use crate::manager::openclaw::connection::{AuthConfig, OpenClawConnection};
+use crate::manager::openclaw::device_identity::DeviceIdentity;
+use crate::manager::openclaw::event_mapper::{TextFallbackState, map_openclaw_event};
+use crate::manager::openclaw::protocol::{
+    ChatAbortParams, ChatSendParams, SessionsResetParams, SessionsResetResponse, SessionsResolveParams,
+    SessionsResolveResponse,
+};
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
 
-/// Internal mutable state for the Remote agent.
+const STOP_FINISH_FALLBACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Internal mutable state for a remotely hosted agent session.
 struct RemoteState {
     session_key: Option<String>,
     confirmations: Vec<Confirmation>,
     has_messages: bool,
+    active_run_id: Option<String>,
+    turn_generation: u64,
     approval_memory: HashMap<String, bool>,
     connection_status: RemoteAgentStatus,
 }
 
 /// Configuration for connecting to a remote agent.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RemoteAgentConfig {
     pub remote_agent_id: String,
+    pub protocol: RemoteAgentProtocol,
     pub url: String,
     pub auth_type: String,
     pub auth_token: Option<String>,
+    pub device_token: Option<String>,
     pub allow_insecure: bool,
+    pub resume_session_key: Option<String>,
+    /// Per-remote-agent OpenClaw device identity persisted by the pairing
+    /// service. Required so remote gateways never share the local OpenClaw
+    /// process identity.
+    pub device_identity: Option<DeviceIdentity>,
 }
 
-/// Manages a Remote Agent via WebSocket connection.
+/// Manages a remote OpenClaw Gateway through the v4 protocol used by
+/// the local OpenClaw integration.
 ///
-/// Remote agents communicate over WebSocket, reusing the OpenClaw Gateway
-/// connection protocol. The Rust implementation owns the WebSocket connection
-/// directly (no CLI subprocess).
+/// `RemoteAgentProtocol::Acp` is intentionally not treated as "ACP over
+/// WebSocket": ACP is a stdio protocol in NomiFun today. Hermes therefore
+/// remains supported locally through `hermes acp`; its separate remote
+/// JSON-RPC gateway needs its own adapter rather than being mislabeled as ACP.
 pub struct RemoteAgentManager {
     runtime: AgentRuntime,
     remote_config: RemoteAgentConfig,
-    state: RwLock<RemoteState>,
-    /// WebSocket sink for sending messages, wrapped in Mutex for concurrency.
-    ws_sink: Mutex<
-        Option<
-            futures_util::stream::SplitSink<
-                tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-                Message,
-            >,
-        >,
-    >,
-    /// Handle to the WebSocket reader task.
+    connection: Arc<OpenClawConnection>,
+    state: Arc<RwLock<RemoteState>>,
+    text_state: Mutex<TextFallbackState>,
     _reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl RemoteAgentManager {
-    /// Create a new Remote agent by establishing a WebSocket connection.
-    pub async fn new(
+    /// Establish the remote protocol connection and return a ready-to-use
+    /// manager. Construction is eager so a conversation warmup fails early
+    /// instead of accepting the first message and then reporting "not
+    /// connected".
+    pub async fn connect(
         conversation_id: String,
         workspace: String,
         remote_config: RemoteAgentConfig,
-    ) -> Result<Self, AppError> {
-        let runtime = AgentRuntime::new(conversation_id, workspace, 256);
-
-        let manager = Self {
-            runtime,
-            remote_config,
-            state: RwLock::new(RemoteState {
-                session_key: None,
-                confirmations: Vec::new(),
-                has_messages: false,
-                approval_memory: HashMap::new(),
-                connection_status: RemoteAgentStatus::Unknown,
+    ) -> Result<(Arc<Self>, Option<String>), AppError> {
+        if remote_config.protocol != RemoteAgentProtocol::OpenClaw {
+            return Err(AppError::BadRequest(format!(
+                "Remote protocol '{}' is not implemented. Remote OpenClaw is supported; Hermes is available locally via `hermes acp`.",
+                protocol_name(remote_config.protocol),
+            )));
+        }
+        let identity = remote_config.device_identity.clone().ok_or_else(|| {
+            AppError::Internal(
+                "Remote OpenClaw configuration has no dedicated device identity; delete and re-create it".into(),
+            )
+        })?;
+        let auth = match remote_config.auth_type.as_str() {
+            "none" => remote_config.device_token.clone().map(|device_token| AuthConfig {
+                token: None,
+                device_token: Some(device_token),
+                password: None,
             }),
-            ws_sink: Mutex::new(None),
-            _reader_handle: Mutex::new(None),
+            "bearer" => Some(AuthConfig {
+                token: Some(require_remote_credential(&remote_config, "Bearer token")?),
+                device_token: remote_config.device_token.clone(),
+                password: None,
+            }),
+            "password" => Some(AuthConfig {
+                token: None,
+                device_token: remote_config.device_token.clone(),
+                password: Some(require_remote_credential(&remote_config, "Password")?),
+            }),
+            other => {
+                return Err(AppError::BadRequest(format!(
+                    "Unsupported remote authentication type '{other}'"
+                )));
+            }
         };
 
-        Ok(manager)
-    }
+        let (connection, hello) =
+            OpenClawConnection::connect_with_options(&remote_config.url, auth, &identity, remote_config.allow_insecure)
+                .await
+                .inspect_err(|e| {
+                error!(
+                    conversation_id,
+                    remote_agent_id = %remote_config.remote_agent_id,
+                    url = %remote_config.url,
+                    error = %ErrorChain(e),
+                    "Failed to connect to remote OpenClaw gateway"
+                );
+            })?;
 
-    /// Connect to the remote WebSocket endpoint and start the reader task.
-    pub async fn connect(self: &Arc<Self>) -> Result<(), AppError> {
-        let url = &self.remote_config.url;
-
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(url).await.map_err(|e| {
-            error!(url = url, error = %ErrorChain(&e), "Failed to connect to remote agent");
-            AppError::Internal(format!("WebSocket connection failed: {e}"))
-        })?;
+        let manager = Arc::new(Self {
+            runtime: AgentRuntime::new(conversation_id, workspace, 256),
+            connection,
+            state: Arc::new(RwLock::new(RemoteState {
+                session_key: remote_config.resume_session_key.clone(),
+                confirmations: Vec::new(),
+                has_messages: false,
+                active_run_id: None,
+                turn_generation: 0,
+                approval_memory: HashMap::new(),
+                connection_status: RemoteAgentStatus::Connected,
+            })),
+            remote_config,
+            text_state: Mutex::new(TextFallbackState::new()),
+            _reader_handle: Mutex::new(None),
+        });
+        manager.start_event_relay().await;
 
         info!(
-            conversation_id = %self.runtime.conversation_id(),
-            url = url,
-            "Connected to remote agent"
+            conversation_id = %manager.runtime.conversation_id(),
+            remote_agent_id = %manager.remote_config.remote_agent_id,
+            url = %manager.remote_config.url,
+            "Connected to remote OpenClaw gateway"
         );
 
-        let (sink, stream) = ws_stream.split();
-
-        // Store the sink for sending messages
-        *self.ws_sink.lock().await = Some(sink);
-
-        // Update connection status
-        {
-            let mut state = self.state.write().await;
-            state.connection_status = RemoteAgentStatus::Connected;
-        }
-
-        // Start reader task
-        let this = Arc::clone(self);
-        let reader_handle = tokio::spawn(async move {
-            this.run_ws_reader(stream).await;
-        });
-
-        *self._reader_handle.lock().await = Some(reader_handle);
-
-        Ok(())
+        let issued_device_token = hello.auth.device_token;
+        Ok((manager, issued_device_token))
     }
 
-    /// Read messages from the WebSocket and process them.
-    async fn run_ws_reader(
-        self: Arc<Self>,
-        mut stream: futures_util::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-        >,
-    ) {
-        while let Some(msg) = stream.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    self.runtime.bump_activity();
-                    match serde_json::from_str::<Value>(&text) {
-                        Ok(raw_json) => self.handle_raw_event(raw_json).await,
-                        Err(e) => {
-                            debug!(
-                                conversation_id = %self.runtime.conversation_id(),
-                                error = %ErrorChain(&e),
-                                "Non-JSON WebSocket message, skipping"
-                            );
+    async fn start_event_relay(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            this.run_event_relay().await;
+        });
+        *self._reader_handle.lock().await = Some(handle);
+    }
+
+    async fn run_event_relay(self: Arc<Self>) {
+        let mut event_rx = self.connection.subscribe_events();
+        let mut close_rx = self.connection.subscribe_close();
+        loop {
+            tokio::select! {
+                event = event_rx.recv() => match event {
+                    Ok(event_frame) => {
+                        self.runtime.bump_activity();
+                        let session_key = self.state.read().await.session_key.clone();
+                        let events = {
+                            let mut text_state = self.text_state.lock().await;
+                            map_openclaw_event(&event_frame, &mut text_state, session_key.as_deref())
+                        };
+                        for event in events {
+                            self.update_state_from_event(&event).await;
+                            if !matches!(event, AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)) {
+                                self.runtime.emit(event);
+                            }
                         }
                     }
-                }
-                Ok(Message::Close(_)) => {
-                    debug!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        "Remote WebSocket closed"
-                    );
-                    break;
-                }
-                Err(e) => {
-                    warn!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        error = %ErrorChain(&e),
-                        "WebSocket read error"
-                    );
-                    break;
-                }
-                _ => {} // Ignore ping/pong/binary
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            lagged = n,
+                            "Remote OpenClaw event relay lagged"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = close_rx.recv() => break,
             }
         }
 
-        // Connection closed — update connection_status and ensure terminal agent status.
         {
             let mut state = self.state.write().await;
             state.connection_status = RemoteAgentStatus::Error;
         }
         if self.runtime.status() == Some(ConversationStatus::Running) {
-            self.runtime.transition_to(ConversationStatus::Finished);
+            self.runtime.emit_error("Remote OpenClaw connection closed");
         }
-    }
-
-    async fn handle_raw_event(&self, raw: Value) {
-        let stream_event = match serde_json::from_value::<AgentStreamEvent>(raw.clone()) {
-            Ok(event) => event,
-            Err(_) => {
-                debug!(
-                    conversation_id = %self.runtime.conversation_id(),
-                    "Unrecognized remote event, skipping"
-                );
-                return;
-            }
-        };
-
-        self.update_state_from_event(&stream_event).await;
-        self.runtime.emit(stream_event);
     }
 
     async fn update_state_from_event(&self, event: &AgentStreamEvent) {
         match event {
             AgentStreamEvent::Start(data) => {
-                self.runtime.transition_to(ConversationStatus::Running);
+                self.runtime.reset_for_new_turn(ConversationStatus::Running);
                 if let Some(ref sid) = data.session_id {
-                    let mut state = self.state.write().await;
-                    state.session_key = Some(sid.clone());
+                    self.state.write().await.session_key = Some(sid.clone());
                 }
             }
             AgentStreamEvent::Finish(data) => {
-                self.runtime.transition_to(ConversationStatus::Finished);
+                let mut state = self.state.write().await;
+                state.active_run_id = None;
                 if let Some(ref sid) = data.session_id {
-                    let mut state = self.state.write().await;
                     state.session_key = Some(sid.clone());
                 }
+                drop(state);
+                self.runtime
+                    .emit_finish_with_reason(data.session_id.clone(), data.stop_reason);
             }
-            AgentStreamEvent::Error(_) => {
-                self.runtime.transition_to(ConversationStatus::Finished);
+            AgentStreamEvent::Error(data) => {
+                self.state.write().await.active_run_id = None;
+                self.runtime.emit_error_data(data.clone());
             }
             AgentStreamEvent::AcpPermission(data) => {
                 if let Some(conf) = data.as_confirmation() {
-                    let mut guard = self.state.write().await;
-                    if let Some(existing) = guard.confirmations.iter_mut().find(|c| c.call_id == conf.call_id) {
+                    let mut state = self.state.write().await;
+                    if let Some(existing) = state.confirmations.iter_mut().find(|c| c.call_id == conf.call_id) {
                         *existing = conf;
                     } else {
-                        guard.confirmations.push(conf);
+                        state.confirmations.push(conf);
                     }
                 }
             }
@@ -219,27 +240,106 @@ impl RemoteAgentManager {
         }
     }
 
-    /// Send a JSON message over the WebSocket.
-    async fn ws_send(&self, payload: &Value) -> Result<(), AppError> {
-        let text = serde_json::to_string(payload)
-            .map_err(|e| AppError::Internal(format!("Failed to serialize WebSocket message: {e}")))?;
+    async fn send_openclaw_message(&self, is_first: bool, data: SendMessageData) -> Result<(), AppError> {
+        if is_first {
+            self.resolve_session().await?;
+        }
+        let session_key = self
+            .state
+            .read()
+            .await
+            .session_key
+            .clone()
+            .ok_or_else(|| AppError::Internal("Remote OpenClaw did not return a session key".into()))?;
 
-        let mut guard = self.ws_sink.lock().await;
-        let sink = guard
-            .as_mut()
-            .ok_or_else(|| AppError::Internal("WebSocket not connected".into()))?;
-
-        sink.send(Message::Text(text.into())).await.map_err(|e| {
-            error!(
-                conversation_id = %self.runtime.conversation_id(),
-                error = %ErrorChain(&e),
-                "Failed to send WebSocket message"
-            );
-            AppError::Internal(format!("WebSocket send failed: {e}"))
-        })
+        let params = ChatSendParams {
+            session_key,
+            message: data.content,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            attachments: if data.files.is_empty() {
+                None
+            } else {
+                Some(data.files.into_iter().map(|file| json!(file)).collect())
+            },
+        };
+        let response = self
+            .connection
+            .request::<Value>("chat.send", serde_json::to_value(params).unwrap_or_default())
+            .await?;
+        let active_run_id = response
+            .get("runId")
+            .or_else(|| response.get("run_id"))
+            .and_then(Value::as_str)
+            .filter(|run_id| !run_id.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| AppError::BadGateway("Remote OpenClaw chat.send returned no runId".into()))?;
+        self.state.write().await.active_run_id = Some(active_run_id);
+        Ok(())
     }
 
-    /// Get the connection status.
+    async fn resolve_session(&self) -> Result<(), AppError> {
+        let resume_key = self.state.read().await.session_key.clone();
+        if let Some(ref key) = resume_key {
+            match self
+                .connection
+                .request::<SessionsResolveResponse>(
+                    "sessions.resolve",
+                    serde_json::to_value(SessionsResolveParams { key: key.clone() }).unwrap_or_default(),
+                )
+                .await
+            {
+                Ok(resp) => {
+                    if resp.ok == Some(false) {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            "Remote sessions.resolve reported a missing session; creating a fresh session"
+                        );
+                    } else if let Some(resolved_key) = resp.key {
+                        self.state.write().await.session_key = Some(resolved_key);
+                        return Ok(());
+                    } else {
+                        warn!(
+                            conversation_id = %self.runtime.conversation_id(),
+                            "Remote sessions.resolve returned no key; creating a fresh session"
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        conversation_id = %self.runtime.conversation_id(),
+                        error = %ErrorChain(&error),
+                        "Remote session resume failed; creating a fresh session"
+                    );
+                }
+            }
+        }
+
+        let response: SessionsResetResponse = self
+            .connection
+            .request(
+                "sessions.reset",
+                serde_json::to_value(SessionsResetParams {
+                    key: self.runtime.conversation_id().to_owned(),
+                    reason: "new".into(),
+                })
+                .unwrap_or_default(),
+            )
+            .await?;
+        let entry_session_id = response
+            .entry
+            .as_ref()
+            .and_then(|entry| entry.get("sessionId"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let key = response
+            .key
+            .or(response.session_id)
+            .or(entry_session_id)
+            .ok_or_else(|| AppError::Internal("Remote OpenClaw sessions.reset returned no session key".into()))?;
+        self.state.write().await.session_key = Some(key);
+        Ok(())
+    }
+
     pub async fn connection_status(&self) -> RemoteAgentStatus {
         self.state.read().await.connection_status
     }
@@ -275,79 +375,79 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
 
     async fn send_message(&self, data: SendMessageData) -> Result<(), AgentSendError> {
         self.runtime.bump_activity();
-
+        self.runtime.reset_for_new_turn(ConversationStatus::Running);
         let is_first = {
             let mut state = self.state.write().await;
-            let first = !state.has_messages;
-            state.has_messages = true;
-            first
+            state.turn_generation = state.turn_generation.wrapping_add(1);
+            state.active_run_id = None;
+            !state.has_messages
         };
-        self.runtime.transition_to(ConversationStatus::Running);
+        {
+            let mut text_state = self.text_state.lock().await;
+            text_state.reset_for_new_turn();
+        }
 
-        if is_first {
-            // First message: create new session via sessionsReset
-            let payload = json!({
-                "type": "sessionsReset",
-                "data": {
-                    "conversationId": self.runtime.conversation_id(),
-                    "message": data.content,
-                    "msgId": data.msg_id,
-                }
-            });
-            match self.ws_send(&payload).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    error!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        error = %ErrorChain(&err),
-                        "Remote send_message failed, emitting Error"
-                    );
-                    let send_error = AgentSendError::from_app_error(err);
-                    self.runtime.emit_error_data(send_error.stream_error().clone());
-                    Err(send_error)
-                }
+        match self.send_openclaw_message(is_first, data).await {
+            Ok(()) => {
+                self.state.write().await.has_messages = true;
+                Ok(())
             }
-        } else {
-            // Subsequent messages: try to resume session
-            let session_key = self.state.read().await.session_key.clone();
-            let mut payload = json!({
-                "type": "sendMessage",
-                "data": {
-                    "message": data.content,
-                    "msgId": data.msg_id,
-                }
-            });
-            if let Some(ref key) = session_key {
-                payload["data"]["sessionKey"] = json!(key);
-            }
-            if !data.files.is_empty() {
-                payload["data"]["files"] = json!(data.files);
-            }
-            match self.ws_send(&payload).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    error!(
-                        conversation_id = %self.runtime.conversation_id(),
-                        error = %ErrorChain(&err),
-                        "Remote send_message failed, emitting Error"
-                    );
-                    let send_error = AgentSendError::from_app_error(err);
-                    self.runtime.emit_error_data(send_error.stream_error().clone());
-                    Err(send_error)
-                }
+            Err(error) => {
+                self.state.write().await.active_run_id = None;
+                error!(
+                    conversation_id = %self.runtime.conversation_id(),
+                    error = %ErrorChain(&error),
+                    "Remote OpenClaw send_message failed"
+                );
+                let send_error = AgentSendError::from_app_error(error);
+                self.runtime.emit_error_data(send_error.stream_error().clone());
+                Err(send_error)
             }
         }
     }
 
     async fn cancel(&self) -> Result<(), AppError> {
-        if self.ws_sink.lock().await.is_none() {
-            return Err(AppError::Conflict("WebSocket not connected; nothing to cancel".into()));
+        let (session_key, run_id, turn_generation) = {
+            let state = self.state.read().await;
+            (
+                state.session_key.clone(),
+                state.active_run_id.clone(),
+                state.turn_generation,
+            )
+        };
+        if let Some(session_key) = session_key {
+            let params = ChatAbortParams {
+                session_key,
+                run_id,
+            };
+            let _ = self
+                .connection
+                .request::<Value>("chat.abort", serde_json::to_value(params).unwrap_or_default())
+                .await;
         }
-        let payload = json!({ "type": "session/cancel", "data": {} });
-        self.ws_send(&payload).await?;
+        {
+            let mut state = self.state.write().await;
+            state.confirmations.clear();
+            state.active_run_id = None;
+        }
 
-        let mut state = self.state.write().await;
-        state.confirmations.clear();
+        let runtime = self.runtime.clone();
+        let state = Arc::clone(&self.state);
+        let conversation_id = self.runtime.conversation_id().to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(STOP_FINISH_FALLBACK_TIMEOUT).await;
+            let is_same_turn = state.read().await.turn_generation == turn_generation;
+            if is_same_turn && runtime.status() == Some(ConversationStatus::Running) {
+                warn!(
+                    conversation_id = %conversation_id,
+                    "Remote Gateway did not send abort event within timeout, emitting fallback Finish"
+                );
+                runtime.emit_finish_with_reason(
+                    None,
+                    Some(crate::protocol::events::TurnStopReason::Cancelled),
+                );
+            }
+        });
         Ok(())
     }
 
@@ -355,17 +455,12 @@ impl crate::agent_task::IAgentTask for RemoteAgentManager {
         info!(
             conversation_id = %self.runtime.conversation_id(),
             ?reason,
-            "Killing Remote agent"
+            "Killing remote OpenClaw agent"
         );
-
-        // Drop the WebSocket sink to close the connection.
-        // We can't move the Mutex into a spawned task, so we clear it inline
-        // using try_lock (non-blocking). If the lock is held, the connection
-        // will close when the holder drops it.
-        if let Ok(mut guard) = self.ws_sink.try_lock() {
-            *guard = None;
-        }
-
+        let connection = Arc::clone(&self.connection);
+        tokio::spawn(async move {
+            connection.close().await;
+        });
         Ok(())
     }
 }
@@ -375,53 +470,67 @@ impl RemoteAgentManager {
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
-        Box::pin(std::future::ready(()))
-    }
-}
-
-/// Remote-specific operations reached through `AgentInstance::Remote(..)`.
-impl RemoteAgentManager {
-    pub fn confirm(&self, _msg_id: &str, call_id: &str, _data: Value, always_allow: bool) -> Result<(), AppError> {
-        if let Ok(mut state) = self.state.try_write() {
-            if always_allow && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id) {
-                let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
-                state.approval_memory.insert(key, true);
-            }
-            state.confirmations.retain(|c| c.call_id != call_id);
-        }
-
-        // WebSocket send for confirmation will be fully wired in Phase 6.15 integration
-        // via a command channel that avoids &self lifetime issues in spawned tasks.
-        warn!(
+        info!(
             conversation_id = %self.runtime.conversation_id(),
-            call_id = call_id,
-            "Remote agent confirm: WebSocket send deferred to integration phase"
+            ?reason,
+            "Killing remote OpenClaw agent and waiting for connection close"
         );
+        let connection = Arc::clone(&self.connection);
+        Box::pin(async move {
+            connection.close().await;
+        })
+    }
 
+    pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
+        let request_id = match self.state.try_write() {
+            Ok(mut state) => {
+                let request_id = state
+                    .confirmations
+                    .iter()
+                    .find(|confirmation| confirmation.call_id == call_id)
+                    .map(|confirmation| confirmation.id.clone())
+                    .ok_or_else(|| AppError::NotFound(format!("Remote approval '{call_id}' not found")))?;
+                if always_allow
+                    && let Some(conf) = state.confirmations.iter().find(|c| c.call_id == call_id)
+                {
+                    let key = approval_key(conf.action.as_deref(), conf.command_type.as_deref());
+                    state.approval_memory.insert(key, true);
+                }
+                state.confirmations.retain(|c| c.call_id != call_id);
+                request_id
+            }
+            Err(_) => return Err(AppError::Conflict("Remote approval state is busy".into())),
+        };
+
+        let decision = confirmation_option_id(&data)
+            .unwrap_or_else(|| if always_allow { "allow-always" } else { "allow-once" }.to_owned());
+        let decision = normalize_approval_decision(&decision);
+        let connection = Arc::clone(&self.connection);
+        tokio::spawn(async move {
+            let params = json!({
+                "id": request_id,
+                "decision": decision,
+            });
+            if let Err(error) = connection.request::<Value>("exec.approval.resolve", params).await {
+                warn!(error = %error, "Failed to send remote OpenClaw approval response");
+            }
+        });
         Ok(())
     }
 
     pub fn get_confirmations(&self) -> Vec<Confirmation> {
         self.state
             .try_read()
-            .map(|g| g.confirmations.clone())
+            .map(|state| state.confirmations.clone())
             .unwrap_or_default()
     }
 
-    /// Clear the conversation context ("release model context"): forget the
-    /// remote session key and pending confirmations and re-arm
-    /// `has_messages = false` so the next `send_message` takes the
-    /// `sessionsReset` branch, creating a brand-new remote session with no
-    /// history.
     pub async fn clear_context(&self) -> Result<(), AppError> {
-        info!(
-            conversation_id = %self.runtime.conversation_id(),
-            "Clearing Remote context"
-        );
         let mut state = self.state.write().await;
         state.session_key = None;
         state.has_messages = false;
+        state.active_run_id = None;
+        state.turn_generation = state.turn_generation.wrapping_add(1);
         state.confirmations.clear();
         Ok(())
     }
@@ -429,11 +538,55 @@ impl RemoteAgentManager {
     pub fn check_approval(&self, action: &str, command_type: Option<&str>) -> bool {
         self.state
             .try_read()
-            .map(|g| {
+            .map(|state| {
                 let key = approval_key(Some(action), command_type);
-                g.approval_memory.get(&key).copied().unwrap_or(false)
+                state.approval_memory.get(&key).copied().unwrap_or(false)
             })
             .unwrap_or(false)
+    }
+
+    pub fn get_session_key(&self) -> Option<String> {
+        self.state.try_read().ok().and_then(|state| state.session_key.clone())
+    }
+}
+
+fn require_remote_credential(config: &RemoteAgentConfig, label: &str) -> Result<String, AppError> {
+    config
+        .auth_token
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest(format!("{label} is required for the selected remote authentication type")))
+}
+
+fn protocol_name(protocol: RemoteAgentProtocol) -> &'static str {
+    match protocol {
+        RemoteAgentProtocol::OpenClaw => "openclaw",
+        RemoteAgentProtocol::ZeroClaw => "zeroclaw",
+        RemoteAgentProtocol::Acp => "acp",
+    }
+}
+
+fn confirmation_option_id(data: &Value) -> Option<String> {
+    match data {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(map) => map
+            .get("option_id")
+            .or_else(|| map.get("optionId"))
+            .or_else(|| map.get("value"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn normalize_approval_decision(value: &str) -> String {
+    match value {
+        "allow_once" | "proceed_once" => "allow-once".to_owned(),
+        "allow_always" | "proceed_always" | "proceed_always_server" | "proceed_always_tool" => {
+            "allow-always".to_owned()
+        }
+        "deny_once" | "reject" | "cancel" => "deny".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -452,13 +605,34 @@ mod tests {
     fn remote_agent_config_clone() {
         let config = RemoteAgentConfig {
             remote_agent_id: "ra-1".into(),
+            protocol: RemoteAgentProtocol::OpenClaw,
             url: "wss://example.com".into(),
             auth_type: "bearer".into(),
             auth_token: Some("token".into()),
+            device_token: Some("device-token".into()),
             allow_insecure: false,
+            resume_session_key: Some("session-1".into()),
+            device_identity: None,
         };
         let cloned = config.clone();
         assert_eq!(cloned.remote_agent_id, "ra-1");
         assert_eq!(cloned.url, "wss://example.com");
+        assert_eq!(cloned.resume_session_key.as_deref(), Some("session-1"));
+        assert_eq!(cloned.device_token.as_deref(), Some("device-token"));
+    }
+
+    #[test]
+    fn confirmation_option_accepts_common_shapes() {
+        assert_eq!(
+            confirmation_option_id(&json!({ "option_id": "allow_once" })).as_deref(),
+            Some("allow_once")
+        );
+        assert_eq!(
+            confirmation_option_id(&json!({ "optionId": "deny_once" })).as_deref(),
+            Some("deny_once")
+        );
+        assert_eq!(normalize_approval_decision("proceed_once"), "allow-once");
+        assert_eq!(normalize_approval_decision("proceed_always"), "allow-always");
+        assert_eq!(normalize_approval_decision("cancel"), "deny");
     }
 }

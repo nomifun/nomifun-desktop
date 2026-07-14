@@ -422,6 +422,14 @@ mod tests {
         assert!(names.contains(&"nomi_cron_create"));
         assert!(names.contains(&"nomi_requirement_create"));
         assert!(names.contains(&"nomi_knowledge_list_bases"));
+        assert!(
+            names.contains(&"nomi_remote_agent_list"),
+            "the work profile must let a trusted Nomi session discover saved OpenClaw gateways"
+        );
+        assert!(
+            names.contains(&"nomi_remote_agent_handshake"),
+            "the work profile must let a trusted desktop Nomi session verify a saved gateway"
+        );
         // The desktop default (work) profile must expose orchestration so the
         // lead/main agent can spin up multi-agent runs (Direction B: 智能编排).
         assert!(names.contains(&"nomi_run_create"));

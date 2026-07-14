@@ -416,7 +416,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           files: files.length > 0 ? files : undefined,
         };
         if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(`acp_initial_message_${conversation.id}`, JSON.stringify(initialMessage));
+          const initialMessageKey =
+            agentConversationParams.type === 'remote'
+              ? `remote_initial_message_${conversation.id}`
+              : `acp_initial_message_${conversation.id}`;
+          sessionStorage.setItem(initialMessageKey, JSON.stringify(initialMessage));
         }
 
         seedConversationCache(conversation);

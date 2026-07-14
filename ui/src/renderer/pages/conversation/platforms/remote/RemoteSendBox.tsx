@@ -183,9 +183,10 @@ const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id 
   useEffect(() => {
     void getConversationOrNull(conversation_id).then(async (res) => {
       if (res?.extra?.workspace) setWorkspacePath(res.extra.workspace);
-      const extra = res?.extra as { remoteAgentId?: number } | undefined;
-      if (extra?.remoteAgentId != null) {
-        const agent = await ipcBridge.remoteAgent.get.invoke({ id: extra.remoteAgentId });
+      const extra = res?.extra as { remote_agent_id?: number; remoteAgentId?: number } | undefined;
+      const remoteAgentId = extra?.remote_agent_id ?? extra?.remoteAgentId;
+      if (remoteAgentId != null) {
+        const agent = await ipcBridge.remoteAgent.get.invoke({ id: remoteAgentId });
         if (agent?.name) setAgentName(agent.name);
       }
     });

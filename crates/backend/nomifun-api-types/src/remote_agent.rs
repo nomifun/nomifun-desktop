@@ -104,6 +104,8 @@ pub struct TestRemoteAgentConnectionRequest {
 #[derive(Debug, Serialize)]
 pub struct HandshakeResponse {
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Deserialize `Option<Option<T>>`:
@@ -119,4 +121,37 @@ where
     // Deserialize the value: null → None, value → Some(value).
     let value: Option<T> = Option::deserialize(deserializer)?;
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HandshakeResponse;
+
+    #[test]
+    fn handshake_response_omits_empty_error() {
+        let value = serde_json::to_value(HandshakeResponse {
+            status: "ok".into(),
+            error: None,
+        })
+        .unwrap();
+
+        assert_eq!(value, serde_json::json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn handshake_response_includes_pairing_error() {
+        let value = serde_json::to_value(HandshakeResponse {
+            status: "pending_approval".into(),
+            error: Some("PAIRING_REQUIRED".into()),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "status": "pending_approval",
+                "error": "PAIRING_REQUIRED"
+            })
+        );
+    }
 }

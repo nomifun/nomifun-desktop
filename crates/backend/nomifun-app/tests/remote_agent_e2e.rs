@@ -13,7 +13,7 @@ use common::{body_json, build_app, delete_with_token, get_with_token, json_with_
 fn bearer_agent_body() -> serde_json::Value {
     json!({
         "name": "Test Remote Server",
-        "protocol": "acp",
+        "protocol": "openclaw",
         "url": "wss://remote.example.com",
         "auth_type": "bearer",
         "auth_token": "my-secret-token-1234",
@@ -51,7 +51,7 @@ async fn t1_1_create_bearer_agent() {
     let data = &json["data"];
     assert!(data["id"].as_i64().is_some());
     assert_eq!(data["name"], "Test Remote Server");
-    assert_eq!(data["protocol"], "acp");
+    assert_eq!(data["protocol"], "openclaw");
     assert_eq!(data["url"], "wss://remote.example.com");
     assert_eq!(data["auth_type"], "bearer");
     // Auth token should be masked
@@ -72,7 +72,7 @@ async fn t1_2_create_openclaw_agent_generates_device_keys() {
     let data = &json["data"];
     assert_eq!(data["protocol"], "openclaw");
     // Device ID and public key should be generated
-    assert!(data["device_id"].as_str().unwrap().starts_with("dev_"));
+    assert_eq!(data["device_id"].as_str().unwrap().len(), 64);
     assert!(data["device_public_key"].as_str().is_some());
     // Private key should NOT be in the response
     assert!(data.get("device_private_key").is_none());
@@ -189,7 +189,7 @@ async fn t4_1_update_name_only() {
     let json = body_json(resp).await;
     assert_eq!(json["data"]["name"], "Updated Name");
     // Other fields preserved
-    assert_eq!(json["data"]["protocol"], "acp");
+    assert_eq!(json["data"]["protocol"], "openclaw");
     assert_eq!(json["data"]["url"], "wss://remote.example.com");
 }
 
@@ -293,20 +293,23 @@ async fn t6_2_test_connection_unauthenticated() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-// ── 1.7 Handshake ───────────────────────────────────────────────────
+// ── 1.7 Protocol validation and handshake ────────────────────────────
 
 #[tokio::test]
-async fn t7_1_handshake_non_openclaw_protocol() {
+async fn t7_1_create_rejects_non_openclaw_protocol() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
-
+    let body = json!({
+        "name": "Unsupported ACP Remote",
+        "protocol": "acp",
+        "url": "wss://remote.example.com",
+        "auth_type": "none"
+    });
     let req = json_with_token(
         "POST",
-        &format!("/api/remote-agents/{id}/handshake"),
-        json!({}),
+        "/api/remote-agents",
+        body,
         &token,
         &csrf,
     );
