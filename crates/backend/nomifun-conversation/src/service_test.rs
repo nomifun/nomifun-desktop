@@ -1239,6 +1239,7 @@ async fn assistant_projection_is_one_durable_row_and_rebroadcasts_stable_final_c
     assert!(events.iter().all(|event| event.data["msg_id"] == first));
     assert!(events.iter().all(|event| event.data["type"] == "content"));
     assert!(events.iter().all(|event| event.data["replace"] == true));
+    assert!(events.iter().all(|event| event.data["stream_complete"] == true));
     assert!(!events.iter().any(|event| {
         matches!(event.name.as_str(), "turn.started" | "turn.completed")
     }));

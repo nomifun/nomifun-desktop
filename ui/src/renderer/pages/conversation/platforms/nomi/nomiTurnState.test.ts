@@ -31,6 +31,15 @@ describe('nomiTurnReducer — basic transitions', () => {
     expect(isTurnRunning(s)).toBe(true);
   });
 
+  test('complete projected content renders without starting or ending a turn', () => {
+    const idle = nomiTurnReducer(initialNomiTurnState, { type: 'content', streamComplete: true });
+    expect(idle).toEqual(initialNomiTurnState);
+
+    const concurrentTurn = run([{ type: 'activity' }]);
+    const unchanged = nomiTurnReducer(concurrentTurn, { type: 'content', streamComplete: true });
+    expect(unchanged).toEqual(concurrentTurn);
+  });
+
   test('setWaiting toggles only waitingResponse', () => {
     const on = nomiTurnReducer(initialNomiTurnState, { type: 'setWaiting', value: true });
     expect(on).toEqual({ streamRunning: false, hasActiveTools: false, waitingResponse: true });
