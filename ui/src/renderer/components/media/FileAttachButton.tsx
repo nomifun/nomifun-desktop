@@ -65,10 +65,10 @@ const buildLoadedMcpStatuses = (
     return statuses;
   }
 
-  // Legacy fallback from name-only snapshots — no real numeric id exists, so
-  // use 0 as a placeholder; the React key below disambiguates on name.
+  // Legacy fallback from name-only snapshots — no real catalog id exists, so
+  // use a stable string placeholder that follows the session-status contract.
   return (legacyNames ?? []).map((name) => ({
-    id: 0,
+    id: `legacy:${name}`,
     name,
     status: 'loaded',
   }));

@@ -668,12 +668,22 @@ export interface IMcpServer {
   builtin?: boolean;
 }
 
-export type ISessionMcpServer = Pick<IMcpServer, 'id' | 'name' | 'transport'>;
+/**
+ * Conversation-scoped MCP snapshot. This intentionally does not reuse
+ * `IMcpServer.id`: a session snapshot may represent either a repository-backed
+ * server (numeric database key) or a session-only server (arbitrary key), so
+ * its wire identifier is always a string.
+ */
+export interface ISessionMcpServer {
+  id: string;
+  name: string;
+  transport: IMcpServerTransport;
+}
 
 export type IConversationMcpStatusKind = 'loaded' | 'failed' | 'unsupported';
 
 export interface IConversationMcpStatus {
-  id: number;
+  id: string;
   name: string;
   status: IConversationMcpStatusKind;
   reason?: string;
