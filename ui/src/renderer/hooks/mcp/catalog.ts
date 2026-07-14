@@ -63,7 +63,7 @@ export const toBackendMcpPayload = (
 });
 
 export const toSessionMcpServer = (server: Pick<IMcpServer, 'id' | 'name' | 'transport'>): ISessionMcpServer => ({
-  id: server.id,
+  id: String(server.id),
   name: server.name,
   transport: server.transport,
 });

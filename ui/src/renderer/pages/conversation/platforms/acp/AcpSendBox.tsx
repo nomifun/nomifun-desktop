@@ -116,7 +116,7 @@ const AcpSendBox: React.FC<{
   const loadedMcpStatuses =
     conversationContext?.loadedMcpStatuses ??
     (conversationContext?.loadedMcpServers ?? []).map<IConversationMcpStatus>((name) => ({
-      id: 0,
+      id: `legacy:${name}`,
       name,
       status: 'loaded',
     }));

@@ -662,6 +662,58 @@ async fn create_returns_conversation_with_defaults() {
 }
 
 #[tokio::test]
+async fn create_normalizes_legacy_numeric_session_mcp_ids_to_strings() {
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": {
+            "workspace": "/project",
+            "selected_session_mcp_servers": [{
+                "id": 3,
+                "name": "everything",
+                "transport": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-everything"]
+                }
+            }]
+        }
+    }))
+    .unwrap();
+
+    let response = svc.create("user_1", req).await.unwrap();
+
+    assert_eq!(response.extra["session_mcp_servers"][0]["id"], "3");
+}
+
+#[tokio::test]
+async fn create_rejects_non_string_or_integer_session_mcp_ids() {
+    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let req: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": {
+            "workspace": "/project",
+            "selected_session_mcp_servers": [{
+                "id": true,
+                "name": "everything",
+                "transport": {
+                    "type": "stdio",
+                    "command": "npx"
+                }
+            }]
+        }
+    }))
+    .unwrap();
+
+    let error = svc.create("user_1", req).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        AppError::BadRequest(message) if message.contains("Invalid selected_session_mcp_servers")
+    ));
+}
+
+#[tokio::test]
 async fn create_rejects_workspace_with_trailing_whitespace_in_request() {
     let (svc, _broadcaster, _repo, _task_mgr) = make_service();
     let dir = std::env::temp_dir().join(format!("nomifun-test-{}", nomifun_common::generate_id()));

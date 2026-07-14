@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     BrowserMcpConfig, GatewayMcpConfig, GuideMcpConfig, KnowledgeMcpConfig, KnowledgeMountInfo,
@@ -36,9 +36,31 @@ pub enum SessionMcpTransport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMcpServer {
+    #[serde(deserialize_with = "deserialize_session_mcp_server_id")]
     pub id: String,
     pub name: String,
     pub transport: SessionMcpTransport,
+}
+
+/// Session MCP snapshots use string identifiers because they can represent
+/// both catalog-backed rows and client-only servers. Accept integer JSON IDs
+/// from pre-normalization desktop clients during a rolling upgrade, but reject
+/// every other JSON type so the transport/configuration contract stays strict.
+fn deserialize_session_mcp_server_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SessionMcpServerId {
+        String(String),
+        Integer(i64),
+    }
+
+    match SessionMcpServerId::deserialize(deserializer)? {
+        SessionMcpServerId::String(id) => Ok(id),
+        SessionMcpServerId::Integer(id) => Ok(id.to_string()),
+    }
 }
 
 /// ACP-specific fields extracted from `extra` in build task options.
