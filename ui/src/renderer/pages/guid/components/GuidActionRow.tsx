@@ -207,6 +207,7 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
             >
               <Checkbox
                 checked={selectedMcpServerIds.includes(server.id)}
+                className='guid-mcp-selection-checkbox'
                 onClick={(e: React.MouseEvent) => e.stopPropagation()}
                 onChange={() => onToggleMcpServer(server.id)}
               >

@@ -544,17 +544,27 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
           <div className='flex-shrink-0 p-12px rd-10px border border-solid border-border-2 bg-bg-1'>
             <Typography.Text bold>{t('settings.presetApplication', { defaultValue: 'Application' })}</Typography.Text>
             <Checkbox.Group
-              className='mt-10px flex flex-wrap gap-x-16px gap-y-8px'
+              className='preset-scope-selection-checkbox mt-10px flex flex-wrap gap-x-16px gap-y-8px'
               value={editTargets}
               onChange={(value) => setEditTargets(value as PresetTarget[])}
               disabled={readOnly}
               options={targetOptions}
             />
             <div className='mt-12px flex flex-wrap gap-x-20px gap-y-8px'>
-              <Checkbox checked={fallbackAllowed} disabled={readOnly} onChange={setFallbackAllowed}>
+              <Checkbox
+                checked={fallbackAllowed}
+                disabled={readOnly}
+                className='preset-scope-selection-checkbox'
+                onChange={setFallbackAllowed}
+              >
                 {t('settings.presetAllowFallback', { defaultValue: 'Allow fallback when a preference is unavailable' })}
               </Checkbox>
-              <Checkbox checked={autoSelectable} disabled={readOnly} onChange={setAutoSelectable}>
+              <Checkbox
+                checked={autoSelectable}
+                disabled={readOnly}
+                className='preset-scope-selection-checkbox'
+                onChange={setAutoSelectable}
+              >
                 {t('settings.presetAutoSelectable', { defaultValue: '允许协作任务自动选择' })}
               </Checkbox>
             </div>
@@ -571,6 +581,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               <Checkbox
                 checked={knowledgePolicy.enabled}
                 disabled={readOnly}
+                className='preset-scope-selection-checkbox'
                 onChange={(enabled) => setKnowledgePolicy({ ...knowledgePolicy, enabled })}
               >
                 {t('common.enabled', { defaultValue: 'Enabled' })}
