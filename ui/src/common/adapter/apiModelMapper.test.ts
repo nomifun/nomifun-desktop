@@ -10,7 +10,16 @@ import { fromApiConversation } from './apiModelMapper';
 // 最小 ApiConversation 片段：只构造 mapper 关心的字段
 const apiConv = (o: Record<string, unknown>) => ({ id: 'c1', name: 'conv', type: 'acp', created_at: 1, modified_at: 2, ...o });
 
-type MappedExtra = { pinned?: boolean; pinned_at?: number; custom_workspace?: boolean } | null | undefined;
+type MappedExtra =
+  | {
+      pinned?: boolean;
+      pinned_at?: number;
+      custom_workspace?: boolean;
+      remote_agent_id?: number;
+      remoteAgentId?: number;
+    }
+  | null
+  | undefined;
 const extraOf = (raw: Record<string, unknown>): MappedExtra => (fromApiConversation(raw) as { extra?: MappedExtra }).extra;
 
 describe('fromApiConversation 置顶镜像（DB 顶层 pinned 列 → extra）', () => {
@@ -53,5 +62,11 @@ describe('fromApiConversation 置顶镜像（DB 顶层 pinned 列 → extra）',
     const extra = extraOf(apiConv({ pinned: true, pinned_at: 1, extra: { workspace: '/w/p1' } }));
     expect(extra?.custom_workspace).toBe(true);
     expect(extra?.pinned).toBe(true);
+  });
+
+  test('remote_agent_id is mirrored to the legacy remoteAgentId UI key', () => {
+    const extra = extraOf(apiConv({ type: 'remote', extra: { remote_agent_id: 42 } }));
+    expect(extra?.remote_agent_id).toBe(42);
+    expect(extra?.remoteAgentId).toBe(42);
   });
 });

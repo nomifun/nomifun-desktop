@@ -52,4 +52,33 @@ describe('buildAgentConversationParams preset contract', () => {
     expect(result.extra.agent_name).toBe('Claude');
     expect(result.extra.backend).toBe('claude');
   });
+
+  test('stores the selected remote-agent row id in snake_case', () => {
+    const result = buildAgentConversationParams({
+      backend: 'remote',
+      name: 'Remote OpenClaw',
+      workspace: '/tmp/workspace',
+      model,
+      custom_agent_id: '42',
+    });
+
+    expect(result.type).toBe('remote');
+    expect(result.extra.remote_agent_id).toBe(42);
+  });
+
+  test('rejects a missing remote-agent row id', () => {
+    let error: unknown;
+    try {
+      buildAgentConversationParams({
+        backend: 'remote',
+        name: 'Remote OpenClaw',
+        workspace: '/tmp/workspace',
+        model,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error instanceof Error).toBe(true);
+    expect((error as Error).message.includes('remote_agent_id')).toBe(true);
+  });
 });

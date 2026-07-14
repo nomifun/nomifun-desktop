@@ -303,6 +303,34 @@ fn remote_surface_projection_is_correct() {
     // P1: the headline agent-delegation caps are exposed to external callers.
     assert!(remote.contains(&"nomi_agent_run"), "nomi_agent_run must be on the Remote surface");
     assert!(remote.contains(&"nomi_agent_result"), "nomi_agent_result must be on the Remote surface");
+    assert!(
+        remote.contains(&"nomi_remote_agent_list"),
+        "Remote callers may discover saved OpenClaw gateway ids"
+    );
+    assert!(
+        remote.contains(&"nomi_remote_agent_get"),
+        "Remote callers may inspect saved gateway metadata; credentials remain masked"
+    );
+    assert!(
+        !remote.contains(&"nomi_remote_agent_create"),
+        "Remote callers must not persist endpoints or credentials"
+    );
+    assert!(
+        !remote.contains(&"nomi_remote_agent_update"),
+        "Remote callers must not change endpoints or credentials"
+    );
+    assert!(
+        !remote.contains(&"nomi_remote_agent_delete"),
+        "Remote callers must not delete saved gateway configurations"
+    );
+    assert!(
+        !remote.contains(&"nomi_remote_agent_test"),
+        "Remote callers must not turn endpoint testing into an internal-network probe"
+    );
+    assert!(
+        !remote.contains(&"nomi_remote_agent_handshake"),
+        "Remote callers must not actively connect saved internal endpoints"
+    );
 
     // Remote ⊆ Desktop (Desktop is the most permissive surface).
     for name in &remote {

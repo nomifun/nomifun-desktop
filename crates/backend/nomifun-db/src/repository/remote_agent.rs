@@ -33,6 +33,10 @@ pub trait IRemoteAgentRepository: Send + Sync {
         status: &str,
         last_connected_at: Option<TimestampMs>,
     ) -> Result<(), DbError>;
+
+    /// Stores the encrypted device token issued by an OpenClaw Gateway.
+    /// Returns `DbError::NotFound` if the ID doesn't exist.
+    async fn update_device_token(&self, id: i64, device_token: Option<&str>) -> Result<(), DbError>;
 }
 
 /// Parameters for creating a new remote agent.

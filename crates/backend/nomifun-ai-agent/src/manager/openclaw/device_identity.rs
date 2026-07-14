@@ -11,6 +11,7 @@ use tracing::{debug, warn};
 
 use super::protocol::{CLIENT_ID, CLIENT_MODE, DeviceAuthParams};
 
+#[derive(Clone, Debug)]
 pub struct DeviceIdentity {
     pub device_id: String,
     pub signing_key: SigningKey,
@@ -47,6 +48,30 @@ pub fn load_or_create_identity(custom_path: Option<&Path>) -> Result<DeviceIdent
         warn!(error = %e, "Failed to save device identity, continuing with ephemeral key");
     }
     Ok(identity)
+}
+
+/// Reconstruct a device identity from a persisted Ed25519 secret key.
+///
+/// Remote-agent rows keep a dedicated device id/keypair so different gateways
+/// do not share the process-global `~/.openclaw` identity. The caller is
+/// responsible for decrypting the database value before invoking this helper.
+pub fn identity_from_secret_bytes(device_id: String, secret: &[u8]) -> Result<DeviceIdentity, AppError> {
+    let secret: [u8; 32] = secret
+        .try_into()
+        .map_err(|_| AppError::Internal("Invalid Ed25519 private key length".into()))?;
+    let signing_key = SigningKey::from_bytes(&secret);
+    let derived_id = derive_device_id(&signing_key.verifying_key());
+    if device_id != derived_id {
+        debug!(
+            stored_device_id = %device_id,
+            derived_device_id = %derived_id,
+            "Remote device ID mismatch, using the public-key fingerprint"
+        );
+    }
+    Ok(DeviceIdentity {
+        device_id: derived_id,
+        signing_key,
+    })
 }
 
 fn load_identity(path: &Path) -> Result<DeviceIdentity, AppError> {
@@ -115,6 +140,12 @@ pub(crate) fn generate_identity() -> DeviceIdentity {
     DeviceIdentity { device_id, signing_key }
 }
 
+/// Generate an in-memory identity without reading or writing `~/.openclaw`.
+/// Connection tests use this so a dry run has no filesystem side effects.
+pub(crate) fn generate_ephemeral_identity() -> DeviceIdentity {
+    generate_identity()
+}
+
 fn derive_device_id(verifying_key: &VerifyingKey) -> String {
     let raw = verifying_key.as_bytes();
     let hash = Sha256::digest(raw);
@@ -125,6 +156,8 @@ pub fn build_device_auth_params(
     identity: &DeviceIdentity,
     nonce: Option<&str>,
     token: Option<&str>,
+    platform: &str,
+    device_family: Option<&str>,
 ) -> DeviceAuthParams {
     let role = "operator";
     let scopes = "operator.admin";
@@ -139,6 +172,8 @@ pub fn build_device_auth_params(
         signed_at,
         token,
         nonce,
+        platform,
+        device_family,
     );
 
     let signature = sign_payload(&identity.signing_key, &payload);
@@ -163,29 +198,34 @@ fn build_auth_payload(
     signed_at_ms: i64,
     token: Option<&str>,
     nonce: Option<&str>,
+    platform: &str,
+    device_family: Option<&str>,
 ) -> String {
-    let version = if nonce.is_some() { "v2" } else { "v1" };
+    let version = if nonce.is_some() { "v3" } else { "v1" };
     let token_str = token.unwrap_or("");
 
-    let signed_at_str = signed_at_ms.to_string();
     let mut parts = vec![
-        version,
-        device_id,
-        client_id,
-        client_mode,
-        role,
-        scopes,
-        signed_at_str.as_str(),
-        token_str,
+        version.to_owned(),
+        device_id.to_owned(),
+        client_id.to_owned(),
+        client_mode.to_owned(),
+        role.to_owned(),
+        scopes.to_owned(),
+        signed_at_ms.to_string(),
+        token_str.to_owned(),
     ];
 
-    let nonce_str;
-    if version == "v2" {
-        nonce_str = nonce.unwrap_or("").to_owned();
-        parts.push(&nonce_str);
+    if version == "v3" {
+        parts.push(nonce.unwrap_or("").to_owned());
+        parts.push(normalize_device_metadata_for_auth(platform));
+        parts.push(normalize_device_metadata_for_auth(device_family.unwrap_or("")));
     }
 
     parts.join("|")
+}
+
+fn normalize_device_metadata_for_auth(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 fn sign_payload(signing_key: &SigningKey, payload: &str) -> String {
@@ -310,6 +350,8 @@ mod tests {
             1700000000000,
             None,
             None,
+            "",
+            None,
         );
         assert_eq!(
             payload,
@@ -318,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn build_auth_payload_v2_with_nonce() {
+    fn build_auth_payload_v3_with_nonce() {
         let payload = build_auth_payload(
             "abc123",
             "gateway-client",
@@ -328,10 +370,12 @@ mod tests {
             1700000000000,
             Some("tok"),
             Some("nonce123"),
+            "WinDows",
+            Some("DeskTop"),
         );
         assert_eq!(
             payload,
-            "v2|abc123|gateway-client|backend|operator|operator.admin|1700000000000|tok|nonce123"
+            "v3|abc123|gateway-client|backend|operator|operator.admin|1700000000000|tok|nonce123|windows|desktop"
         );
     }
 
@@ -363,7 +407,7 @@ mod tests {
     #[test]
     fn build_device_auth_params_produces_valid_signature() {
         let identity = generate_identity();
-        let params = build_device_auth_params(&identity, Some("nonce-x"), None);
+        let params = build_device_auth_params(&identity, Some("nonce-x"), None, "windows", None);
 
         assert_eq!(params.id, identity.device_id);
         assert_eq!(params.nonce.as_deref(), Some("nonce-x"));

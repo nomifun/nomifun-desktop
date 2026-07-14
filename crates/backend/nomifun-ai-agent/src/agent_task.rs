@@ -323,11 +323,13 @@ impl AgentInstance {
         }
     }
 
-    /// Session key for agent types that expose one (currently OpenClaw).
+    /// Session key for gateway agent types that expose one (OpenClaw and
+    /// remote OpenClaw).
     pub fn get_session_key(&self) -> Option<String> {
         match self {
             Self::OpenClaw(m) => m.get_session_key(),
-            Self::Acp(_) | Self::Nomi(_) | Self::Nanobot(_) | Self::Remote(_) => None,
+            Self::Remote(m) => m.get_session_key(),
+            Self::Acp(_) | Self::Nomi(_) | Self::Nanobot(_) => None,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_session_key(),
         }

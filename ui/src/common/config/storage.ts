@@ -388,7 +388,9 @@ export type TChatConversation =
           workspace?: string;
           custom_workspace?: boolean;
           /** Remote agent config ID (FK to remote_agents table) */
-          remoteAgentId: number;
+          remote_agent_id: number;
+          /** Legacy UI alias kept during the snake_case migration. */
+          remoteAgentId?: number;
           /** Remote session key for resume */
           sessionKey?: string;
           /** Skills snapshot for this conversation — authoritative list, written

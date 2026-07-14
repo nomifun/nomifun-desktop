@@ -223,6 +223,9 @@ pub struct RemoteBuildExtra {
     /// Primary key of the `remote_agents` row (i64 since the primary-key
     /// rework). The frontend carries it as a JSON number.
     pub remote_agent_id: i64,
+    /// Remote gateway session key persisted after a successful turn.
+    #[serde(default, rename = "sessionKey", alias = "session_key")]
+    pub session_key: Option<String>,
 }
 
 /// Opt-in goal-driven continuation for a session. When present, the engine

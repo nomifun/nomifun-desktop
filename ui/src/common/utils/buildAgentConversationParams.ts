@@ -69,7 +69,11 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     if (type === 'remote') {
       // custom_agent_id carries the remote_agents row id stringified by the
       // agent-selection layer; parse it back to the integer FK the backend wants.
-      extra.remote_agent_id = custom_agent_id != null ? Number(custom_agent_id) : undefined;
+      const remoteAgentId = custom_agent_id != null ? Number(custom_agent_id) : Number.NaN;
+      if (!Number.isSafeInteger(remoteAgentId) || remoteAgentId <= 0) {
+        throw new Error('A valid remote_agent_id is required for remote conversations');
+      }
+      extra.remote_agent_id = remoteAgentId;
     } else if (type === 'openclaw-gateway') {
       extra.agent_name = agent_name || name;
       extra.gateway = {

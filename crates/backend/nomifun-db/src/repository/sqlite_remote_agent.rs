@@ -158,6 +158,21 @@ impl IRemoteAgentRepository for SqliteRemoteAgentRepository {
 
         Ok(())
     }
+
+    async fn update_device_token(&self, id: i64, device_token: Option<&str>) -> Result<(), DbError> {
+        let result = sqlx::query("UPDATE remote_agents SET device_token = ?, updated_at = ? WHERE id = ?")
+            .bind(device_token)
+            .bind(nomifun_common::now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("Remote agent '{id}' not found")));
+        }
+
+        Ok(())
+    }
 }
 
 /// Merge partial update params into an existing row, returning a new instance.
@@ -427,6 +442,29 @@ mod tests {
     async fn update_status_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
         let err = repo.update_status(999, "connected", None).await.unwrap_err();
+        assert!(matches!(err, DbError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn update_device_token_sets_and_clears_token() {
+        let (repo, _db) = setup().await;
+        let created = repo.create(sample_params()).await.unwrap();
+
+        repo.update_device_token(created.id, Some("encrypted-device-token"))
+            .await
+            .unwrap();
+        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        assert_eq!(found.device_token.as_deref(), Some("encrypted-device-token"));
+
+        repo.update_device_token(created.id, None).await.unwrap();
+        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        assert!(found.device_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_device_token_nonexistent_returns_not_found() {
+        let (repo, _db) = setup().await;
+        let err = repo.update_device_token(999, Some("token")).await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 

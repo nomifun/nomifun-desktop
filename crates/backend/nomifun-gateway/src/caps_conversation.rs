@@ -60,7 +60,7 @@ struct CreateConversationParams {
     /// Optional display name for the new conversation.
     #[serde(default)]
     name: Option<String>,
-    /// Agent type: "nomi" (default) or "acp". NOT for terminals — any
+    /// Agent type: "nomi" (default), "acp", or "remote". NOT for terminals — any
     /// terminal/shell intent must go through nomi_create_terminal instead.
     #[serde(default)]
     agent_type: Option<String>,
@@ -74,6 +74,9 @@ struct CreateConversationParams {
     /// Model id for nomi sessions. Omit to auto-resolve (see provider_id).
     #[serde(default)]
     model: Option<String>,
+    /// Registered remote-agent row id. Required when agent_type is "remote".
+    #[serde(default)]
+    remote_agent_id: Option<i64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -266,6 +269,23 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
         Err(_) => return json!({ "error": format!("invalid agent_type '{agent_type_str}'") }),
     };
     let mut extra = json!({});
+    if agent_type == AgentType::Remote {
+        let Some(remote_agent_id) = p.remote_agent_id else {
+            return json!({ "error": "remote_agent_id is required when agent_type is 'remote'" });
+        };
+        match deps.remote_agent_service.get(&remote_agent_id.to_string()).await {
+            Ok(remote) if remote.protocol == nomifun_common::RemoteAgentProtocol::OpenClaw => {}
+            Ok(_) => {
+                return json!({
+                    "error": "remote_agent_id refers to an unsupported legacy protocol; create an OpenClaw remote agent"
+                });
+            }
+            Err(error) => return json!({ "error": format!("invalid remote_agent_id: {error}") }),
+        }
+        extra["remote_agent_id"] = json!(remote_agent_id);
+    } else if p.remote_agent_id.is_some() {
+        return json!({ "error": "remote_agent_id is only valid when agent_type is 'remote'" });
+    }
     if let Some(backend) = p.backend {
         extra["backend"] = json!(backend);
     }
@@ -293,6 +313,9 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationPar
     match deps.conversation_service.create(&user_id, req).await {
         Ok(resp) => ok(json!({
             "id": resp.id,
+            // Canonical chaining field for nomi_send_to_conversation /
+            // nomi_conversation_status. Keep `id` for backwards compatibility.
+            "conversation_id": resp.id,
             "name": resp.name,
             "agent_type": resp.r#type,
             "model": resp.model,
@@ -657,7 +680,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session (nomi or acp). nomi sessions get a model at creation.",
+            "Open a fresh desktop session (nomi, acp, or remote OpenClaw). For remote sessions pass remote_agent_id from nomi_remote_agent_list.",
             DangerTier::Write,
         ),
         create,
@@ -730,5 +753,17 @@ mod tests {
         let v = json!({"content": "short"});
         let out = truncate_message_contents(v);
         assert_eq!(out["content"], "short");
+    }
+
+    #[test]
+    fn remote_create_params_accept_numeric_remote_agent_id() {
+        let params: CreateConversationParams = serde_json::from_value(json!({
+            "agent_type": "remote",
+            "remote_agent_id": 12
+        }))
+        .unwrap();
+
+        assert_eq!(params.agent_type.as_deref(), Some("remote"));
+        assert_eq!(params.remote_agent_id, Some(12));
     }
 }

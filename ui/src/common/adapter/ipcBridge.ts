@@ -1283,10 +1283,9 @@ export const remoteAgent = {
     (p) => p.updates
   ),
   delete: httpDelete<boolean, { id: number }>((p) => `/api/remote-agents/${p.id}`),
-  testConnection: httpPost<
-    { success: boolean; error?: string },
-    { url: string; auth_type: string; auth_token?: string; allow_insecure?: boolean }
-  >('/api/remote-agents/test-connection'),
+  testConnection: httpPost<void, { url: string; auth_type: string; auth_token?: string; allow_insecure?: boolean }>(
+    '/api/remote-agents/test-connection'
+  ),
   handshake: httpPost<{ status: 'ok' | 'pending_approval' | 'error'; error?: string }, { id: number }>(
     (p) => `/api/remote-agents/${p.id}/handshake`
   ),
