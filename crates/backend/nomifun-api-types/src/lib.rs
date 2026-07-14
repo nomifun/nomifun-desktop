@@ -240,7 +240,8 @@ pub use system::{
 };
 pub use mcp_bridge::{
     BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
-    GATEWAY_CAPABILITY_DOMAIN, GATEWAY_LIST_TOOLS_OPERATION,
+    GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,
+    GATEWAY_LIST_TOOLS_OPERATION,
     GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig,
     GatewayMcpConfig,
     KNOWLEDGE_CAPABILITY_DOMAIN, KNOWLEDGE_READ_TOOL, KNOWLEDGE_SEARCH_TOOL,

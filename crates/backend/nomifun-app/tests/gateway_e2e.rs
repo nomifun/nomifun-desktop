@@ -33,9 +33,21 @@ impl Gateway {
     }
 
     async fn call(&self, tool: &str, caller_conv: &str, user_id: &str, args: Value) -> Value {
+        self.call_with_companion(tool, caller_conv, user_id, None, args)
+            .await
+    }
+
+    async fn call_with_companion(
+        &self,
+        tool: &str,
+        caller_conv: &str,
+        user_id: &str,
+        companion_id: Option<&str>,
+        args: Value,
+    ) -> Value {
         let child = self
             .config
-            .issue_for_conversation(user_id, caller_conv, None, None, None, &[])
+            .issue_for_conversation(user_id, caller_conv, companion_id, None, None, &[])
             .expect("valid Gateway child capability");
         let access = &child.bootstrap.access;
         let resp = self
@@ -232,6 +244,59 @@ async fn gw_list_conversations_excludes_companion_sessions() {
     assert_eq!(plain["id"], json!(2));
     assert_eq!(plain["companion_id"], json!(null), "no binding → null, got {plain}");
     assert_eq!(plain["is_companion_companion"], json!(false));
+}
+
+#[tokio::test]
+async fn gw_plain_conversation_cannot_create_a_top_level_conversation() {
+    let (_app, services) = build_app().await;
+    let gw = Gateway::from_services(&services);
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+        .fetch_one(services.database.pool())
+        .await
+        .unwrap();
+
+    let body = gw
+        .call(
+            "nomi_create_conversation",
+            "111",
+            "system_default_user",
+            json!({"name": "must not exist", "agent_type": "acp", "backend": "codex"}),
+        )
+        .await;
+    assert_eq!(error_of(&body), "session_capability_denied");
+
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
+        .fetch_one(services.database.pool())
+        .await
+        .unwrap();
+    assert_eq!(after, before, "denied creation must not persist a row");
+}
+
+#[tokio::test]
+async fn gw_companion_can_create_a_top_level_conversation() {
+    let (_app, services) = build_app().await;
+    let gw = Gateway::from_services(&services);
+
+    let body = gw
+        .call_with_companion(
+            "nomi_create_conversation",
+            "companion-session",
+            "system_default_user",
+            Some("companion-1"),
+            json!({"name": "伙伴创建的会话", "agent_type": "acp", "backend": "codex"}),
+        )
+        .await;
+    let created = result_of(&body);
+    assert_eq!(created["name"], json!("伙伴创建的会话"));
+    assert_eq!(created["agent_type"], json!("acp"));
+
+    let persisted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversations WHERE name = '伙伴创建的会话'",
+    )
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(persisted, 1);
 }
 
 #[tokio::test]
