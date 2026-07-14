@@ -31,7 +31,7 @@ const FigureTile: React.FC<{
 
   return (
     <>
-      <div className='group relative flex flex-col overflow-hidden rd-16px bg-fill-2 border border-solid border-[var(--color-border-2)] transition-all duration-200 hover:-translate-y-2px hover:shadow-[0_10px_28px_rgba(var(--primary-rgb),0.18)] hover:border-[var(--color-primary)]'>
+      <div className='figure-library-card w-184px h-234px group relative flex shrink-0 flex-col overflow-hidden rd-16px bg-fill-2 border border-solid border-[var(--color-border-2)] shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-2px hover:shadow-[0_10px_28px_rgba(var(--primary-rgb),0.16)] hover:border-[var(--color-primary)]'>
         {/* "in use" badge — always visible so the blocked delete reads as intentional */}
         {inUse && (
           <span className='absolute left-8px top-8px z-2 inline-flex items-center h-18px px-7px rd-full text-10px font-600 !bg-primary-1 !text-primary-6'>
@@ -60,7 +60,7 @@ const FigureTile: React.FC<{
           </FigureActionButton>
         </FigureActionSurface>
 
-        <div className='flex items-center justify-center aspect-square w-full' style={CHECKER_BG}>
+        <div className='figure-library-card-preview h-190px flex shrink-0 items-center justify-center overflow-hidden' style={CHECKER_BG}>
           <img
             src={figureImageUrlOf(baseUrl, fig.id, fig.created_at)}
             alt={fig.name}
@@ -69,7 +69,7 @@ const FigureTile: React.FC<{
           />
         </div>
 
-        <div className='flex items-center gap-6px px-12px py-10px border-t border-solid border-[var(--color-border-2)]'>
+        <div className='figure-library-card-footer h-44px flex shrink-0 items-center gap-6px px-12px bg-fill-2'>
           <span className='text-13px font-600 text-t-primary truncate' title={fig.name}>
             {fig.name}
           </span>
@@ -147,7 +147,7 @@ const FigureLibraryPage: React.FC = () => {
           </Button>
         </div>
       ) : (
-        <div className='grid gap-14px' style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(148px, 1fr))' }}>
+        <div className='grid justify-start gap-14px' style={{ gridTemplateColumns: 'repeat(auto-fill, 184px)' }}>
           {figures.map((fig) => (
             <FigureTile key={fig.id} fig={fig} baseUrl={base} inUse={inUse.has(fig.id)} onUpdate={update} onDelete={confirmDelete} />
           ))}
@@ -155,12 +155,14 @@ const FigureLibraryPage: React.FC = () => {
           <button
             type='button'
             onClick={() => setWizardOpen(true)}
-            className='flex flex-col items-center justify-center gap-8px aspect-square rd-16px bg-fill-1 border-2 border-dashed border-[var(--color-border-2)] text-t-tertiary cursor-pointer transition-all duration-200 hover:-translate-y-2px hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] hover:bg-fill-2'
+            className='figure-library-card w-184px h-234px figure-library-create-card flex shrink-0 flex-col items-center justify-center gap-8px rd-16px bg-fill-1 text-t-tertiary cursor-pointer transition-all duration-200 hover:-translate-y-2px hover:bg-fill-2 hover:text-[var(--color-primary)]'
           >
-            <span className='flex items-center justify-center w-44px h-44px rd-full bg-fill-3 text-26px'>
-              <IconPlus />
+            <span className='figure-library-create-content flex flex-col items-center gap-8px'>
+              <span className='flex items-center justify-center w-44px h-44px rd-full bg-fill-3 text-26px'>
+                <IconPlus />
+              </span>
+              <span className='text-12px font-600'>{t('nomi.customFigure.createNew')}</span>
             </span>
-            <span className='text-12px font-600'>{t('nomi.customFigure.createNew')}</span>
           </button>
         </div>
       )}

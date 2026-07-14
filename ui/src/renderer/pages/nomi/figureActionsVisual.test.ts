@@ -12,6 +12,21 @@ import zhNomi from '../../services/i18n/locales/zh-CN/nomi.json';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('Custom figure card action polish', () => {
+  test('uses one fixed gallery-card geometry for figures and the creation entry', () => {
+    const library = readSource(new URL('./FigureLibraryPage.tsx', import.meta.url));
+
+    expect(library.includes('figure-library-card w-184px h-234px')).toBe(true);
+    expect(library.includes('figure-library-card-preview h-190px')).toBe(true);
+    expect(library.includes('figure-library-card-footer h-44px')).toBe(true);
+    expect(library.includes('figure-library-card-footer h-44px flex shrink-0 items-center gap-6px px-12px bg-fill-2')).toBe(true);
+    expect(library.includes('figure-library-create-card')).toBe(true);
+    expect(library.includes('figure-library-create-content')).toBe(true);
+    expect(library.includes("figure-library-create-card flex shrink-0 flex-col items-center justify-center gap-8px")).toBe(true);
+    expect(library.includes('figure-library-create-card flex shrink-0 flex-col overflow-hidden')).toBe(false);
+    expect(library.includes('border-2 border-dashed')).toBe(false);
+    expect(library.includes("gridTemplateColumns: 'repeat(auto-fill, 184px)'")).toBe(true);
+  });
+
   test('uses the shared glass action surface in both figure library and character picker', () => {
     const library = readSource(new URL('./FigureLibraryPage.tsx', import.meta.url));
     const picker = readSource(new URL('./CharacterPicker.tsx', import.meta.url));
