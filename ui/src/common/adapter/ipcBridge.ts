@@ -2143,6 +2143,10 @@ export interface IResponseMessage {
   hidden?: boolean;
   /** Replace accumulated text for the same msg_id instead of appending. */
   replace?: boolean;
+  /** This content is a self-contained finalized projection, not a fragment of
+   *  an active model turn. Consumers must render it without raising turn or
+   *  conversation activity state. */
+  stream_complete?: boolean;
   /** Companion wire markers (backend StreamRelay stamps them on every
    *  fragment): true + owning companion id when the conversation is a companion
    *  owned session. */

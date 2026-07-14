@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import { isCompleteMessageProjection } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
@@ -26,7 +27,18 @@ const isPreparingAgentStatus = (data: unknown): boolean => {
   return (data as { status?: string }).status === 'preparing';
 };
 
-const isGeneratingStreamMessage = (message: { type: string; data: unknown }): boolean => {
+export const isGeneratingStreamMessage = (message: {
+  type: string;
+  data: unknown;
+  stream_complete?: boolean;
+}): boolean => {
+  // Finalized assistant projections (for example an Agent Execution terminal
+  // report) use message.stream only as a realtime delivery channel. They do
+  // not start a model turn and deliberately have no later terminal event.
+  if (isCompleteMessageProjection(message)) {
+    return false;
+  }
+
   if (message.type === 'agent_status') {
     return isPreparingAgentStatus(message.data);
   }

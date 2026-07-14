@@ -12,7 +12,10 @@ import type { TChatConversation, TokenUsageData } from '@/common/config/storage'
 import { prefixedId, uuid } from '@/common/utils';
 import { useAddOrUpdateMessage } from '@/renderer/pages/conversation/Messages/hooks';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
-import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
+import {
+  isCompleteMessageProjection,
+  isConversationProcessing,
+} from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { emitter } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { ThoughtData } from '../thoughtTypes';
@@ -360,8 +363,13 @@ export const useNomiMessage = (
             setThought({ subject: '', description: '' });
             onError?.(message as IResponseMessage);
           } else if (message.type === 'content') {
-            // Actual assistant content: running, no longer waiting for the model.
-            dispatchTurn({ type: 'content' });
+            // A terminal Agent Execution report is a self-contained projection,
+            // not a new model stream. Render it without re-raising the send-box
+            // busy state; ordinary stream content still marks the turn active.
+            dispatchTurn({
+              type: 'content',
+              streamComplete: isCompleteMessageProjection(message),
+            });
           } else {
             // Any other non-error output: keep the turn marked running (handles
             // events that arrive after a premature finish).

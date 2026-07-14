@@ -2307,6 +2307,9 @@ impl ConversationService {
     /// Replays intentionally rebroadcast the same stable `msg_id`. This closes
     /// the crash window between DB commit and WebSocket publication; clients
     /// already merge stream messages by `msg_id` and `replace=true`.
+    /// `stream_complete=true` makes the lifecycle boundary explicit: this is a
+    /// self-contained projection, not the beginning of a model stream, so UI
+    /// activity indicators must render it without entering a running state.
     pub async fn project_assistant_message_idempotent(
         &self,
         user_id: &str,
@@ -2390,6 +2393,7 @@ impl ConversationService {
                 "status": row.status,
                 "hidden": row.hidden,
                 "replace": true,
+                "stream_complete": true,
                 "origin": origin,
                 "companion": companion,
                 "companion_id": companion_id,

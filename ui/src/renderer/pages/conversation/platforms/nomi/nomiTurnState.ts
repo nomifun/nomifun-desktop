@@ -36,8 +36,10 @@ export type NomiTurnEvent =
    * touching `waitingResponse`: start, thinking, permission prompt, or other
    * non-content output. Subsumes the old "auto-recover streamRunning" hacks. */
   | { type: 'activity' }
-  /** Assistant text/content: running, and no longer waiting for the model. */
-  | { type: 'content' }
+  /** Assistant text/content: running, and no longer waiting for the model.
+   * A complete projection is rendered in the transcript without changing the
+   * current turn because it is not part of a model stream. */
+  | { type: 'content'; streamComplete?: boolean }
   /** A tool-group update carrying whether any tool is active and whether the
    * group is non-empty. */
   | { type: 'toolGroup'; hasActive: boolean; hasAny: boolean }
@@ -80,6 +82,9 @@ export function nomiTurnReducer(state: NomiTurnState, event: NomiTurnEvent): Nom
       return { ...state, streamRunning: true };
 
     case 'content':
+      if (event.streamComplete) {
+        return state;
+      }
       return { ...state, streamRunning: true, waitingResponse: false };
 
     case 'toolGroup': {
