@@ -2,27 +2,31 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_ai_agent::task_manager::IWorkerTaskManager;
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
+use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
+use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
+#[cfg(test)]
+use nomifun_ai_agent::types::SendMessageData;
 use nomifun_ai_agent::{AgentRegistry, AgentStreamEvent};
 use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
 use nomifun_common::{
-    AgentType, AppError, ProviderWithModel, now_ms, workspace_path_has_edge_whitespace_segment,
+    AgentType, AppError, ExecutionAuthority, ProviderWithModel, now_ms,
+    workspace_path_has_edge_whitespace_segment,
 };
 use nomifun_conversation::ConversationService;
 use nomifun_db::models::MessageRow;
 use nomifun_db::{ConversationRowUpdate, IConversationRepository};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use crate::artifacts::{broadcast_artifact, build_cron_trigger_artifact};
+use crate::artifacts::{build_cron_trigger_artifact, emit_artifact};
 use crate::busy_guard::CronBusyGuard;
 use crate::error::CronError;
 use crate::prompt::{
-    build_existing_conversation_prompt, build_new_conversation_prompt_with_skill_suggest,
-    build_new_conversation_with_skill_prompt, build_skill_suggest_prompt,
+    build_existing_conversation_prompt, build_new_conversation_prompt,
+    build_new_conversation_prompt_with_skill_suggest, build_new_conversation_with_skill_prompt,
+    build_skill_suggest_prompt,
 };
 use crate::skill_file::{
     cron_skill_name, read_skill_content, write_raw_skill_file, write_skill_file,
@@ -31,7 +35,6 @@ use crate::skill_suggest::SkillSuggestDetector;
 use crate::types::{CronJob, ExecutionMode};
 
 pub const RETRY_INTERVAL_MS: u64 = 30_000;
-const SYSTEM_DEFAULT_USER_ID: &str = "system_default_user";
 const SKILL_SUGGEST_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 
@@ -76,6 +79,7 @@ pub(crate) struct PreparedExecution {
 /// (which the spawner clones) remain distinct from these metadata
 /// fields.
 struct SkillSuggestContext {
+    owner_id: String,
     conversation_id: String,
     job_id: String,
     job_name: String,
@@ -85,13 +89,14 @@ struct SkillSuggestContext {
 }
 
 pub struct JobExecutor {
-    task_manager: Arc<dyn IWorkerTaskManager>,
+    authoritative_user_id: Arc<str>,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     conversation_repo: Arc<dyn IConversationRepository>,
     conversation_service: Arc<ConversationService>,
     busy_guard: Arc<CronBusyGuard>,
     work_dir: PathBuf,
     data_dir: PathBuf,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     agent_registry: Arc<AgentRegistry>,
     skill_suggest_detector: SkillSuggestDetector,
 }
@@ -99,30 +104,48 @@ pub struct JobExecutor {
 impl JobExecutor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        task_manager: Arc<dyn IWorkerTaskManager>,
+        authoritative_user_id: Arc<str>,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
         conversation_repo: Arc<dyn IConversationRepository>,
         conversation_service: Arc<ConversationService>,
         busy_guard: Arc<CronBusyGuard>,
         work_dir: PathBuf,
         data_dir: PathBuf,
-        broadcaster: Arc<dyn EventBroadcaster>,
+        user_events: Arc<dyn UserEventSink>,
         agent_registry: Arc<AgentRegistry>,
     ) -> Self {
         let skill_suggest_detector = SkillSuggestDetector::new(
-            Arc::clone(&broadcaster),
+            Arc::clone(&user_events),
             conversation_repo.clone(),
             data_dir.clone(),
         );
         Self {
-            task_manager,
+            authoritative_user_id,
+            runtime_registry,
             conversation_repo,
             conversation_service,
             busy_guard,
             work_dir,
             data_dir,
-            broadcaster,
+            user_events,
             agent_registry,
             skill_suggest_detector,
+        }
+    }
+
+    fn controls_host(&self, user_id: &str) -> bool {
+        ExecutionAuthority::resolve(user_id, self.authoritative_user_id.as_ref())
+            .controls_host()
+    }
+
+    async fn prepare_authorized_saved_skill(
+        &self,
+        job: &CronJob,
+    ) -> Result<Option<SavedSkillContext>, CronError> {
+        if self.controls_host(&job.user_id) {
+            self.prepare_saved_skill(job).await
+        } else {
+            Ok(None)
         }
     }
 
@@ -133,7 +156,22 @@ impl JobExecutor {
             return self.handle_busy(job);
         }
 
-        let saved_skill = match self.prepare_saved_skill(job).await {
+        // Existing-mode cron is a public/background initiator. Fence retained
+        // Attempt transcripts before skill-file preparation or any runtime
+        // mutation; new-conversation mode receives a new ordinary Conversation
+        // and is checked again after resolution below.
+        if matches!(job.execution_mode, ExecutionMode::Existing)
+            && !conversation_id.trim().is_empty()
+            && let Err(error) = self
+                .ensure_public_conversation_mutable(job, conversation_id)
+                .await
+        {
+            return ExecutionResult::Error {
+                message: error.to_string(),
+            };
+        }
+
+        let saved_skill = match self.prepare_authorized_saved_skill(job).await {
             Ok(skill) => skill,
             Err(e) => {
                 error!(job_id = %job.id, error = %e, "Failed to prepare saved cron skill");
@@ -161,6 +199,15 @@ impl JobExecutor {
                 }
             };
 
+        if let Err(error) = self
+            .ensure_public_conversation_mutable(job, &target_conversation_id)
+            .await
+        {
+            return ExecutionResult::Error {
+                message: error.to_string(),
+            };
+        }
+
         self.busy_guard
             .set_processing(&target_conversation_id, true);
 
@@ -178,7 +225,13 @@ impl JobExecutor {
         &self,
         job: &CronJob,
     ) -> Result<PreparedExecution, CronError> {
-        let saved_skill = match self.prepare_saved_skill(job).await {
+        if matches!(job.execution_mode, ExecutionMode::Existing)
+            && !job.conversation_id.trim().is_empty()
+        {
+            self.ensure_public_conversation_mutable(job, &job.conversation_id)
+                .await?;
+        }
+        let saved_skill = match self.prepare_authorized_saved_skill(job).await {
             Ok(skill) => skill,
             Err(err) => {
                 error!(
@@ -192,6 +245,8 @@ impl JobExecutor {
 
         self.validate_runtime_job_workspace(job).await?;
         let conversation_id = self.resolve_conversation(job, saved_skill.as_ref()).await?;
+        self.ensure_public_conversation_mutable(job, &conversation_id)
+            .await?;
 
         Ok(PreparedExecution {
             conversation_id,
@@ -204,6 +259,14 @@ impl JobExecutor {
         job: &CronJob,
         prepared: PreparedExecution,
     ) -> ExecutionResult {
+        if let Err(error) = self
+            .ensure_public_conversation_mutable(job, &prepared.conversation_id)
+            .await
+        {
+            return ExecutionResult::Error {
+                message: error.to_string(),
+            };
+        }
         self.busy_guard
             .set_processing(&prepared.conversation_id, true);
 
@@ -225,17 +288,17 @@ impl JobExecutor {
         &self.busy_guard
     }
 
-    pub async fn conversation_exists(&self, conversation_id: &str) -> Result<bool, CronError> {
-        // An unbound/empty conversation id never names an existing conversation.
-        let Some(key) = parse_conversation_key(conversation_id) else {
-            return Ok(false);
-        };
-        let row = self
-            .conversation_repo
-            .get(key)
+    async fn ensure_public_conversation_mutable(
+        &self,
+        job: &CronJob,
+        conversation_id: &str,
+    ) -> Result<(), CronError> {
+        self.verify_target_conversation_owner(job, conversation_id)
+            .await?;
+        self.conversation_service
+            .ensure_public_mutation_allowed(&job.user_id, conversation_id)
             .await
-            .map_err(CronError::Database)?;
-        Ok(row.is_some())
+            .map_err(CronError::App)
     }
 
     pub async fn get_conversation_row(
@@ -282,10 +345,21 @@ impl JobExecutor {
 
     pub async fn insert_tips_message(
         &self,
+        owner_id: &str,
         conversation_id: &str,
         content: &str,
         tip_type: &str,
     ) -> Result<(), CronError> {
+        let row = self
+            .get_conversation_row(conversation_id)
+            .await?
+            .filter(|row| row.user_id == owner_id)
+            .ok_or_else(|| {
+                CronError::Scheduler(format!(
+                    "conversation {conversation_id} is not owned by cron owner {owner_id}"
+                ))
+            })?;
+        debug_assert_eq!(row.user_id, owner_id);
         // `id` must stay in the short-id family so the frontend message list
         // sees a uniform shape across all sources (see ConversationService's
         // mint_msg_id contract). A follow-up PR will move this insert behind
@@ -324,12 +398,20 @@ impl JobExecutor {
     /// `ConversationService::create` returns) so the FK is always satisfiable.
     pub async fn bind_cron_job_to_conversation(
         &self,
+        owner_id: &str,
         conversation_id: &str,
         cron_job_id: &str,
     ) -> Result<(), CronError> {
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            return Ok(());
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} not found while binding cron job {cron_job_id}"
+            )));
         };
+        if row.user_id != owner_id {
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} owner does not match cron job {cron_job_id}"
+            )));
+        }
 
         if row.cron_job_id.as_deref() == Some(cron_job_id) {
             return Ok(());
@@ -348,6 +430,7 @@ impl JobExecutor {
 
     pub async fn persist_workspace_if_missing(
         &self,
+        owner_id: &str,
         conversation_id: &str,
         resolved_workspace: &str,
     ) -> Result<(), CronError> {
@@ -358,8 +441,15 @@ impl JobExecutor {
 
         let conversation_key = parse_i64_id(conversation_id)?;
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            return Ok(());
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} not found while persisting cron workspace"
+            )));
         };
+        if row.user_id != owner_id {
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} owner does not match cron owner {owner_id}"
+            )));
+        }
 
         let mut extra: serde_json::Value =
             serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
@@ -448,21 +538,12 @@ impl JobExecutor {
                 if job.conversation_id.trim().is_empty() {
                     return self.create_new_conversation(job, saved_skill).await;
                 }
-                self.verify_conversation_exists(&job.conversation_id)
+                self.verify_target_conversation_owner(job, &job.conversation_id)
                     .await?;
                 Ok(job.conversation_id.clone())
             }
             ExecutionMode::NewConversation => self.create_new_conversation(job, saved_skill).await,
         }
-    }
-
-    async fn verify_conversation_exists(&self, conversation_id: &str) -> Result<(), CronError> {
-        if !self.conversation_exists(conversation_id).await? {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} not found"
-            )));
-        }
-        Ok(())
     }
 
     async fn create_new_conversation(
@@ -472,7 +553,6 @@ impl JobExecutor {
     ) -> Result<String, CronError> {
         let agent_type = parse_agent_type(&self.agent_registry, &job.agent_type).await;
         let model = resolve_model(job);
-        let user_id = self.resolve_conversation_owner_user_id(job).await?;
 
         let extra = build_conversation_extra(&self.agent_registry, job, saved_skill).await;
 
@@ -484,6 +564,10 @@ impl JobExecutor {
             channel_chat_id: None,
             preset_id: job.agent_config.as_ref().and_then(|config| config.preset_id.clone()),
             preset_overrides: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
             extra,
         };
 
@@ -493,10 +577,10 @@ impl JobExecutor {
             .and_then(|config| config.preset_snapshot.clone())
         {
             self.conversation_service
-                .create_from_preset_snapshot(&user_id, req, snapshot)
+                .create_from_preset_snapshot(&job.user_id, req, snapshot)
                 .await
         } else {
-            self.conversation_service.create(&user_id, req).await
+            self.conversation_service.create(&job.user_id, req).await
         }
         .map_err(CronError::from_conversation_create)?;
 
@@ -528,6 +612,7 @@ impl JobExecutor {
                 ))
             })?;
             self.persist_workspace_if_missing(
+                &job.user_id,
                 &conversation_id,
                 &fallback_workspace.to_string_lossy(),
             )
@@ -543,17 +628,6 @@ impl JobExecutor {
         Ok(conversation_id)
     }
 
-    async fn resolve_conversation_owner_user_id(&self, job: &CronJob) -> Result<String, CronError> {
-        if !job.conversation_id.trim().is_empty()
-            && let Some(row) = self.get_conversation_row(&job.conversation_id).await?
-            && !row.user_id.trim().is_empty()
-        {
-            return Ok(row.user_id);
-        }
-
-        Ok(SYSTEM_DEFAULT_USER_ID.to_owned())
-    }
-
     async fn execute_inner(
         &self,
         job: &CronJob,
@@ -563,29 +637,56 @@ impl JobExecutor {
         let agent_type = parse_agent_type(&self.agent_registry, &job.agent_type).await;
         // The interactive `send_message` path resolves the model by parsing
         // `conversation.model` via
-        // `nomifun_conversation::task_options::provider_model_from_conversation_row`.
-        // Cron routes through the same helper so that an nomi job whose
+        // `nomifun_conversation::runtime_options::provider_model_from_conversation_row`.
+        // Cron routes through the same helper so that a Nomi job whose
         // cached `agent_config.backend` is a stale vendor label (`"nomi"`)
         // cannot reach the factory and raise `Provider 'nomi' not found`
         // (Sentry ELECTRON-1HM). `resolve_conversation` (called by
-        // `execute`/`execute_prepared` before this method runs) guarantees
-        // the row exists, so `Ok(None)` only fires on a delete racing the
-        // executor — we fall back to the canonical empty sentinel, which
-        // matches what the helper itself returns for unparseable rows.
-        let model = match self.get_conversation_row(conversation_id).await {
-            Ok(Some(row)) => {
-                nomifun_conversation::task_options::provider_model_from_conversation_row(&row)
+        // `execute`/`execute_prepared` before this method runs) guarantees the
+        // row exists. Re-check both existence and owner here to close the
+        // delete/rebind race before any runtime is obtained.
+        let conversation_row = match self.get_conversation_row(conversation_id).await {
+            Ok(Some(row)) if row.user_id == job.user_id => row,
+            Ok(Some(_)) => {
+                return ExecutionResult::Error {
+                    message: format!(
+                        "conversation {conversation_id} owner does not match cron job {}",
+                        job.id
+                    ),
+                };
             }
-            Ok(None) => nomifun_conversation::task_options::empty_provider_model(),
+            Ok(None) => {
+                return ExecutionResult::Error {
+                    message: format!("conversation {conversation_id} not found"),
+                };
+            }
             Err(e) => {
                 error!(
                     job_id = %job.id,
                     conversation_id,
                     error = %e,
-                    "Failed to load conversation row for cron model resolution"
+                    "Failed to load conversation row for cron runtime resolution"
                 );
                 return ExecutionResult::Error {
                     message: e.to_string(),
+                };
+            }
+        };
+        let model =
+            nomifun_conversation::runtime_options::provider_model_from_conversation_row(
+                &conversation_row,
+            );
+        let delegation_policy = match nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&conversation_row) {
+            Ok(policy) => policy,
+            Err(error) => {
+                error!(
+                    job_id = %job.id,
+                    conversation_id,
+                    error = %error,
+                    "Failed to resolve conversation delegation policy for cron runtime"
+                );
+                return ExecutionResult::Error {
+                    message: error.to_string(),
                 };
             }
         };
@@ -604,42 +705,43 @@ impl JobExecutor {
             }
         };
 
-        let skill_names = match self
-            .resolve_task_skill_names(job, conversation_id, saved_skill)
-            .await
-        {
-            Ok(names) => names,
-            Err(e) => {
-                error!(job_id = %job.id, error = %e, "Failed to resolve task skills");
-                return ExecutionResult::Error {
-                    message: e.to_string(),
-                };
+        let skill_names = if self.controls_host(&job.user_id) {
+            match self
+                .resolve_task_skill_names(job, conversation_id, saved_skill)
+                .await
+            {
+                Ok(names) => names,
+                Err(e) => {
+                    error!(job_id = %job.id, error = %e, "Failed to resolve task skills");
+                    return ExecutionResult::Error {
+                        message: e.to_string(),
+                    };
+                }
             }
+        } else {
+            Vec::new()
         };
         let build_extra = build_task_extra(&self.agent_registry, job, &skill_names).await;
         let requested_workspace_missing = workspace.trim().is_empty();
 
         // Resolve this conversation instance's identity (row `created_at`) for
         // nomi session ownership validation; best-effort (None skips it).
-        let conversation_created_at = self
-            .get_conversation_row(conversation_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.created_at);
+        let conversation_created_at = Some(conversation_row.created_at);
 
-        let options = BuildTaskOptions {
+        let options = AgentRuntimeBuildOptions {
+            user_id: job.user_id.clone(),
             agent_type,
             workspace,
             model,
             conversation_id: conversation_id.to_owned(),
+            delegation_policy,
             extra: build_extra,
             conversation_created_at,
         };
 
         let agent = match self
-            .task_manager
-            .get_or_build_task(conversation_id, options)
+            .runtime_registry
+            .get_or_create_runtime(conversation_id, options)
             .await
         {
             Ok(handle) => handle,
@@ -647,7 +749,7 @@ impl JobExecutor {
                 error!(
                     job_id = %job.id,
                     error = %e,
-                    "Failed to get or build agent task"
+                    "Failed to get or build Agent runtime"
                 );
                 return ExecutionResult::Error {
                     message: e.to_string(),
@@ -657,7 +759,7 @@ impl JobExecutor {
 
         if requested_workspace_missing
             && let Err(e) = self
-                .persist_workspace_if_missing(conversation_id, agent.workspace())
+                .persist_workspace_if_missing(&job.user_id, conversation_id, agent.workspace())
                 .await
         {
             error!(
@@ -707,25 +809,8 @@ impl JobExecutor {
             }
         }
 
-        let prompt = build_prompt(job, saved_skill);
+        let prompt = build_prompt(job, saved_skill, self.controls_host(&job.user_id));
         let turn_rx = agent.subscribe();
-        let user_id = match self
-            .resolve_target_conversation_user_id(conversation_id)
-            .await
-        {
-            Ok(user_id) => user_id,
-            Err(e) => {
-                error!(
-                    job_id = %job.id,
-                    conversation_id,
-                    error = %e,
-                    "Failed to resolve cron conversation owner before dispatch"
-                );
-                return ExecutionResult::Error {
-                    message: e.to_string(),
-                };
-            }
-        };
         // msg_id is generated by ConversationService::send_message — we
         // intentionally do not set it here.
         let send_req = SendMessageRequest {
@@ -739,7 +824,7 @@ impl JobExecutor {
 
         match self
             .conversation_service
-            .send_message(&user_id, conversation_id, send_req, &self.task_manager)
+            .send_message(&job.user_id, conversation_id, send_req, &self.runtime_registry)
             .await
         {
             Ok(_) => {
@@ -754,13 +839,15 @@ impl JobExecutor {
                         "Failed to persist/broadcast cron trigger artifact"
                     );
                 }
-                if saved_skill.is_none()
+                if self.controls_host(&job.user_id)
+                    && saved_skill.is_none()
                     && matches!(job.execution_mode, ExecutionMode::NewConversation)
                 {
                     self.spawn_skill_suggest_flow(
                         agent.clone(),
                         turn_rx,
                         SkillSuggestContext {
+                            owner_id: job.user_id.clone(),
                             conversation_id: conversation_id.to_owned(),
                             job_id: job.id.clone(),
                             job_name: job.name.clone(),
@@ -793,21 +880,23 @@ impl JobExecutor {
         }
     }
 
-    async fn resolve_target_conversation_user_id(
+    async fn verify_target_conversation_owner(
         &self,
+        job: &CronJob,
         conversation_id: &str,
-    ) -> Result<String, CronError> {
+    ) -> Result<(), CronError> {
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
             return Err(CronError::Scheduler(format!(
                 "conversation {conversation_id} not found"
             )));
         };
-
-        if row.user_id.trim().is_empty() {
-            return Ok(SYSTEM_DEFAULT_USER_ID.to_owned());
+        if row.user_id != job.user_id {
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} owner does not match cron job {}",
+                job.id
+            )));
         }
-
-        Ok(row.user_id)
+        Ok(())
     }
 
     async fn upsert_cron_trigger_artifact(
@@ -822,20 +911,24 @@ impl JobExecutor {
             .upsert_artifact(&row)
             .await
             .map_err(CronError::Database)?;
-        broadcast_artifact(&self.broadcaster, &row)?;
+        emit_artifact(self.user_events.as_ref(), &job.user_id, &row)?;
 
         Ok(())
     }
 
-    pub async fn mark_skill_suggest_artifacts_saved(&self, job_id: &str) -> Result<(), CronError> {
+    pub async fn mark_skill_suggest_artifacts_saved(
+        &self,
+        owner_id: &str,
+        job_id: &str,
+    ) -> Result<(), CronError> {
         let rows = self
             .conversation_repo
-            .mark_skill_suggest_artifacts_saved(job_id, now_ms())
+            .mark_skill_suggest_artifacts_saved(owner_id, job_id, now_ms())
             .await
             .map_err(CronError::Database)?;
 
         for row in rows {
-            broadcast_artifact(&self.broadcaster, &row)?;
+            emit_artifact(self.user_events.as_ref(), owner_id, &row)?;
         }
 
         Ok(())
@@ -855,8 +948,19 @@ impl JobExecutor {
         }
 
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            return Ok(String::new());
+            if conversation_id.trim().is_empty() {
+                return Ok(String::new());
+            }
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} not found while resolving cron workspace"
+            )));
         };
+        if row.user_id != job.user_id {
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} owner does not match cron job {}",
+                job.id
+            )));
+        }
 
         let extra = serde_json::from_str::<serde_json::Value>(&row.extra).unwrap_or_default();
         Ok(extra
@@ -880,12 +984,15 @@ impl JobExecutor {
 
     fn spawn_skill_suggest_flow(
         &self,
-        agent: nomifun_ai_agent::AgentInstance,
+        agent: nomifun_ai_agent::AgentRuntimeHandle,
         main_rx: broadcast::Receiver<AgentStreamEvent>,
         ctx: SkillSuggestContext,
     ) {
         let detector = self.skill_suggest_detector.clone();
+        let conversation_service = self.conversation_service.clone();
+        let runtime_registry = self.runtime_registry.clone();
         let SkillSuggestContext {
+            owner_id,
             conversation_id,
             job_id,
             job_name,
@@ -906,18 +1013,24 @@ impl JobExecutor {
 
             if needs_follow_up {
                 let follow_up_rx = agent.subscribe();
-                // msg_id flows through the conversation service so every
-                // id in the system shares one minting path.
-                let follow_up = SendMessageData {
+                let follow_up = SendMessageRequest {
                     content: build_skill_suggest_prompt(&job_name),
-                    msg_id: ConversationService::mint_msg_id(),
                     files: vec![],
                     inject_skills: skill_names,
-                    // Cron-driven follow-up, not the human owner: never distill.
+                    hidden: true,
                     origin: Some("cron".to_owned()),
+                    channel_platform: None,
                 };
 
-                if let Err(err) = agent.send_message(follow_up).await {
+                if let Err(err) = conversation_service
+                    .send_message(
+                        &owner_id,
+                        &conversation_id,
+                        follow_up,
+                        &runtime_registry,
+                    )
+                    .await
+                {
                     warn!(
                         conversation_id,
                         job_id,
@@ -936,7 +1049,7 @@ impl JobExecutor {
                 }
             }
 
-            detector.schedule_check(conversation_id, job_id, workspace);
+            detector.schedule_check(owner_id, conversation_id, job_id, workspace);
         });
     }
 
@@ -981,7 +1094,9 @@ impl JobExecutor {
         saved_skill: Option<&SavedSkillContext>,
     ) -> Result<Vec<String>, CronError> {
         let mut skills = match job.execution_mode {
-            ExecutionMode::Existing => self.load_conversation_skill_names(conversation_id).await?,
+            ExecutionMode::Existing => {
+                self.load_conversation_skill_names(job, conversation_id).await?
+            }
             ExecutionMode::NewConversation => Vec::new(),
         };
 
@@ -998,7 +1113,7 @@ impl JobExecutor {
     async fn ensure_agent_session_mode(
         &self,
         job: &CronJob,
-        agent: &nomifun_ai_agent::AgentInstance,
+        agent: &nomifun_ai_agent::AgentRuntimeHandle,
     ) -> Result<(), CronError> {
         let Some(desired_mode) = job
             .agent_config
@@ -1036,6 +1151,7 @@ impl JobExecutor {
 
     async fn load_conversation_skill_names(
         &self,
+        job: &CronJob,
         conversation_id: &str,
     ) -> Result<Vec<String>, CronError> {
         let Some(row) = self
@@ -1046,6 +1162,12 @@ impl JobExecutor {
         else {
             return Ok(Vec::new());
         };
+        if row.user_id != job.user_id {
+            return Err(CronError::Scheduler(format!(
+                "conversation {conversation_id} owner does not match cron job {}",
+                job.id
+            )));
+        }
 
         let Ok(extra) = serde_json::from_str::<serde_json::Value>(&row.extra) else {
             return Ok(Vec::new());
@@ -1284,7 +1406,11 @@ async fn build_task_extra(
     serde_json::Value::Object(extra)
 }
 
-fn build_prompt(job: &CronJob, saved_skill: Option<&SavedSkillContext>) -> String {
+fn build_prompt(
+    job: &CronJob,
+    saved_skill: Option<&SavedSkillContext>,
+    allow_skill_suggest: bool,
+) -> String {
     let schedule_desc = schedule_description_text(&job.schedule);
 
     match job.execution_mode {
@@ -1294,12 +1420,14 @@ fn build_prompt(job: &CronJob, saved_skill: Option<&SavedSkillContext>) -> Strin
         ExecutionMode::NewConversation => {
             if saved_skill.is_some() {
                 build_new_conversation_with_skill_prompt(&job.name, &job.message)
-            } else {
+            } else if allow_skill_suggest {
                 build_new_conversation_prompt_with_skill_suggest(
                     &job.name,
                     &schedule_desc,
                     &job.message,
                 )
+            } else {
+                build_new_conversation_prompt(&job.name, &schedule_desc, &job.message)
             }
         }
     }
@@ -1484,8 +1612,8 @@ async fn persist_legacy_skill_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CreatedBy, CronAgentConfig, CronSchedule, TargetKind};
-    use nomifun_ai_agent::agent_task::{AgentInstance, IAgentTask, IMockAgent};
+    use crate::types::{CreatedBy, CronAgentConfig, CronSchedule};
+    use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime};
     use nomifun_ai_agent::protocol::events::FinishEventData;
     use nomifun_api_types::{AgentModeResponse, WebSocketMessage};
     use nomifun_common::{AgentKillReason, ConversationStatus, PaginatedResult, TimestampMs};
@@ -1500,6 +1628,7 @@ mod tests {
     fn sample_job() -> CronJob {
         CronJob {
             id: "cron_test1".into(),
+            user_id: "user_1".into(),
             name: "Test Job".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -1537,7 +1666,6 @@ mod tests {
             run_count: 0,
             retry_count: 0,
             max_retries: 3,
-            target_kind: TargetKind::Agent,
         }
     }
 
@@ -1663,7 +1791,7 @@ mod tests {
     #[test]
     fn build_prompt_existing_mode_no_skill() {
         let job = sample_job();
-        let prompt = build_prompt(&job, None);
+        let prompt = build_prompt(&job, None, true);
         assert!(prompt.contains("[Scheduled Task Execution]"));
         assert!(prompt.contains("Task instruction:\ndo something"));
     }
@@ -1677,6 +1805,7 @@ mod tests {
                 name: "cron-cron_test1".into(),
                 raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
+            true,
         );
         assert!(prompt.contains("[Scheduled Task Execution]"));
         assert!(!prompt.contains("## Skill Instructions"));
@@ -1695,6 +1824,7 @@ mod tests {
                 name: "cron-cron_test1".into(),
                 raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
+            true,
         );
         assert!(prompt.contains("A skill file with detailed instructions has been loaded"));
         assert!(prompt.contains("do something"));
@@ -1706,7 +1836,7 @@ mod tests {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
-        let prompt = build_prompt(&job, None);
+        let prompt = build_prompt(&job, None, true);
         assert!(prompt.contains("create a file named \"SKILL_SUGGEST.md\""));
     }
 
@@ -1716,8 +1846,21 @@ mod tests {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
         };
-        let prompt = build_prompt(&job, None);
+        let prompt = build_prompt(&job, None, true);
         assert!(prompt.contains("SKILL_SUGGEST.md"));
+    }
+
+    #[test]
+    fn build_prompt_model_only_new_conversation_never_requests_host_file() {
+        let job = CronJob {
+            execution_mode: ExecutionMode::NewConversation,
+            ..sample_job()
+        };
+        let prompt = build_prompt(&job, None, false);
+        assert!(prompt.contains("[Scheduled Task Context]"));
+        assert!(prompt.contains("do something"));
+        assert!(!prompt.contains("SKILL_SUGGEST.md"));
+        assert!(!prompt.contains("create a file"));
     }
 
     // -- registry helper ------------------------------------------------------
@@ -1928,7 +2071,7 @@ mod tests {
     #[tokio::test]
     async fn build_task_extra_injects_current_model_id_for_acp() {
         // ACP agents resolve their model via the session `extra` carrying
-        // `current_model_id`, mirroring the multi-agent team path. The
+        // `current_model_id`, mirroring the Agent execution path. The
         // configured `agent_config.model_id` must reach the session.
         let registry = hydrated_registry().await;
         let job = CronJob {
@@ -2054,8 +2197,8 @@ mod tests {
     #[tokio::test]
     async fn build_conversation_extra_injects_current_model_id_for_acp() {
         // ACP agents pick up the configured model from the session `extra`
-        // via `current_model_id` (the same channel the multi-agent team
-        // uses). Without this the cron-configured model is silently dropped.
+        // via `current_model_id` (the same channel interactive Agent sessions
+        // use). Without this the cron-configured model is silently dropped.
         let registry = hydrated_registry().await;
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
@@ -2175,7 +2318,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_applies_desired_session_mode_before_sending() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let executor = make_executor_with_agent(AgentInstance::Mock(agent.clone()));
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
@@ -2196,7 +2339,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_applies_mode_even_for_uninitialized_agent() {
         let agent = Arc::new(RecordingAgent::new("1", "default", false));
-        let executor = make_executor_with_agent(AgentInstance::Mock(agent.clone()));
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
@@ -2217,7 +2360,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_skips_mode_update_when_already_matching() {
         let agent = Arc::new(RecordingAgent::new("1", "yolo", true));
-        let executor = make_executor_with_agent(AgentInstance::Mock(agent.clone()));
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
@@ -2238,10 +2381,10 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_new_conversation_without_saved_skill_requests_skill_suggest() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
-        let executor = make_executor_with_task_manager(task_manager.clone());
+        let executor = make_executor_with_runtime_registry(runtime_registry.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2265,9 +2408,9 @@ mod tests {
         );
         assert!(sent_messages[0].inject_skills.is_empty());
 
-        let options = task_manager
+        let options = runtime_registry
             .last_options()
-            .expect("task manager should capture build options");
+            .expect("runtime registry should capture build options");
         assert!(
             options
                 .extra
@@ -2280,10 +2423,10 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_new_conversation_with_saved_skill_injects_saved_skill() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
-        let executor = make_executor_with_task_manager(task_manager.clone());
+        let executor = make_executor_with_runtime_registry(runtime_registry.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2315,11 +2458,11 @@ mod tests {
             vec!["cron-cron_test1".to_owned()]
         );
 
-        let options = task_manager
+        let options = runtime_registry
             .recorded_options()
             .into_iter()
             .next()
-            .expect("task manager should capture build options");
+            .expect("runtime registry should capture build options");
         assert_eq!(
             options.extra["skills"],
             serde_json::json!(["cron-cron_test1"])
@@ -2329,7 +2472,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_existing_with_saved_skill_keeps_saved_skill_out_of_prompt_and_turn() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let executor = make_executor_with_agent(AgentInstance::Mock(agent.clone()));
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
         let saved_skill = SavedSkillContext {
             name: "cron-cron_test1".into(),
@@ -2355,7 +2498,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_existing_without_saved_skill_does_not_send_skill_suggest_follow_up() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let executor = make_executor_with_agent(AgentInstance::Mock(agent.clone()));
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
 
         let result = executor.execute_inner(&job, "1", None).await;
@@ -2385,10 +2528,10 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_uses_conversation_workspace_when_job_workspace_missing() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
-        let executor = make_executor_with_task_manager(task_manager.clone());
+        let executor = make_executor_with_runtime_registry(runtime_registry.clone());
         let mut job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2404,23 +2547,23 @@ mod tests {
             }
         );
         wait_for_agent_send(&agent, 1).await;
-        let options = task_manager
+        let options = runtime_registry
             .last_options()
-            .expect("task manager should capture build options");
+            .expect("runtime registry should capture build options");
         assert_eq!(options.workspace, "/tmp/existing-conversation-workspace");
     }
 
     #[tokio::test]
     async fn execute_inner_persists_agent_workspace_when_conversation_workspace_missing() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
             "1",
             serde_json::json!({}),
         ));
-        let executor = make_executor_with_task_manager_and_repo(task_manager.clone(), repo.clone());
+        let executor = make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
         let mut job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2436,9 +2579,9 @@ mod tests {
             }
         );
         wait_for_agent_send(&agent, 1).await;
-        let options = task_manager
+        let options = runtime_registry
             .last_options()
-            .expect("task manager should capture build options");
+            .expect("runtime registry should capture build options");
         assert_eq!(options.workspace, "");
 
         let update = repo
@@ -2452,14 +2595,14 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_inserts_right_side_user_message_for_cron_prompt() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
             "1",
             serde_json::json!({ "workspace": "/tmp/existing-conversation-workspace" }),
         ));
-        let executor = make_executor_with_task_manager_and_repo(task_manager, repo.clone());
+        let executor = make_executor_with_runtime_registry_and_repo(runtime_registry, repo.clone());
         let job = CronJob {
             execution_mode: ExecutionMode::NewConversation,
             ..sample_job()
@@ -2492,7 +2635,7 @@ mod tests {
     #[tokio::test]
     async fn execute_inner_upserts_cron_trigger_artifact_and_broadcasts_event() {
         let agent = Arc::new(RecordingAgent::new("1", "default", true));
-        let task_manager = Arc::new(RecordingTaskManager::new(AgentInstance::Mock(
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
@@ -2500,8 +2643,8 @@ mod tests {
             serde_json::json!({ "workspace": "/tmp/existing-conversation-workspace" }),
         ));
         let broadcaster = Arc::new(RecordingBroadcaster::new());
-        let executor = make_executor_with_task_manager_repo_and_broadcaster(
-            task_manager,
+        let executor = make_executor_with_runtime_registry_repo_and_broadcaster(
+            runtime_registry,
             repo.clone(),
             broadcaster.clone(),
         );
@@ -2554,38 +2697,38 @@ mod tests {
     // -- helper ---------------------------------------------------------------
 
     fn make_executor_for_busy_tests(guard: Arc<CronBusyGuard>) -> JobExecutor {
-        struct StubTaskManager;
+        struct StubAgentRuntimeRegistry;
         #[async_trait::async_trait]
-        impl IWorkerTaskManager for StubTaskManager {
-            fn get_task(&self, _: &str) -> Option<AgentInstance> {
+        impl AgentRuntimeRegistry for StubAgentRuntimeRegistry {
+            fn get_runtime(&self, _: &str) -> Option<AgentRuntimeHandle> {
                 None
             }
-            async fn get_or_build_task(
+            async fn get_or_create_runtime(
                 &self,
                 _: &str,
-                _: BuildTaskOptions,
-            ) -> Result<AgentInstance, nomifun_common::AppError> {
+                _: AgentRuntimeBuildOptions,
+            ) -> Result<AgentRuntimeHandle, nomifun_common::AppError> {
                 Err(nomifun_common::AppError::Internal("stub".into()))
             }
-            fn kill(
+            fn terminate(
                 &self,
                 _: &str,
                 _: Option<nomifun_common::AgentKillReason>,
             ) -> Result<(), nomifun_common::AppError> {
                 Ok(())
             }
-            fn kill_and_wait(
+            fn terminate_and_wait(
                 &self,
                 _: &str,
                 _: Option<nomifun_common::AgentKillReason>,
             ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 Box::pin(std::future::ready(()))
             }
-            fn clear(&self) {}
-            fn active_count(&self) -> usize {
+            fn terminate_all(&self) {}
+            fn active_runtime_count(&self) -> usize {
                 0
             }
-            fn collect_idle(&self, _: nomifun_common::TimestampMs) -> Vec<String> {
+            fn collect_idle_runtimes(&self, _: nomifun_common::TimestampMs) -> Vec<String> {
                 vec![]
             }
         }
@@ -2710,8 +2853,8 @@ mod tests {
         }
 
         struct StubBroadcaster;
-        impl nomifun_realtime::EventBroadcaster for StubBroadcaster {
-            fn broadcast(&self, _: WebSocketMessage<serde_json::Value>) {}
+        impl nomifun_realtime::UserEventSink for StubBroadcaster {
+            fn send_to_user(&self, _: &str, _: WebSocketMessage<serde_json::Value>) {}
         }
 
         struct StubSkillResolver;
@@ -2738,33 +2881,35 @@ mod tests {
             }
         }
 
-        let stub_broadcaster: Arc<dyn nomifun_realtime::EventBroadcaster> =
-            Arc::new(StubBroadcaster);
+        let stub_broadcaster = Arc::new(StubBroadcaster);
         let stub_repo: Arc<dyn IConversationRepository> = Arc::new(StubConvRepo);
         let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
             Arc::new(StubAgentMetadataRepo);
         let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
             Arc::new(StubAcpSessionRepo);
         let conv_service = Arc::new(ConversationService::new(
+            Arc::<str>::from("user_1"),
             std::env::temp_dir(),
-            stub_broadcaster,
+            stub_broadcaster.clone(),
             Arc::new(StubSkillResolver),
-            Arc::new(StubTaskManager),
+            Arc::new(StubAgentRuntimeRegistry),
             Arc::clone(&stub_repo),
             Arc::clone(&agent_metadata_repo),
             acp_session_repo,
+            Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         ));
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
         JobExecutor::new(
-            Arc::new(StubTaskManager),
+            Arc::<str>::from("user_1"),
+            Arc::new(StubAgentRuntimeRegistry),
             stub_repo,
             conv_service,
             guard,
             std::env::temp_dir(),
             std::env::temp_dir(),
-            Arc::new(StubBroadcaster),
+            stub_broadcaster,
             agent_registry,
         )
     }
@@ -2813,7 +2958,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl IAgentTask for RecordingAgent {
+    impl AgentRuntimeControl for RecordingAgent {
         fn agent_type(&self) -> AgentType {
             AgentType::Acp
         }
@@ -2857,7 +3002,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl IMockAgent for RecordingAgent {
+    impl MockAgentRuntime for RecordingAgent {
         async fn mode(&self) -> Result<AgentModeResponse, nomifun_common::AppError> {
             Ok(AgentModeResponse {
                 mode: self.mode().await,
@@ -2873,25 +3018,25 @@ mod tests {
         }
     }
 
-    struct FixedTaskManager {
-        agent: AgentInstance,
+    struct FixedAgentRuntimeRegistry {
+        agent: AgentRuntimeHandle,
     }
 
     #[async_trait::async_trait]
-    impl IWorkerTaskManager for FixedTaskManager {
-        fn get_task(&self, _conversation_id: &str) -> Option<AgentInstance> {
+    impl AgentRuntimeRegistry for FixedAgentRuntimeRegistry {
+        fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
             Some(self.agent.clone())
         }
 
-        async fn get_or_build_task(
+        async fn get_or_create_runtime(
             &self,
             _conversation_id: &str,
-            _options: BuildTaskOptions,
-        ) -> Result<AgentInstance, nomifun_common::AppError> {
+            _options: AgentRuntimeBuildOptions,
+        ) -> Result<AgentRuntimeHandle, nomifun_common::AppError> {
             Ok(self.agent.clone())
         }
 
-        fn kill(
+        fn terminate(
             &self,
             _conversation_id: &str,
             _reason: Option<AgentKillReason>,
@@ -2899,7 +3044,7 @@ mod tests {
             Ok(())
         }
 
-        fn kill_and_wait(
+        fn terminate_and_wait(
             &self,
             _: &str,
             _: Option<AgentKillReason>,
@@ -2907,38 +3052,38 @@ mod tests {
             Box::pin(std::future::ready(()))
         }
 
-        fn clear(&self) {}
+        fn terminate_all(&self) {}
 
-        fn active_count(&self) -> usize {
+        fn active_runtime_count(&self) -> usize {
             1
         }
 
-        fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+        fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
             Vec::new()
         }
     }
 
-    struct RecordingTaskManager {
-        agent: AgentInstance,
-        options: Mutex<Vec<BuildTaskOptions>>,
+    struct RecordingAgentRuntimeRegistry {
+        agent: AgentRuntimeHandle,
+        options: Mutex<Vec<AgentRuntimeBuildOptions>>,
     }
 
-    impl RecordingTaskManager {
-        fn new(agent: AgentInstance) -> Self {
+    impl RecordingAgentRuntimeRegistry {
+        fn new(agent: AgentRuntimeHandle) -> Self {
             Self {
                 agent,
                 options: Mutex::new(Vec::new()),
             }
         }
 
-        fn last_options(&self) -> Option<BuildTaskOptions> {
+        fn last_options(&self) -> Option<AgentRuntimeBuildOptions> {
             self.options
                 .lock()
                 .ok()
                 .and_then(|items| items.last().cloned())
         }
 
-        fn recorded_options(&self) -> Vec<BuildTaskOptions> {
+        fn recorded_options(&self) -> Vec<AgentRuntimeBuildOptions> {
             self.options
                 .lock()
                 .map(|items| items.clone())
@@ -2947,21 +3092,21 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl IWorkerTaskManager for RecordingTaskManager {
-        fn get_task(&self, _conversation_id: &str) -> Option<AgentInstance> {
+    impl AgentRuntimeRegistry for RecordingAgentRuntimeRegistry {
+        fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
             Some(self.agent.clone())
         }
 
-        async fn get_or_build_task(
+        async fn get_or_create_runtime(
             &self,
             _conversation_id: &str,
-            options: BuildTaskOptions,
-        ) -> Result<AgentInstance, nomifun_common::AppError> {
+            options: AgentRuntimeBuildOptions,
+        ) -> Result<AgentRuntimeHandle, nomifun_common::AppError> {
             self.options.lock().unwrap().push(options);
             Ok(self.agent.clone())
         }
 
-        fn kill(
+        fn terminate(
             &self,
             _conversation_id: &str,
             _reason: Option<AgentKillReason>,
@@ -2969,7 +3114,7 @@ mod tests {
             Ok(())
         }
 
-        fn kill_and_wait(
+        fn terminate_and_wait(
             &self,
             _: &str,
             _: Option<AgentKillReason>,
@@ -2977,13 +3122,13 @@ mod tests {
             Box::pin(std::future::ready(()))
         }
 
-        fn clear(&self) {}
+        fn terminate_all(&self) {}
 
-        fn active_count(&self) -> usize {
+        fn active_runtime_count(&self) -> usize {
             1
         }
 
-        fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+        fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
             Vec::new()
         }
     }
@@ -2998,13 +3143,17 @@ mod tests {
         ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(Some(nomifun_db::models::ConversationRow {
                 id,
-                user_id: "cron".into(),
+                user_id: "user_1".into(),
                 name: "Cron Conversation".into(),
                 r#type: "acp".into(),
                 extra: serde_json::json!({
                     "workspace": "/tmp/existing-conversation-workspace"
                 })
                 .to_string(),
+                delegation_policy: "automatic".into(),
+                execution_model_pool: None,
+                decision_policy: "automatic".into(),
+                execution_template_id: None,
                 model: None,
                 status: Some("finished".into()),
                 source: None,
@@ -3150,10 +3299,14 @@ mod tests {
             Self {
                 row: nomifun_db::models::ConversationRow {
                     id: conversation_id.parse::<i64>().unwrap_or_default(),
-                    user_id: "cron".into(),
+                    user_id: "user_1".into(),
                     name: "Cron Conversation".into(),
                     r#type: "acp".into(),
                     extra: extra.to_string(),
+                    delegation_policy: "automatic".into(),
+                    execution_model_pool: None,
+                    decision_policy: "automatic".into(),
+                    execution_template_id: None,
                     model: None,
                     status: Some("finished".into()),
                     source: None,
@@ -3210,8 +3363,8 @@ mod tests {
         }
     }
 
-    impl nomifun_realtime::EventBroadcaster for RecordingBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+    impl nomifun_realtime::UserEventSink for RecordingBroadcaster {
+        fn send_to_user(&self, _: &str, event: WebSocketMessage<serde_json::Value>) {
             self.events.lock().unwrap().push(serde_json::json!({
                 "name": event.name,
                 "data": event.data,
@@ -3221,8 +3374,8 @@ mod tests {
 
     struct StubBroadcaster;
 
-    impl nomifun_realtime::EventBroadcaster for StubBroadcaster {
-        fn broadcast(&self, _: WebSocketMessage<serde_json::Value>) {}
+    impl nomifun_realtime::UserEventSink for StubBroadcaster {
+        fn send_to_user(&self, _: &str, _: WebSocketMessage<serde_json::Value>) {}
     }
 
     #[async_trait::async_trait]
@@ -3367,27 +3520,30 @@ mod tests {
         }
     }
 
-    fn make_executor_with_agent(agent: AgentInstance) -> JobExecutor {
-        make_executor_with_task_manager(Arc::new(FixedTaskManager { agent }))
+    fn make_executor_with_agent(agent: AgentRuntimeHandle) -> JobExecutor {
+        make_executor_with_runtime_registry(Arc::new(FixedAgentRuntimeRegistry { agent }))
     }
 
-    fn make_executor_with_task_manager(task_manager: Arc<dyn IWorkerTaskManager>) -> JobExecutor {
-        make_executor_with_task_manager_and_repo(task_manager, Arc::new(ExistingConversationRepo))
+    fn make_executor_with_runtime_registry(runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> JobExecutor {
+        make_executor_with_runtime_registry_and_repo(runtime_registry, Arc::new(ExistingConversationRepo))
     }
 
-    fn make_executor_with_task_manager_and_repo(
-        task_manager: Arc<dyn IWorkerTaskManager>,
+    fn make_executor_with_runtime_registry_and_repo(
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
         repo: Arc<dyn IConversationRepository>,
     ) -> JobExecutor {
-        let broadcaster: Arc<dyn nomifun_realtime::EventBroadcaster> = Arc::new(StubBroadcaster);
-        make_executor_with_task_manager_repo_and_broadcaster(task_manager, repo, broadcaster)
+        let broadcaster = Arc::new(StubBroadcaster);
+        make_executor_with_runtime_registry_repo_and_broadcaster(runtime_registry, repo, broadcaster)
     }
 
-    fn make_executor_with_task_manager_repo_and_broadcaster(
-        task_manager: Arc<dyn IWorkerTaskManager>,
+    fn make_executor_with_runtime_registry_repo_and_broadcaster<B>(
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
         repo: Arc<dyn IConversationRepository>,
-        broadcaster: Arc<dyn nomifun_realtime::EventBroadcaster>,
-    ) -> JobExecutor {
+        broadcaster: Arc<B>,
+    ) -> JobExecutor
+    where
+        B: nomifun_realtime::UserEventSink + 'static,
+    {
         struct StubSkillResolver;
 
         #[async_trait::async_trait]
@@ -3418,19 +3574,22 @@ mod tests {
         let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
             Arc::new(StubAcpSessionRepo);
         let conversation_service = Arc::new(ConversationService::new(
+            Arc::<str>::from("user_1"),
             std::env::temp_dir(),
-            Arc::clone(&broadcaster),
+            broadcaster.clone(),
             Arc::new(StubSkillResolver),
-            Arc::clone(&task_manager),
+            Arc::clone(&runtime_registry),
             Arc::clone(&repo),
             Arc::clone(&agent_metadata_repo),
             acp_session_repo,
+            Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
         ));
 
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
         JobExecutor::new(
-            task_manager,
+            Arc::<str>::from("user_1"),
+            runtime_registry,
             repo,
             conversation_service,
             Arc::new(CronBusyGuard::new()),

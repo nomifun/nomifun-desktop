@@ -6,9 +6,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use nomi_execution::{
-    CapabilityPolicy, CleanupReport, CommandSpec, ExecutionError, ExecutionOutcome,
-    ExecutionOwner, ExecutionPolicy, OutputCursor, OutputSnapshot, OutputStream, PollResult,
+use nomi_process_runtime::{
+    CapabilityPolicy, CleanupReport, CommandSpec, ProcessError, ProcessOutcome,
+    ProcessOwner, ProcessPolicy, OutputCursor, OutputSnapshot, OutputStream, PollResult,
     ProcessSupervisor, ShellKind, normalize_request,
 };
 use nomi_protocol::events::ToolCategory;
@@ -33,7 +33,7 @@ pub struct BashTool {
     supervisor: Arc<ProcessSupervisor>,
     cwd: PathBuf,
     capability: CapabilityPolicy,
-    run_id: Uuid,
+    invocation_id: Uuid,
 }
 
 impl BashTool {
@@ -46,7 +46,7 @@ impl BashTool {
             supervisor,
             cwd,
             capability,
-            run_id: Uuid::now_v7(),
+            invocation_id: Uuid::now_v7(),
         }
     }
 
@@ -54,7 +54,7 @@ impl BashTool {
         supervisor: Arc<ProcessSupervisor>,
         cwd: PathBuf,
         capability: CapabilityPolicy,
-        owner: ExecutionOwner,
+        owner: ProcessOwner,
         command: String,
         timeout_ms: u64,
         cancelled: CancellationToken,
@@ -63,7 +63,7 @@ impl BashTool {
         let deadline = started_at
             .checked_add(Duration::from_millis(timeout_ms))
             .unwrap_or(started_at);
-        let request = nomi_execution::ExecutionRequest {
+        let request = nomi_process_runtime::ProcessRequest {
             owner,
             command: CommandSpec::Shell {
                 shell: if cfg!(windows) {
@@ -76,16 +76,16 @@ impl BashTool {
             cwd: cwd.clone(),
             env: BTreeMap::new(),
             transport: shell_transport(false),
-            policy: ExecutionPolicy {
+            policy: ProcessPolicy {
                 output_limit_bytes: BASH_OUTPUT_MAX_BYTES,
                 deadline: Some(deadline),
-                ..ExecutionPolicy::default()
+                ..ProcessPolicy::default()
             },
             capability,
         };
         let request = match normalize_request(request, &cwd) {
             Ok(request) => request,
-            Err(error) => return execution_error_result("Failed to prepare command", error),
+            Err(error) => return process_error_result("Failed to prepare command", error),
         };
         let start = supervisor.start(request);
         tokio::pin!(start);
@@ -103,7 +103,7 @@ impl BashTool {
                 Err(error) if Instant::now() >= deadline => {
                     return timeout_error_without_session(timeout_ms, error);
                 }
-                Err(error) => return execution_error_result("Failed to execute command", error),
+                Err(error) => return process_error_result("Failed to execute command", error),
             }
         };
         let mut session_guard =
@@ -116,7 +116,7 @@ impl BashTool {
                 session_guard.disarm();
                 return match outcome {
                     Ok(outcome) => render_cancelled(outcome),
-                    Err(error) => execution_error_result("Command cancellation failed", error),
+                    Err(error) => process_error_result("Command cancellation failed", error),
                 };
             }
             result = supervisor.poll(
@@ -266,7 +266,7 @@ impl Tool for BashTool {
             Arc::clone(&self.supervisor),
             self.cwd.clone(),
             self.capability.clone(),
-            ExecutionOwner::new(self.run_id, Uuid::now_v7()),
+            ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
             command.to_owned(),
             timeout_ms,
             cancelled,
@@ -318,16 +318,16 @@ impl Drop for CancelWorkerOnDrop {
 
 struct SessionCancelOnDrop {
     supervisor: Arc<ProcessSupervisor>,
-    owner: ExecutionOwner,
-    session_id: nomi_execution::SessionId,
+    owner: ProcessOwner,
+    session_id: nomi_process_runtime::SessionId,
     armed: bool,
 }
 
 impl SessionCancelOnDrop {
     fn new(
         supervisor: Arc<ProcessSupervisor>,
-        owner: ExecutionOwner,
-        session_id: nomi_execution::SessionId,
+        owner: ProcessOwner,
+        session_id: nomi_process_runtime::SessionId,
     ) -> Self {
         Self {
             supervisor,
@@ -358,14 +358,14 @@ impl Drop for SessionCancelOnDrop {
     }
 }
 
-fn render_cancelled(outcome: ExecutionOutcome) -> ToolResult {
+fn render_cancelled(outcome: ProcessOutcome) -> ToolResult {
     let mut result = render_outcome(outcome);
     result.is_error = true;
     result.content = format!("Command was cancelled.\n{}", result.content);
     result
 }
 
-fn timeout_error_without_session(timeout_ms: u64, error: ExecutionError) -> ToolResult {
+fn timeout_error_without_session(timeout_ms: u64, error: ProcessError) -> ToolResult {
     ToolResult {
         content: format!(
             "Command timed out after {timeout_ms}ms during ownership setup.\n\
@@ -377,17 +377,17 @@ fn timeout_error_without_session(timeout_ms: u64, error: ExecutionError) -> Tool
 }
 
 fn render_timeout(
-    outcome: ExecutionOutcome,
+    outcome: ProcessOutcome,
     partial: Option<OutputSnapshot>,
     timeout_ms: u64,
 ) -> ToolResult {
     let (output, summary) = match &outcome {
-        ExecutionOutcome::Exited { output, .. }
-        | ExecutionOutcome::Cancelled { output, .. }
-        | ExecutionOutcome::TimedOut { output, .. } => {
+        ProcessOutcome::Exited { output, .. }
+        | ProcessOutcome::Cancelled { output, .. }
+        | ProcessOutcome::TimedOut { output, .. } => {
             (Some(output), format_outcome_summary(&outcome))
         }
-        ExecutionOutcome::Lost { output, .. } => {
+        ProcessOutcome::Lost { output, .. } => {
             let output = if output.chunks.is_empty() && output.dropped_bytes == 0 {
                 partial.as_ref()
             } else {
@@ -395,7 +395,7 @@ fn render_timeout(
             };
             (output, format_outcome_summary(&outcome))
         }
-        ExecutionOutcome::SpawnFailed(_) => {
+        ProcessOutcome::SpawnFailed(_) => {
             (partial.as_ref(), format_outcome_summary(&outcome))
         }
     };
@@ -414,9 +414,9 @@ fn render_timeout(
     }
 }
 
-fn render_outcome(outcome: ExecutionOutcome) -> ToolResult {
+fn render_outcome(outcome: ProcessOutcome) -> ToolResult {
     match outcome {
-        ExecutionOutcome::Exited {
+        ProcessOutcome::Exited {
             code,
             signal,
             output,
@@ -436,7 +436,7 @@ fn render_outcome(outcome: ExecutionOutcome) -> ToolResult {
                 images: Vec::new(),
             }
         }
-        ExecutionOutcome::Cancelled { output, cleanup } => {
+        ProcessOutcome::Cancelled { output, cleanup } => {
             let mut content = format!("Command was cancelled.\n{}", render_output(&output));
             append_cleanup(&mut content, &cleanup);
             ToolResult {
@@ -445,7 +445,7 @@ fn render_outcome(outcome: ExecutionOutcome) -> ToolResult {
                 images: Vec::new(),
             }
         }
-        ExecutionOutcome::TimedOut { output, cleanup } => {
+        ProcessOutcome::TimedOut { output, cleanup } => {
             let mut content = format!(
                 "Command timed out.\n{COMMAND_TIMEOUT_GUIDANCE}\n{}",
                 render_output(&output)
@@ -457,7 +457,7 @@ fn render_outcome(outcome: ExecutionOutcome) -> ToolResult {
                 images: Vec::new(),
             }
         }
-        ExecutionOutcome::Lost {
+        ProcessOutcome::Lost {
             last_known,
             output,
             cleanup,
@@ -475,7 +475,7 @@ fn render_outcome(outcome: ExecutionOutcome) -> ToolResult {
                 images: Vec::new(),
             }
         }
-        ExecutionOutcome::SpawnFailed(failure) => ToolResult {
+        ProcessOutcome::SpawnFailed(failure) => ToolResult {
             content: format!("Failed to execute command: {} ({})", failure.message, failure.code),
             is_error: true,
             images: Vec::new(),
@@ -530,18 +530,18 @@ fn append_cleanup(content: &mut String, cleanup: &CleanupReport) {
     content.push_str(&cleanup.errors.join("; "));
 }
 
-fn format_outcome_summary(outcome: &ExecutionOutcome) -> String {
+fn format_outcome_summary(outcome: &ProcessOutcome) -> String {
     match outcome {
-        ExecutionOutcome::Exited { code, signal, .. } => {
+        ProcessOutcome::Exited { code, signal, .. } => {
             format!("exited code={code:?} signal={signal:?}")
         }
-        ExecutionOutcome::Cancelled { cleanup, .. } => {
+        ProcessOutcome::Cancelled { cleanup, .. } => {
             format!("cancelled reaped={}", cleanup.reaped)
         }
-        ExecutionOutcome::TimedOut { cleanup, .. } => {
+        ProcessOutcome::TimedOut { cleanup, .. } => {
             format!("timed_out reaped={}", cleanup.reaped)
         }
-        ExecutionOutcome::Lost {
+        ProcessOutcome::Lost {
             last_known,
             cleanup,
             ..
@@ -551,13 +551,13 @@ fn format_outcome_summary(outcome: &ExecutionOutcome) -> String {
             cleanup.reaped,
             cleanup.errors.join("; ")
         ),
-        ExecutionOutcome::SpawnFailed(failure) => {
+        ProcessOutcome::SpawnFailed(failure) => {
             format!("spawn_failed {}: {}", failure.code, failure.message)
         }
     }
 }
 
-fn execution_error_result(prefix: &str, error: ExecutionError) -> ToolResult {
+fn process_error_result(prefix: &str, error: ProcessError) -> ToolResult {
     ToolResult {
         content: format!("{prefix}: {error} ({})", error.code()),
         is_error: true,
@@ -571,7 +571,7 @@ mod tests {
     #[cfg(windows)]
     use crate::test_support::pty_test_helper_bin;
     use crate::test_support::pty_test_helper_shell_cmd;
-    use nomi_execution::{SandboxPolicy, SupervisorConfig};
+    use nomi_process_runtime::{SandboxPolicy, SupervisorConfig};
     use serde_json::json;
     use std::path::Path;
 
@@ -684,7 +684,7 @@ mod tests {
             shell_quote_path(&marker),
             shell_quote_path(&ready)
         ));
-        let execution = {
+        let command_task = {
             let tool = tool(directory.path().to_path_buf());
             tokio::spawn(async move {
                 tool.execute(json!({"command": command, "timeout": 800}))
@@ -695,10 +695,10 @@ mod tests {
         let probes = read_helper_pids(&ready).map(|(helper, grandchild)| {
             (ProcessProbe::new(helper), ProcessProbe::new(grandchild))
         });
-        let result = tokio::time::timeout(Duration::from_secs(7), execution)
+        let result = tokio::time::timeout(Duration::from_secs(7), command_task)
             .await
             .expect("timeout cleanup must remain bounded")
-            .expect("Bash execution task should join");
+            .expect("Bash task should join");
         tokio::time::sleep(Duration::from_millis(1_700)).await;
         let processes_gone = probes
             .as_ref()
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn timeout_lost_outcome_prefers_frozen_cleanup_tail() {
         let snapshot = |text: &str| OutputSnapshot {
-            chunks: vec![nomi_execution::OutputChunk {
+            chunks: vec![nomi_process_runtime::OutputChunk {
                 seq: 1,
                 start: 0,
                 stream: OutputStream::Stdout,
@@ -747,14 +747,14 @@ mod tests {
             next_cursor: OutputCursor::new(text.len() as u64),
             retained_bytes: text.len(),
             dropped_bytes: 0,
-            encoding: nomi_execution::EncodingMetadata::default(),
+            encoding: nomi_process_runtime::EncodingMetadata::default(),
         };
         let now = Instant::now();
         let result = render_timeout(
-            ExecutionOutcome::Lost {
-                last_known: nomi_execution::ProcessSnapshot {
+            ProcessOutcome::Lost {
+                last_known: nomi_process_runtime::ProcessSnapshot {
                     pid: 42,
-                    state: nomi_execution::ProcessState::Lost,
+                    state: nomi_process_runtime::ProcessState::Lost,
                     started_at: now,
                     last_activity_at: now,
                 },
@@ -837,15 +837,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deny_execution_capability_fails_closed() {
+    async fn deny_process_capability_fails_closed() {
         let directory = tempfile::tempdir().unwrap();
         let tool = BashTool::new(
             ProcessSupervisor::new(SupervisorConfig::default()),
             directory.path().to_path_buf(),
             CapabilityPolicy {
                 cwd_roots: vec![directory.path().to_path_buf()],
-                sandbox: SandboxPolicy::DenyExecution,
-                allow_hand_off: false,
+                sandbox: SandboxPolicy::DenySpawn,
             },
         );
         let result = tool.execute(json!({"command": "echo must_not_run"})).await;
@@ -881,7 +880,7 @@ mod tests {
             shell_quote_path(&marker),
             shell_quote_path(&ready)
         ));
-        let execution = {
+        let command_task = {
             let tool = tool(directory.path().to_path_buf());
             tokio::spawn(async move {
                 tool.execute(json!({"command": command, "timeout": 30_000}))
@@ -897,8 +896,8 @@ mod tests {
         let helper = ProcessProbe::new(helper_pid);
         let grandchild = ProcessProbe::new(grandchild_pid);
 
-        execution.abort();
-        let _ = execution.await;
+        command_task.abort();
+        let _ = command_task.await;
         let gone = tokio::time::timeout(Duration::from_secs(7), async {
             loop {
                 if helper.is_gone() && grandchild.is_gone() {
@@ -930,7 +929,6 @@ mod tests {
                 sandbox: SandboxPolicy::MacSeatbelt {
                     write_roots: vec![canonical.clone()],
                 },
-                allow_hand_off: false,
             },
         );
         let inside = canonical.join("inside.txt");
@@ -966,7 +964,6 @@ mod tests {
                 sandbox: SandboxPolicy::MacSeatbelt {
                     write_roots: vec![canonical.join("missing-write-root")],
                 },
-                allow_hand_off: false,
             },
         );
 
@@ -993,7 +990,6 @@ mod tests {
                 sandbox: SandboxPolicy::MacSeatbelt {
                     write_roots: vec![PathBuf::from("/")],
                 },
-                allow_hand_off: false,
             },
         );
 

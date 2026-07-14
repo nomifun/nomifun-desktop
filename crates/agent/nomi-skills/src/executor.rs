@@ -2,7 +2,7 @@ use crate::context_modifier::effort_to_string;
 use crate::shell::{ShellExecutionError, execute_shell_commands};
 use crate::substitution::substitute_arguments;
 use crate::types::{ExecutionContext, SkillMetadata};
-use nomi_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
+use nomi_types::agent::{AgentInvocationInput, AgentInvocationRunner, AgentToolPolicy};
 
 /// Prepare skill content for inline execution.
 ///
@@ -68,42 +68,40 @@ pub fn check_execution_context(skill: &SkillMetadata) -> Result<(), String> {
     Ok(())
 }
 
-/// Execute a fork skill by spawning an independent sub-agent.
+/// Execute a fork-mode skill through an isolated delegated Agent.
 ///
 /// Steps:
 /// 1. Prepare skill content (variable substitution + shell execution).
-/// 2. Build a SubAgentConfig from skill metadata overrides.
-/// 3. Spawn the sub-agent and wait for its result.
-/// 4. Return the sub-agent's output text, or an error string on failure.
+/// 2. Build one AgentInvocationInput from skill metadata.
+/// 3. Invoke the shared one-Agent primitive and await its result.
+/// 4. Return the delegated Agent's output text, or an error string on failure.
 pub async fn execute_fork(
     skill: &SkillMetadata,
     args: Option<&str>,
     session_id: Option<&str>,
     cwd: &str,
-    spawner: &dyn Spawner,
+    invocation_runner: &dyn AgentInvocationRunner,
 ) -> Result<String, String> {
     // Prepare content (substitution + shell) — same pipeline as inline mode
     let prompt = prepare_inline_content(skill, args, session_id, cwd)
         .await
         .map_err(|e: ShellExecutionError| e.to_string())?;
 
-    let sub_config = SubAgentConfig {
+    let invocation = AgentInvocationInput {
         name: skill.name.clone(),
         prompt,
         max_turns: 10,
         max_tokens: 16384,
         system_prompt: None,
-        // Fork skills restrict tools via ForkOverrides.allowed_tools below.
-        allowed_tools: Vec::new(),
-    };
-
-    let overrides = ForkOverrides {
         model: skill.model.clone(),
         effort: skill.effort.map(effort_to_string),
-        allowed_tools: skill.allowed_tools.clone(),
+        tool_policy: AgentToolPolicy::Full,
+        // Skill manifests retain their exact set; the runner intersects it
+        // with both the host scope and the typed policy.
+        exact_tools: skill.allowed_tools.clone(),
     };
 
-    let result = spawner.spawn_fork(sub_config, overrides).await;
+    let result = invocation_runner.invoke(invocation).await;
     if result.is_error {
         Err(result.text)
     } else {
@@ -475,7 +473,7 @@ mod supplemental_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7 tests — execute_fork() with MockSpawner
+// Phase 7 tests — execute_fork() with the shared invocation primitive.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -487,30 +485,26 @@ mod phase7_tests {
     use super::execute_fork;
     use crate::types::{EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
     use nomi_types::message::TokenUsage;
-    use nomi_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+    use nomi_types::agent::{
+        AgentInvocationInput, AgentInvocationOutput, AgentInvocationRunner,
+    };
 
     // ---------------------------------------------------------------------------
-    // MockSpawner — captures args passed to spawn_fork, returns preset result
+    // Mock runner captures the unified input and returns a preset output.
     // ---------------------------------------------------------------------------
 
-    struct MockSpawner {
-        /// Preset is_error value for the returned SubAgentResult.
+    struct MockInvocationRunner {
         is_error: bool,
-        /// Preset text value for the returned SubAgentResult.
         text: String,
-        /// Captures the SubAgentConfig passed to spawn_fork.
-        captured_config: Mutex<Option<SubAgentConfig>>,
-        /// Captures the ForkOverrides passed to spawn_fork.
-        captured_overrides: Mutex<Option<ForkOverrides>>,
+        captured_input: Mutex<Option<AgentInvocationInput>>,
     }
 
-    impl MockSpawner {
+    impl MockInvocationRunner {
         fn success(text: &str) -> Self {
             Self {
                 is_error: false,
                 text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
+                captured_input: Mutex::new(None),
             }
         }
 
@@ -518,39 +512,25 @@ mod phase7_tests {
             Self {
                 is_error: true,
                 text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
+                captured_input: Mutex::new(None),
             }
         }
 
-        fn take_config(&self) -> SubAgentConfig {
-            self.captured_config
+        fn take_input(&self) -> AgentInvocationInput {
+            self.captured_input
                 .lock()
                 .unwrap()
                 .take()
-                .expect("spawn_fork was not called")
-        }
-
-        fn take_overrides(&self) -> ForkOverrides {
-            self.captured_overrides
-                .lock()
-                .unwrap()
-                .take()
-                .expect("spawn_fork was not called")
+                .expect("Agent invocation was not called")
         }
     }
 
     #[async_trait]
-    impl Spawner for MockSpawner {
-        async fn spawn_fork(
-            &self,
-            config: SubAgentConfig,
-            overrides: ForkOverrides,
-        ) -> SubAgentResult {
-            *self.captured_config.lock().unwrap() = Some(config.clone());
-            *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
-            SubAgentResult {
-                name: config.name.clone(),
+    impl AgentInvocationRunner for MockInvocationRunner {
+        async fn invoke(&self, input: AgentInvocationInput) -> AgentInvocationOutput {
+            *self.captured_input.lock().unwrap() = Some(input.clone());
+            AgentInvocationOutput {
+                name: input.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
@@ -592,76 +572,76 @@ mod phase7_tests {
     }
 
     // ---------------------------------------------------------------------------
-    // TC-7.10: execute_fork success — returns Ok with sub-agent text
+    // TC-7.10: execute_fork success — returns Ok with delegated Agent text
     // ---------------------------------------------------------------------------
     #[tokio::test]
     async fn tc_7_10_fork_success_returns_ok() {
         let skill = make_fork_skill("my-fork", "Do the task.");
-        let spawner = MockSpawner::success("agent completed task");
-        let result = execute_fork(&skill, None, None, "/tmp", &spawner).await;
+        let delegation_backend = MockInvocationRunner::success("agent completed task");
+        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert_eq!(result.unwrap(), "agent completed task");
     }
 
-    // TC-7.11: execute_fork sub-agent error — returns Err with error text
+    // TC-7.11: execute_fork delegated Agent error — returns Err with error text
     #[tokio::test]
-    async fn tc_7_11_fork_sub_agent_error_returns_err() {
+    async fn tc_7_11_fork_delegated_agent_error_returns_err() {
         let skill = make_fork_skill("failing-fork", "Do something.");
-        let spawner = MockSpawner::error("sub-agent crashed");
-        let result = execute_fork(&skill, None, None, "/tmp", &spawner).await;
+        let delegation_backend = MockInvocationRunner::error("delegated Agent crashed");
+        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
         assert!(result.is_err(), "expected Err, got: {result:?}");
-        assert_eq!(result.unwrap_err(), "sub-agent crashed");
+        assert_eq!(result.unwrap_err(), "delegated Agent crashed");
     }
 
-    // TC-7.13: model from SkillMetadata propagates to ForkOverrides
+    // TC-7.13: model propagates through the unified invocation input.
     #[tokio::test]
     async fn tc_7_13_model_propagated_to_fork_overrides() {
         let mut skill = make_fork_skill("model-fork", "content");
         skill.model = Some("claude-sonnet-4-6".to_string());
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let overrides = spawner.take_overrides();
-        assert_eq!(overrides.model.as_deref(), Some("claude-sonnet-4-6"));
+        let input = delegation_backend.take_input();
+        assert_eq!(input.model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
-    // TC-7.14: effort from SkillMetadata propagates to ForkOverrides as string
+    // TC-7.14: effort propagates through the unified invocation input.
     #[tokio::test]
     async fn tc_7_14_effort_propagated_to_fork_overrides() {
         let mut skill = make_fork_skill("effort-fork", "content");
         skill.effort = Some(EffortLevel::High);
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let overrides = spawner.take_overrides();
-        assert_eq!(overrides.effort.as_deref(), Some("high"));
+        let input = delegation_backend.take_input();
+        assert_eq!(input.effort.as_deref(), Some("high"));
     }
 
-    // TC-7.15: allowed_tools from SkillMetadata propagates to ForkOverrides
+    // TC-7.15: skill tool set propagates as the exact intersected set.
     #[tokio::test]
     async fn tc_7_15_allowed_tools_propagated_to_fork_overrides() {
         let mut skill = make_fork_skill("tools-fork", "content");
         skill.allowed_tools = vec!["Bash".to_string(), "Read".to_string()];
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let overrides = spawner.take_overrides();
-        assert_eq!(overrides.allowed_tools, vec!["Bash", "Read"]);
+        let input = delegation_backend.take_input();
+        assert_eq!(input.exact_tools, vec!["Bash", "Read"]);
     }
 
-    // TC-7.16: prompt passed to SubAgentConfig equals prepare_inline_content output
+    // TC-7.16: invocation prompt equals prepared inline content.
     #[tokio::test]
     async fn tc_7_16_prompt_is_prepared_content() {
         let mut skill = make_fork_skill("prompt-fork", "Search $ARGUMENTS");
         skill.argument_names = vec![]; // use $ARGUMENTS placeholder
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, Some("rust"), None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, Some("rust"), None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         // Variable substitution should have replaced $ARGUMENTS with "rust"
         assert_eq!(
             config.prompt, "Search rust",
@@ -669,15 +649,15 @@ mod phase7_tests {
         );
     }
 
-    // TC-7.17: SubAgentConfig.name equals skill.name
+    // TC-7.17: invocation input name equals skill.name.
     #[tokio::test]
-    async fn tc_7_17_sub_agent_config_name_equals_skill_name() {
+    async fn tc_7_17_delegated_agent_config_name_equals_skill_name() {
         let skill = make_fork_skill("my-skill-name", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         assert_eq!(config.name, "my-skill-name");
     }
 
@@ -685,13 +665,13 @@ mod phase7_tests {
     #[tokio::test]
     async fn tc_7_40_empty_content_no_error() {
         let skill = make_fork_skill("empty-fork", "");
-        let spawner = MockSpawner::success("ok");
-        let result = execute_fork(&skill, None, None, "/tmp", &spawner).await;
+        let delegation_backend = MockInvocationRunner::success("ok");
+        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
         assert!(
             result.is_ok(),
             "empty content should not cause error: {result:?}"
         );
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         assert_eq!(config.prompt, "");
     }
 
@@ -701,28 +681,28 @@ mod phase7_tests {
         let mut skill = make_fork_skill("mcp-fork", "content");
         skill.source = SkillSource::Mcp;
         skill.loaded_from = LoadedFrom::Mcp;
-        let spawner = MockSpawner::success("mcp result");
-        let result = execute_fork(&skill, None, None, "/tmp", &spawner).await;
+        let delegation_backend = MockInvocationRunner::success("mcp result");
+        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
         assert!(
             result.is_ok(),
             "MCP fork skill should be allowed: {result:?}"
         );
     }
 
-    // TC-7.42: no model/effort → ForkOverrides fields are None/empty
+    // TC-7.42: absent model/effort/exact tools stay empty.
     #[tokio::test]
     async fn tc_7_42_no_model_no_effort_fork_overrides_empty() {
         let skill = make_fork_skill("plain-fork", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let overrides = spawner.take_overrides();
-        assert!(overrides.model.is_none(), "model should be None");
-        assert!(overrides.effort.is_none(), "effort should be None");
+        let input = delegation_backend.take_input();
+        assert!(input.model.is_none(), "model should be None");
+        assert!(input.effort.is_none(), "effort should be None");
         assert!(
-            overrides.allowed_tools.is_empty(),
-            "allowed_tools should be empty"
+            input.exact_tools.is_empty(),
+            "exact_tools should be empty"
         );
     }
 
@@ -730,56 +710,56 @@ mod phase7_tests {
     #[tokio::test]
     async fn tc_7_43_empty_allowed_tools_passthrough() {
         let skill = make_fork_skill("no-tools-fork", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let overrides = spawner.take_overrides();
-        assert!(overrides.allowed_tools.is_empty());
+        let input = delegation_backend.take_input();
+        assert!(input.exact_tools.is_empty());
     }
 
-    // TC-7.44: sub-agent result text propagated to Ok return value
+    // TC-7.44: delegated Agent result text propagated to Ok return value
     #[tokio::test]
     async fn tc_7_44_result_text_propagated() {
         let skill = make_fork_skill("text-fork", "content");
-        let spawner = MockSpawner::success("the final answer");
-        let result = execute_fork(&skill, None, None, "/tmp", &spawner).await;
+        let delegation_backend = MockInvocationRunner::success("the final answer");
+        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
         assert_eq!(result.unwrap(), "the final answer");
     }
 
-    // TC-7.45: SubAgentConfig.max_turns defaults to 10
+    // TC-7.45: AgentInvocationInput.max_turns defaults to 10.
     #[tokio::test]
     async fn tc_7_45_max_turns_default_is_10() {
         let skill = make_fork_skill("turns-fork", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         assert_eq!(config.max_turns, 10);
     }
 
-    // TC-7.46: SubAgentConfig.max_tokens defaults to 16384
+    // TC-7.46: AgentInvocationInput.max_tokens defaults to 16384.
     #[tokio::test]
     async fn tc_7_46_max_tokens_default_is_16384() {
         let skill = make_fork_skill("tokens-fork", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         assert_eq!(config.max_tokens, 16384);
     }
 
-    // TC-7.47: SubAgentConfig.system_prompt defaults to None
+    // TC-7.47: AgentInvocationInput.system_prompt defaults to None.
     #[tokio::test]
     async fn tc_7_47_system_prompt_default_is_none() {
         let skill = make_fork_skill("sysprompt-fork", "content");
-        let spawner = MockSpawner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &spawner)
+        let delegation_backend = MockInvocationRunner::success("ok");
+        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
             .await
             .unwrap();
-        let config = spawner.take_config();
+        let config = delegation_backend.take_input();
         assert!(
             config.system_prompt.is_none(),
             "system_prompt should default to None"

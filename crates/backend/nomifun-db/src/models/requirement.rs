@@ -19,7 +19,7 @@ pub struct RequirementRow {
     pub owner_session_id: Option<i64>,
     /// `'conversation'` | `'terminal'` | NULL (when unowned).
     pub owner_kind: Option<String>,
-    pub claimed_at: Option<TimestampMs>,
+    pub active_turn_started_at: Option<TimestampMs>,
     pub lease_expires_at: Option<TimestampMs>,
     pub started_at: Option<TimestampMs>,
     pub completed_at: Option<TimestampMs>,
@@ -47,7 +47,7 @@ pub struct RequirementRowUpdate {
     pub completion_note: Option<Option<String>>,
     pub owner_session_id: Option<Option<i64>>,
     pub owner_kind: Option<Option<String>>,
-    pub claimed_at: Option<Option<TimestampMs>>,
+    pub active_turn_started_at: Option<Option<TimestampMs>>,
     pub lease_expires_at: Option<Option<TimestampMs>>,
     pub started_at: Option<Option<TimestampMs>>,
     pub completed_at: Option<Option<TimestampMs>>,

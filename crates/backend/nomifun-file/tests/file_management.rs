@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_file::{FileService, IFileService};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 // -----------------------------------------------------------------------
 // Test helpers (shared with file_read_write.rs pattern)
@@ -17,12 +17,14 @@ use nomifun_realtime::EventBroadcaster;
 
 struct RecordingBroadcaster {
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+    owners: Mutex<Vec<String>>,
 }
 
 impl RecordingBroadcaster {
     fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            owners: Mutex::new(Vec::new()),
         }
     }
 
@@ -32,16 +34,17 @@ impl RecordingBroadcaster {
     }
 }
 
-impl EventBroadcaster for RecordingBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for RecordingBroadcaster {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        self.owners.lock().unwrap().push(user_id.to_owned());
         self.events.lock().unwrap().push(event);
     }
 }
 
 struct NoopBroadcaster;
 
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 fn make_service(root: &std::path::Path) -> FileService {
@@ -202,7 +205,9 @@ async fn remove_entry_file() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    svc.remove_entry(file.to_str().unwrap(), ws).await.unwrap();
+    svc.remove_entry("owner-a", file.to_str().unwrap(), ws)
+        .await
+        .unwrap();
 
     assert!(!file.exists());
 }
@@ -216,7 +221,9 @@ async fn remove_entry_directory() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    svc.remove_entry(sub.to_str().unwrap(), ws).await.unwrap();
+    svc.remove_entry("owner-a", sub.to_str().unwrap(), ws)
+        .await
+        .unwrap();
 
     assert!(!sub.exists());
 }
@@ -228,7 +235,7 @@ async fn remove_entry_nonexistent_errors() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let result = svc.remove_entry(fake.to_str().unwrap(), ws).await;
+    let result = svc.remove_entry("owner-a", fake.to_str().unwrap(), ws).await;
 
     assert!(result.is_err());
 }
@@ -241,7 +248,9 @@ async fn remove_entry_emits_delete_event() {
 
     let (svc, recorder) = make_service_with_recorder(dir.path());
     let ws = dir.path().to_str().unwrap();
-    svc.remove_entry(file.to_str().unwrap(), ws).await.unwrap();
+    svc.remove_entry("owner-a", file.to_str().unwrap(), ws)
+        .await
+        .unwrap();
 
     let events = recorder.take_events();
     assert_eq!(events.len(), 1);
@@ -269,7 +278,9 @@ async fn remove_entry_invalidates_cache() {
 
     // Remove a file
     let target = dir.path().join("a.txt");
-    svc.remove_entry(target.to_str().unwrap(), ws).await.unwrap();
+    svc.remove_entry("owner-a", target.to_str().unwrap(), ws)
+        .await
+        .unwrap();
 
     // Cache should be invalidated, so we see only 1 file
     let files = svc.list_workspace_files(ws).await.unwrap();
@@ -283,7 +294,7 @@ async fn remove_entry_path_traversal_rejected() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let result = svc.remove_entry("../../etc/passwd", ws).await;
+    let result = svc.remove_entry("owner-a", "../../etc/passwd", ws).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();

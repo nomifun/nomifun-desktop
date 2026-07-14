@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use nomifun_api_types::{
-    CronAgentConfigDto, CronJobMetadataDto, CronJobPayloadDto, CronJobResponse, CronJobStateDto,
-    CronJobTargetDto, CronScheduleDto,
+    CronAgentConfigDto, CronJobMetadataDto, CronJobResponse, CronJobStateDto, CronScheduleDto,
 };
 use nomifun_common::TimestampMs;
 use nomifun_db::models::CronJobRow;
@@ -55,35 +54,6 @@ impl FromStr for ExecutionMode {
             "existing" => Ok(Self::Existing),
             "new_conversation" => Ok(Self::NewConversation),
             other => Err(CronError::InvalidExecutionMode(other.to_owned())),
-        }
-    }
-}
-
-/// Scheduled tasks now run only against agent conversations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TargetKind {
-    #[default]
-    Agent,
-}
-
-impl TargetKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-        }
-    }
-}
-
-impl FromStr for TargetKind {
-    type Err = CronError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "agent" => Ok(Self::Agent),
-            "terminal" => Err(CronError::InvalidTargetKind(
-                "terminal scheduled tasks are no longer supported".to_owned(),
-            )),
-            other => Err(CronError::InvalidTargetKind(other.to_owned())),
         }
     }
 }
@@ -189,6 +159,9 @@ pub struct CronAgentConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CronJob {
     pub id: String,
+    /// Immutable aggregate owner and the sole authority for execution,
+    /// Conversation creation, persistence and private events.
+    pub user_id: String,
     pub name: String,
     pub enabled: bool,
     pub schedule: CronSchedule,
@@ -210,10 +183,6 @@ pub struct CronJob {
     pub run_count: i64,
     pub retry_count: i64,
     pub max_retries: i64,
-    /// Execution target kind. Only `Agent` is supported; the field remains for
-    /// compatibility with rows/API payloads created before terminal scheduling
-    /// support was removed.
-    pub target_kind: TargetKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +190,12 @@ pub struct CronJob {
 // ---------------------------------------------------------------------------
 
 pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
+    if row.user_id.trim().is_empty() {
+        return Err(CronError::Scheduler(format!(
+            "cron job {} has no owner",
+            row.id
+        )));
+    }
     let schedule = parse_schedule(
         &row.schedule_kind,
         &row.schedule_value,
@@ -250,10 +225,9 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
         .map(JobStatus::from_str)
         .transpose()?;
 
-    let target_kind = TargetKind::from_str(&row.target_kind)?;
-
     Ok(CronJob {
         id: row.id,
+        user_id: row.user_id,
         name: row.name,
         enabled: row.enabled,
         schedule,
@@ -282,7 +256,6 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
         run_count: row.run_count,
         retry_count: row.retry_count,
         max_retries: row.max_retries,
-        target_kind,
     })
 }
 
@@ -327,6 +300,12 @@ fn parse_schedule(
 // ---------------------------------------------------------------------------
 
 pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
+    if job.user_id.trim().is_empty() {
+        return Err(CronError::Scheduler(format!(
+            "cron job {} has no owner",
+            job.id
+        )));
+    }
     let (schedule_kind, schedule_value, schedule_tz, schedule_description) =
         schedule_to_row_fields(&job.schedule);
 
@@ -338,6 +317,7 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
 
     Ok(CronJobRow {
         id: job.id.clone(),
+        user_id: job.user_id.clone(),
         name: job.name.clone(),
         enabled: job.enabled,
         schedule_kind,
@@ -380,12 +360,6 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         run_count: job.run_count,
         retry_count: job.retry_count,
         max_retries: job.max_retries,
-        target_kind: job.target_kind.as_str().to_owned(),
-        terminal_mode: None,
-        terminal_session_id: None,
-        terminal_command: None,
-        terminal_args: None,
-        terminal_script: None,
     })
 }
 
@@ -470,13 +444,8 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
         description: job.description.clone(),
         enabled: job.enabled,
         schedule,
-        target: CronJobTargetDto {
-            payload: CronJobPayloadDto::Message {
-                text: job.message.clone(),
-            },
-            execution_mode: Some(job.execution_mode.as_str().to_owned()),
-            target_kind: job.target_kind.as_str().to_owned(),
-        },
+        message: job.message.clone(),
+        execution_mode: job.execution_mode.as_str().to_owned(),
         metadata: CronJobMetadataDto {
             // DTO field is the integer key; the domain holds it as a String
             // (empty == unbound → `0` sentinel on the wire).
@@ -690,6 +659,7 @@ mod tests {
     fn sample_row() -> CronJobRow {
         CronJobRow {
             id: "cron_test1".into(),
+            user_id: "user_1".into(),
             name: "Test Job".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -699,6 +669,9 @@ mod tests {
             payload_message: "do something".into(),
             execution_mode: "existing".into(),
             agent_config: Some(r#"{"backend":"acp","name":"Claude"}"#.into()),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             conversation_id: Some(1),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),
@@ -714,18 +687,13 @@ mod tests {
             run_count: 5,
             retry_count: 0,
             max_retries: 3,
-            target_kind: "agent".into(),
-            terminal_mode: None,
-            terminal_session_id: None,
-            terminal_command: None,
-            terminal_args: None,
-            terminal_script: None,
         }
     }
 
     fn sample_job() -> CronJob {
         CronJob {
             id: "cron_test1".into(),
+            user_id: "user_1".into(),
             name: "Test Job".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -763,7 +731,6 @@ mod tests {
             run_count: 5,
             retry_count: 0,
             max_retries: 3,
-            target_kind: TargetKind::Agent,
         }
     }
 
@@ -921,7 +888,8 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(resp.target.execution_mode.as_deref(), Some("existing"));
+        assert_eq!(resp.message, "do something");
+        assert_eq!(resp.execution_mode, "existing");
         assert_eq!(resp.metadata.conversation_id, 1);
         assert_eq!(resp.metadata.agent_type, "acp");
         assert_eq!(resp.metadata.created_by, "user");
@@ -979,10 +947,7 @@ mod tests {
             ..sample_job()
         };
         let resp = cron_job_to_response(&job);
-        assert_eq!(
-            resp.target.execution_mode.as_deref(),
-            Some("new_conversation")
-        );
+        assert_eq!(resp.execution_mode, "new_conversation");
     }
 
     // -- DTO → Domain schedule ------------------------------------------------
@@ -1037,31 +1002,11 @@ mod tests {
         );
     }
 
-    // -- Target kind ----------------------------------------------------------
-
     #[test]
-    fn target_kind_accepts_agent_only() {
-        assert_eq!(
-            TargetKind::from_str(TargetKind::Agent.as_str()).unwrap(),
-            TargetKind::Agent
-        );
-        assert!(TargetKind::from_str("bogus").is_err());
-        assert!(matches!(
-            TargetKind::from_str("terminal"),
-            Err(CronError::InvalidTargetKind(_))
-        ));
-    }
-
-    #[test]
-    fn agent_job_clears_legacy_terminal_columns_after_roundtrip() {
+    fn agent_job_roundtrips_through_storage() {
+        let original = sample_job();
         let row = cron_job_to_row(&sample_job()).unwrap();
-        assert_eq!(row.target_kind, "agent");
-        assert!(row.terminal_mode.is_none());
-        assert!(row.terminal_session_id.is_none());
-        assert!(row.terminal_command.is_none());
-        assert!(row.terminal_args.is_none());
-        assert!(row.terminal_script.is_none());
         let restored = cron_job_from_row(row).unwrap();
-        assert_eq!(restored.target_kind, TargetKind::Agent);
+        assert_eq!(restored, original);
     }
 }

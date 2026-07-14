@@ -11,7 +11,7 @@ use tracing::warn;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::AppError;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 use crate::path_safety::{
     PathAuthority, has_traversal, validate_path, validate_path_authority, validate_path_for_write,
@@ -61,7 +61,7 @@ const PLACEHOLDER_SVG: &str = concat!(
 
 /// A concrete implementation of [`crate::traits::IFileService`].
 pub struct FileService {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     /// Allowed root directories for path safety validation.
     allowed_roots: Vec<std::path::PathBuf>,
     /// In-memory cache for `list_workspace_files`, keyed by canonical root.
@@ -71,9 +71,9 @@ pub struct FileService {
 }
 
 impl FileService {
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
+    pub fn new(user_events: Arc<dyn UserEventSink>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
         Self {
-            broadcaster,
+            user_events,
             allowed_roots,
             workspace_files_cache: DashMap::new(),
             zip_cancellations: DashMap::new(),
@@ -239,6 +239,7 @@ impl FileService {
 
     async fn write_file_impl(
         &self,
+        owner_id: &str,
         path: &str,
         data: &[u8],
         workspace: &str,
@@ -276,7 +277,7 @@ impl FileService {
         };
         let payload = serde_json::to_value(&event).unwrap_or_default();
         let msg = WebSocketMessage::new("fileStream.contentUpdate", payload);
-        self.broadcaster.broadcast(msg);
+        self.user_events.send_to_user(owner_id, msg);
 
         if let Ok(canonical_ws) = std::fs::canonicalize(workspace_path) {
             self.invalidate_cache(&canonical_ws.to_string_lossy());
@@ -287,6 +288,7 @@ impl FileService {
 
     async fn remove_entry_impl(
         &self,
+        owner_id: &str,
         path: &str,
         workspace: &str,
         authority: &PathAuthority,
@@ -321,7 +323,7 @@ impl FileService {
         };
         let payload = serde_json::to_value(&event).unwrap_or_default();
         let msg = WebSocketMessage::new("fileStream.contentUpdate", payload);
-        self.broadcaster.broadcast(msg);
+        self.user_events.send_to_user(owner_id, msg);
 
         if let Ok(canonical_ws) = std::fs::canonicalize(workspace_path) {
             self.invalidate_cache(&canonical_ws.to_string_lossy());
@@ -915,18 +917,26 @@ impl crate::traits::IFileService for FileService {
             .map_err(|e| AppError::Internal(format!("read file buffer task failed: {e}")))?
     }
 
-    async fn write_file(&self, path: &str, data: &[u8], workspace: &str) -> Result<bool, AppError> {
-        self.write_file_impl(path, data, workspace, &self.base_authority(None)).await
+    async fn write_file(
+        &self,
+        owner_id: &str,
+        path: &str,
+        data: &[u8],
+        workspace: &str,
+    ) -> Result<bool, AppError> {
+        self.write_file_impl(owner_id, path, data, workspace, &self.base_authority(None))
+            .await
     }
 
     async fn write_file_scoped(
         &self,
+        owner_id: &str,
         path: &str,
         data: &[u8],
         workspace: &str,
         authority: &PathAuthority,
     ) -> Result<bool, AppError> {
-        self.write_file_impl(path, data, workspace, authority).await
+        self.write_file_impl(owner_id, path, data, workspace, authority).await
     }
 
     async fn copy_files_to_workspace(
@@ -984,17 +994,19 @@ impl crate::traits::IFileService for FileService {
         .map_err(|e| AppError::Internal(format!("copy task failed: {e}")))?
     }
 
-    async fn remove_entry(&self, path: &str, workspace: &str) -> Result<(), AppError> {
-        self.remove_entry_impl(path, workspace, &self.base_authority(None)).await
+    async fn remove_entry(&self, owner_id: &str, path: &str, workspace: &str) -> Result<(), AppError> {
+        self.remove_entry_impl(owner_id, path, workspace, &self.base_authority(None))
+            .await
     }
 
     async fn remove_entry_scoped(
         &self,
+        owner_id: &str,
         path: &str,
         workspace: &str,
         authority: &PathAuthority,
     ) -> Result<(), AppError> {
-        self.remove_entry_impl(path, workspace, authority).await
+        self.remove_entry_impl(owner_id, path, workspace, authority).await
     }
 
     async fn rename_entry(&self, path: &str, new_name: &str) -> Result<String, AppError> {
@@ -2005,8 +2017,13 @@ mod tests {
     // ---- create_upload_file -------------------------------------------------
 
     struct NullBroadcaster;
-    impl nomifun_realtime::EventBroadcaster for NullBroadcaster {
-        fn broadcast(&self, _msg: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    impl nomifun_realtime::UserEventSink for NullBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
     }
 
     fn make_service() -> crate::service::FileService {

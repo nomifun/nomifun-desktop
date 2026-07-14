@@ -36,13 +36,12 @@ nomifun-knowledge.workspace = true
 # workshop / creation only (neither deps gateway — no cycle).
 nomifun-workshop.workspace = true
 nomifun-creation.workspace = true
-# 助手 (presets) service: caps_orchestrator folds each ENABLED preset's
-# persona/skills/model into the run's fleet snapshot (P4 Task 2). Dependency
+# Preset service: the Agent Execution gateway freezes each enabled preset's
+# persona/skills/model into an Execution participant snapshot. Dependency
 # direction gateway → nomifun-preset only (no cycle — preset does not depend on gateway).
 nomifun-preset.workspace = true
-# 智能编排 (orchestration) Run control-plane: RunService (create/plan/inspect/cancel)
-# + RunEngine (serial execution loop) backing the caps_orchestrator gateway tools.
-nomifun-orchestrator.workspace = true
+# Persistent Agent Execution aggregate and Engine backing collaboration tools.
+nomifun-agent-execution.workspace = true
 # System domain capabilities (settings / client preferences / providers / model fetch).
 nomifun-system.workspace = true
 # Channel domain capabilities (IM bot plugins / pairing / users / companion binding).

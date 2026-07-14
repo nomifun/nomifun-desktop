@@ -1,8 +1,10 @@
 use nomifun_common::{
-    AgentType, ConversationSource, ConversationStatus, MessagePosition, MessageStatus, MessageType, PaginatedResult,
-    ProviderWithModel, TimestampMs,
+    AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
+    MessagePosition, MessageStatus, MessageType, PaginatedResult, ProviderWithModel, TimestampMs,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::webhook::double_option;
 
 /// Per-MCP snapshot status stored in `conversation.extra`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +48,14 @@ pub struct CreateConversationRequest {
     pub preset_id: Option<String>,
     #[serde(default)]
     pub preset_overrides: Option<crate::PresetOverrides>,
+    #[serde(default)]
+    pub delegation_policy: DelegationPolicy,
+    #[serde(default)]
+    pub execution_model_pool: Option<crate::ExecutionModelPool>,
+    #[serde(default)]
+    pub decision_policy: DecisionPolicy,
+    #[serde(default)]
+    pub execution_template_id: Option<String>,
     pub extra: serde_json::Value,
 }
 
@@ -58,6 +68,12 @@ pub struct UpdateConversationRequest {
     pub name: Option<String>,
     pub pinned: Option<bool>,
     pub model: Option<ProviderWithModel>,
+    pub delegation_policy: Option<DelegationPolicy>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub execution_model_pool: Option<Option<crate::ExecutionModelPool>>,
+    pub decision_policy: Option<DecisionPolicy>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub execution_template_id: Option<Option<String>>,
     pub extra: Option<serde_json::Value>,
 }
 
@@ -120,8 +136,8 @@ pub enum ConversationRuntimeStateKind {
 pub struct ConversationRuntimeSummary {
     pub state: ConversationRuntimeStateKind,
     pub can_send_message: bool,
-    pub has_task: bool,
-    pub task_status: Option<ConversationStatus>,
+    pub has_runtime: bool,
+    pub runtime_status: Option<ConversationStatus>,
     pub is_processing: bool,
     pub pending_confirmations: usize,
     /// Wall-clock start (epoch ms) of the currently-running turn, when
@@ -212,6 +228,20 @@ pub struct ConversationResponse {
     pub preset_revision: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset_snapshot: Option<crate::ResolvedPresetSnapshot>,
+    pub delegation_policy: DelegationPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_model_pool: Option<crate::ExecutionModelPool>,
+    pub decision_policy: DecisionPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_template_id: Option<String>,
+    /// Current Agent collaboration projected from `conversation_execution_links`.
+    /// These fields are read-only and are never stored on the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_step_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_attempt_id: Option<String>,
     pub created_at: TimestampMs,
     pub modified_at: TimestampMs,
     pub extra: serde_json::Value,
@@ -344,6 +374,40 @@ mod tests {
     }
 
     #[test]
+    fn conversation_model_pool_uses_the_agent_execution_tagged_contract() {
+        let raw = json!({
+            "type": "nomi",
+            "execution_model_pool": {
+                "mode": "range",
+                "models": [{ "provider_id": "provider-1", "model": "model-1" }]
+            },
+            "extra": {}
+        });
+        let req: CreateConversationRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            req.execution_model_pool,
+            Some(crate::ExecutionModelPool::Range {
+                models: vec![crate::ExecutionModelRef {
+                    provider_id: "provider-1".into(),
+                    model: "model-1".into(),
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn conversation_model_pool_rejects_the_removed_array_alias() {
+        let raw = json!({
+            "type": "nomi",
+            "execution_model_pool": [
+                { "provider_id": "provider-1", "model": "model-1" }
+            ],
+            "extra": {}
+        });
+        assert!(serde_json::from_value::<CreateConversationRequest>(raw).is_err());
+    }
+
+    #[test]
     fn deserialize_create_request_missing_type() {
         let raw = json!({
             "model": { "provider_id": "p1", "model": "m1" },
@@ -406,6 +470,22 @@ mod tests {
         assert!(req.pinned.is_none());
         assert!(req.model.is_none());
         assert!(req.extra.is_none());
+    }
+
+    #[test]
+    fn deserialize_update_model_pool_distinguishes_omitted_from_clear() {
+        let clear: UpdateConversationRequest =
+            serde_json::from_value(json!({ "execution_model_pool": null })).unwrap();
+        assert_eq!(clear.execution_model_pool, Some(None));
+
+        let automatic: UpdateConversationRequest = serde_json::from_value(json!({
+            "execution_model_pool": { "mode": "automatic" }
+        }))
+        .unwrap();
+        assert_eq!(
+            automatic.execution_model_pool,
+            Some(Some(crate::ExecutionModelPool::Automatic))
+        );
     }
 
     #[test]
@@ -523,6 +603,13 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
+            linked_execution_id: Some("exec_1".into()),
+            execution_step_id: None,
+            execution_attempt_id: None,
             extra: json!({ "workspace": "/project" }),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -533,6 +620,11 @@ mod tests {
         assert_eq!(json["created_at"], 1712345678000_i64);
         assert_eq!(json["modified_at"], 1712345678000_i64);
         assert_eq!(json["extra"]["workspace"], "/project");
+        assert_eq!(json["linked_execution_id"], "exec_1");
+        assert!(
+            json.get("active_execution_id").is_none(),
+            "the hard-cut wire contract must not retain the misleading legacy field"
+        );
         // Verify snake_case keys
         assert!(json.get("channelChatId").is_none());
         assert!(json.get("createdAt").is_none());
@@ -563,6 +655,13 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
             extra: json!({}),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -597,6 +696,13 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
             extra: json!({}),
         };
         let serialized = serde_json::to_string(&resp).unwrap();
@@ -683,6 +789,13 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
+                delegation_policy: Default::default(),
+                execution_model_pool: None,
+                decision_policy: Default::default(),
+                execution_template_id: None,
+                linked_execution_id: None,
+                execution_step_id: None,
+                execution_attempt_id: None,
                 extra: json!({}),
             },
         };
@@ -722,6 +835,13 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
+                delegation_policy: Default::default(),
+                execution_model_pool: None,
+                decision_policy: Default::default(),
+                execution_template_id: None,
+                linked_execution_id: None,
+                execution_step_id: None,
+                execution_attempt_id: None,
                 extra: json!({}),
             },
         };
@@ -795,6 +915,13 @@ mod tests {
                 preset_id: None,
                 preset_revision: None,
                 preset_snapshot: None,
+                delegation_policy: Default::default(),
+                execution_model_pool: None,
+                decision_policy: Default::default(),
+                execution_template_id: None,
+                linked_execution_id: None,
+                execution_step_id: None,
+                execution_attempt_id: None,
                 extra: json!({}),
             }],
             total: 1,
@@ -842,6 +969,13 @@ mod tests {
                     preset_id: None,
                     preset_revision: None,
                     preset_snapshot: None,
+                    delegation_policy: Default::default(),
+                    execution_model_pool: None,
+                    decision_policy: Default::default(),
+                    execution_template_id: None,
+                    linked_execution_id: None,
+                    execution_step_id: None,
+                    execution_attempt_id: None,
                     extra: json!({}),
                 },
             }],

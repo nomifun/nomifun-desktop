@@ -71,6 +71,13 @@ async fn build_app() -> (axum::Router, nomifun_app::AppServices) {
     (router, services)
 }
 
+async fn setup_owner(
+    app: &mut axum::Router,
+    services: &nomifun_app::AppServices,
+) -> (String, String) {
+    setup_and_login(app, services, "admin", "StrongP@ss1").await
+}
+
 // ── 9.1 Workspace browse ────────────────────────────────────────
 
 #[tokio::test]
@@ -88,7 +95,7 @@ async fn workspace_browse_requires_auth() {
 #[tokio::test]
 async fn workspace_browse_no_active_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     // Seed a real workspace on disk so the handler can canonicalize it.
     let tmp = tempfile::tempdir().unwrap();
@@ -134,7 +141,7 @@ async fn workspace_browse_empty_path() {
 #[tokio::test]
 async fn workspace_browse_treats_symlinked_skill_dir_as_directory() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
@@ -228,7 +235,7 @@ async fn terminal_workspace_requires_auth() {
 #[tokio::test]
 async fn terminal_workspace_lists_cwd_entries() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     // Seed a real workspace on disk; the handler derives the root from the
     // session's `cwd` (server-authoritative) and lists one level.
@@ -252,7 +259,7 @@ async fn terminal_workspace_lists_cwd_entries() {
 #[tokio::test]
 async fn terminal_workspace_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     // Authenticated, but no such terminal session row → 404 (the service
     // surfaces a missing row as NotFound before any filesystem access).
@@ -281,7 +288,7 @@ async fn side_question_empty_question() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    // side-question is now dispatched to AgentInstance after the
+    // side-question is now dispatched to AgentRuntimeHandle after the
     // conversation lookup, so a missing conversation surfaces as 404
     // before the empty-question check gets a chance to fire.
     let req = json_with_token(
@@ -298,7 +305,7 @@ async fn side_question_empty_question() {
 #[tokio::test]
 async fn side_question_no_active_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Side Q Test", "acp").await;
 
     let req = json_with_token(
@@ -330,8 +337,8 @@ async fn slash_commands_requires_auth() {
 #[tokio::test]
 async fn slash_commands_no_active_task() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
-    let conv_id = create_conversation(&mut app, &token, &_csrf, "Slash Test", "acp").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Test", "acp").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -355,20 +362,20 @@ async fn openclaw_runtime_requires_auth() {
 #[tokio::test]
 async fn openclaw_runtime_no_active_task() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
-    let conv_id = create_conversation(&mut app, &token, &_csrf, "OpenClaw Test", "openclaw-gateway").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
+    let conv_id = create_conversation(&mut app, &token, &csrf, "OpenClaw Test", "openclaw-gateway").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/openclaw/runtime"), &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// ── Confirmation routes (no active task → graceful defaults) ─────
+// ── Confirmation routes (no active runtime → graceful defaults) ─────
 
 #[tokio::test]
 async fn list_confirmations_no_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test", "acp").await;
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/confirmations"), &token);
@@ -382,7 +389,7 @@ async fn list_confirmations_no_task() {
 #[tokio::test]
 async fn confirm_call_no_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test", "acp").await;
 
     let req = json_with_token(
@@ -399,7 +406,7 @@ async fn confirm_call_no_task() {
 #[tokio::test]
 async fn check_approval_no_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test", "acp").await;
 
     let req = get_with_token(
@@ -413,12 +420,12 @@ async fn check_approval_no_task() {
     assert_eq!(json["data"]["approved"], false);
 }
 
-// ── Stop + Warmup (no active task → idempotent success) ───────
+// ── Stop + Warmup (no active runtime → idempotent success) ───────
 
 #[tokio::test]
 async fn stop_stream_no_task() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Stop Test", "acp").await;
 
     let req = json_with_token(

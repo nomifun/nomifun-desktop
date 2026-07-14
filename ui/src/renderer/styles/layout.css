@@ -1,6 +1,6 @@
 /* Layout-level styles: sidebar, sider animations, message positioning */
 
-/* Sticky section labels in the sider (team / cron / projects / timeline). */
+/* Sticky section labels in the sider (automation / projects / timeline). */
 .sider-section-label {
   background-color: var(--bg-2);
 }

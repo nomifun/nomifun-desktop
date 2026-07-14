@@ -548,7 +548,7 @@ done
 [ $n -eq 1 ] && { echo "no headless backend — using fallback"; SCREENSHOT_FAILED=1; }
 ```
 
-Read each PNG against the checklist; delegate to a subagent when the harness has one.
+Read each PNG against the checklist; delegate to another Agent when the harness supports collaboration.
 
 **Fallback — HTML-text** (no image-Read or no browser): read `view "$FILE" html` as text. DOM cannot prove **dark-on-dark / fine overlap / arrowheads / gap-margin metrics / column alignment** — flag these as "not visually verified" rather than PASS.
 

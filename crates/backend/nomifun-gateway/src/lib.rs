@@ -1,8 +1,8 @@
-//! `nomifun-gateway` — the Desktop Gateway MCP: an in-process HTTP tool server
+//! `nomifun-gateway` — the Platform Gateway MCP: an in-process HTTP tool server
 //! that exposes the whole Nomi Desktop capability surface (conversations,
 //! terminals, cron jobs, global companion memory, requirements, AutoWork, IDMM,
 //! knowledge bases, model providers) to agent sessions that carry the
-//! backend-set `desktopGateway` extra flag.
+//! process-issued, scoped session claims.
 //!
 //! Governance principle: the companion IS the desktop's universal semantic control
 //! surface — every new desktop feature domain ships a companion-operable gateway
@@ -10,8 +10,8 @@
 //!
 //! ## Why this exists
 //!
-//! Remote IM (channel) sessions and companion companion threads act as the user's
-//! "master agent": one conversation through which the user can see and drive
+//! Remote IM (channel) sessions and companion threads are Agent entry points
+//! through which the user can inspect and drive
 //! everything running on the desktop. Agents reach this server through the
 //! `nomicore mcp-gateway-stdio` bridge (claude / codex / gemini advertise
 //! stdio-only MCP capabilities; the nomi engine consumes the same bridge), and
@@ -32,13 +32,10 @@ pub mod browser_registry;
 #[cfg(feature = "computer-use")]
 pub mod computer_registry;
 
-// ── legacy helper modules retained for shared pure logic ─────────────────
-// `tools_provider` keeps the nomi model-resolution chain (used by the cron +
-// conversation capabilities); `tools_terminal` keeps `preset_launch` (used by
-// the terminal capabilities). `tools_browser` is the not-yet-migrated browser
-// domain, still dispatched by the legacy match in `server.rs` under coexistence.
-mod tools_provider;
-mod tools_terminal;
+// Pure support functions shared by multiple registered capability domains.
+// They do not dispatch tools and are not an alternate capability surface.
+mod provider_support;
+mod terminal_support;
 
 // ── capability domains (registry form) ───────────────────────────────────
 // NEW DOMAIN? Adding `mod caps_<x>;` here is step 2 of 3 — also add the
@@ -62,7 +59,7 @@ mod caps_knowledge;
 mod caps_knowledge_ext;
 mod caps_mcp;
 mod caps_memory;
-mod caps_orchestrator;
+mod caps_agent_execution;
 mod caps_provider;
 mod caps_requirement;
 mod caps_scheduling_ext;

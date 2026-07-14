@@ -75,10 +75,12 @@ export const useNomiMessage = (
   options?: {
     onError?: (message: IResponseMessage) => void;
     onConfigChanged?: (capabilities: Record<string, unknown>) => void;
+    readOnly?: boolean;
   }
 ) => {
   const onError = options?.onError;
   const onConfigChanged = options?.onConfigChanged;
+  const readOnly = options?.readOnly === true;
   const onConfigChangedRef = useRef(onConfigChanged);
   const addOrUpdateMessage = useAddOrUpdateMessage();
   // Single source of truth for the turn's activity state (design §3.2): a pure
@@ -165,7 +167,7 @@ export const useNomiMessage = (
 
   const processCompletedAssistantMessage = useCallback(
     async (msgId: string) => {
-      if (!msgId || processedCronMsgIdsRef.current.has(msgId)) {
+      if (readOnly || !msgId || processedCronMsgIdsRef.current.has(msgId)) {
         return;
       }
 
@@ -217,7 +219,7 @@ export const useNomiMessage = (
         processedCronMsgIdsRef.current.delete(msgId);
       }
     },
-    [addOrUpdateMessage, conversation_id]
+    [addOrUpdateMessage, conversation_id, readOnly]
   );
 
   useEffect(() => {
@@ -289,14 +291,16 @@ export const useNomiMessage = (
                 context_window: metrics.context_window,
               };
               setTokenUsage(newTokenUsage);
-              emitter.emit('nomi.usage.updated', { conversation_id, tokenUsage: newTokenUsage });
-              void ipcBridge.conversation.update.invoke({
-                id: conversation_id,
-                updates: {
-                  extra: { last_token_usage: newTokenUsage } as TChatConversation['extra'],
-                },
-                merge_extra: true,
-              });
+              if (!readOnly) {
+                emitter.emit('nomi.usage.updated', { conversation_id, tokenUsage: newTokenUsage });
+                void ipcBridge.conversation.update.invoke({
+                  id: conversation_id,
+                  updates: {
+                    extra: { last_token_usage: newTokenUsage } as TChatConversation['extra'],
+                  },
+                  merge_extra: true,
+                });
+              }
             }
           }
           break;
@@ -370,7 +374,7 @@ export const useNomiMessage = (
       }
     });
     // Note: turn state is read via turnStateRef to avoid re-subscription
-  }, [conversation_id, addOrUpdateMessage, onError, processCompletedAssistantMessage]);
+  }, [conversation_id, addOrUpdateMessage, onError, processCompletedAssistantMessage, readOnly]);
 
   useEffect(() => {
     let cancelled = false;

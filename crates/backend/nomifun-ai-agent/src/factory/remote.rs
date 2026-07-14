@@ -4,17 +4,17 @@ use nomifun_api_types::RemoteBuildExtra;
 use nomifun_common::AppError;
 use tracing::warn;
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::remote::{RemoteAgentConfig, RemoteAgentManager};
-use crate::types::BuildTaskOptions;
+use crate::types::AgentRuntimeBuildOptions;
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
+    options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
-) -> Result<AgentInstance, AppError> {
+) -> Result<AgentRuntimeHandle, AppError> {
     let extra: RemoteBuildExtra = serde_json::from_value(options.extra)
         .map_err(|e| AppError::BadRequest(format!("Invalid Remote build options: {e}")))?;
     let row = deps
@@ -44,5 +44,5 @@ pub(super) async fn build(
         allow_insecure: row.allow_insecure,
     };
     let agent = RemoteAgentManager::new(ctx.conversation_id, ctx.workspace, config).await?;
-    Ok(AgentInstance::Remote(Arc::new(agent)))
+    Ok(AgentRuntimeHandle::Remote(Arc::new(agent)))
 }

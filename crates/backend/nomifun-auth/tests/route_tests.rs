@@ -51,6 +51,7 @@ async fn test_app_with_local(local: bool) -> (Router, TestContext) {
     let trust_state = TrustState {
         policy: if local { AuthPolicy::NoAuth } else { AuthPolicy::Required },
         local_trust_secret: None,
+        authoritative_user_id: Arc::from(nomifun_auth::SYSTEM_USER_ID),
     };
     let app = auth_routes(state).layer(axum::middleware::from_fn_with_state(trust_state, trust_resolve_middleware));
     let ctx = TestContext {

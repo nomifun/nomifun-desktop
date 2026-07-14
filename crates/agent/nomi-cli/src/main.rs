@@ -22,7 +22,7 @@ use nomi_protocol::{ToolApprovalManager, ToolApprovalResult};
 #[derive(Parser)]
 #[command(
     name = "nomi",
-    about = "Nomi agent CLI — multi-provider AI agent with tool orchestration",
+    about = "Nomi agent CLI — multi-provider AI agent with tool execution and delegation",
     version
 )]
 struct Cli {
@@ -283,14 +283,14 @@ async fn main() -> anyhow::Result<()> {
     if prompt.is_empty() {
         repl_loop(&mut engine, &terminal, &output).await?;
     } else {
-        let run_result = engine.run(&prompt, "").await?;
+        let turn_result = engine.execute_turn(&prompt, "").await?;
         output.emit_stream_end(
             "",
-            run_result.turns,
-            run_result.usage.input_tokens,
-            run_result.usage.output_tokens,
-            run_result.usage.cache_creation_tokens,
-            run_result.usage.cache_read_tokens,
+            turn_result.turns,
+            turn_result.usage.input_tokens,
+            turn_result.usage.output_tokens,
+            turn_result.usage.cache_creation_tokens,
+            turn_result.usage.cache_read_tokens,
         );
     }
 
@@ -299,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
         && report.sessions.iter().any(|session| {
             matches!(
                 &session.outcome,
-                nomi_execution::ExecutionOutcome::Lost { cleanup, .. } if !cleanup.reaped
+                nomi_process_runtime::ProcessOutcome::Lost { cleanup, .. } if !cleanup.reaped
             )
         })
     {
@@ -334,7 +334,7 @@ async fn repl_loop(
             break;
         }
 
-        match engine.run(input, "").await {
+        match engine.execute_turn(input, "").await {
             Ok(result) => {
                 if result.turns > 0 {
                     output.emit_stream_end(
@@ -574,12 +574,12 @@ async fn run_json_stream_mode(
                 let mut mode_changed = false;
 
                 {
-                    let engine_fut = engine.run(&content, &msg_id);
-                    tokio::pin!(engine_fut);
+                    let turn_execution = engine.execute_turn(&content, &msg_id);
+                    tokio::pin!(turn_execution);
 
                     loop {
                         tokio::select! {
-                            result = &mut engine_fut => {
+                            result = &mut turn_execution => {
                                 match result {
                                     Ok(result) => {
                                         output.emit_stream_end(
@@ -743,7 +743,7 @@ async fn run_json_stream_mode(
         && report.sessions.iter().any(|session| {
             matches!(
                 &session.outcome,
-                nomi_execution::ExecutionOutcome::Lost { cleanup, .. } if !cleanup.reaped
+                nomi_process_runtime::ProcessOutcome::Lost { cleanup, .. } if !cleanup.reaped
             )
         })
     {

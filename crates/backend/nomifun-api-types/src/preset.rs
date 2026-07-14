@@ -9,7 +9,7 @@ pub enum PresetSource { Builtin, User, Extension }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetTarget { Conversation, ClusterMember, Companion, PublicCompanion, Cron }
+pub enum PresetTarget { Conversation, ExecutionStep, Companion, PublicCompanion, Cron }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -233,6 +233,6 @@ mod tests {
     }
     #[test]
     fn target_names_are_stable_snake_case() {
-        assert_eq!(serde_json::to_string(&PresetTarget::ClusterMember).unwrap(), "\"cluster_member\"");
+        assert_eq!(serde_json::to_string(&PresetTarget::ExecutionStep).unwrap(), "\"execution_step\"");
     }
 }

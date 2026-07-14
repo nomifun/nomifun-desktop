@@ -27,7 +27,7 @@ fn runtime_production_source() -> String {
 }
 
 #[test]
-fn runtime_ownership_primitives_are_delegated_to_nomi_execution() {
+fn bundled_runtime_contains_no_process_ownership_primitives() {
     let source = runtime_production_source();
     let forbidden = [
         "struct CleanupJob",
@@ -45,16 +45,16 @@ fn runtime_ownership_primitives_are_delegated_to_nomi_execution() {
 
     assert!(
         remaining.is_empty(),
-        "nomifun-runtime must delegate these ownership primitives to nomi-execution: {remaining:?}"
+        "nomifun-runtime must remain limited to bundled-toolchain and PATH support: {remaining:?}"
     );
 }
 
 #[test]
-fn path_merge_is_delegated_to_nomi_execution() {
+fn path_merge_is_delegated_to_nomi_process_runtime() {
     let source = production_source(&runtime_src_dir().join("shell_env.rs"));
     assert!(
-        source.contains("nomi_execution::merge_process_path"),
-        "shell_env must delegate ordered PATH merging to nomi_execution::merge_process_path"
+        source.contains("nomi_process_runtime::merge_process_path"),
+        "shell_env must delegate ordered PATH merging to nomi_process_runtime::merge_process_path"
     );
     assert!(
         !source.contains("std::env::join_paths"),

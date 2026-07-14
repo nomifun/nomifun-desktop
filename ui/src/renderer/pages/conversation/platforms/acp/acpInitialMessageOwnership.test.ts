@@ -19,7 +19,7 @@ describe('ACP initial message ownership', () => {
     expect(useAcpInitialMessageIndex).toBeGreaterThan(useAcpMessageIndex);
   });
 
-  test('keeps initial-message orchestration out of the sendbox UI component', () => {
+  test('keeps initial-message ownership out of the sendbox UI component', () => {
     const sendBoxSource = readSource(new URL('./AcpSendBox.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('useAcpInitialMessage')).toBe(false);

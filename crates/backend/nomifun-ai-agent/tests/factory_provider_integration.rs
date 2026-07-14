@@ -5,7 +5,7 @@ use nomifun_ai_agent::AcpSessionSyncService;
 use nomifun_ai_agent::AcpSkillManager;
 use nomifun_ai_agent::factory::{AgentFactoryDeps, build_agent_factory};
 use nomifun_ai_agent::registry::AgentRegistry;
-use nomifun_ai_agent::types::BuildTaskOptions;
+use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_common::{AgentType, ProviderWithModel, encrypt_string};
 use nomifun_db::{
     CreateProviderParams, IAcpSessionRepository, IProviderRepository, SqliteAcpSessionRepository,
@@ -65,10 +65,11 @@ fn make_factory(
     remote_agent_repo: Arc<SqliteRemoteAgentRepository>,
     agent_registry: Arc<AgentRegistry>,
     acp_agent_service: Arc<AcpSessionSyncService>,
-) -> nomifun_ai_agent::task_manager::AgentFactory {
+) -> nomifun_ai_agent::runtime_registry::AgentRuntimeFactory {
     let tmp = tempfile::TempDir::new().unwrap();
     let skill_paths = Arc::new(nomifun_extension::resolve_skill_paths(tmp.path(), tmp.path()));
     build_agent_factory(AgentFactoryDeps {
+        authoritative_user_id: Arc::from("system_default_user"),
         cron_sink_factory: None,
         gateway_mcp_config: None,
         open_mcp_config: None,
@@ -88,7 +89,6 @@ fn make_factory(
         data_dir: PathBuf::from("/tmp/nomi-test"),
         work_dir: PathBuf::from("/tmp/nomi-test"),
         backend_binary_path: Arc::new(PathBuf::from("/tmp/nomi-test/nomicore")),
-        guide_mcp_config: None,
         requirement_mcp_config: None,
         knowledge_mcp_config: None,
         mcp_server_repo: None,
@@ -107,7 +107,8 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
     let (provider_repo, remote_agent_repo, agent_registry, acp_agent_service) = setup().await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
-    let options = BuildTaskOptions {
+    let options = AgentRuntimeBuildOptions {
+        user_id: "system_default_user".into(),
         agent_type: AgentType::Nomi,
         workspace: String::new(),
         model: ProviderWithModel {
@@ -116,6 +117,7 @@ async fn nomi_factory_returns_unavailable_when_no_providers_configured() {
             use_model: None,
         },
         conversation_id: "conv-test-1".into(),
+        delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),
     };
@@ -142,7 +144,8 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
     insert_test_provider(&*provider_repo, "prov-001", "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
-    let options = BuildTaskOptions {
+    let options = AgentRuntimeBuildOptions {
+        user_id: "system_default_user".into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
         model: ProviderWithModel {
@@ -151,6 +154,7 @@ async fn nomi_factory_falls_back_to_first_enabled_when_bound_provider_missing() 
             use_model: None,
         },
         conversation_id: "conv-test-fallback".into(),
+        delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),
     };
@@ -165,7 +169,8 @@ async fn nomi_factory_resolves_provider_from_db() {
     insert_test_provider(&*provider_repo, "prov-001", "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
-    let options = BuildTaskOptions {
+    let options = AgentRuntimeBuildOptions {
+        user_id: "system_default_user".into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
         model: ProviderWithModel {
@@ -174,6 +179,7 @@ async fn nomi_factory_resolves_provider_from_db() {
             use_model: None,
         },
         conversation_id: "conv-test-2".into(),
+        delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({ "max_tokens": 2048 }),
     };
@@ -188,7 +194,8 @@ async fn nomi_factory_respects_use_model_override() {
     insert_test_provider(&*provider_repo, "prov-002", "openai").await;
     let factory = make_factory(provider_repo, remote_agent_repo, agent_registry, acp_agent_service);
 
-    let options = BuildTaskOptions {
+    let options = AgentRuntimeBuildOptions {
+        user_id: "system_default_user".into(),
         agent_type: AgentType::Nomi,
         workspace: "/tmp/test-workspace".into(),
         model: ProviderWithModel {
@@ -197,6 +204,7 @@ async fn nomi_factory_respects_use_model_override() {
             use_model: Some("gpt-5.4".into()),
         },
         conversation_id: "conv-test-3".into(),
+        delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: serde_json::json!({}),
     };

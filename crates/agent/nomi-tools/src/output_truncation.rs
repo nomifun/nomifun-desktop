@@ -4,7 +4,7 @@
 //! and inserting a marker that records how much was removed. Ported (and
 //! de-dependency-ed) from codex `utils/string/src/truncate.rs`.
 //!
-//! Unlike the engine-level fallback in `nomi-agent::orchestration` (private,
+//! Unlike the engine-level fallback in `nomi-agent::tool_execution` (private,
 //! char-counted, multi-pass), this is a reusable, single-pass, tested pure
 //! function so any tool (Bash today; Grep/Read later) can bound its output.
 

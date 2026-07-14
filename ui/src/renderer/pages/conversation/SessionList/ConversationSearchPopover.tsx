@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IMessageSearchItem } from '@/common/types/team/database';
+import type { IMessageSearchItem } from '@/common/types/conversationSearch';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';

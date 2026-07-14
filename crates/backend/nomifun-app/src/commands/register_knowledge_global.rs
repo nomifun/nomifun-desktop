@@ -1,45 +1,27 @@
-//! User-scope (global) one-click registration of the platform knowledge MCP
-//! into a CLI's USER-level config, so an agent CLI started in ANY directory —
-//! not just a NomiFun-managed terminal — picks up knowledge_search / knowledge_read
-//! / knowledge_write. Secret-free (the bridge resolves port/token from the
-//! endpoint beacon at runtime), so the written file is safe to keep and survives
-//! app restarts. Merge-safe: never clobbers the user's own servers.
-//!
-//! Mirrors [`super::register_knowledge`] (project scope) but targets the user
-//! config:
-//!   - Claude → `~/.claude.json`
-//!   - Gemini → `~/.gemini/settings.json`
-//!   - Codex  → `codex mcp add` (codex config is global; no project/user split)
+//! Merge-safe user-scope registration for external Claude/Gemini/Codex CLIs.
+//! Files remain command-only; runtime capabilities come from the local broker.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use nomifun_terminal::AgentCli;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::register_knowledge::{RegisterOutcome, merge_gemini_settings, merge_mcp_json};
+use super::register_knowledge::{
+    KNOWLEDGE_MCP_SERVER_NAME, RegisterOutcome, atomic_write, merge_registration_file, run_codex,
+};
 
-/// MCP server name (must match the bridge subcommand registration).
-const SERVER_NAME: &str = "nomifun-knowledge";
-
-/// Outcome of a global unregistration.
 #[derive(Debug, Clone, Serialize)]
 pub struct UnregisterOutcome {
     pub path: String,
-    /// `true` when the server entry was present and removed; `false` when it was
-    /// already absent (idempotent no-op).
     pub removed: bool,
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+    dirs::home_dir().filter(|path| !path.as_os_str().is_empty())
 }
 
-/// User-level config path for the family. `Codex` is `None` — it is managed via
-/// the `codex` CLI (global config), not a path we write directly.
 fn user_config_path(family: AgentCli) -> Option<PathBuf> {
     let home = home_dir()?;
     match family {
@@ -49,71 +31,13 @@ fn user_config_path(family: AgentCli) -> Option<PathBuf> {
     }
 }
 
-/// Remove the `nomifun-knowledge` server from an mcpServers-shaped JSON doc.
-/// Returns `(serialized_doc, removed)`. Tolerant of malformed/missing content.
-fn remove_server_from_mcp_json(existing: &str) -> (String, bool) {
-    let Ok(mut doc) = serde_json::from_str::<Value>(existing) else {
-        return (existing.to_owned(), false);
-    };
-    let removed = doc
-        .get_mut("mcpServers")
-        .and_then(Value::as_object_mut)
-        .map(|servers| servers.remove(SERVER_NAME).is_some())
-        .unwrap_or(false);
-    let out = serde_json::to_string_pretty(&doc).unwrap_or_else(|_| existing.to_owned());
-    (out, removed)
-}
-
-/// Merge the registration into a specific config file (path-injectable core,
-/// used by [`register_global`] and unit tests).
-fn register_to_file(path: &Path, family: AgentCli, nomicore: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = std::fs::read_to_string(path).ok();
-    let merged = match family {
-        AgentCli::Gemini => merge_gemini_settings(existing.as_deref(), nomicore),
-        _ => merge_mcp_json(existing.as_deref(), nomicore),
-    };
-    std::fs::write(path, merged)
-}
-
-/// Remove the registration from a specific config file. Returns whether an
-/// entry was actually removed.
-fn unregister_from_file(path: &Path) -> std::io::Result<bool> {
-    let Some(existing) = std::fs::read_to_string(path).ok() else {
-        return Ok(false);
-    };
-    let (doc, removed) = remove_server_from_mcp_json(&existing);
-    if removed {
-        std::fs::write(path, doc)?;
-    }
-    Ok(removed)
-}
-
-fn run_codex(args: &[&str]) -> std::io::Result<()> {
-    let out = std::process::Command::new("codex")
-        .args(args)
-        .output()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, format!("codex CLI not found or failed to spawn: {e}")))?;
-    if !out.status.success() {
-        return Err(std::io::Error::other(format!(
-            "codex {} failed (exit {}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        )));
-    }
-    Ok(())
-}
-
-/// Register the knowledge MCP into the family's USER-level config.
-pub fn register_global(family: AgentCli, nomicore: &str) -> std::io::Result<RegisterOutcome> {
+pub fn register_global(family: AgentCli, nomicore: &str) -> io::Result<RegisterOutcome> {
     match family {
         AgentCli::Claude | AgentCli::Gemini => {
-            let path =
-                user_config_path(family).ok_or_else(|| std::io::Error::other("cannot resolve user home directory"))?;
-            register_to_file(&path, family, nomicore)?;
+            let path = user_config_path(family).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "cannot resolve user home directory")
+            })?;
+            merge_registration_file(&path, family, nomicore)?;
             Ok(RegisterOutcome {
                 written_path: path.to_string_lossy().into_owned(),
                 scope: "user".into(),
@@ -121,45 +45,109 @@ pub fn register_global(family: AgentCli, nomicore: &str) -> std::io::Result<Regi
             })
         }
         AgentCli::Codex => {
-            run_codex(&["mcp", "add", SERVER_NAME, "--", nomicore, "mcp-knowledge-stdio"])?;
+            run_codex(&[
+                "mcp",
+                "add",
+                KNOWLEDGE_MCP_SERVER_NAME,
+                "--",
+                nomicore,
+                "mcp-knowledge-stdio",
+            ])?;
             Ok(RegisterOutcome {
                 written_path: "~/.codex/config.toml".into(),
                 scope: "user".into(),
-                note: Some("codex 无项目级配置，已注册到全局（对所有目录生效）".into()),
+                note: Some("已注册到 Codex 用户级配置（对所有目录生效）".into()),
             })
         }
     }
 }
 
-/// Remove the knowledge MCP from the family's USER-level config (idempotent).
-pub fn unregister_global(family: AgentCli) -> std::io::Result<UnregisterOutcome> {
+pub fn unregister_global(family: AgentCli) -> io::Result<UnregisterOutcome> {
     match family {
         AgentCli::Claude | AgentCli::Gemini => {
-            let path =
-                user_config_path(family).ok_or_else(|| std::io::Error::other("cannot resolve user home directory"))?;
+            let path = user_config_path(family).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "cannot resolve user home directory")
+            })?;
             let removed = unregister_from_file(&path)?;
-            Ok(UnregisterOutcome { path: path.to_string_lossy().into_owned(), removed })
+            Ok(UnregisterOutcome {
+                path: path.to_string_lossy().into_owned(),
+                removed,
+            })
         }
         AgentCli::Codex => {
-            run_codex(&["mcp", "remove", SERVER_NAME])?;
-            Ok(UnregisterOutcome { path: "~/.codex/config.toml".into(), removed: true })
+            run_codex(&["mcp", "remove", KNOWLEDGE_MCP_SERVER_NAME])?;
+            Ok(UnregisterOutcome {
+                path: "~/.codex/config.toml".into(),
+                removed: true,
+            })
         }
     }
 }
 
-/// Whether the family's USER-level config currently registers the server.
-/// File-based for Claude/Gemini; `None` for Codex (would require invoking the
-/// CLI to inspect global config — the UI treats `None` as "unknown").
 pub fn is_registered_global(family: AgentCli) -> Option<bool> {
     match family {
         AgentCli::Claude | AgentCli::Gemini => {
-            let path = user_config_path(family)?;
-            let existing = std::fs::read_to_string(&path).ok()?;
-            let doc: Value = serde_json::from_str(&existing).ok()?;
-            Some(doc.get("mcpServers").and_then(|s| s.get(SERVER_NAME)).is_some())
+            let document: Value = serde_json::from_str(
+                &std::fs::read_to_string(user_config_path(family)?).ok()?,
+            )
+            .ok()?;
+            Some(
+                document
+                    .get("mcpServers")
+                    .and_then(|servers| servers.get(KNOWLEDGE_MCP_SERVER_NAME))
+                    .is_some_and(is_command_only_registration),
+            )
         }
+        // Codex owns and may evolve its TOML schema. We intentionally avoid
+        // parsing or rewriting that file behind the CLI's back.
         AgentCli::Codex => None,
     }
+}
+
+fn is_command_only_registration(value: &Value) -> bool {
+    let Some(server) = value.as_object() else {
+        return false;
+    };
+    let args_are_canonical = server
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|args| {
+            args.len() == 1 && args[0].as_str() == Some("mcp-knowledge-stdio")
+        });
+    if server.get("command").and_then(Value::as_str).is_none() || !args_are_canonical {
+        return false;
+    }
+    !server.keys().any(|key| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "env" | "url" | "headers" | "token" | "port" | "capability"
+        )
+    })
+}
+
+fn unregister_from_file(path: &Path) -> io::Result<bool> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut document: Value = serde_json::from_str(&existing).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("existing MCP config is invalid JSON: {error}"),
+        )
+    })?;
+    let removed = document
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .map(|servers| servers.remove(KNOWLEDGE_MCP_SERVER_NAME).is_some())
+        .unwrap_or(false);
+    if removed {
+        let serialized = serde_json::to_vec_pretty(&document)
+            .map_err(|error| io::Error::other(format!("could not serialize MCP config: {error}")))?;
+        atomic_write(path, &serialized)?;
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -167,54 +155,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn register_then_unregister_roundtrip_claude() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".claude.json");
-
-        // Pre-seed a user server that must survive the merge.
-        std::fs::write(&path, r#"{"mcpServers":{"mine":{"command":"x"}},"top":"keep"}"#).unwrap();
-
-        register_to_file(&path, AgentCli::Claude, "/usr/bin/nomicore").unwrap();
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(doc["mcpServers"][SERVER_NAME]["command"], "/usr/bin/nomicore");
-        assert_eq!(doc["mcpServers"]["mine"]["command"], "x", "user server preserved");
-        assert_eq!(doc["top"], "keep", "top-level preserved");
-
-        let removed = unregister_from_file(&path).unwrap();
-        assert!(removed);
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(doc["mcpServers"].get(SERVER_NAME).is_none(), "server removed");
-        assert_eq!(doc["mcpServers"]["mine"]["command"], "x", "user server still preserved");
-
-        // Idempotent: removing again is a no-op.
+    fn register_unregister_roundtrip_preserves_other_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".claude.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"mine":{"command":"x"}},"top":"keep"}"#,
+        )
+        .unwrap();
+        merge_registration_file(&path, AgentCli::Claude, "/bin/nomicore").unwrap();
+        assert!(unregister_from_file(&path).unwrap());
         assert!(!unregister_from_file(&path).unwrap());
+        let document: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(document["mcpServers"]["mine"]["command"], "x");
+        assert_eq!(document["top"], "keep");
     }
 
     #[test]
-    fn register_creates_gemini_settings_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".gemini").join("settings.json");
-        register_to_file(&path, AgentCli::Gemini, "/bin/nomicore").unwrap();
-        assert!(path.exists(), "settings.json created with parent dir");
-        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(doc["mcpServers"][SERVER_NAME]["command"], "/bin/nomicore");
+    fn malformed_global_config_is_not_modified() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(&path, "broken").unwrap();
+        assert!(unregister_from_file(&path).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
     }
 
     #[test]
-    fn remove_is_tolerant_and_no_token() {
-        // Absent server → not removed, doc unchanged-ish.
-        let (_doc, removed) = remove_server_from_mcp_json(r#"{"mcpServers":{}}"#);
-        assert!(!removed);
-        // Malformed → no removal, original returned.
-        let (doc, removed) = remove_server_from_mcp_json("not json");
-        assert_eq!(doc, "not json");
-        assert!(!removed);
-    }
-
-    #[test]
-    fn unregister_missing_file_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nope.json");
-        assert!(!unregister_from_file(&path).unwrap());
+    fn legacy_static_credentials_are_not_reported_as_secure_registration() {
+        assert!(is_command_only_registration(&serde_json::json!({
+            "command": "/bin/nomicore",
+            "args": ["mcp-knowledge-stdio"]
+        })));
+        assert!(!is_command_only_registration(&serde_json::json!({
+            "command": "/bin/nomicore",
+            "args": ["mcp-knowledge-stdio"],
+            "env": {"NOMI_KB_MCP_CAPABILITY": "stale"}
+        })));
     }
 }

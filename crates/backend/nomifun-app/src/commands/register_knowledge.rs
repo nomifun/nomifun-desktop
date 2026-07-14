@@ -1,16 +1,18 @@
-//! One-click registration of the platform knowledge MCP into the working path's
-//! CLI auto-discovery file. Secret-free (command=<nomicore> mcp-knowledge-stdio;
-//! the bridge discovers port/token at runtime via the endpoint beacon), so the
-//! written file is safe to commit and survives restarts. Merge-safe: never
-//! clobbers the user's own servers.
+//! Merge-safe project registration for the external knowledge MCP.
+//!
+//! Persisted config contains only `command = <nomicore>` plus
+//! `mcp-knowledge-stdio`. Authorization is issued at runtime by the protected
+//! local broker, so these files are safe to commit and survive backend restarts.
 
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use nomifun_terminal::AgentCli;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-/// Outcome of a one-click registration into a workpath (or global for codex).
+pub const KNOWLEDGE_MCP_SERVER_NAME: &str = "nomifun-knowledge";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RegisterOutcome {
     pub written_path: String,
@@ -19,246 +21,265 @@ pub struct RegisterOutcome {
     pub note: Option<String>,
 }
 
-/// Build the nomifun-knowledge server JSON value (NO token, NO port).
 fn knowledge_server_value(nomicore: &str) -> Value {
     json!({ "command": nomicore, "args": ["mcp-knowledge-stdio"] })
 }
 
-/// Merge the nomifun-knowledge server into an existing (or new) `.mcp.json`-shaped
-/// JSON document, preserving any other mcpServers + top-level keys.
-///
-/// Tolerant of malformed/missing existing content: falls back to an empty object.
-pub fn merge_mcp_json(existing: Option<&str>, nomicore: &str) -> String {
-    let mut doc: Value = existing
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_else(|| json!({}));
-    if !doc.is_object() {
-        doc = json!({});
-    }
-    let obj = doc.as_object_mut().unwrap();
-    let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    if !servers.is_object() {
-        *servers = json!({});
-    }
-    servers
-        .as_object_mut()
-        .unwrap()
-        .insert("nomifun-knowledge".to_owned(), knowledge_server_value(nomicore));
-    serde_json::to_string_pretty(&doc).unwrap_or_default()
+/// Merge without destroying malformed or structurally incompatible user
+/// configuration. Callers must surface `InvalidData` and leave the file intact.
+pub fn merge_mcp_json(existing: Option<&str>, nomicore: &str) -> io::Result<String> {
+    let mut document = match existing {
+        Some(raw) => serde_json::from_str::<Value>(raw).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("existing MCP config is invalid JSON: {error}"),
+            )
+        })?,
+        None => json!({}),
+    };
+    let object = document.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "existing MCP config must be a JSON object",
+        )
+    })?;
+    let servers = object.entry("mcpServers").or_insert_with(|| json!({}));
+    let servers = servers.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "existing mcpServers value must be a JSON object",
+        )
+    })?;
+    servers.insert(
+        KNOWLEDGE_MCP_SERVER_NAME.to_owned(),
+        knowledge_server_value(nomicore),
+    );
+    serde_json::to_string_pretty(&document)
+        .map_err(|error| io::Error::other(format!("could not serialize MCP config: {error}")))
 }
 
-/// Gemini `settings.json` uses the same `mcpServers` shape as claude's `.mcp.json`.
-pub fn merge_gemini_settings(existing: Option<&str>, nomicore: &str) -> String {
+pub fn merge_gemini_settings(existing: Option<&str>, nomicore: &str) -> io::Result<String> {
     merge_mcp_json(existing, nomicore)
 }
 
-/// Write/merge the platform knowledge MCP registration into the workpath for
-/// the given agent family.
-///
-/// - `Claude` → `<cwd>/.mcp.json` (project scope)
-/// - `Gemini` → `<cwd>/.gemini/settings.json` (project scope, creates dir)
-/// - `Codex` → runs `codex mcp add nomifun-knowledge -- <nomicore> mcp-knowledge-stdio`
-///   (global scope; codex has no cwd-scoped config)
 pub fn register_into_workpath(
     cwd: &str,
     family: AgentCli,
     nomicore: &str,
-) -> std::io::Result<RegisterOutcome> {
+) -> io::Result<RegisterOutcome> {
+    let cwd = canonical_directory(cwd)?;
     match family {
         AgentCli::Claude => {
-            let path = Path::new(cwd).join(".mcp.json");
-            let existing = std::fs::read_to_string(&path).ok();
-            std::fs::write(&path, merge_mcp_json(existing.as_deref(), nomicore))?;
+            let path = cwd.join(".mcp.json");
+            merge_registration_file(&path, family, nomicore)?;
             Ok(RegisterOutcome {
                 written_path: path.to_string_lossy().into_owned(),
                 scope: "project".into(),
-                note: Some(
-                    "已写入项目 .mcp.json（无密钥，可提交）；claude 在此目录启动即加载".into(),
-                ),
+                note: Some("已写入项目 .mcp.json（无密钥，可提交）；Claude 在此目录启动即加载".into()),
             })
         }
         AgentCli::Gemini => {
-            let dir = Path::new(cwd).join(".gemini");
-            std::fs::create_dir_all(&dir)?;
-            let path = dir.join("settings.json");
-            let existing = std::fs::read_to_string(&path).ok();
-            std::fs::write(&path, merge_gemini_settings(existing.as_deref(), nomicore))?;
+            let path = cwd.join(".gemini").join("settings.json");
+            merge_registration_file(&path, family, nomicore)?;
             Ok(RegisterOutcome {
                 written_path: path.to_string_lossy().into_owned(),
                 scope: "project".into(),
-                note: None,
+                note: Some("已写入项目 .gemini/settings.json（无密钥，可提交）".into()),
             })
         }
         AgentCli::Codex => {
-            // codex has no cwd-scoped config; let codex itself merge its global TOML.
-            let out = std::process::Command::new("codex")
-                .args(["mcp", "add", "nomifun-knowledge", "--", nomicore, "mcp-knowledge-stdio"])
-                .output()
-                .map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("codex CLI not found or failed to spawn: {e}"),
-                    )
-                })?;
-            if !out.status.success() {
-                return Err(std::io::Error::other(format!(
-                    "codex mcp add failed (exit {}): {}",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr)
-                )));
-            }
+            run_codex(&[
+                "mcp",
+                "add",
+                KNOWLEDGE_MCP_SERVER_NAME,
+                "--",
+                nomicore,
+                "mcp-knowledge-stdio",
+            ])?;
             Ok(RegisterOutcome {
                 written_path: "~/.codex/config.toml".into(),
-                scope: "global".into(),
-                note: Some(
-                    "codex 无工作路径级配置，已注册到全局 ~/.codex（对所有项目生效）".into(),
-                ),
+                scope: "user".into(),
+                note: Some("Codex 无项目级 MCP 配置，已注册到用户级配置（对所有目录生效）".into()),
             })
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+pub(super) fn merge_registration_file(
+    path: &Path,
+    family: AgentCli,
+    nomicore: &str,
+) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let existing = match std::fs::read_to_string(path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let merged = match family {
+        AgentCli::Gemini => merge_gemini_settings(existing.as_deref(), nomicore)?,
+        AgentCli::Claude | AgentCli::Codex => merge_mcp_json(existing.as_deref(), nomicore)?,
+    };
+    atomic_write(path, merged.as_bytes())
+}
+
+fn canonical_directory(raw: &str) -> io::Result<PathBuf> {
+    if raw.is_empty() || raw.trim() != raw {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cwd must be a non-empty exact path",
+        ));
+    }
+    let path = std::fs::canonicalize(raw)?;
+    if !std::fs::metadata(&path)?.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "cwd must be a directory"));
+    }
+    Ok(path)
+}
+
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("mcp-config");
+    let temporary = parent.join(format!(
+        ".{file_name}.nomifun-{}.tmp",
+        nomifun_common::generate_id()
+    ));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both buffers are NUL-terminated UTF-16 paths and remain live for
+    // the synchronous MoveFileExW call.
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn run_codex(args: &[&str]) -> io::Result<()> {
+    let output = std::process::Command::new("codex")
+        .args(args)
+        .output()
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Codex CLI not found or failed to spawn: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "codex {} failed (exit {}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn merge_mcp_json_new_creates_server() {
-        let result = merge_mcp_json(None, "/usr/local/bin/nomicore");
-        let parsed: Value = serde_json::from_str(&result).unwrap();
+    fn merge_is_secret_free_and_preserves_user_config() {
+        let existing = r#"{"mcpServers":{"mine":{"command":"mine"}},"theme":"dark"}"#;
+        let merged = merge_mcp_json(Some(existing), "/bin/nomicore").unwrap();
+        let document: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(document["mcpServers"]["mine"]["command"], "mine");
+        assert_eq!(document["theme"], "dark");
         assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/usr/local/bin/nomicore"
-        );
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["args"],
+            document["mcpServers"][KNOWLEDGE_MCP_SERVER_NAME]["args"],
             json!(["mcp-knowledge-stdio"])
         );
+        let lower = merged.to_ascii_lowercase();
+        assert!(!lower.contains("token"));
+        assert!(!lower.contains("capability"));
+        assert!(!lower.contains("nomi_kb_mcp"));
+        assert!(!lower.contains("\"port\""));
     }
 
     #[test]
-    fn merge_mcp_json_preserves_existing_server() {
-        let existing = r#"{
-            "mcpServers": {
-                "my-custom-server": { "command": "foo", "args": ["bar"] }
-            },
-            "topLevel": "preserved"
-        }"#;
-        let result = merge_mcp_json(Some(existing), "/bin/nomicore");
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-        // User's server preserved
-        assert_eq!(parsed["mcpServers"]["my-custom-server"]["command"], "foo");
-        // New server added
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-        // Top-level key preserved
-        assert_eq!(parsed["topLevel"], "preserved");
+    fn malformed_existing_config_is_never_clobbered() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".mcp.json");
+        std::fs::write(&path, "not json {{{").unwrap();
+        assert!(merge_registration_file(&path, AgentCli::Claude, "/bin/nomicore").is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "not json {{{");
     }
 
     #[test]
-    fn merge_mcp_json_no_token_no_port() {
-        let result = merge_mcp_json(None, "/bin/nomicore");
-        let lower = result.to_lowercase();
-        assert!(!lower.contains("token"), "must not contain token: {result}");
-        assert!(!lower.contains("\"port\""), "must not contain port key: {result}");
-    }
-
-    #[test]
-    fn merge_mcp_json_tolerates_malformed_existing() {
-        // Completely invalid JSON → treated as empty
-        let result = merge_mcp_json(Some("not json at all {{{"), "/bin/nomicore");
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-
-        // Existing is a JSON array, not object → treated as empty
-        let result2 = merge_mcp_json(Some("[1,2,3]"), "/bin/nomicore");
-        let parsed2: Value = serde_json::from_str(&result2).unwrap();
-        assert_eq!(
-            parsed2["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-    }
-
-    #[test]
-    fn merge_gemini_settings_same_shape() {
-        let existing = r#"{ "theme": "dark", "mcpServers": {} }"#;
-        let result = merge_gemini_settings(Some(existing), "/bin/nomicore");
-        let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["theme"], "dark");
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-    }
-
-    #[test]
-    fn register_into_workpath_claude_writes_mcp_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path().to_str().unwrap();
-        let outcome = register_into_workpath(cwd, AgentCli::Claude, "/bin/nomicore").unwrap();
-
-        assert_eq!(outcome.scope, "project");
-        assert!(outcome.written_path.ends_with(".mcp.json"));
-
-        let content = std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap();
-        let parsed: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["args"],
-            json!(["mcp-knowledge-stdio"])
-        );
-    }
-
-    #[test]
-    fn register_into_workpath_gemini_creates_dir_and_writes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path().to_str().unwrap();
-        let outcome = register_into_workpath(cwd, AgentCli::Gemini, "/bin/nomicore").unwrap();
-
-        assert_eq!(outcome.scope, "project");
-        assert!(outcome.written_path.contains(".gemini"));
-        assert!(outcome.written_path.ends_with("settings.json"));
-
-        let path = tmp.path().join(".gemini/settings.json");
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        let parsed: Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
-    }
-
-    #[test]
-    fn register_into_workpath_claude_merge_preserves_existing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path().to_str().unwrap();
-        let existing = r#"{"mcpServers":{"user-server":{"command":"us","args":[]}}}"#;
-        std::fs::write(tmp.path().join(".mcp.json"), existing).unwrap();
-
-        let outcome = register_into_workpath(cwd, AgentCli::Claude, "/bin/nomicore").unwrap();
-        assert_eq!(outcome.scope, "project");
-
-        let content = std::fs::read_to_string(tmp.path().join(".mcp.json")).unwrap();
-        let parsed: Value = serde_json::from_str(&content).unwrap();
-        // User's server preserved
-        assert_eq!(parsed["mcpServers"]["user-server"]["command"], "us");
-        // New server added
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"],
-            "/bin/nomicore"
-        );
+    fn project_registration_canonicalizes_symlink_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&workspace, temp.path().join("alias")).unwrap();
+            let result = register_into_workpath(
+                temp.path().join("alias").to_str().unwrap(),
+                AgentCli::Claude,
+                "/bin/nomicore",
+            )
+            .unwrap();
+            assert_eq!(
+                result.written_path,
+                std::fs::canonicalize(&workspace)
+                    .unwrap()
+                    .join(".mcp.json")
+                    .to_string_lossy()
+            );
+        }
     }
 }

@@ -1,0 +1,33 @@
+{
+  "policy": {
+    "title": "协作策略",
+    "description": "决定当前对话是否拆分任务，以及是否优先并行推进。",
+    "delegation": {
+      "disabled": "关闭",
+      "automatic": "自动",
+      "prefer_parallel": "优先并行"
+    },
+    "askUser": "关键决策时询问我",
+    "askUserDescription": "协作者遇到无法安全判断的选择时暂停并询问。",
+    "open": "协作策略",
+    "button": "协作"
+  },
+  "template": {
+    "title": "协作方案",
+    "empty": "暂无已保存方案",
+    "namePlaceholder": "保存当前配置为方案",
+    "save": "保存",
+    "clear": "取消使用",
+    "activeHint": "将完整使用方案中的 {{count}} 位协作者；不会截断成当前模型选择。",
+    "delete": "删除方案",
+    "deleteConfirm": "删除这个协作方案？",
+    "saved": "协作方案已保存",
+    "applied": "已应用协作方案：{{name}}",
+    "deleted": "协作方案已删除",
+    "loadError": "协作方案加载失败",
+    "saveError": "协作方案保存失败",
+    "leadMismatch": "该方案不包含当前主模型 {{model}}，请先切换主模型或选择其他方案。",
+    "applyError": "协作方案应用失败",
+    "deleteError": "协作方案删除失败"
+  }
+}

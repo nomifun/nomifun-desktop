@@ -40,7 +40,7 @@ const TaskDetailPage: React.FC = () => {
   const [runningNow, setRunningNow] = useState(false);
   const [toggling, setToggling] = useState(false);
 
-  const isNewConversationMode = job?.target.execution_mode === 'new_conversation';
+  const isNewConversationMode = job?.execution_mode === 'new_conversation';
   const isManualOnly = job?.schedule.kind === 'cron' && !job.schedule.expr;
   const { runs, loading: runHistoryLoading } = useCronJobRuns(job_id);
   const { cliAgents } = useConversationAgents();
@@ -332,7 +332,7 @@ const TaskDetailPage: React.FC = () => {
               <h2 className='m-0 text-13px font-medium text-t-secondary'>{t('cron.detail.instructions')}</h2>
               <div className='box-border rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-2 px-16px py-14px'>
                 <div className='whitespace-pre-wrap break-words text-14px leading-22px text-t-primary font-mono'>
-                  {job.target.payload.text || '-'}
+                  {job.message || '-'}
                 </div>
               </div>
             </section>

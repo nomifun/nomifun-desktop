@@ -64,6 +64,31 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content.senderConversationId).toBeUndefined();
   });
 
+  test('maps external collaboration fields to the single Agent message shape', () => {
+    const message = transformMessage(
+      baseWire({
+        type: 'content',
+        data: {
+          content: 'Delegated result',
+          teammate_message: true,
+          sender_name: 'Researcher',
+          sender_backend: 'nomi',
+          sender_conversation_id: 42,
+        },
+      })
+    );
+
+    expect(message?.type).toBe('text');
+    if (message?.type !== 'text') throw new Error('expected text message');
+    expect(message.content).toMatchObject({
+      content: 'Delegated result',
+      agentMessage: true,
+      senderName: 'Researcher',
+      senderAgentType: 'nomi',
+      senderConversationId: 42,
+    });
+  });
+
   test('normalizes tips content and type from malformed payloads', () => {
     const message = transformMessage(
       baseWire({

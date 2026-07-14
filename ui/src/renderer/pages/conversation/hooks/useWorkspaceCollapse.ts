@@ -12,13 +12,12 @@ type UseWorkspaceCollapseParams = {
   isMobile: boolean;
   /**
    * Identifier whose change forces a mobile collapse (typically the active
-   * conversation id; in team mode, the active agent's conversation id).
+   * conversation id).
    */
   conversation_id?: number;
   /**
-   * Stable key used to persist the user's manual toggle preference. Single-chat
-   * uses `conversation_id`; team mode passes `team_id` so the preference
-   * survives agent-tab switches and follows the team as a whole.
+   * Stable key used to persist the user's manual toggle preference. Defaults
+   * to the conversation id; callers may provide a broader stable scope.
    */
   preferenceKey?: string;
   /**
@@ -106,8 +105,8 @@ export function resolveWorkspaceCollapseAfterHasFiles({
  *     file while the user is here).
  *
  * Manual toggle is persisted under `workspace-preference-${preferenceKey}` and
- * overrides auto-expand. The caller decides what `preferenceKey` is — single
- * chats use `conversation_id`, teams use `team_id`.
+ * overrides auto-expand. The caller decides what `preferenceKey` is; normal
+ * conversations use `conversation_id`.
  *
  * Known limitation: leaving and re-entering a temporary workspace remounts the
  * workspace tree, so files added while away report as initial load. They will

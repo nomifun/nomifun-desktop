@@ -5,7 +5,6 @@ use nomifun_api_types::{CreateProviderRequest, ProviderResponse, UpdateProviderR
 use nomifun_common::{AppError, ProviderInUseDetails, decrypt_string, encrypt_string};
 use nomifun_db::{CreateProviderParams, IProviderRepository, UpdateProviderParams, models::Provider};
 use serde::de::DeserializeOwned;
-use tracing::warn;
 
 use crate::managed_model::is_managed_provider_identity;
 use crate::provider_deletion::SharedProviderDeletionCoordinator;
@@ -27,8 +26,8 @@ impl ProviderService {
         }
     }
 
-    /// Inject a deletion coordinator so `delete` refuses in-use providers and
-    /// cleans up soft references afterwards.
+    /// Inject a deletion coordinator so `delete` returns friendly labeled
+    /// conflicts before SQLite enforces the same hard bindings atomically.
     pub fn with_deletion_coordinator(mut self, coordinator: SharedProviderDeletionCoordinator) -> Self {
         self.coordinator = Some(coordinator);
         self
@@ -132,8 +131,8 @@ impl ProviderService {
     ///
     /// When a deletion coordinator is configured, deletion is refused with
     /// `AppError::ProviderInUse` if any feature still holds a hard binding to
-    /// the provider. After a successful delete, soft references are cleaned up
-    /// on a best-effort basis (failures are logged, not propagated).
+    /// the provider. SQLite owns atomic soft-reference cleanup in the provider
+    /// DELETE transaction; there is no post-commit cleanup phase.
     pub async fn delete(&self, id: &str) -> Result<(), AppError> {
         reject_managed_id(id)?;
         self.reject_persisted_managed_provider(id).await?;
@@ -144,11 +143,6 @@ impl ProviderService {
             }
         }
         self.repo.delete(id).await?;
-        if let Some(coord) = &self.coordinator
-            && let Err(e) = coord.cleanup_soft_refs(id).await
-        {
-            warn!(provider_id = %id, error = %e, "provider soft-ref cleanup failed (delete already committed)");
-        }
         Ok(())
     }
 
@@ -997,7 +991,7 @@ mod tests {
 mod delete_guard_tests {
     use super::*;
     use nomifun_common::{ProviderUsage, ProviderUsageFeature};
-    use nomifun_db::models::Provider;
+    use nomifun_db::{SqliteProviderRepository, init_database_memory, models::Provider};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct CountingRepo {
@@ -1025,16 +1019,39 @@ mod delete_guard_tests {
 
     struct FakeCoord {
         usages: Vec<ProviderUsage>,
-        cleaned: AtomicBool,
     }
     #[async_trait::async_trait]
     impl crate::provider_deletion::ProviderDeletionCoordinator for FakeCoord {
         async fn usages(&self, _: &str) -> Result<Vec<ProviderUsage>, AppError> {
             Ok(self.usages.clone())
         }
-        async fn cleanup_soft_refs(&self, _: &str) -> Result<(), AppError> {
-            self.cleaned.store(true, Ordering::SeqCst);
-            Ok(())
+    }
+
+    struct RacingCoord {
+        pool: nomifun_db::sqlx::SqlitePool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider_deletion::ProviderDeletionCoordinator for RacingCoord {
+        async fn usages(&self, provider_id: &str) -> Result<Vec<ProviderUsage>, AppError> {
+            // Simulate a hard binding committed immediately after the friendly
+            // application scan observed no usages. The provider DELETE trigger
+            // remains the authoritative race barrier.
+            nomifun_db::sqlx::query(
+                "INSERT INTO conversations (\
+                    user_id, name, type, extra, model, status, pinned, created_at, updated_at\
+                 ) VALUES (\
+                    'system_default_user', 'racing conversation', 'nomi', '{}', ?,\
+                    'pending', 0, 1, 1\
+                 )",
+            )
+            .bind(format!(
+                r#"{{"provider_id":"{provider_id}","model":"model"}}"#
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| AppError::Internal(format!("create racing provider binding: {error}")))?;
+            Ok(Vec::new())
         }
     }
 
@@ -1049,7 +1066,6 @@ mod delete_guard_tests {
                 label: "甲".into(),
                 target_id: None,
             }],
-            cleaned: AtomicBool::new(false),
         });
         let svc = ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coord);
         let err = svc.delete("prov_x").await.unwrap_err();
@@ -1058,17 +1074,51 @@ mod delete_guard_tests {
     }
 
     #[tokio::test]
-    async fn delete_proceeds_and_cleans_when_unused() {
+    async fn delete_proceeds_when_unused() {
         let repo = Arc::new(CountingRepo {
             deleted: AtomicBool::new(false),
         });
         let coord = Arc::new(FakeCoord {
             usages: vec![],
-            cleaned: AtomicBool::new(false),
         });
-        let svc = ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coord.clone());
+        let svc = ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coord);
         svc.delete("prov_x").await.unwrap();
         assert!(repo.deleted.load(Ordering::SeqCst));
-        assert!(coord.cleaned.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn delete_race_is_reported_as_conflict_instead_of_internal_error() {
+        let database = init_database_memory().await.unwrap();
+        nomifun_db::sqlx::query(
+            "INSERT INTO providers (\
+                id, platform, name, base_url, api_key_encrypted, models, enabled,\
+                capabilities, created_at, updated_at\
+             ) VALUES (\
+                'prov_race', 'openai', 'Race provider', 'https://example.invalid',\
+                'encrypted', '[]', 1, '[]', 1, 1\
+             )",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
+        let coordinator = Arc::new(RacingCoord {
+            pool: database.pool().clone(),
+        });
+        let service =
+            ProviderService::new(repo.clone(), [0u8; 32]).with_deletion_coordinator(coordinator);
+
+        let error = service.delete("prov_race").await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                AppError::Conflict(ref message)
+                    if message == "provider is still referenced by an executable Agent binding"
+            ),
+            "the atomic delete guard must surface as a deterministic conflict; got {error:?}"
+        );
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert!(repo.find_by_id("prov_race").await.unwrap().is_some());
     }
 }

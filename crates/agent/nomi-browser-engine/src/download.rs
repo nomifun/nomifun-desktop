@@ -118,13 +118,13 @@ const DENY_EXTENSIONS: &[&str] = &[
 /// `BrowserTool::execute` 把它接到 yolo/companion 也不旁路的独立 fail-closed 门上）由 **F1** 做。
 ///
 /// 红线语义（DESIGN §16「会话红线（yolo/companion 无 UI 也 fail-closed 拒绝）」含「可执行下载」）：
-/// 一旦命中，**无论 session_mode（yolo/companion 也罢）都拒**——这正是「不靠被旁路的 orchestration
+/// 一旦命中，**无论 session_mode（yolo/companion 也罢）都拒**——这正是「不靠被旁路的 approval pipeline
 /// 审批闸、靠独立门」的体现。故本函数**不吃 session_mode**：命中即拒，无放行参数。
 ///
 /// `Ok(())` = 文件名安全（非可执行），可放行下载。
 ///
 /// TODO(E4->F1-enforce-download-redline): F1 在 facade `do_download`/下载触发的动作分支调用本判定，
-/// 命中即 hard-deny 返回（不经 orchestration）。E4 此处仅提供判定 + 单测。
+/// 命中即 hard-deny 返回（不经 approval pipeline）。E4 此处仅提供判定 + 单测。
 pub fn reject_executable_download(filename: &str) -> Result<(), BrowserError> {
     if is_executable_denylist(filename) {
         return Err(BrowserError::Blocked {

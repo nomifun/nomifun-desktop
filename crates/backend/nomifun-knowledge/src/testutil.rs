@@ -202,14 +202,19 @@ impl IKnowledgeRepository for MemRepo {
 
 pub(crate) struct NoopBroadcaster;
 
-impl nomifun_realtime::EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+impl nomifun_realtime::UserEventSink for NoopBroadcaster {
+    fn send_to_user(
+        &self,
+        _user_id: &str,
+        _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+    ) {
+    }
 }
 
 pub(crate) fn make_service(data_dir: &Path) -> KnowledgeService {
     KnowledgeService::new(
         Arc::new(MemRepo::default()),
         data_dir,
-        KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster)),
+        KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from("test-owner")),
     )
 }

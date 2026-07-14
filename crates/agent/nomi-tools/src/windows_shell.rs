@@ -1,4 +1,4 @@
-use nomi_execution::Transport;
+use nomi_process_runtime::Transport;
 
 pub(crate) const SHELL_PTY_COLS: u16 = 120;
 pub(crate) const SHELL_PTY_ROWS: u16 = 30;

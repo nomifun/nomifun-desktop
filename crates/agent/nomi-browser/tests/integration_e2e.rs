@@ -14,8 +14,8 @@
 //!   （普通会话 submit 真提交 → onsubmit 标记 `submitted:<user>:<plan>`，经再 observe 读回证实）。
 //! - **安全门生效（红线）**：
 //!   1. **yolo/审批旁路会话** click submit（accname="Submit order" → 分类 Irreversible）→ facade redline
-//!      门 **hard-deny Blocked**（设计裁决⑧：不靠被旁路的 orchestration，靠 facade 独立 fail-closed 门）；
-//!   2. **普通会话** 同一 submit → 门**不拦**（交 orchestration），动作真执行；
+//!      门 **hard-deny Blocked**（设计裁决⑧：不靠被旁路的 approval pipeline，靠 facade 独立 fail-closed 门）；
+//!   2. **普通会话** 同一 submit → 门**不拦**（交 approval pipeline），动作真执行；
 //!   3. **secret 域绑定 fail-closed**：`secret:NAME` 在 file:// 源（无 eTLD+1）→ Blocked，明文不入输出。
 //!
 //! 手动跑（本机 Windows 有系统 Chrome）：
@@ -102,7 +102,7 @@ async fn concurrent_first_calls_on_one_facade_launch_single_engine() {
 #[tokio::test]
 #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all"]
 async fn e2e_multistep_form_flow_through_facade_normal_session() {
-    // 普通会话（session_bypasses_approval=false）：facade redline 门不拦不可逆动作（交 orchestration）。
+    // 普通会话（session_bypasses_approval=false）：facade redline 门不拦不可逆动作（交 approval pipeline）。
     let tool = BrowserTool::with_data_dir(isolated_data_dir("normal"), false);
 
     // ── 1. navigate ────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
     assert_eq!(
         tool.category_for(&json!({"action": "click", "ref": submit_ref})),
         nomi_protocol::events::ToolCategory::Irreversible,
-        "submit-order click must classify as Irreversible (so orchestration prompts in a normal session)"
+        "submit-order click must classify as Irreversible (so approval pipeline prompts in a normal session)"
     );
     let submit = tool
         .execute(json!({"action": "click", "ref": submit_ref}))
@@ -190,14 +190,14 @@ async fn e2e_multistep_form_flow_through_facade_normal_session() {
          type user    = changed=true\n\
          type pass    = changed=true\n\
          select Pro   = changed=true (value 'pro')\n\
-         submit       = NOT blocked in normal session (classified Irreversible → orchestration)\n\
+         submit       = NOT blocked in normal session (classified Irreversible → approval pipeline)\n\
          form-status  = submitted:e2e-user:pro (onsubmit fired)"
     );
 }
 
 /// **安全门生效证据（红线）：审批旁路（yolo/companion）会话里的不可逆 submit → facade hard-deny Blocked。**
 ///
-/// 这是设计裁决⑧的端到端证明：不靠被旁路的 orchestration 审批闸，靠 facade 的独立 fail-closed 门。
+/// 这是设计裁决⑧的端到端证明：不靠被旁路的 tool-execution 审批闸，靠 facade 的独立 fail-closed 门。
 /// 经 `with_policy(.., session_bypasses_approval=true, ..)` 构造一个审批旁路会话的 tool（= yolo / companion
 /// 强制 yolo / --auto-approve 的等价 test seam），navigate + observe 真页拿到真 submit ref（accname
 /// "Submit order" → 分类 Irreversible），然后 `execute(click submit)` → **Blocked**（门在 dispatch 之前拦）。
@@ -241,7 +241,7 @@ async fn e2e_security_gate_blocks_irreversible_submit_in_bypassing_session() {
         "=== F3 SECURITY GATE EVIDENCE ===\n\
          session      = approval-bypassing (yolo/companion/auto_approve)\n\
          action       = click submit [ref={submit_ref}] (accname 'Submit order' → Irreversible)\n\
-         result       = HARD-DENY Blocked (facade fail-closed gate, NOT orchestration)\n\
+         result       = HARD-DENY Blocked (facade fail-closed gate, NOT approval pipeline)\n\
          message      = {:?}",
         blocked.content
     );
@@ -252,7 +252,7 @@ async fn e2e_security_gate_blocks_irreversible_submit_in_bypassing_session() {
 ///
 /// secret 正向注入路径需真 http 源（eTLD+1 域绑定），离线 file:// 无 registrable domain → 域门 fail-closed。
 /// 这正好验**最关键的安全方向**：源不匹配 / 无源 → 拒绝解析，且 `secret:NAME` 字面量绝不当普通文本输入、
-/// 也绝不泄漏配置的值。即便 yolo 会话也拦（门是 vault 的属性，非 orchestration 审批）。
+/// 也绝不泄漏配置的值。即便 yolo 会话也拦（门是 vault 的属性，非 tool-execution 审批）。
 #[tokio::test]
 #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all"]
 async fn e2e_secret_origin_gate_fails_closed_on_file_origin() {

@@ -7,10 +7,11 @@ executes inside the host process. The React 19 SPA in `ui/` is the only client,
 and it always speaks plain HTTP and WebSocket — no Electron preload, no Tauri
 custom protocol.
 
-This document is the map. The four siblings drill into the parts:
+This document is the map. The sibling documents drill into the parts:
 
-- [`backend-crates.md`](backend-crates.md) — the 29 `nomifun-*` backend crates.
+- [`backend-crates.md`](backend-crates.md) — the 32 `nomifun-*` backend crates.
 - [`agent-engine.md`](agent-engine.md) — the 15 `nomi-*` agent crates.
+- [`agent-execution.zh.md`](agent-execution.zh.md) — the unified persistent AgentExecution model.
 - [`frontend.md`](frontend.md) — the React SPA, adapter layer, routing.
 - [`communication.md`](communication.md) — HTTP / WebSocket / Tauri IPC / ACP / MCP.
 - [`data-and-storage.md`](data-and-storage.md) — SQLite, workspaces, runtimes.
@@ -48,7 +49,7 @@ This document is the map. The four siblings drill into the parts:
                           │                       │
                           ▼                       ▼
               ┌─────────────────────┐   ┌─────────────────────┐
-              │  nomifun-* (29)     │   │  nomi-* (15)         │
+              │  nomifun-* (32)     │   │  nomi-* (15)         │
               │  backend crates     │◀─▶│  agent engine crates │
               │  data, auth, MCP,   │   │  via the SEAM:       │
               │  conversation, etc. │   │  nomifun-ai-agent     │
@@ -83,8 +84,8 @@ files that participate.
    persists the message, looks up the conversation's bound agent
 5. Agent seam
    crates/backend/nomifun-ai-agent  — the primary backend bridge to nomi-*
-   AgentRegistry / WorkerTaskManager dispatches to the right agent kind
-6. Agent run
+   AgentRegistry resolves the Agent kind; AgentRuntimeRegistry reuses its Conversation runtime
+6. Agent turn
    nomi-agent  drives the engine: providers (anthropic/openai/bedrock/vertex),
    tools (bash/read/write/...), MCP servers, skills, plan/confirm/output sinks
    For ACP-protocol agents (Claude Code, Codex, Gemini CLI, ...), the backend
@@ -104,8 +105,8 @@ on disk, not just in package names:
 | Folder | Purpose | Crate prefix | Count |
 | --- | --- | --- | --- |
 | `crates/agent/` | AI engine — providers, tools, sessions, MCP, skills, computer/browser use | `nomi-*` | 15 |
-| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 29 |
-| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 2 |
+| `crates/backend/` | The HTTP/WS server, data, auth, features, public capability gateway | `nomifun-*` | 32 |
+| `crates/shared/` | Cross-layer utilities used by both groups | mixed | 3 |
 
 The agent group is **self-contained** — no `nomi-*` crate references any
 `nomifun-*` crate, the workspace root, or frameworks like Tauri / sqlx / axum.
@@ -124,8 +125,8 @@ nomifun-tauri/
 │   └─ web/       nomifun-web      (standalone server: /api + SPA on one port)
 ├─ crates/
 │   ├─ agent/     15 nomi-* crates  → see agent-engine.md
-│   ├─ backend/   29 nomifun-* crates → see backend-crates.md
-│   └─ shared/    2 shared crates
+│   ├─ backend/   32 nomifun-* crates → see backend-crates.md
+│   └─ shared/    3 shared crates
 ├─ ui/            React 19 + Vite 6 + Arco + UnoCSS  → see frontend.md
 └─ docs/
     ├─ architecture/   (this folder)

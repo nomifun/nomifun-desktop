@@ -30,4 +30,4 @@ export interface ChannelTarget {
 }
 
 /** Builtin IM platforms a companion can connect (the channel config forms cover this set). */
-export type MasterAgentPlatform = 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | 'discord' | 'slack' | 'matrix' | 'mattermost' | 'twitch' | 'nostr' | 'qqbot';
+export type ChannelPlatform = 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | 'discord' | 'slack' | 'matrix' | 'mattermost' | 'twitch' | 'nostr' | 'qqbot';

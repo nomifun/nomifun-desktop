@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use nomifun_api_types::{AutoWorkTargetKind, IdmmConfig, IdmmState, IdmmTargetKind, InterventionRecord};
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, generate_prefixed_id, now_ms};
 use nomifun_db::IIdmmInterventionRepository;
 use nomifun_db::models::IdmmInterventionRow;
 use tracing::{debug, info, warn};
@@ -101,7 +101,48 @@ pub async fn run_supervisor(
     shared: Arc<SupervisorShared>,
     cancel: Arc<AtomicBool>,
 ) {
+    run_supervisor_for_owner(probe, cfg, deps, shared, cancel, None).await;
+}
+
+/// Owner-bound supervisor entry used by `IdmmManager`. The public free-standing
+/// wrapper above remains convenient for policy tests, while production always
+/// supplies the owner resolved during arming and revalidates it here before any
+/// probe observation, action, persistence, or realtime emission.
+async fn run_supervisor_for_owner(
+    probe: Arc<dyn SessionProbe>,
+    cfg: IdmmConfig,
+    deps: Arc<LoopDeps>,
+    shared: Arc<SupervisorShared>,
+    cancel: Arc<AtomicBool>,
+    expected_owner_id: Option<String>,
+) {
     let (kind, target_id) = probe.target();
+    // Resolve the persisted session owner once, before any realtime emission.
+    // A target with no authoritative owner is not safe to supervise: publishing
+    // to a guessed/default audience would expose private intervention state.
+    let owner_id = match probe.describe().await {
+        Ok(description) if !description.user_id.trim().is_empty() => description.user_id,
+        Ok(_) => {
+            warn!(target_id, ?kind, "IDMM target has no owner — supervision not started");
+            return;
+        }
+        Err(error) => {
+            warn!(target_id, ?kind, error = %error, "IDMM target owner resolution failed — supervision not started");
+            return;
+        }
+    };
+    if let Some(expected_owner_id) = expected_owner_id
+        && owner_id != expected_owner_id
+    {
+        warn!(
+            target_id,
+            ?kind,
+            expected_owner_id,
+            actual_owner_id = owner_id,
+            "IDMM target owner changed while arming — supervision not started"
+        );
+        return;
+    }
     // The conversation idle ticker uses the decision watch's scan interval (idle
     // nudges are a decision-lane concern); fall back to the fault watch's when
     // the decision watch is off, then to a sane default.
@@ -127,9 +168,20 @@ pub async fn run_supervisor(
         && let Some(sig) = probe.pending_signal().await
     {
         *shared.last_signal.lock().unwrap() = Some(signal_label(&sig));
-        set_intervening(&shared, &deps, kind, &target_id, &cfg, true);
-        let halted = handle_stall(&probe, &mut policy, &deps, &shared, kind, &target_id, &cfg, &sig).await;
-        set_intervening(&shared, &deps, kind, &target_id, &cfg, false);
+        set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, true);
+        let halted = handle_stall(
+            &probe,
+            &mut policy,
+            &deps,
+            &shared,
+            &owner_id,
+            kind,
+            &target_id,
+            &cfg,
+            &sig,
+        )
+        .await;
+        set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, false);
         if halted {
             warn!(target_id, "IDMM halted on the on-arm pending decision — standing down");
             return;
@@ -145,7 +197,7 @@ pub async fn run_supervisor(
         match &sig {
             SessionSignal::Working | SessionSignal::Done => {
                 policy.on_progress(&sig);
-                set_intervening(&shared, &deps, kind, &target_id, &cfg, false);
+                set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, false);
                 continue;
             }
             SessionSignal::Cancelled => {
@@ -156,7 +208,7 @@ pub async fn run_supervisor(
                 // just paused.
                 debug!(target_id, "IDMM user cancel — suppressing interventions until new work");
                 policy.on_user_cancel();
-                set_intervening(&shared, &deps, kind, &target_id, &cfg, false);
+                set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, false);
                 continue;
             }
             SessionSignal::Exited => {
@@ -194,7 +246,7 @@ pub async fn run_supervisor(
         }
 
         // A stall. Sleep the backoff, then run the ladder.
-        set_intervening(&shared, &deps, kind, &target_id, &cfg, true);
+        set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, true);
         let delay = policy.next_delay();
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
@@ -203,8 +255,19 @@ pub async fn run_supervisor(
             break;
         }
 
-        let halted = handle_stall(&probe, &mut policy, &deps, &shared, kind, &target_id, &cfg, &sig).await;
-        set_intervening(&shared, &deps, kind, &target_id, &cfg, false);
+        let halted = handle_stall(
+            &probe,
+            &mut policy,
+            &deps,
+            &shared,
+            &owner_id,
+            kind,
+            &target_id,
+            &cfg,
+            &sig,
+        )
+        .await;
+        set_intervening(&shared, &deps, &owner_id, kind, &target_id, &cfg, false);
         if halted {
             // The policy decided this needs a human (retries/budget exhausted,
             // unanswerable decision). Halting must actually STOP supervision —
@@ -226,6 +289,7 @@ async fn handle_stall(
     policy: &mut PolicyState,
     deps: &Arc<LoopDeps>,
     shared: &Arc<SupervisorShared>,
+    owner_id: &str,
     kind: IdmmTargetKind,
     target_id: &str,
     cfg: &IdmmConfig,
@@ -245,6 +309,7 @@ async fn handle_stall(
             emit_intervention(
                 deps,
                 shared,
+                owner_id,
                 kind,
                 target_id,
                 sig,
@@ -268,6 +333,7 @@ async fn handle_stall(
             emit_intervention(
                 deps,
                 shared,
+                owner_id,
                 kind,
                 target_id,
                 sig,
@@ -285,7 +351,10 @@ async fn handle_stall(
             false
         }
         PolicyStep::Sidecar { class, detail } => {
-            run_sidecar(probe, policy, deps, shared, kind, target_id, cfg, sig, class, &detail).await;
+            run_sidecar(
+                probe, policy, deps, shared, owner_id, kind, target_id, cfg, sig, class, &detail,
+            )
+            .await;
             policy.record_for(now, sig);
             false
         }
@@ -298,6 +367,7 @@ async fn run_sidecar(
     policy: &mut PolicyState,
     deps: &Arc<LoopDeps>,
     shared: &Arc<SupervisorShared>,
+    owner_id: &str,
     kind: IdmmTargetKind,
     target_id: &str,
     cfg: &IdmmConfig,
@@ -373,6 +443,7 @@ async fn run_sidecar(
         emit_intervention(
             deps,
             shared,
+            owner_id,
             kind,
             target_id,
             sig,
@@ -409,6 +480,7 @@ async fn run_sidecar(
             emit_intervention(
                 deps,
                 shared,
+                owner_id,
                 kind,
                 target_id,
                 sig,
@@ -430,6 +502,7 @@ async fn run_sidecar(
             emit_intervention(
                 deps,
                 shared,
+                owner_id,
                 kind,
                 target_id,
                 sig,
@@ -452,6 +525,7 @@ async fn run_sidecar(
             emit_intervention(
                 deps,
                 shared,
+                owner_id,
                 kind,
                 target_id,
                 sig,
@@ -522,6 +596,7 @@ fn finalize_action(sig: &SessionSignal, action: WakeAction) -> WakeAction {
 fn set_intervening(
     shared: &Arc<SupervisorShared>,
     deps: &Arc<LoopDeps>,
+    owner_id: &str,
     kind: IdmmTargetKind,
     target_id: &str,
     cfg: &IdmmConfig,
@@ -533,7 +608,7 @@ fn set_intervening(
         // do not need to round-trip the persisted config — the GET endpoint
         // is the rehydration source. Pass None.
         let st = build_state(shared, kind, target_id, cfg, true, None);
-        deps.emitter.emit_status_changed(&st);
+        deps.emitter.emit_status_changed(owner_id, &st);
     }
 }
 
@@ -615,6 +690,7 @@ fn rule_category(sig: &SessionSignal) -> Option<String> {
 async fn emit_intervention(
     deps: &Arc<LoopDeps>,
     shared: &Arc<SupervisorShared>,
+    owner_id: &str,
     kind: IdmmTargetKind,
     target_id: &str,
     sig: &SessionSignal,
@@ -653,6 +729,7 @@ async fn emit_intervention(
     // `/log`; the supervisor itself keeps only live counters (count / last-at).
     let row = IdmmInterventionRow {
         id: rec.id.clone(),
+        user_id: owner_id.to_owned(),
         target_kind,
         target_id: target_id.to_string(),
         watch,
@@ -680,7 +757,7 @@ async fn emit_intervention(
         "IDMM intervention"
     );
     shared.record(&rec);
-    deps.emitter.emit_intervention(&rec);
+    deps.emitter.emit_intervention(owner_id, &rec);
 }
 
 /// Build the live state for emission / API.
@@ -754,7 +831,12 @@ pub trait ProbeFactory: Send + Sync {
 /// Reads persisted IDMM config for a target (impl in service.rs over the DB).
 #[async_trait::async_trait]
 pub trait ConfigReader: Send + Sync {
-    async fn read(&self, kind: IdmmTargetKind, target_id: &str) -> IdmmConfig;
+    async fn read(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<IdmmConfig, AppError>;
 }
 
 /// Domain-qualified key for the per-target supervisor maps. The integer
@@ -772,7 +854,7 @@ pub struct IdmmInner {
     /// `Arc` so each supervisor task can carry a cleanup guard that removes
     /// its own (generation-matched) entry when `run_supervisor` returns —
     /// without this, a naturally-exited supervisor (session Exited, probe
-    /// found no agent task) stayed in the map forever, `is_supervising`
+    /// found no Agent runtime) stayed in the map forever, `is_supervising`
     /// reported a live supervisor that wasn't there (AutoWork then "waited
     /// for IDMM recovery" that never came), and `ensure` could never re-arm.
     handles: Arc<DashMap<IdmmKey, SupervisorHandle>>,
@@ -822,27 +904,61 @@ impl IdmmInner {
     /// decision-ending turn to IDMM. False when the decision watch is off, the
     /// target is not buildable, or the text is not a decision.
     async fn has_pending_decision(&self, kind: IdmmTargetKind, target_id: &str, turn_text: &str) -> bool {
-        let cfg = self.config_reader.read(kind, target_id).await;
+        let Some(probe) = self.factory.build(kind, target_id) else {
+            return false;
+        };
+        let Ok(description) = probe.describe().await else {
+            return false;
+        };
+        if description.user_id.trim().is_empty() || description.kind != kind {
+            return false;
+        }
+        let Ok(cfg) = self
+            .config_reader
+            .read(&description.user_id, kind, target_id)
+            .await
+        else {
+            return false;
+        };
         if !cfg.decision_watch.base.enabled {
             return false;
         }
-        match self.factory.build(kind, target_id) {
-            Some(probe) => probe.decision_in_text(turn_text).await,
-            None => false,
-        }
+        probe.decision_in_text(turn_text).await
     }
 
     async fn ensure(&self, kind: IdmmTargetKind, target_id: &str) {
-        if self.is_supervising(kind, target_id) {
-            return;
-        }
-        let cfg = self.config_reader.read(kind, target_id).await;
-        if !cfg.any_enabled() {
-            return;
-        }
         let Some(probe) = self.factory.build(kind, target_id) else {
             return;
         };
+        let description = match probe.describe().await {
+            Ok(description)
+                if description.kind == kind && !description.user_id.trim().is_empty() => description,
+            Ok(_) => {
+                warn!(target_id, ?kind, "IDMM target has no valid owner — supervisor not armed");
+                return;
+            }
+            Err(error) => {
+                warn!(target_id, ?kind, error = %error, "IDMM target owner resolution failed — supervisor not armed");
+                return;
+            }
+        };
+        if self.is_supervising(kind, target_id) {
+            return;
+        }
+        let cfg = match self
+            .config_reader
+            .read(&description.user_id, kind, target_id)
+            .await
+        {
+            Ok(cfg) => cfg,
+            Err(error) => {
+                warn!(target_id, ?kind, error = %error, "IDMM owned config read failed — supervisor not armed");
+                return;
+            }
+        };
+        if !cfg.any_enabled() {
+            return;
+        }
         let shared = self.shared_for(kind, target_id);
         let cancel = Arc::new(AtomicBool::new(false));
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
@@ -856,9 +972,10 @@ impl IdmmInner {
             let cfg = cfg.clone();
             let deps = self.deps.clone();
             let cancel = cancel.clone();
+            let owner_id = description.user_id;
             async move {
                 let _cleanup = cleanup;
-                run_supervisor(probe, cfg, deps, shared, cancel).await;
+                run_supervisor_for_owner(probe, cfg, deps, shared, cancel, Some(owner_id)).await;
             }
         });
         // The supervisor may exit (and clean up) before this insert runs — a
@@ -1138,8 +1255,13 @@ mod tests {
 
     #[derive(Default)]
     struct NullBroadcaster;
-    impl nomifun_realtime::EventBroadcaster for NullBroadcaster {
-        fn broadcast(&self, _e: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    impl nomifun_realtime::UserEventSink for NullBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
     }
 
     // ── Mock record repo: captures every `insert` so a test can assert the
@@ -1162,22 +1284,32 @@ mod tests {
         }
         async fn list_for_target(
             &self,
+            _user_id: &str,
             _kind: &str,
             _id: &str,
             _limit: i64,
         ) -> Result<Vec<nomifun_db::models::IdmmInterventionRow>, DbError> {
             Ok(self.inserted.lock().unwrap().clone())
         }
-        async fn delete_for_target(&self, _kind: &str, _id: &str) -> Result<u64, DbError> {
+        async fn delete_for_target(
+            &self,
+            _user_id: &str,
+            _kind: &str,
+            _id: &str,
+        ) -> Result<u64, DbError> {
             Ok(0)
         }
-        async fn list_recent(&self, _limit: i64) -> Result<Vec<nomifun_db::models::IdmmInterventionRow>, DbError> {
+        async fn list_recent(
+            &self,
+            _user_id: &str,
+            _limit: i64,
+        ) -> Result<Vec<nomifun_db::models::IdmmInterventionRow>, DbError> {
             Ok(self.inserted.lock().unwrap().clone())
         }
-        async fn clear_all(&self) -> Result<u64, DbError> {
+        async fn clear_all(&self, _user_id: &str) -> Result<u64, DbError> {
             Ok(0)
         }
-        async fn sweep(&self, _cutoff_ms: i64, _global_cap: i64) -> Result<u64, DbError> {
+        async fn sweep_all_owners(&self, _cutoff_ms: i64, _per_user_cap: i64) -> Result<u64, DbError> {
             Ok(0)
         }
     }
@@ -1308,6 +1440,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one intervention should be persisted; got {rows:?}");
         let row = &rows[0];
         assert!(row.id.starts_with("idmmrec_"), "id must be idmmrec_-prefixed; got {}", row.id);
+        assert_eq!(row.user_id, "u");
         assert_eq!(row.target_kind, "conversation");
         assert_eq!(row.target_id, "t1");
         assert_eq!(row.watch, "decision");
@@ -1787,11 +1920,30 @@ mod tests {
         }
     }
 
+    struct DomainProbeFactory {
+        conversation: Arc<MockProbe>,
+        terminal: Arc<MockProbe>,
+    }
+
+    impl ProbeFactory for DomainProbeFactory {
+        fn build(&self, kind: IdmmTargetKind, _target_id: &str) -> Option<Arc<dyn SessionProbe>> {
+            Some(match kind {
+                IdmmTargetKind::Conversation => self.conversation.clone(),
+                IdmmTargetKind::Terminal => self.terminal.clone(),
+            })
+        }
+    }
+
     struct EnabledConfigReader(IdmmConfig);
     #[async_trait]
     impl ConfigReader for EnabledConfigReader {
-        async fn read(&self, _kind: IdmmTargetKind, _target_id: &str) -> IdmmConfig {
-            self.0.clone()
+        async fn read(
+            &self,
+            _user_id: &str,
+            _kind: IdmmTargetKind,
+            _target_id: &str,
+        ) -> Result<IdmmConfig, AppError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -1801,10 +1953,15 @@ mod tests {
         // immediately. The handle must leave the map (cleanup guard) so
         // is_supervising goes false — a stale `true` made AutoWork wait for
         // an IDMM recovery that could never come AND blocked every re-arm.
-        let (probe, _injected) = MockProbe::new(vec![]);
+        let (conversation_probe, _injected) = MockProbe::new(vec![]);
+        let (terminal_probe, _injected) =
+            MockProbe::with_kind(vec![], IdmmTargetKind::Terminal);
         let manager = IdmmManager::new(
             deps_with(vec![]),
-            Arc::new(FixedProbeFactory(probe)),
+            Arc::new(DomainProbeFactory {
+                conversation: conversation_probe,
+                terminal: terminal_probe,
+            }),
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
         manager.ensure(IdmmTargetKind::Conversation, "t1").await;
@@ -1834,10 +1991,15 @@ mod tests {
     async fn c3_conv5_and_term5_are_supervised_independently() {
         // Time is paused, so the spawned supervisor tasks do not advance to
         // their Exited cleanup during the assertions — both handles stay live.
-        let (probe, _injected) = MockProbe::new(vec![]);
+        let (conversation_probe, _injected) = MockProbe::new(vec![]);
+        let (terminal_probe, _injected) =
+            MockProbe::with_kind(vec![], IdmmTargetKind::Terminal);
         let manager = IdmmManager::new(
             deps_with(vec![]),
-            Arc::new(FixedProbeFactory(probe)),
+            Arc::new(DomainProbeFactory {
+                conversation: conversation_probe,
+                terminal: terminal_probe,
+            }),
             Arc::new(EnabledConfigReader(rule_cfg())),
         );
 

@@ -1,4 +1,4 @@
-// Core agent infrastructure: engine, session, orchestration, output sinks.
+// Core agent infrastructure: engine, session, tool execution, output sinks.
 
 pub mod agents_md;
 pub mod bootstrap;
@@ -15,15 +15,15 @@ pub mod engine;
 pub mod goal;
 pub mod knowledge_tools;
 pub mod loop_guard;
-pub mod orchestration;
+pub mod tool_execution;
 pub mod output;
 pub mod plan;
 pub mod requirement_tools;
 pub mod session;
 pub mod skill_tool;
-pub mod spawn_tool;
-pub mod spawner;
-pub mod taskboard;
+mod local_agent_invocation;
+mod local_delegation_progress;
+mod local_delegate_tool;
 pub mod vcr;
 
 // Re-export the skills crate so existing callers (nomi-cli, tests) can use

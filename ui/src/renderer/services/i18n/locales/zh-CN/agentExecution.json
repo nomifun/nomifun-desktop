@@ -1,0 +1,189 @@
+{
+  "panel": {
+    "title": "协作任务",
+    "resize": "调整协作面板宽度",
+    "open": "打开协作任务",
+    "collapse": "收起协作任务"
+  },
+  "status": {
+    "execution": {
+      "planning": "规划中",
+      "awaiting_approval": "待批准",
+      "running": "进行中",
+      "paused": "已暂停",
+      "waiting_input": "等待你的决定",
+      "completed": "已完成",
+      "completed_with_failures": "部分完成",
+      "failed": "失败",
+      "cancelled": "已取消"
+    },
+    "step": {
+      "pending": "待开始",
+      "running": "进行中",
+      "waiting_input": "等待决定",
+      "completed": "已完成",
+      "failed": "失败",
+      "skipped": "已跳过",
+      "cancelled": "已取消"
+    }
+  },
+  "controls": {
+    "replan": "重新规划",
+    "replanOk": "协作计划已更新",
+    "replanError": "重新规划失败：{{error}}",
+    "approve": "批准执行",
+    "approveOk": "已批准，开始协作",
+    "approveError": "批准失败：{{error}}",
+    "planning": "规划中…",
+    "pause": "暂停",
+    "pauseOk": "协作任务已暂停",
+    "pauseError": "暂停失败：{{error}}",
+    "resume": "继续",
+    "resumeOk": "协作任务已继续",
+    "resumeError": "继续失败：{{error}}",
+    "cancel": "终止",
+    "cancelOk": "协作任务已终止",
+    "cancelError": "终止失败：{{error}}",
+    "cancelConfirm": "确定终止当前协作任务吗？进行中的任务会被取消。",
+    "confirm": "终止",
+    "back": "返回",
+    "activeParticipants": "{{count}} 位协作者进行中"
+  },
+  "adjust": {
+    "label": "调整协作",
+    "placeholder": "说明需要怎样调整；系统会尽量保留仍然有用的已完成工作…",
+    "summary": "计划已调整 · 保留 {{kept}} · 新增 {{added}} · 移除 {{removed}}",
+    "error": "调整计划失败：{{error}}"
+  },
+  "approval": {
+    "eyebrow": "待批准",
+    "text": "协作计划已就绪，你仍可调整；准备好后批准执行。",
+    "button": "批准执行",
+    "ok": "已批准，开始协作",
+    "error": "批准失败：{{error}}"
+  },
+  "progress": {
+    "title": "协作进度",
+    "summary": "已完成 {{done}} / {{total}} 项任务",
+    "question": "任务「{{title}}」需要你的决定"
+  },
+  "thinking": {
+    "title": "正在准备协作计划",
+    "short": "规划中…"
+  },
+  "editor": {
+    "goalPlaceholder": "请说明目标、范围与验收标准…",
+    "modelLabel": "协作模型",
+    "noModels": "暂无可用模型，请先配置并启用模型。",
+    "model": {
+      "automatic": "自动选择",
+      "single": "单一模型",
+      "range": "模型范围",
+      "rangeCount": "{{count}} 个模型",
+      "singlePlaceholder": "选择一个模型",
+      "rangePlaceholder": "选择多个模型",
+      "automaticHint": "系统会根据任务从 {{count}} 个可用模型中自动选择。",
+      "required": "请选择可用模型"
+    },
+    "planGateLabel": "开始方式",
+    "planGate": {
+      "automatic": "自动开始",
+      "automaticHint": "计划完成后直接开始协作，你仍可随时介入。",
+      "require_approval": "批准后开始",
+      "require_approvalHint": "计划完成后暂停，等你批准再开始。"
+    }
+  },
+  "step": {
+    "untitled": "未命名任务",
+    "tokens": "tokens",
+    "waitingInput": "待回答"
+  },
+  "kind": {
+    "synthesis": "汇总",
+    "verify": "验证",
+    "judge": "评审",
+    "loop": "循环",
+    "parallelGroup": "并行协作 · {{label}}"
+  },
+  "verdict": {
+    "pass": "通过",
+    "fail": "未通过",
+    "pending": "验证中"
+  },
+  "judge": {
+    "winner": "胜出",
+    "none": "暂无结果",
+    "pending": "评审中"
+  },
+  "loop": {
+    "done": "完成",
+    "failed": "失败",
+    "iterating": "迭代中"
+  },
+  "detail": {
+    "loadError": "协作进度加载失败"
+  },
+  "configure": {
+    "model": "指定模型",
+    "followAutomatic": "自动选择",
+    "noModels": "暂无可用模型，请先配置模型。",
+    "modelHint": "可为当前任务指定模型；留空时由系统自动选择。",
+    "presetLabel": "预置要求",
+    "presetPlaceholder": "写下该任务必须遵守的额外要求或偏好。",
+    "presetPill": "预置要求",
+    "presetPillHint": "任务启动时生效",
+    "pendingHint": "可预先指定模型和额外要求，任务启动时生效。",
+    "save": "保存配置",
+    "saved": "已保存，任务启动时生效",
+    "saveError": "保存失败：{{error}}"
+  },
+  "assignment": {
+    "change": "更换协作者",
+    "updated": "协作者已更新",
+    "error": "更新协作者失败：{{error}}"
+  },
+  "retry": {
+    "button": "重试",
+    "ok": "任务已重试",
+    "error": "重试失败：{{error}}"
+  },
+  "adopt": {
+    "button": "采用当前结果",
+    "ok": "已采用当前结果",
+    "error": "采用失败：{{error}}"
+  },
+  "projection": {
+    "viewing": "当前任务",
+    "return": "返回主对话"
+  },
+  "question": {
+    "title": "需要你的决定",
+    "hint": "直接提交你的选择，协作者会据此继续任务。",
+    "placeholder": "输入你的决定…",
+    "submit": "提交决定",
+    "ok": "决定已提交",
+    "error": "提交决定失败：{{error}}"
+  },
+  "steer": {
+    "placeholder": "向正在执行的协作者补充说明…",
+    "submit": "发送说明",
+    "ok": "说明已发送",
+    "error": "发送说明失败：{{error}}"
+  },
+  "transcript": {
+    "notStarted": "任务尚未开始"
+  },
+  "profile": {
+    "title": "沉淀为设定",
+    "subtitle": "本次协作中有 {{count}} 个角色可保存复用",
+    "modelsLabel": "模型",
+    "skillsLabel": "{{count}} 项技能",
+    "saveAsPreset": "保存为设定",
+    "saved": "已保存",
+    "saveOk": "已将「{{name}}」保存为设定",
+    "saveError": "保存设定失败：{{error}}",
+    "synthDesc": "「{{role}}」角色，负责：{{tasks}}",
+    "synthDescBare": "从本次协作沉淀的「{{role}}」角色",
+    "taskSep": "、"
+  }
+}

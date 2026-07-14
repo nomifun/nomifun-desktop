@@ -221,7 +221,7 @@ const TerminalCreatePage: React.FC = () => {
           </Button>
         </div>
 
-        {/* Extended capabilities (knowledge mount + connect / AutoWork / advanced MCP) —
+        {/* Extended capabilities (knowledge mount / AutoWork / smart decision) —
             an optional drawer below the primary action; collapsed by default. */}
         <ExtendedCapabilitiesPanel
           cwd={cwd}

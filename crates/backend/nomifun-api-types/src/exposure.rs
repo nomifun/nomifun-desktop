@@ -1,7 +1,7 @@
 //! Exposure tier: an orthogonal-to-Surface trust axis attached to a companion /
 //! token / channel binding. `Surface` says WHERE a call comes from; `ExposureMode`
 //! says HOW MUCH the caller is trusted. `PublicService` is the untrusted-stranger
-//! tier: the engine is hard-clamped to a safe allowlist, no gateway, no OS tools.
+//! tier: the engine is hard-clamped to a safe allowlist and no OS tools.
 //!
 //! This is the backbone of the "外呼员工 / 对外服务" feature. The clamp is applied
 //! at execution time in the nomi factory as a backend-authoritative gate — it
@@ -55,14 +55,12 @@ pub const SAFE_PUBLIC_SERVICE_TOOLS: &[&str] = &["knowledge_search", "knowledge_
 pub struct ExposureClamp {
     /// Native tool allowlist fed to `builtin_allowlist` → `retain_named`.
     pub allowed_tools: Vec<String>,
-    /// Whether the Desktop Gateway MCP (`nomi_*` platform tools) is injected.
-    pub desktop_gateway: bool,
     /// Whether the Computer (desktop control) tool is available.
     pub computer_use: bool,
     /// Whether the Browser (CDP automation) tool is available.
     pub browser_use: bool,
-    /// Whether in-process sub-agent Spawn is available (fan-out blast radius).
-    pub in_process_spawn: bool,
+    /// Whether the host may install embedded AgentExecution for this exposure.
+    pub install_embedded_agent_execution: bool,
 }
 
 /// `Some(clamp)` = force these values regardless of what the client or host
@@ -75,10 +73,9 @@ pub fn exposure_clamp(mode: ExposureMode) -> Option<ExposureClamp> {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
-            desktop_gateway: false,
             computer_use: false,
             browser_use: false,
-            in_process_spawn: false,
+            install_embedded_agent_execution: false,
         }),
     }
 }
@@ -93,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn public_service_clamp_is_locked_down() {
+    fn public_service_disables_embedded_agent_execution_and_host_tools() {
         let c = exposure_clamp(ExposureMode::PublicService).expect("public service clamps");
         // 白名单非空不变量（空 = retain_named no-op = 放开全部）
         assert!(
@@ -106,10 +103,12 @@ mod tests {
                 .all(|t| SAFE_PUBLIC_SERVICE_TOOLS.contains(&t.as_str())),
             "allowlist must be a subset of the vetted safe set"
         );
-        assert!(!c.desktop_gateway, "no gateway for strangers");
         assert!(!c.computer_use, "no desktop control for strangers");
         assert!(!c.browser_use, "no browser for strangers");
-        assert!(!c.in_process_spawn, "no fan-out for strangers");
+        assert!(
+            !c.install_embedded_agent_execution,
+            "no embedded AgentExecution for strangers"
+        );
     }
 
     #[test]

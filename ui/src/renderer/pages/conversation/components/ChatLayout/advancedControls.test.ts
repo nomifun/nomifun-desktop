@@ -10,13 +10,12 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('ChatLayout advanced controls', () => {
-  test('keeps the stable header controls but removes the multi-agent entry icon', () => {
+  test('keeps the stable header controls', () => {
     const source = readSource(new URL('./index.tsx', import.meta.url));
 
     expect(source.includes("<AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
     expect(source.includes("<IdmmControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
     expect(source.includes("<KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
-    expect(source.includes('MultiAgentControl')).toBe(false);
   });
 
   test('does not let workspace file-tree events auto-expand the conversation right rail', () => {

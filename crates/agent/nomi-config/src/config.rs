@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthConfig, OAuthManager};
@@ -271,29 +273,23 @@ pub struct ToolsConfig {
     #[serde(default)]
     pub lsp_servers: Vec<LspServerConfig>,
     /// Opt-in (default None = uncapped): a cumulative token ceiling shared
-    /// across all sub-agents of a Spawn fan-out. A soft ceiling that bounds
+    /// across all delegated Agents in a Delegate fan-out. A soft ceiling that bounds
     /// runaway multi-agent spend (§3.4 shared token budget).
     #[serde(default)]
-    pub subagent_token_budget: Option<u64>,
+    pub delegation_token_budget: Option<u64>,
     /// Opt-in (default off): request macOS Seatbelt write containment for Bash
     /// and child-agent execution. The request fails closed on unsupported
     /// platforms rather than silently running unrestricted (§3.6).
     #[serde(default)]
     pub bash_sandbox: bool,
     /// Opt-in (default off): wind the engine down COOPERATIVELY on stop —
-    /// cancel a token and await a clean finish — instead of dropping the run
+    /// cancel a token and await a clean finish — instead of dropping the turn
     /// future mid-flight. Cleaner message state; trades a little mid-tool
-    /// stop-latency (the run is awaited, not dropped). (Phase 0 F0.4)
+    /// stop-latency (the turn is awaited, not dropped). (Phase 0 F0.4)
     #[serde(default)]
     pub cooperative_cancel: bool,
-    /// 是否注册进程内 `Spawn` 子 agent 工具（默认 true = 现状）。桌面后端会话
-    /// 由工厂置 false —— 子 agent 改走可视化的 `nomi_spawn` 编排扇出（每个
-    /// 子任务在 DAG 画布上有状态与转录）；CLI/独立模式保持 true（进程内
-    /// Spawn 仍是其唯一扇出手段）。
-    #[serde(default = "default_true")]
-    pub in_process_spawn: bool,
     /// 非空时：bootstrap 注册完全部工具后只保留名字在此列表内的（含 MCP 代理
-    /// 工具）。受限角色的编排 worker（searcher/reviewer 只读等）用它做
+    /// 工具）。受限执行角色（searcher/reviewer 只读等）用它做
     /// per-node 工具白名单。空（默认）= 不限制。
     #[serde(default)]
     pub builtin_allowlist: Vec<String>,
@@ -322,10 +318,9 @@ impl Default for ToolsConfig {
             persistent_shell: false,
             write_root: String::new(),
             lsp_servers: Vec::new(),
-            subagent_token_budget: None,
+            delegation_token_budget: None,
             bash_sandbox: false,
             cooperative_cancel: false,
-            in_process_spawn: true,
             builtin_allowlist: Vec::new(),
         }
     }
@@ -553,7 +548,7 @@ impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
         // 1. Load global config
-        let global = load_config_file(&global_config_path());
+        let global = load_config_file(&global_config_path())?;
 
         // 2. Load project config (from project_dir if specified, else CWD)
         let project_path = cli
@@ -561,7 +556,7 @@ impl Config {
             .as_ref()
             .map(|d| d.join(".nomi.toml"))
             .unwrap_or_else(project_config_path);
-        let project = load_config_file(&project_path);
+        let project = load_config_file(&project_path)?;
 
         // 3. Merge: global <- project
         let mut merged = merge_config_files(global, project);
@@ -816,13 +811,196 @@ fn project_config_path() -> PathBuf {
     PathBuf::from(".nomi.toml")
 }
 
-fn load_config_file(path: &Path) -> ConfigFile {
+/// The only legacy delegation value with a surviving semantic: preserve the
+/// token ceiling under its canonical name. Host composition switches are
+/// removed below instead of being aliased into another runtime mode.
+const LEGACY_DELEGATION_BUDGET: (&str, &str) =
+    ("subagent_token_budget", "delegation_token_budget");
+const RETIRED_HOST_COMPOSITION_SETTINGS: [&str; 3] = [
+    "delegation_execution",
+    "in_process_delegation",
+    "in_process_spawn",
+];
+
+fn parse_config_file_content(content: &str) -> Result<ConfigFile, toml::de::Error> {
+    toml::from_str(content)
+}
+
+/// Canonicalize legacy Agent settings once. The old token-budget spelling is
+/// migrated; retired host-composition switches are deleted because composition
+/// is selected by the embedding host and is no longer user configuration.
+/// `None` means the file is already canonical and must not be rewritten.
+fn canonicalize_legacy_agent_delegation_settings(
+    content: &str,
+) -> Result<Option<String>, toml_edit::TomlError> {
+    let mut document = content.parse::<toml_edit::DocumentMut>()?;
+    let Some(tools) = document
+        .get_mut("tools")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(None);
+    };
+
+    let mut migrated = false;
+    let (legacy_key, current_key) = LEGACY_DELEGATION_BUDGET;
+    let legacy_key_format = tools
+        .key(legacy_key)
+        .map(|key| (key.leaf_decor().clone(), key.dotted_decor().clone()));
+    if let Some(legacy_value) = tools.remove(legacy_key) {
+        migrated = true;
+        if tools.contains_key(current_key) {
+            tracing::warn!(
+                target: "nomi_config",
+                legacy_key,
+                current_key,
+                "both legacy and current Agent delegation budgets are present; current setting wins"
+            );
+            // Preserve a comment attached to the removed budget spelling by
+            // moving it to the surviving canonical key.
+            if let Some((legacy_decor, _)) = legacy_key_format {
+                let legacy_prefix = legacy_decor
+                    .prefix()
+                    .and_then(toml_edit::RawString::as_str)
+                    .unwrap_or("");
+                if !legacy_prefix.trim().is_empty()
+                    && let Some(mut key) = tools.key_mut(current_key)
+                {
+                    let decor = key.leaf_decor_mut();
+                    let current_prefix = decor
+                        .prefix()
+                        .and_then(toml_edit::RawString::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    decor.set_prefix(format!("{legacy_prefix}{current_prefix}"));
+                }
+            }
+        } else {
+            let mut canonical_key = toml_edit::Key::new(current_key);
+            if let Some((leaf_decor, dotted_decor)) = legacy_key_format {
+                canonical_key = canonical_key
+                    .with_leaf_decor(leaf_decor)
+                    .with_dotted_decor(dotted_decor);
+            }
+            tools.entry_format(&canonical_key).or_insert(legacy_value);
+        }
+    }
+
+    for retired_key in RETIRED_HOST_COMPOSITION_SETTINGS {
+        if tools.remove(retired_key).is_some() {
+            migrated = true;
+            tracing::warn!(
+                target: "nomi_config",
+                retired_key,
+                "removed retired Agent host-composition setting"
+            );
+        }
+    }
+
+    Ok(migrated.then(|| document.to_string()))
+}
+
+/// Persist a canonicalized config by replacing it with a same-directory temp
+/// file. Keeping the temp file on the same filesystem makes the final replace
+/// atomic on supported platforms. Symlinked configs retain the link itself and
+/// update its resolved target.
+fn persist_config_migration(path: &Path, expected: &str, migrated: &str) -> io::Result<()> {
+    if std::fs::read_to_string(path)? != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "config changed while legacy settings were being migrated",
+        ));
+    }
+
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    if let Ok(metadata) = std::fs::metadata(&target) {
+        temporary.as_file().set_permissions(metadata.permissions())?;
+    }
+    temporary.write_all(migrated.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&target)
+        .map_err(|error| error.error)?;
+
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+
+    Ok(())
+}
+
+fn load_config_file(path: &Path) -> anyhow::Result<ConfigFile> {
+    load_config_file_with_persist(path, persist_config_migration)
+}
+
+/// Load one config after completing any required on-disk hard migration.
+///
+/// The parser never consumes an in-memory compatibility projection: a legacy
+/// document must first be atomically replaced and read back from disk. If that
+/// write fails, configuration resolution fails visibly instead of keeping a
+/// permanent runtime alias alive.
+fn load_config_file_with_persist<F>(path: &Path, persist: F) -> anyhow::Result<ConfigFile>
+where
+    F: FnOnce(&Path, &str, &str) -> io::Result<()>,
+{
     match std::fs::read_to_string(path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
-            tracing::warn!(target: "nomi_config", path = %path.display(), error = %e, "failed to parse config file");
-            ConfigFile::default()
-        }),
-        Err(_) => ConfigFile::default(),
+        Ok(content) => {
+            let canonical = match canonicalize_legacy_agent_delegation_settings(&content) {
+                Ok(canonical) => canonical,
+                Err(error) => {
+                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to inspect config for legacy Agent delegation settings");
+                    None
+                }
+            };
+            let source = if let Some(migrated) = canonical {
+                // Validate before replacing the user's file. This preserves the
+                // previous fail-safe for malformed legacy values without ever
+                // running from an unpersisted compatibility projection.
+                parse_config_file_content(&migrated).with_context(|| {
+                    format!(
+                        "legacy Agent settings in {} could not be migrated",
+                        path.display()
+                    )
+                })?;
+                persist(path, &content, &migrated).with_context(|| {
+                    format!(
+                        "legacy Agent settings in {} must be persisted before use",
+                        path.display()
+                    )
+                })?;
+                let persisted = std::fs::read_to_string(path).with_context(|| {
+                    format!("could not verify migrated config {}", path.display())
+                })?;
+                if persisted != migrated {
+                    anyhow::bail!(
+                        "config {} changed while its legacy Agent settings were being migrated",
+                        path.display()
+                    );
+                }
+                tracing::info!(
+                    target: "nomi_config",
+                    path = %path.display(),
+                    "hard-migrated legacy Agent settings"
+                );
+                persisted
+            } else {
+                content
+            };
+            match parse_config_file_content(&source) {
+                Ok(config) => Ok(config),
+                Err(error) => {
+                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to parse config file");
+                    Ok(ConfigFile::default())
+                }
+            }
+        }
+        Err(_) => Ok(ConfigFile::default()),
     }
 }
 
@@ -938,11 +1116,9 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
                 global.tools.write_root
             },
             lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            subagent_token_budget: project.tools.subagent_token_budget.or(global.tools.subagent_token_budget),
+            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
             bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
             cooperative_cancel: global.tools.cooperative_cancel || project.tools.cooperative_cancel,
-            // 任一层显式关闭即关闭（默认皆 true，行为不变）。
-            in_process_spawn: global.tools.in_process_spawn && project.tools.in_process_spawn,
             // 项目层非空则覆盖全局（与 write_root 同模式）。
             builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
                 project.tools.builtin_allowlist
@@ -968,11 +1144,9 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
                 global.tools.write_root
             },
             lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-            subagent_token_budget: project.tools.subagent_token_budget.or(global.tools.subagent_token_budget),
+            delegation_token_budget: project.tools.delegation_token_budget.or(global.tools.delegation_token_budget),
             bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
             cooperative_cancel: global.tools.cooperative_cancel || project.tools.cooperative_cancel,
-            // 任一层显式关闭即关闭（默认皆 true，行为不变）。
-            in_process_spawn: global.tools.in_process_spawn && project.tools.in_process_spawn,
             // 项目层非空则覆盖全局（与 write_root 同模式）。
             builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
                 project.tools.builtin_allowlist
@@ -2374,13 +2548,146 @@ max_tokens = 1234
     }
 
     #[test]
-    fn tools_config_new_fields_default_to_current_behavior() {
+    fn tools_config_contains_no_user_selectable_host_composition() {
         let t = ToolsConfig::default();
-        assert!(t.in_process_spawn, "默认必须保留进程内 Spawn（CLI 零回归）");
         assert!(t.builtin_allowlist.is_empty(), "默认不限制工具");
-        // serde 缺字段也回落默认（旧 config 文件零回归）。
-        let de: ToolsConfig = serde_json::from_str("{}").unwrap();
-        assert!(de.in_process_spawn);
-        assert!(de.builtin_allowlist.is_empty());
+        let serialized = serde_json::to_string(&t).unwrap();
+        assert!(!serialized.contains("delegation_execution"));
+        assert!(!serialized.contains("in_process_delegation"));
+        assert!(!serialized.contains("in_process_spawn"));
+    }
+
+    #[test]
+    fn legacy_agent_settings_migrate_budget_and_delete_host_composition() {
+        let source = r#"
+[tools]
+subagent_token_budget = 4321
+delegation_execution = "isolated"
+in_process_delegation = true
+in_process_spawn = false
+"#;
+        let unmigrated = parse_config_file_content(source).unwrap();
+        assert_eq!(unmigrated.tools.delegation_token_budget, None);
+
+        let canonical = canonicalize_legacy_agent_delegation_settings(source)
+            .unwrap()
+            .expect("legacy keys require file canonicalization");
+        let config = parse_config_file_content(&canonical).unwrap();
+
+        assert_eq!(config.tools.delegation_token_budget, Some(4321));
+        assert!(canonical.contains("delegation_token_budget = 4321"));
+        assert!(!canonical.contains("subagent_token_budget"));
+        assert!(!canonical.contains("delegation_execution"));
+        assert!(!canonical.contains("in_process_delegation"));
+        assert!(!canonical.contains("in_process_spawn"));
+    }
+
+    #[test]
+    fn current_delegation_budget_wins_while_host_composition_is_deleted() {
+        let source = r#"
+[tools]
+delegation_token_budget = 1234
+subagent_token_budget = 4321
+delegation_execution = "coordinated"
+in_process_delegation = false
+in_process_spawn = true
+"#;
+        let canonical = canonicalize_legacy_agent_delegation_settings(source)
+            .unwrap()
+            .expect("conflicting legacy keys still need to be removed");
+        let config = parse_config_file_content(&canonical).unwrap();
+
+        assert_eq!(config.tools.delegation_token_budget, Some(1234));
+        assert!(canonical.contains("delegation_token_budget = 1234"));
+        assert!(!canonical.contains("subagent_token_budget"));
+        assert!(!canonical.contains("delegation_execution"));
+        assert!(!canonical.contains("in_process_delegation"));
+        assert!(!canonical.contains("in_process_spawn"));
+    }
+
+    #[test]
+    fn legacy_budget_is_canonicalized_without_losing_neighboring_config() {
+        let migrated = canonicalize_legacy_agent_delegation_settings(
+            r#"# global comment
+[tools]
+# keep this explanation
+subagent_token_budget = 4321
+delegation_execution = "isolated"
+in_process_delegation = false
+in_process_spawn = false
+builtin_allowlist = ["bash"]
+"#,
+        )
+        .unwrap()
+        .expect("legacy keys should produce a canonical document");
+
+        assert!(migrated.contains("# global comment"));
+        assert!(migrated.contains("# keep this explanation"));
+        assert!(migrated.contains("delegation_token_budget = 4321"));
+        assert!(migrated.contains("builtin_allowlist = [\"bash\"]"));
+        assert!(!migrated.contains("subagent_token_budget"));
+        assert!(!migrated.contains("delegation_execution"));
+        assert!(!migrated.contains("in_process_delegation"));
+        assert!(!migrated.contains("in_process_spawn"));
+
+        let config = parse_config_file_content(&migrated).unwrap();
+        assert_eq!(config.tools.delegation_token_budget, Some(4321));
+    }
+
+    #[test]
+    fn loading_legacy_agent_settings_persists_one_time_canonicalization() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"[tools]
+subagent_token_budget = 4321
+delegation_execution = "parallel"
+in_process_delegation = true
+in_process_spawn = false
+"#,
+        )
+        .unwrap();
+
+        let config = load_config_file(&path).unwrap();
+        assert_eq!(config.tools.delegation_token_budget, Some(4321));
+
+        let persisted = std::fs::read_to_string(&path).unwrap();
+        assert!(persisted.contains("delegation_token_budget = 4321"));
+        assert!(!persisted.contains("subagent_token_budget"));
+        assert!(!persisted.contains("delegation_execution"));
+        assert!(!persisted.contains("in_process_delegation"));
+        assert!(!persisted.contains("in_process_spawn"));
+        assert!(
+            canonicalize_legacy_agent_delegation_settings(&persisted)
+                .unwrap()
+                .is_none(),
+            "a second load must not have another migration to perform"
+        );
+
+        let second = load_config_file(&path).unwrap();
+        assert_eq!(second.tools.delegation_token_budget, Some(4321));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), persisted);
+    }
+
+    #[test]
+    fn loading_legacy_agent_settings_fails_closed_when_persistence_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let legacy = r#"[tools]
+subagent_token_budget = 4321
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let error = load_config_file_with_persist(&path, |_, _, _| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "read-only config",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("must be persisted before use"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
     }
 }

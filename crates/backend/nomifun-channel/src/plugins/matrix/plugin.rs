@@ -409,7 +409,7 @@ async fn handle_timeline_event(
             };
 
             // Skip edit events — they update an existing message, not a new one.
-            // The orchestrator sees the original; edits are not relayed as new
+            // The message loop sees the original; edits are not relayed as new
             // incoming messages.
             if content.is_edit() {
                 return;

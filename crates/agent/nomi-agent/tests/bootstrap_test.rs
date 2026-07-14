@@ -108,8 +108,8 @@ async fn bootstrap_registers_all_expected_tools() {
         "SkillTool should be registered"
     );
     assert!(
-        names.iter().any(|n| n == "Spawn"),
-        "SpawnTool should be registered"
+        names.iter().any(|n| n == "nomi_delegate"),
+        "embedded nomi_delegate should be registered"
     );
     assert!(
         names.iter().any(|n| n == "ToolSearch"),
@@ -118,23 +118,37 @@ async fn bootstrap_registers_all_expected_tools() {
 }
 
 #[tokio::test]
-async fn bootstrap_spawn_gated_off_when_in_process_spawn_false() {
-    let mut config = minimal_config();
-    config.tools.in_process_spawn = false;
+async fn bootstrap_embedded_agent_execution_is_host_composed() {
+    let enabled = AgentBootstrap::new(minimal_config(), "/tmp/test-workspace", null_output())
+        .build()
+        .await
+        .unwrap()
+        .engine
+        .tool_names()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
 
-    let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())
+    let result = AgentBootstrap::new(minimal_config(), "/tmp/test-workspace", null_output())
+        .install_embedded_agent_execution(false)
         .build()
         .await
         .unwrap();
 
-    let names = result.engine.tool_names();
+    let names = result
+        .engine
+        .tool_names()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     assert!(
-        !names.iter().any(|n| n == "Spawn"),
-        "门控关闭时不得注册进程内 Spawn（桌面会话改走 nomi_spawn 编排扇出）"
+        !names.contains("nomi_delegate"),
+        "host composition disabled must not register embedded AgentExecution"
     );
-    // 其余内建工具不受影响。
-    assert!(names.iter().any(|n| n == "Read"));
-    assert!(names.iter().any(|n| n == "Bash"));
+    let mut expected = enabled;
+    assert!(expected.remove("nomi_delegate"));
+    assert_eq!(
+        names, expected,
+        "host composition gate must remove only the embedded nomi_delegate surface"
+    );
 }
 
 #[tokio::test]
@@ -155,7 +169,7 @@ async fn bootstrap_builtin_allowlist_restricts_tools() {
         "Bash",
         "Write",
         "Edit",
-        "Spawn",
+        "nomi_delegate",
         "Skill",
         "exec_command",
         "write_stdin",
@@ -272,7 +286,7 @@ async fn bootstrap_with_agents_md_in_workspace() {
 
     let mut engine = result.engine;
     engine
-        .run("show active instructions", &workspace.to_string_lossy())
+        .execute_turn("show active instructions", &workspace.to_string_lossy())
         .await
         .unwrap();
 

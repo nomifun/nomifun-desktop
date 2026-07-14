@@ -1160,24 +1160,15 @@ mod tests {
         .unwrap();
     }
 
-    /// Helper to create a stub conversation for FK-constrained tests. The
-    /// explicit integer id is a valid AUTOINCREMENT rowid.
+    /// Helper to create an installation-owned stub conversation for
+    /// FK-constrained channel-session tests. Channel sessions may point at a
+    /// host-capable Conversation, so the fixture must use the one principal
+    /// that is allowed to own host execution.
     async fn create_stub_conversation(pool: &SqlitePool, conv_id: i64) {
         let now = nomifun_common::now_ms();
-        // Create prerequisite user first (matches `users` table schema)
-        sqlx::query(
-            "INSERT OR IGNORE INTO users \
-                (id, username, password_hash, created_at, updated_at) \
-             VALUES ('sys_test', 'test_user', 'hash', ?1, ?1)",
-        )
-        .bind(now)
-        .execute(pool)
-        .await
-        .unwrap();
-
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, 'sys_test', 'Test Conv', 'chat', ?2, ?2)",
+             VALUES (?1, 'system_default_user', 'Test Conv', 'chat', ?2, ?2)",
         )
         .bind(conv_id)
         .bind(now)

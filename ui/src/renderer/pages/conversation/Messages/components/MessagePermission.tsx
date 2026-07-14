@@ -7,6 +7,7 @@
 import type { IMessagePermission } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { ipcBridge } from '@/common';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { Button, Card, Image, Radio, Typography } from '@arco-design/web-react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -26,6 +27,7 @@ const actionIcons: Record<string, string> = {
 
 const MessagePermission: React.FC<MessagePermissionProps> = React.memo(({ message }) => {
   const { t } = useTranslation();
+  const readOnly = useConversationContextSafe()?.readOnly === true;
   const { options = [], description, title, action, call_id, command_type, screenshot } = message.content || {};
   const descriptionText = optionalDisplayText(description);
   const titleText = optionalDisplayText(title);
@@ -41,7 +43,7 @@ const MessagePermission: React.FC<MessagePermissionProps> = React.memo(({ messag
   const displayTitle = titleText || descriptionText || t('messages.permissionRequest');
 
   const handleConfirm = async () => {
-    if (hasResponded || !selected) return;
+    if (readOnly || hasResponded || !selected) return;
 
     setIsResponding(true);
     try {
@@ -84,7 +86,7 @@ const MessagePermission: React.FC<MessagePermissionProps> = React.memo(({ messag
             <Image src={screenshotSrc} alt={t('messages.browserApprovalPreview')} width='100%' style={{ maxHeight: 320, objectFit: 'contain' }} />
           </div>
         )}
-        {!hasResponded && (
+        {!readOnly && !hasResponded && (
           <>
             <div className='mt-10px'>{t('messages.chooseAction')}</div>
             <Radio.Group direction='vertical' size='mini' value={selected} onChange={setSelected}>

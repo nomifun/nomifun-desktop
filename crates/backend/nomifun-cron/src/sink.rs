@@ -29,9 +29,9 @@ pub fn set_process_cron_service(service: Arc<CronService>) {
 /// Build a conversation-bound [`CronSink`] over the process `CronService`, or an
 /// [`UnavailableCronSink`] if it has not been registered yet (only possible
 /// before startup finishes — never during a live conversation).
-pub fn cron_sink_for(conversation_id: String) -> Arc<dyn CronSink> {
+pub fn cron_sink_for(user_id: String, conversation_id: String) -> Arc<dyn CronSink> {
     match CRON_SERVICE.get() {
-        Some(service) => CronServiceSink::into_arc(service.clone(), conversation_id),
+        Some(service) => CronServiceSink::into_arc(service.clone(), user_id, conversation_id),
         None => Arc::new(UnavailableCronSink),
     }
 }
@@ -56,15 +56,21 @@ impl CronSink for UnavailableCronSink {
 /// `CronSink` bound to one (nomi) conversation.
 pub struct CronServiceSink {
     service: Arc<CronService>,
+    user_id: String,
     /// The agent's conversation id (numeric string).
     conversation_id: String,
 }
 
 impl CronServiceSink {
     /// Build the sink as a trait object ready to inject into the agent factory.
-    pub fn into_arc(service: Arc<CronService>, conversation_id: String) -> Arc<dyn CronSink> {
+    pub fn into_arc(
+        service: Arc<CronService>,
+        user_id: String,
+        conversation_id: String,
+    ) -> Arc<dyn CronSink> {
         Arc::new(Self {
             service,
+            user_id,
             conversation_id,
         })
     }
@@ -99,9 +105,12 @@ impl CronSink for CronServiceSink {
             created_by: "agent".to_string(),
             execution_mode: None, // -> Existing
             agent_config: None,
-            target_kind: "agent".to_string(),
         };
-        let job = self.service.add_job(req).await.map_err(|e| e.to_string())?;
+        let job = self
+            .service
+            .add_job(&self.user_id, req)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(job.id)
     }
 
@@ -109,7 +118,7 @@ impl CronSink for CronServiceSink {
         let conv = self.conv_i64()?;
         let jobs = self
             .service
-            .list_jobs(&ListCronJobsQuery {
+            .list_jobs(&self.user_id, &ListCronJobsQuery {
                 conversation_id: Some(conv),
             })
             .await
@@ -130,7 +139,7 @@ impl CronSink for CronServiceSink {
 
     async fn delete(&self, job_id: &str) -> Result<(), String> {
         self.service
-            .remove_job(job_id)
+            .remove_job(&self.user_id, job_id)
             .await
             .map_err(|e| e.to_string())
     }

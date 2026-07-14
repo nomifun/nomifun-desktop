@@ -5,6 +5,9 @@ use crate::models::Provider;
 use crate::repository::IProviderRepository;
 use crate::repository::provider::{CreateProviderParams, UpdateProviderParams};
 
+const PROVIDER_HARD_BINDING_DELETE_CONFLICT: &str =
+    "provider is still referenced by an executable Agent binding";
+
 /// SQLite-backed implementation of [`IProviderRepository`].
 #[derive(Clone, Debug)]
 pub struct SqliteProviderRepository {
@@ -159,13 +162,25 @@ impl IProviderRepository for SqliteProviderRepository {
         let result = sqlx::query("DELETE FROM providers WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
-            .await?;
+            .await
+            .map_err(map_provider_delete_error)?;
 
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound(format!("Provider '{id}' not found")));
         }
 
         Ok(())
+    }
+}
+
+fn map_provider_delete_error(error: sqlx::Error) -> DbError {
+    match &error {
+        sqlx::Error::Database(database_error)
+            if database_error.message() == PROVIDER_HARD_BINDING_DELETE_CONFLICT =>
+        {
+            DbError::Conflict(PROVIDER_HARD_BINDING_DELETE_CONFLICT.to_owned())
+        }
+        _ => DbError::Query(error),
     }
 }
 

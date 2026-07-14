@@ -17,6 +17,12 @@ pub enum DbError {
 
     #[error("Database initialization failed: {0}")]
     Init(String),
+
+    /// A pre-migration recovery snapshot could not be created or proven safe.
+    /// This is deliberately distinct from source-database corruption: startup
+    /// must preserve the healthy source file in place and fail closed.
+    #[error("Database safety backup failed: {0}")]
+    SafetyBackup(String),
 }
 
 impl From<DbError> for AppError {
@@ -27,6 +33,9 @@ impl From<DbError> for AppError {
             DbError::Query(e) => AppError::Internal(format!("Database error: {e}")),
             DbError::Migration(e) => AppError::Internal(format!("Migration error: {e}")),
             DbError::Init(msg) => AppError::Internal(format!("Database init error: {msg}")),
+            DbError::SafetyBackup(msg) => {
+                AppError::Internal(format!("Database safety backup error: {msg}"))
+            }
         }
     }
 }

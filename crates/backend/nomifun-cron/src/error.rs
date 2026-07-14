@@ -14,12 +14,6 @@ pub enum CronError {
     #[error("Invalid execution mode: {0}")]
     InvalidExecutionMode(String),
 
-    #[error("Invalid target kind: {0}")]
-    InvalidTargetKind(String),
-
-    #[error("Invalid terminal config: {0}")]
-    InvalidTerminalConfig(String),
-
     #[error("Invalid created-by value: {0}")]
     InvalidCreatedBy(String),
 
@@ -55,8 +49,6 @@ impl From<CronError> for AppError {
             CronError::InvalidSchedule(msg) => AppError::BadRequest(msg),
             CronError::InvalidCronExpression(msg) => AppError::BadRequest(msg),
             CronError::InvalidExecutionMode(msg) => AppError::BadRequest(msg),
-            CronError::InvalidTargetKind(msg) => AppError::BadRequest(msg),
-            CronError::InvalidTerminalConfig(msg) => AppError::BadRequest(msg),
             CronError::InvalidCreatedBy(msg) => AppError::BadRequest(msg),
             CronError::InvalidJobStatus(msg) => AppError::BadRequest(msg),
             CronError::InvalidTimezone(msg) => AppError::BadRequest(msg),

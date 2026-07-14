@@ -35,12 +35,6 @@ pub struct UpdateCronJobParams {
     pub last_error: Option<Option<String>>,
     pub run_count: Option<i64>,
     pub retry_count: Option<i64>,
-    pub target_kind: Option<String>,
-    pub terminal_mode: Option<Option<String>>,
-    pub terminal_session_id: Option<Option<i64>>,
-    pub terminal_command: Option<Option<String>>,
-    pub terminal_args: Option<Option<String>>,
-    pub terminal_script: Option<Option<String>>,
 }
 
 /// Data access abstraction for the `cron_jobs` table.
@@ -51,34 +45,57 @@ pub trait ICronRepository: Send + Sync {
 
     /// Updates a cron job by ID with the provided fields.
     /// Returns `DbError::NotFound` if absent.
-    async fn update(&self, id: &str, params: &UpdateCronJobParams) -> Result<(), DbError>;
+    async fn update(
+        &self,
+        user_id: &str,
+        id: &str,
+        params: &UpdateCronJobParams,
+    ) -> Result<(), DbError>;
 
     /// Deletes a cron job by ID. Returns `DbError::NotFound` if absent.
-    async fn delete(&self, id: &str) -> Result<(), DbError>;
+    async fn delete(&self, user_id: &str, id: &str) -> Result<(), DbError>;
 
     /// Returns a single cron job by ID, or `None` if not found.
-    async fn get_by_id(&self, id: &str) -> Result<Option<CronJobRow>, DbError>;
+    async fn get_by_id(&self, user_id: &str, id: &str) -> Result<Option<CronJobRow>, DbError>;
 
     /// Returns all cron jobs ordered by creation time ascending.
-    async fn list_all(&self) -> Result<Vec<CronJobRow>, DbError>;
+    async fn list_all(&self, user_id: &str) -> Result<Vec<CronJobRow>, DbError>;
 
-    /// Returns all enabled cron jobs.
-    async fn list_enabled(&self) -> Result<Vec<CronJobRow>, DbError>;
+    /// Process-internal scheduler lookup. The returned row carries the
+    /// authoritative non-empty owner; callers must preserve it through the
+    /// execution path rather than supplying or deriving a fallback owner.
+    async fn get_by_id_for_scheduler(&self, id: &str) -> Result<Option<CronJobRow>, DbError>;
+
+    /// Process-internal scheduler scan across owners.
+    async fn list_enabled_for_scheduler(&self) -> Result<Vec<CronJobRow>, DbError>;
 
     /// Returns all cron jobs for a given conversation.
-    async fn list_by_conversation(&self, conversation_id: i64) -> Result<Vec<CronJobRow>, DbError>;
+    async fn list_by_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+    ) -> Result<Vec<CronJobRow>, DbError>;
 
     /// Deletes all cron jobs associated with a conversation.
     /// Returns the number of deleted rows.
-    async fn delete_by_conversation(&self, conversation_id: i64) -> Result<u64, DbError>;
+    async fn delete_by_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+    ) -> Result<u64, DbError>;
 
     /// Inserts one execution record and prunes older rows for the same job so
     /// each job retains at most [`CRON_RUN_HISTORY_LIMIT`] rows.
-    async fn insert_run_pruned(&self, row: &CronJobRunRow) -> Result<(), DbError>;
+    async fn insert_run_pruned(
+        &self,
+        user_id: &str,
+        row: &CronJobRunRow,
+    ) -> Result<(), DbError>;
 
     /// Returns recent execution records for one job, newest first.
     async fn list_runs_by_job(
         &self,
+        user_id: &str,
         job_id: &str,
         limit: i64,
     ) -> Result<Vec<CronJobRunRow>, DbError>;

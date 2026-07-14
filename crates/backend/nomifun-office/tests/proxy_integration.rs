@@ -2,11 +2,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_office::OfficeError;
+use nomifun_office::{OfficeError, PreviewAccess};
 use nomifun_office::proxy::{ProxyError, ProxyService};
 use nomifun_office::types::DocType;
 use nomifun_office::watch_manager::{OfficecliWatchManager, ProcessHandle, ProcessSpawner};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
@@ -110,8 +110,8 @@ impl ProcessSpawner for TcpOnlySpawner {
 
 struct NoopBroadcaster;
 
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 fn build_http_response(status: u16, headers: &[(&str, &str)], body: &str) -> String {
@@ -134,7 +134,10 @@ fn build_http_response(status: u16, headers: &[(&str, &str)], body: &str) -> Str
     resp
 }
 
-async fn setup_proxy(doc_type: DocType, response_template: &str) -> (ProxyService, u16, tempfile::TempDir) {
+async fn setup_proxy(
+    doc_type: DocType,
+    response_template: &str,
+) -> (ProxyService, PreviewAccess, tempfile::TempDir) {
     let spawner = HttpMockSpawner {
         response_template: response_template.to_owned(),
     };
@@ -144,13 +147,16 @@ async fn setup_proxy(doc_type: DocType, response_template: &str) -> (ProxyServic
     let file = dir.path().join("test.docx");
     std::fs::write(&file, b"test").unwrap();
 
-    let port = mgr.start(file.to_str().unwrap(), doc_type).await.unwrap();
+    let access = mgr
+        .start("owner-a", file.to_str().unwrap(), doc_type)
+        .await
+        .unwrap();
     let proxy = ProxyService::new(mgr);
 
-    (proxy, port, dir)
+    (proxy, access, dir)
 }
 
-async fn setup_ssrf_proxy(doc_type: DocType) -> (ProxyService, u16, tempfile::TempDir) {
+async fn setup_ssrf_proxy(doc_type: DocType) -> (ProxyService, PreviewAccess, tempfile::TempDir) {
     let mgr = Arc::new(OfficecliWatchManager::new(
         Arc::new(TcpOnlySpawner),
         Arc::new(NoopBroadcaster),
@@ -160,37 +166,41 @@ async fn setup_ssrf_proxy(doc_type: DocType) -> (ProxyService, u16, tempfile::Te
     let file = dir.path().join("test.docx");
     std::fs::write(&file, b"test").unwrap();
 
-    let port = mgr.start(file.to_str().unwrap(), doc_type).await.unwrap();
+    let access = mgr
+        .start("owner-a", file.to_str().unwrap(), doc_type)
+        .await
+        .unwrap();
     let proxy = ProxyService::new(mgr);
 
-    (proxy, port, dir)
+    (proxy, access, dir)
 }
 
 // ---------------------------------------------------------------------------
-// RP-2: PPT proxy SSRF protection — inactive port rejected
+// RP-2: PPT proxy SSRF protection — guessed capability rejected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rp2_ppt_proxy_ssrf_rejects_inactive_port() {
-    let (proxy, _active_port, _dir) = setup_ssrf_proxy(DocType::Ppt).await;
+async fn rp2_ppt_proxy_ssrf_rejects_guessed_capability() {
+    let (proxy, _access, _dir) = setup_ssrf_proxy(DocType::Ppt).await;
 
-    let result = proxy.forward(9999, "/index.html", DocType::Ppt, &[]).await;
+    let guessed = "0".repeat(64);
+    let result = proxy.forward(&guessed, "/index.html", DocType::Ppt, &[]).await;
 
     let err = result.unwrap_err();
-    assert!(matches!(err, ProxyError::PortNotActive(9999)));
+    assert!(matches!(err, ProxyError::InvalidCapability));
 }
 
 // ---------------------------------------------------------------------------
-// RP-4: Office watch proxy SSRF protection — inactive port rejected
+// RP-4: Office watch proxy rejects legacy port-only paths
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rp4_office_watch_proxy_ssrf_rejects_inactive_port() {
-    let (proxy, _active_port, _dir) = setup_ssrf_proxy(DocType::Word).await;
+async fn rp4_office_watch_proxy_rejects_legacy_port_capability() {
+    let (proxy, _access, _dir) = setup_ssrf_proxy(DocType::Word).await;
 
-    let result = proxy.forward_watch(9999, "/", &[]).await;
+    let result = proxy.forward_watch("9999", "/", &[]).await;
 
-    assert!(matches!(result.unwrap_err(), ProxyError::PortNotActive(9999)));
+    assert!(matches!(result.unwrap_err(), ProxyError::InvalidCapability));
 }
 
 // ---------------------------------------------------------------------------
@@ -199,11 +209,46 @@ async fn rp4_office_watch_proxy_ssrf_rejects_inactive_port() {
 
 #[tokio::test]
 async fn ssrf_wrong_doc_type_rejected() {
-    let (proxy, active_port, _dir) = setup_ssrf_proxy(DocType::Word).await;
+    let (proxy, access, _dir) = setup_ssrf_proxy(DocType::Word).await;
 
-    let result = proxy.forward(active_port, "/index.html", DocType::Ppt, &[]).await;
+    let result = proxy
+        .forward(&access.capability, "/index.html", DocType::Ppt, &[])
+        .await;
 
-    assert!(matches!(result.unwrap_err(), ProxyError::PortNotActive(_)));
+    assert!(matches!(result.unwrap_err(), ProxyError::InvalidCapability));
+}
+
+#[tokio::test]
+async fn malformed_capability_is_rejected_without_upstream_access() {
+    let (proxy, _access, _dir) = setup_ssrf_proxy(DocType::Word).await;
+
+    let result = proxy
+        .forward("not-a-capability", "/index.html", DocType::Word, &[])
+        .await;
+
+    assert!(matches!(result.unwrap_err(), ProxyError::InvalidCapability));
+}
+
+#[tokio::test]
+async fn stopped_capability_is_revoked_before_proxying() {
+    let mgr = Arc::new(OfficecliWatchManager::new(
+        Arc::new(TcpOnlySpawner),
+        Arc::new(NoopBroadcaster),
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("test.docx");
+    std::fs::write(&file, b"test").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    let access = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    let proxy = ProxyService::new(Arc::clone(&mgr));
+
+    mgr.stop("owner-a", DocType::Word, &access.capability)
+        .await;
+    let result = proxy
+        .forward(&access.capability, "/", DocType::Word, &[])
+        .await;
+
+    assert!(matches!(result.unwrap_err(), ProxyError::InvalidCapability));
 }
 
 // ---------------------------------------------------------------------------
@@ -211,11 +256,14 @@ async fn ssrf_wrong_doc_type_rejected() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn forward_watch_accepts_excel_session_port() {
+async fn forward_watch_accepts_excel_session_capability() {
     let response = build_http_response(200, &[("Content-Type", "text/plain")], "Excel preview");
-    let (proxy, port, _dir) = setup_proxy(DocType::Excel, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Excel, &response).await;
 
-    let result = proxy.forward_watch(port, "/", &[]).await.unwrap();
+    let result = proxy
+        .forward_watch(&access.capability, "/", &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 200);
     let body = String::from_utf8(result.body).unwrap();
@@ -227,11 +275,14 @@ async fn forward_watch_accepts_excel_session_port() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn forward_watch_accepts_word_session_port() {
+async fn forward_watch_accepts_word_session_capability() {
     let response = build_http_response(200, &[("Content-Type", "text/plain")], "Word preview");
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response).await;
 
-    let result = proxy.forward_watch(port, "/", &[]).await.unwrap();
+    let result = proxy
+        .forward_watch(&access.capability, "/", &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 200);
     let body = String::from_utf8(result.body).unwrap();
@@ -243,12 +294,12 @@ async fn forward_watch_accepts_word_session_port() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn forward_watch_rejects_ppt_session_port() {
-    let (proxy, ppt_port, _dir) = setup_ssrf_proxy(DocType::Ppt).await;
+async fn forward_watch_rejects_ppt_session_capability() {
+    let (proxy, access, _dir) = setup_ssrf_proxy(DocType::Ppt).await;
 
-    let result = proxy.forward_watch(ppt_port, "/", &[]).await;
+    let result = proxy.forward_watch(&access.capability, "/", &[]).await;
 
-    assert!(matches!(result.unwrap_err(), ProxyError::PortNotActive(_)));
+    assert!(matches!(result.unwrap_err(), ProxyError::InvalidCapability));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,9 +309,12 @@ async fn forward_watch_rejects_ppt_session_port() {
 #[tokio::test]
 async fn rp1_rp3_proxy_forwards_plain_text() {
     let response = build_http_response(200, &[("Content-Type", "text/plain")], "Hello from preview");
-    let (proxy, port, _dir) = setup_proxy(DocType::Ppt, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Ppt, &response).await;
 
-    let result = proxy.forward(port, "/index.html", DocType::Ppt, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/index.html", DocType::Ppt, &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 200);
     let body = String::from_utf8(result.body).unwrap();
@@ -275,15 +329,18 @@ async fn rp1_rp3_proxy_forwards_plain_text() {
 async fn rp5_proxy_injects_navigation_guard_in_html() {
     let html_body = "<html><head><title>Preview</title></head><body>Content</body></html>";
     let response = build_http_response(200, &[("Content-Type", "text/html")], html_body);
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response).await;
 
-    let result = proxy.forward(port, "/", DocType::Word, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/", DocType::Word, &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 200);
     let body = String::from_utf8(result.body).unwrap();
     assert!(body.contains("<script>"), "should inject navigation guard script");
     assert!(
-        body.contains(&format!("'/api/office-watch-proxy/{port}'")),
+        body.contains(&format!("'/api/office-watch-proxy/{}'", access.capability)),
         "guard should reference correct proxy base path"
     );
     assert!(
@@ -299,9 +356,12 @@ async fn rp5_proxy_injects_navigation_guard_in_html() {
 #[tokio::test]
 async fn rp5b_proxy_does_not_inject_in_json() {
     let response = build_http_response(200, &[("Content-Type", "application/json")], r#"{"ok":true}"#);
-    let (proxy, port, _dir) = setup_proxy(DocType::Ppt, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Ppt, &response).await;
 
-    let result = proxy.forward(port, "/api/data", DocType::Ppt, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/api/data", DocType::Ppt, &[])
+        .await
+        .unwrap();
 
     let body = String::from_utf8(result.body).unwrap();
     assert!(!body.contains("<script>"), "should not inject script in JSON responses");
@@ -319,13 +379,18 @@ async fn rp7_proxy_strips_hop_by_hop_headers() {
             ("Content-Type", "text/plain"),
             ("Connection", "keep-alive"),
             ("Keep-Alive", "timeout=5"),
+            ("Set-Cookie", "nomifun-session=attacker"),
+            ("X-Frame-Options", "DENY"),
             ("X-Custom", "preserved"),
         ],
         "body",
     );
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response).await;
 
-    let result = proxy.forward(port, "/", DocType::Word, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/", DocType::Word, &[])
+        .await
+        .unwrap();
 
     let header_names: Vec<&str> = result.headers.iter().map(|(k, _)| k.as_str()).collect();
     assert!(
@@ -336,26 +401,29 @@ async fn rp7_proxy_strips_hop_by_hop_headers() {
         !header_names.contains(&"keep-alive"),
         "keep-alive header should be stripped"
     );
+    assert!(!header_names.contains(&"set-cookie"), "upstream must not inject app cookies");
+    assert!(
+        !header_names.contains(&"x-frame-options"),
+        "the outer app policy owns iframe ancestors"
+    );
     assert!(header_names.contains(&"x-custom"), "custom header should be preserved");
 }
 
 // ---------------------------------------------------------------------------
-// X-Frame-Options set to SAMEORIGIN
+// Frame ancestor policy belongs to the outer security middleware
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn proxy_sets_x_frame_options_sameorigin() {
+async fn proxy_does_not_emit_a_conflicting_x_frame_options_policy() {
     let response = build_http_response(200, &[("Content-Type", "text/plain")], "body");
-    let (proxy, port, _dir) = setup_proxy(DocType::Ppt, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Ppt, &response).await;
 
-    let result = proxy.forward(port, "/", DocType::Ppt, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/", DocType::Ppt, &[])
+        .await
+        .unwrap();
 
-    let xfo = result
-        .headers
-        .iter()
-        .find(|(k, _)| k == "x-frame-options")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(xfo, Some("SAMEORIGIN"));
+    assert!(result.headers.iter().all(|(key, _)| key != "x-frame-options"));
 }
 
 // ---------------------------------------------------------------------------
@@ -366,9 +434,12 @@ async fn proxy_sets_x_frame_options_sameorigin() {
 async fn proxy_removes_content_length_for_html() {
     let html_body = "<html><head></head><body></body></html>";
     let response = build_http_response(200, &[("Content-Type", "text/html")], html_body);
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response).await;
 
-    let result = proxy.forward(port, "/", DocType::Word, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/", DocType::Word, &[])
+        .await
+        .unwrap();
 
     let has_cl = result.headers.iter().any(|(k, _)| k == "content-length");
     assert!(
@@ -384,9 +455,12 @@ async fn proxy_removes_content_length_for_html() {
 #[tokio::test]
 async fn proxy_preserves_content_length_for_non_html() {
     let response = build_http_response(200, &[("Content-Type", "application/json")], r#"{"ok":true}"#);
-    let (proxy, port, _dir) = setup_proxy(DocType::Ppt, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Ppt, &response).await;
 
-    let result = proxy.forward(port, "/api/data", DocType::Ppt, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/api/data", DocType::Ppt, &[])
+        .await
+        .unwrap();
 
     let has_cl = result.headers.iter().any(|(k, _)| k == "content-length");
     assert!(has_cl, "content-length should be preserved for non-HTML");
@@ -406,9 +480,12 @@ async fn rp6_proxy_rewrites_location_header() {
         ],
         "",
     );
-    let (proxy, port, _dir) = setup_proxy(DocType::Ppt, &response_template).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Ppt, &response_template).await;
 
-    let result = proxy.forward(port, "/old", DocType::Ppt, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/old", DocType::Ppt, &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 302);
     let location = result
@@ -416,7 +493,10 @@ async fn rp6_proxy_rewrites_location_header() {
         .iter()
         .find(|(k, _)| k == "location")
         .map(|(_, v)| v.as_str());
-    assert_eq!(location, Some(format!("/api/ppt-proxy/{port}/new/path").as_str()));
+    assert_eq!(
+        location,
+        Some(format!("/api/ppt-proxy/{}/new/path", access.capability).as_str())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -426,9 +506,12 @@ async fn rp6_proxy_rewrites_location_header() {
 #[tokio::test]
 async fn rp6b_proxy_rewrites_root_relative_location() {
     let response_template = build_http_response(302, &[("Content-Type", "text/html"), ("Location", "/redirected")], "");
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response_template).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response_template).await;
 
-    let result = proxy.forward(port, "/old", DocType::Word, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/old", DocType::Word, &[])
+        .await
+        .unwrap();
 
     let location = result
         .headers
@@ -437,7 +520,7 @@ async fn rp6b_proxy_rewrites_root_relative_location() {
         .map(|(_, v)| v.as_str());
     assert_eq!(
         location,
-        Some(format!("/api/office-watch-proxy/{port}/redirected").as_str())
+        Some(format!("/api/office-watch-proxy/{}/redirected", access.capability).as_str())
     );
 }
 
@@ -448,9 +531,12 @@ async fn rp6b_proxy_rewrites_root_relative_location() {
 #[tokio::test]
 async fn proxy_forwards_404_status() {
     let response = build_http_response(404, &[("Content-Type", "text/plain")], "Not Found");
-    let (proxy, port, _dir) = setup_proxy(DocType::Word, &response).await;
+    let (proxy, access, _dir) = setup_proxy(DocType::Word, &response).await;
 
-    let result = proxy.forward(port, "/missing", DocType::Word, &[]).await.unwrap();
+    let result = proxy
+        .forward(&access.capability, "/missing", DocType::Word, &[])
+        .await
+        .unwrap();
 
     assert_eq!(result.status, 404);
 }

@@ -74,8 +74,8 @@ see notes).
 
 | Id | Route / screen | Host | Caption | Used in | Status |
 | --- | --- | --- | --- | --- | --- |
-| `readme-00-orchestration-hero.png` | desktop app / conversation orchestration | desktop | Header hero showing orchestration conversation, reusable roles, and DAG canvas | README / README.zh-CN | live |
-| `readme-01-workbench-overview.png` | desktop app / conversation orchestration | desktop | Work orchestration with conversation, reusable roles, and DAG canvas | README / README.zh-CN | live |
+| `readme-00-agent-collaboration-hero.png` | desktop app / Agent collaboration | desktop | Header hero showing an Agent conversation, reusable roles, and execution graph | README / README.zh-CN | live |
+| `readme-01-workbench-overview.png` | desktop app / Agent collaboration | desktop | Agent collaboration with conversation, reusable roles, and execution graph | README / README.zh-CN | live |
 | `readme-02-terminal-create.png` | `#/terminal-new` | desktop | Create terminal flow with expanded capability handoff panel | README / README.zh-CN | live |
 | `readme-03-presets.png` | `#/presets` | desktop | Preset library | README / README.zh-CN | refresh required |
 | `readme-04-model-agents.png` | `#/models` | desktop | Models and Agents management with installed and supported CLI agents | README / README.zh-CN | live |

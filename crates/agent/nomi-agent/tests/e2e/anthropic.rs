@@ -69,7 +69,7 @@ async fn test_anthropic_single_turn_completion() {
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
     let result = engine
-        .run("Say 'hello world' and nothing else.", "")
+        .execute_turn("Say 'hello world' and nothing else.", "")
         .await
         .expect("engine.run should not fail for a valid request");
 
@@ -109,7 +109,7 @@ async fn test_anthropic_tool_use() {
         path
     );
     let result = engine
-        .run(&prompt, "")
+        .execute_turn(&prompt, "")
         .await
         .expect("engine.run should not fail");
 

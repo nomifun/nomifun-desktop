@@ -1,4 +1,4 @@
-//! 托管启动 Chromium：经 [`nomifun_runtime::Builder`] spawn 解析到的 chrome，传随机
+//! 托管启动 Chromium：经 [`nomi_process_runtime::ChildProcessBuilder`] spawn 解析到的 chrome，传随机
 //! 调试端口（`--remote-debugging-port=0`，OS 分配）+ **专属 user-data-dir**（红线：永不
 //! 碰用户 profile）+ [`crate::switches::chromium_switches`] 全量硬化开关，然后**轮询
 //! `<user-data-dir>/DevToolsActivePort`** 拿到实际端口与 browser ws 路径，拼出
@@ -249,7 +249,7 @@ pub async fn launch_chrome(
     }
 }
 
-/// **Unix**：`--remote-debugging-pipe` 启动。建两条匿名管道,经 [`nomifun_runtime::Builder::inherit_fds`]
+/// **Unix**：`--remote-debugging-pipe` 启动。建两条匿名管道,经 [`nomi_process_runtime::ChildProcessBuilder::inherit_fds`]
 /// 把 chrome 端装到 fd3（读命令）/fd4（写响应）；我们持另两端交 [`crate::transport::Connection::connect_pipe`]。
 /// 无端口轮询——管道即时可用,且浏览器在父死/管道 EOF 时自退（免疫 SIGKILL）。
 #[cfg(unix)]
@@ -261,7 +261,7 @@ async fn launch_chrome_pipe(
     let (chrome_cmd_read, our_cmd_write) = make_pipe()?;
     let (our_resp_read, chrome_resp_write) = make_pipe()?;
 
-    let mut builder = nomifun_runtime::Builder::new(&config.chrome_path);
+    let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&config.chrome_path);
     builder
         .args(args)
         // chrome 的 stdout/stderr 我们不消费；null 掉避免污染父进程控制台。
@@ -348,7 +348,7 @@ async fn launch_chrome_ws(
     let port_file = config.user_data_dir.join("DevToolsActivePort");
     let _ = std::fs::remove_file(&port_file);
 
-    let mut builder = nomifun_runtime::Builder::new(&config.chrome_path);
+    let mut builder = nomi_process_runtime::ChildProcessBuilder::new(&config.chrome_path);
     builder
         .args(args)
         .stdin(std::process::Stdio::null())
@@ -380,7 +380,7 @@ async fn launch_chrome_ws(
             }
         }
         if Instant::now() >= deadline {
-            let _ = nomifun_runtime::kill_process_tree(&mut child).await;
+            let _ = nomi_process_runtime::kill_process_tree(&mut child).await;
             return Err(BrowserError::Other(format!(
                 "timed out after {}s waiting for DevToolsActivePort in {}",
                 PORT_FILE_TIMEOUT.as_secs(),

@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme-00-orchestration-hero.png" alt="NomiFun 编排会话、角色沉淀与 DAG 画布" width="100%">
+  <img src="docs/images/readme-00-agent-collaboration-hero.png" alt="NomiFun Agent 协作、角色沉淀与执行图" width="100%">
 </a>
 
 <h3>一项毫无保留、<em>本地优先</em>的超级 AI 工作站。</h3>
@@ -96,8 +96,8 @@
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun 工作编排会话与 DAG 画布" width="100%">
-  <br/><sub><b>工作编排：会话、角色沉淀与 DAG 画布</b></sub>
+  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun Agent 协作与执行图" width="100%">
+  <br/><sub><b>Agent 协作：一条会话、可复用角色与实时执行图</b></sub>
 </p>
 
 <table>
@@ -136,14 +136,14 @@
 - **会传播的 skill。** 伙伴自动总结、生成 skill 并与你商议，还能把 skill **赠予**另一个伙伴（对方得到一份副本）—— 开启跨伙伴的共享学习。
 - **不只是伙伴，更是超级网关。** 每个伙伴都是完整、独立的个体，可连接多个 IM 渠道。只要有网络和社交平台，随时随地一条消息，就能指挥伙伴帮你操作电脑。每个伙伴都能完整驱动桌面的系统能力。
 
-### 🧠 会话原生编排
+### 🧠 Agent 协作
 
-从普通会话起步，任务一旦值得拆分，NomiFun 就会把它扩展成一张实时 DAG。
+从一条普通 Agent 会话开始。当任务确实值得并行时，同一套 Agent 能力会委派部分工作，并展示实时执行图。
 
-- **先是会话，再是编排。** 多 agent 工作直接从你当前的聊天发起；右侧编排栏与悬浮画布都挂在这条会话上，无需跳到另一个页面。
-- **每个节点都能启动前配置。** worker 真正启动前，可单独改模型、补一段预置要求；已完成节点也能带着这套配置重跑。
-- **执行前先给你过目。** interactive run 会在规划完成后停在待批准态，并在会话里显示「批准执行」提示条，让你先审、先调、再开跑。
-- **节点内容真实投射。** 点击任一 DAG 节点，就能在主内容区查看该 worker 的真实会话；随时回到 `main` 继续指挥主 agent。
+- **产品只保留一个概念。** 你只需配置 Agent 和协作策略；委派工作始终留在同一个 Conversation 与唯一的 `AgentExecution` 聚合中。
+- **每个步骤都能启动前配置。** 被委派的 Agent 真正启动前，可单独改模型、补一段预置要求；已完成步骤也能带着这套配置重试。
+- **执行前先给你过目。** 开启计划审批后，协作会在规划完成时暂停，让你先审核和调整执行图，再开始工作。
+- **真实 Agent 会话。** 点击任一步骤，就能查看该 Agent 的真实会话；随时回到主会话继续指导整体工作。
 
 ### 🤖 智能值守 —— 需求平台 + AutoWork + IDMM
 

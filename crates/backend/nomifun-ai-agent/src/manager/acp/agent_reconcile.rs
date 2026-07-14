@@ -2,7 +2,7 @@ use crate::manager::acp::AcpAgentManager;
 
 use crate::manager::acp::mode_normalize::normalize_requested_mode;
 use crate::protocol::error::AcpError;
-use crate::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId};
+use crate::session::{ConfigKey, ConfigValue, ModeId, ModelId};
 use agent_client_protocol::schema::{
     SessionId, SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest,
 };

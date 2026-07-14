@@ -31,7 +31,7 @@ pub enum MessageResult {
         conversation_id: Option<String>,
     },
     /// A chat action (`chat.continue`) re-enters the normal AI dispatch
-    /// path with a synthesized user text. The orchestrator relays it
+    /// path with a synthesized user text. The message loop relays it
     /// exactly like `Dispatched`, preserving streaming replies.
     DispatchedText {
         session_id: String,
@@ -41,7 +41,7 @@ pub enum MessageResult {
     /// `chat.regenerate`: resend the conversation's last user message.
     /// Resolving that text needs conversation history access
     /// (`ChannelMessageService`), which the executor deliberately does not
-    /// hold — the orchestrator performs the lookup and dispatch.
+    /// hold — the message loop performs the lookup and dispatch.
     RegenerateRequested {
         session_id: String,
         conversation_id: Option<String>,
@@ -554,7 +554,7 @@ impl ActionExecutor {
             "chat.continue" => {
                 // Re-enter the normal dispatch path with a fixed "continue"
                 // prompt so the agent resumes its previous answer. The
-                // orchestrator handles streaming exactly like a typed message.
+                // message loop handles streaming exactly like a typed message.
                 let session = self.resolve_action_session(action, internal_user_id, channel_id).await?;
                 Ok(MessageResult::DispatchedText {
                     session_id: session.id,
@@ -565,7 +565,7 @@ impl ActionExecutor {
             "chat.regenerate" => {
                 // The last user message lives in conversation history, which
                 // only ChannelMessageService can read — hand the lookup to
-                // the orchestrator instead of growing this executor's deps.
+                // the message loop instead of growing this executor's deps.
                 let session = self.resolve_action_session(action, internal_user_id, channel_id).await?;
                 Ok(MessageResult::RegenerateRequested {
                     session_id: session.id,
@@ -787,15 +787,15 @@ mod action_tests {
         ChannelSessionRow, ChannelUserRow, ChannelPluginRow, ClientPreference, ChannelPairingCodeRow,
     };
     use nomifun_db::{DbError, IChannelRepository, IClientPreferenceRepository, UpdatePluginStatusParams};
-    use nomifun_realtime::EventBroadcaster;
+    use nomifun_realtime::UserEventSink;
     use std::sync::Mutex;
 
-    // ── Mock EventBroadcaster ──────────────────────────────────────────
+    // ── Mock owner-scoped event sink ───────────────────────────────────
 
     struct MockBroadcaster;
 
-    impl EventBroadcaster for MockBroadcaster {
-        fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+    impl UserEventSink for MockBroadcaster {
+        fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
     }
 
     // ── Mock IChannelRepository ────────────────────────────────────────
@@ -1065,7 +1065,7 @@ mod action_tests {
     fn setup() -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster);
-        let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster));
+        let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster, "owner-a"));
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
         let pref_repo: Arc<dyn IClientPreferenceRepository> = Arc::new(MockPrefRepo);
         let settings = Arc::new(ChannelSettingsService::new(pref_repo));
@@ -1078,7 +1078,7 @@ mod action_tests {
     fn setup_with_prefs(entries: &[(&str, &str)]) -> (ActionExecutor, Arc<MockRepo>) {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster);
-        let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster));
+        let pairing = Arc::new(PairingService::new(repo.clone(), broadcaster, "owner-a"));
         let session_mgr = Arc::new(SessionManager::new(repo.clone()));
         let pref_repo: Arc<dyn IClientPreferenceRepository> = Arc::new(SeededPrefRepo::new(entries));
         let settings = Arc::new(ChannelSettingsService::new(pref_repo));
@@ -1573,7 +1573,7 @@ mod action_tests {
         repo.add_authorized_user("tg_42", "telegram");
 
         // Create the session via a normal text message, then bind a
-        // conversation to it like the orchestrator would.
+        // conversation to it like the message loop would.
         let text_msg = make_text_message("tg_42", "chat_1", "Hello", PluginType::Telegram);
         let sid = match executor.handle_incoming_message(&text_msg, "tg-1").await.unwrap() {
             MessageResult::Dispatched { session_id, .. } => session_id,
@@ -1603,7 +1603,7 @@ mod action_tests {
     }
 
     #[tokio::test]
-    async fn chat_regenerate_requests_orchestrator_lookup() {
+    async fn chat_regenerate_requests_message_loop_lookup() {
         let (executor, repo) = setup();
         repo.add_authorized_user("tg_42", "telegram");
 
@@ -1653,7 +1653,7 @@ mod action_tests {
                 conversation_id,
             } => {
                 assert!(!session_id.is_empty());
-                // The orchestrator turns this into a "nothing to regenerate"
+                // The message loop turns this into a "nothing to regenerate"
                 // notice — the executor only reports the missing binding.
                 assert_eq!(conversation_id, None);
             }

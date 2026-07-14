@@ -37,16 +37,21 @@ pub fn office_routes(state: OfficeRouterState) -> Router {
 
 pub fn office_proxy_routes(state: OfficeRouterState) -> Router {
     Router::new()
-        .route("/api/ppt-proxy/{port}", get(ppt_proxy))
-        .route("/api/ppt-proxy/{port}/{*path}", get(ppt_proxy))
-        .route("/api/office-watch-proxy/{port}", get(office_watch_proxy))
-        .route("/api/office-watch-proxy/{port}/{*path}", get(office_watch_proxy))
+        .route("/api/ppt-proxy/{capability}", get(ppt_proxy))
+        .route("/api/ppt-proxy/{capability}/", get(ppt_proxy))
+        .route("/api/ppt-proxy/{capability}/{*path}", get(ppt_proxy))
+        .route("/api/office-watch-proxy/{capability}", get(office_watch_proxy))
+        .route("/api/office-watch-proxy/{capability}/", get(office_watch_proxy))
+        .route(
+            "/api/office-watch-proxy/{capability}/{*path}",
+            get(office_watch_proxy),
+        )
         .with_state(state)
 }
 
 #[derive(serde::Deserialize)]
-struct ProxyPortPath {
-    port: u16,
+struct ProxyCapabilityPath {
+    capability: String,
     path: Option<String>,
 }
 
@@ -54,54 +59,55 @@ struct ProxyPortPath {
 
 async fn start_word_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StartPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, body, DocType::Word).await
+    start_preview(state, &user.id, body, DocType::Word).await
 }
 
 async fn stop_word_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StopPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, body, DocType::Word).await
+    stop_preview(state, &user.id, body, DocType::Word).await
 }
 
 async fn start_excel_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StartPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, body, DocType::Excel).await
+    start_preview(state, &user.id, body, DocType::Excel).await
 }
 
 async fn stop_excel_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StopPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, body, DocType::Excel).await
+    stop_preview(state, &user.id, body, DocType::Excel).await
 }
 
 async fn start_ppt_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StartPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
-    start_preview(state, body, DocType::Ppt).await
+    start_preview(state, &user.id, body, DocType::Ppt).await
 }
 
 async fn stop_ppt_preview(
     State(state): State<OfficeRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<StopPreviewRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    stop_preview(state, body, DocType::Ppt).await
+    stop_preview(state, &user.id, body, DocType::Ppt).await
 }
 
 async fn start_preview(
     state: OfficeRouterState,
+    owner_id: &str,
     body: Result<Json<StartPreviewRequest>, JsonRejection>,
     doc_type: DocType,
 ) -> Result<Json<ApiResponse<PreviewUrlResponse>>, AppError> {
@@ -109,15 +115,22 @@ async fn start_preview(
     let validated_path = validate_office_path(&state, &req.file_path, req.workspace.as_deref())?;
     let validated_path = validated_path.to_string_lossy().into_owned();
 
-    let result = state.watch_manager.start(&validated_path, doc_type).await;
+    let result = state.watch_manager.start(owner_id, &validated_path, doc_type).await;
 
     let resp = match result {
-        Ok(port) => {
-            let url = format!("/api/{}/{}", doc_type.proxy_prefix(), port);
-            PreviewUrlResponse { url, error: None }
+        Ok(access) => {
+            // The trailing slash is part of the security boundary: ordinary
+            // relative iframe links stay underneath the capability segment.
+            let url = format!("/api/{}/{}/", doc_type.proxy_prefix(), access.capability);
+            PreviewUrlResponse {
+                url,
+                capability: Some(access.capability),
+                error: None,
+            }
         }
         Err(e) => PreviewUrlResponse {
             url: String::new(),
+            capability: None,
             error: Some(preview_error_code(&e).to_owned()),
         },
     };
@@ -127,11 +140,15 @@ async fn start_preview(
 
 async fn stop_preview(
     state: OfficeRouterState,
+    owner_id: &str,
     body: Result<Json<StopPreviewRequest>, JsonRejection>,
     doc_type: DocType,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.watch_manager.stop(&req.file_path, doc_type).await;
+    state
+        .watch_manager
+        .stop(owner_id, doc_type, &req.capability)
+        .await;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -228,16 +245,16 @@ fn preview_error_code(error: &OfficeError) -> &'static str {
 
 async fn ppt_proxy(
     State(state): State<OfficeRouterState>,
-    Path(params): Path<ProxyPortPath>,
+    Path(params): Path<ProxyCapabilityPath>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let path = params.path.as_deref().unwrap_or("/");
-    proxy_forward(state, params.port, path, DocType::Ppt, &headers).await
+    proxy_forward(state, &params.capability, path, DocType::Ppt, &headers).await
 }
 
 async fn office_watch_proxy(
     State(state): State<OfficeRouterState>,
-    Path(params): Path<ProxyPortPath>,
+    Path(params): Path<ProxyCapabilityPath>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let path = params.path.as_deref().unwrap_or("/");
@@ -248,7 +265,7 @@ async fn office_watch_proxy(
 
     let proxy_resp = state
         .proxy_service
-        .forward_watch(params.port, path, &request_headers)
+        .forward_watch(&params.capability, path, &request_headers)
         .await?;
 
     let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -265,7 +282,7 @@ async fn office_watch_proxy(
 
 async fn proxy_forward(
     state: OfficeRouterState,
-    port: u16,
+    capability: &str,
     path: &str,
     doc_type: DocType,
     headers: &HeaderMap,
@@ -277,7 +294,7 @@ async fn proxy_forward(
 
     let proxy_resp = state
         .proxy_service
-        .forward(port, path, doc_type, &request_headers)
+        .forward(capability, path, doc_type, &request_headers)
         .await?;
 
     let status = StatusCode::from_u16(proxy_resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -344,12 +361,17 @@ mod tests {
         }
 
         struct NoopBroadcaster;
-        impl nomifun_realtime::EventBroadcaster for NoopBroadcaster {
-            fn broadcast(&self, _msg: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+        impl nomifun_realtime::UserEventSink for NoopBroadcaster {
+            fn send_to_user(
+                &self,
+                _user_id: &str,
+                _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+            ) {
+            }
         }
 
         let spawner = Arc::new(NoopSpawner);
-        let bc: Arc<dyn nomifun_realtime::EventBroadcaster> = Arc::new(NoopBroadcaster);
+        let bc: Arc<dyn nomifun_realtime::UserEventSink> = Arc::new(NoopBroadcaster);
         let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
 
         let snapshot = Arc::new(SnapshotService::new(std::path::Path::new("/tmp/test")));

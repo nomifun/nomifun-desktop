@@ -140,14 +140,14 @@ impl ChannelSettingsService {
             use_model,
         }))
     }
-    /// Reads the companion bound to a platform's master agent from
+    /// Reads the companion bound to a channel platform from
     /// `client_preferences` (key `channels.{platform}.companionId`).
     ///
     /// Returns `None` when the key is absent or stores an empty string —
-    /// "no explicit binding, use the default companion". Tolerates both a JSON
+    /// the platform has no companion binding. Tolerates both a JSON
     /// string (`"companion_x"`) and a raw unquoted value.
-    pub async fn get_master_agent_companion_id(&self, platform: PluginType) -> Result<Option<String>, ChannelError> {
-        let key = master_agent_companion_key(platform);
+    pub async fn get_channel_companion_id(&self, platform: PluginType) -> Result<Option<String>, ChannelError> {
+        let key = channel_companion_key(platform);
         let prefs = self.pref_repo.get_by_keys(&[&key]).await?;
 
         let Some(pref) = prefs.into_iter().next() else {
@@ -167,19 +167,18 @@ impl ChannelSettingsService {
         Ok(Some(trimmed.to_owned()))
     }
 
-    /// Writes (or clears) the companion bound to a platform's master agent
+    /// Writes (or clears) the companion bound to a channel platform
     /// (key `channels.{platform}.companionId`). `None` / empty string deletes the
-    /// key — back to "default companion" semantics.
+    /// key and leaves the platform unbound.
     ///
-    /// Persistence only: the channel routes layer pairs this with the same
-    /// session reset as the masterAgent switch so the next inbound message
-    /// recreates conversations under the new binding.
-    pub async fn set_master_agent_companion_id(
+    /// Persistence only: the channel routes layer pairs this with a session reset
+    /// so the next inbound message resolves the new binding.
+    pub async fn set_channel_companion_id(
         &self,
         platform: PluginType,
         companion_id: Option<&str>,
     ) -> Result<(), ChannelError> {
-        let key = master_agent_companion_key(platform);
+        let key = channel_companion_key(platform);
         match companion_id.map(str::trim).filter(|s| !s.is_empty()) {
             Some(id) => {
                 let value = serde_json::Value::String(id.to_owned()).to_string();
@@ -197,7 +196,7 @@ fn agent_key(platform: PluginType) -> String {
     format!("channels.{platform}.agent")
 }
 
-fn master_agent_companion_key(platform: PluginType) -> String {
+fn channel_companion_key(platform: PluginType) -> String {
     format!("channels.{platform}.companionId")
 }
 
@@ -477,13 +476,13 @@ mod tests {
         assert!(config.is_none());
     }
 
-    // ── get/set_master_agent_companion_id ───────────────────────────────────
+    // ── get/set_channel_companion_id ────────────────────────────────────────
 
     #[tokio::test]
     async fn companion_id_returns_none_when_no_pref() {
         let repo = Arc::new(MockPrefRepo::new());
         let svc = ChannelSettingsService::new(repo);
-        assert!(svc.get_master_agent_companion_id(PluginType::Telegram).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -494,7 +493,7 @@ mod tests {
         )]));
         let svc = ChannelSettingsService::new(repo);
         assert_eq!(
-            svc.get_master_agent_companion_id(PluginType::Telegram).await.unwrap().as_deref(),
+            svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().as_deref(),
             Some("companion_abc")
         );
     }
@@ -504,7 +503,7 @@ mod tests {
         let repo = Arc::new(MockPrefRepo::with_data(vec![("channels.lark.companionId", "companion_raw")]));
         let svc = ChannelSettingsService::new(repo);
         assert_eq!(
-            svc.get_master_agent_companion_id(PluginType::Lark).await.unwrap().as_deref(),
+            svc.get_channel_companion_id(PluginType::Lark).await.unwrap().as_deref(),
             Some("companion_raw")
         );
     }
@@ -517,9 +516,9 @@ mod tests {
             ("channels.weixin.companionId", "null"),
         ]));
         let svc = ChannelSettingsService::new(repo);
-        assert!(svc.get_master_agent_companion_id(PluginType::Telegram).await.unwrap().is_none());
-        assert!(svc.get_master_agent_companion_id(PluginType::Lark).await.unwrap().is_none());
-        assert!(svc.get_master_agent_companion_id(PluginType::Weixin).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Lark).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Weixin).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -527,28 +526,28 @@ mod tests {
         let repo = Arc::new(MockPrefRepo::new());
         let svc = ChannelSettingsService::new(repo);
 
-        svc.set_master_agent_companion_id(PluginType::Dingtalk, Some("companion_77"))
+        svc.set_channel_companion_id(PluginType::Dingtalk, Some("companion_77"))
             .await
             .unwrap();
         assert_eq!(
-            svc.get_master_agent_companion_id(PluginType::Dingtalk).await.unwrap().as_deref(),
+            svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().as_deref(),
             Some("companion_77")
         );
         // Other platforms unaffected.
-        assert!(svc.get_master_agent_companion_id(PluginType::Telegram).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().is_none());
 
         // None clears the binding (key deleted).
-        svc.set_master_agent_companion_id(PluginType::Dingtalk, None).await.unwrap();
-        assert!(svc.get_master_agent_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
+        svc.set_channel_companion_id(PluginType::Dingtalk, None).await.unwrap();
+        assert!(svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
 
         // Empty string also clears.
-        svc.set_master_agent_companion_id(PluginType::Dingtalk, Some("companion_88"))
+        svc.set_channel_companion_id(PluginType::Dingtalk, Some("companion_88"))
             .await
             .unwrap();
-        svc.set_master_agent_companion_id(PluginType::Dingtalk, Some("  "))
+        svc.set_channel_companion_id(PluginType::Dingtalk, Some("  "))
             .await
             .unwrap();
-        assert!(svc.get_master_agent_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
+        assert!(svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
     }
 
     // ── resolved_model_to_provider ────────────────────────────────────

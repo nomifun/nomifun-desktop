@@ -1,7 +1,9 @@
 use nomifun_db::{init_database_memory, models::ConversationRow, models::MessageRow};
 use sqlx::Row;
 
-// Helper: insert a test user and return their id.
+const INSTALLATION_OWNER: &str = "system_default_user";
+
+// Helper: insert a secondary test user and return their id.
 async fn insert_test_user(pool: &sqlx::SqlitePool) -> String {
     let id = "test_user_1";
     sqlx::query(
@@ -15,14 +17,31 @@ async fn insert_test_user(pool: &sqlx::SqlitePool) -> String {
     id.to_string()
 }
 
-// Helper: insert a test conversation and return its id. The explicit integer
-// id is a valid AUTOINCREMENT rowid.
+async fn insert_test_provider(pool: &sqlx::SqlitePool, id: &str) {
+    sqlx::query(
+        "INSERT INTO providers (\
+            id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES (?, 'openai', ?, 'https://example.invalid', \
+                   'encrypted', '[]', 1, '[]', 1000, 1000)",
+    )
+    .bind(id)
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+// Helper: insert a legal model-only Conversation for a secondary user and
+// return its id. Tests that need host-capable columns use INSTALLATION_OWNER
+// explicitly instead.
 async fn insert_test_conversation(pool: &sqlx::SqlitePool, user_id: &str) -> i64 {
     let id: i64 = 1;
     sqlx::query(
         "INSERT INTO conversations \
-         (id, user_id, name, type, extra, status, created_at, updated_at) \
-         VALUES ($1, $2, 'Test Chat', 'gemini', '{\"workspace\":\"/tmp\"}', 'pending', 1000, 1000)",
+         (id, user_id, name, type, extra, status, delegation_policy, created_at, updated_at) \
+         VALUES ($1, $2, 'Test Chat', 'nomi', '{\"workspace\":\"/tmp\"}', \
+                 'pending', 'disabled', 1000, 1000)",
     )
     .bind(id)
     .bind(user_id)
@@ -63,7 +82,8 @@ async fn migration_creates_messages_table() {
 #[tokio::test]
 async fn conversations_accepts_all_columns() {
     let db = init_database_memory().await.unwrap();
-    let user_id = insert_test_user(db.pool()).await;
+    insert_test_provider(db.pool(), "p1").await;
+    let user_id = INSTALLATION_OWNER;
 
     sqlx::query(
         "INSERT INTO conversations \
@@ -98,7 +118,7 @@ async fn conversations_accepts_all_columns() {
 #[tokio::test]
 async fn conversations_defaults() {
     let db = init_database_memory().await.unwrap();
-    let user_id = insert_test_user(db.pool()).await;
+    let user_id = INSTALLATION_OWNER;
 
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
@@ -139,7 +159,7 @@ async fn conversations_defaults() {
 #[tokio::test]
 async fn conversations_status_check_constraint() {
     let db = init_database_memory().await.unwrap();
-    let user_id = insert_test_user(db.pool()).await;
+    let user_id = INSTALLATION_OWNER;
 
     let result = sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
@@ -155,7 +175,7 @@ async fn conversations_status_check_constraint() {
 #[tokio::test]
 async fn conversations_status_allows_valid_values() {
     let db = init_database_memory().await.unwrap();
-    let user_id = insert_test_user(db.pool()).await;
+    let user_id = INSTALLATION_OWNER;
 
     for (i, status) in ["pending", "running", "finished"].iter().enumerate() {
         let id = 20_i64 + i as i64;
@@ -179,8 +199,10 @@ async fn conversations_fk_user_id() {
     let db = init_database_memory().await.unwrap();
 
     let result = sqlx::query(
-        "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
-         VALUES (30, 'nonexistent_user', 'Bad FK', 'gemini', 'pending', 1000, 1000)",
+        "INSERT INTO conversations \
+            (id, user_id, name, type, status, delegation_policy, created_at, updated_at) \
+         VALUES \
+            (30, 'nonexistent_user', 'Bad FK', 'nomi', 'pending', 'disabled', 1000, 1000)",
     )
     .execute(db.pool())
     .await;
@@ -469,7 +491,8 @@ async fn cascade_delete_user_removes_conversations_and_messages() {
 #[tokio::test]
 async fn conversation_row_from_row() {
     let db = init_database_memory().await.unwrap();
-    let user_id = insert_test_user(db.pool()).await;
+    insert_test_provider(db.pool(), "p1").await;
+    let user_id = INSTALLATION_OWNER;
 
     sqlx::query(
         "INSERT INTO conversations \
@@ -511,8 +534,9 @@ async fn conversation_row_nullable_fields() {
 
     sqlx::query(
         "INSERT INTO conversations \
-         (id, user_id, name, type, extra, status, created_at, updated_at) \
-         VALUES (41, $1, 'Nullable Test', 'remote', '{}', 'pending', 1000, 1000)",
+         (id, user_id, name, type, extra, status, delegation_policy, created_at, updated_at) \
+         VALUES \
+            (41, $1, 'Nullable Test', 'nomi', '{}', 'pending', 'disabled', 1000, 1000)",
     )
     .bind(&user_id)
     .execute(db.pool())

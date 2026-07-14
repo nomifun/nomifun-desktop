@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::registry::{Capability, CapabilityMeta, DangerTier};
 use crate::server::ok;
-use crate::tools_provider;
+use crate::provider_support;
 
 #[derive(Deserialize, JsonSchema)]
 struct CronListParams {
@@ -73,11 +73,14 @@ fn is_duplicate_job(existing_name: &str, existing_message: &str, new_name: &str,
     existing_name.trim().eq_ignore_ascii_case(new_name.trim()) || existing_message.trim() == new_message.trim()
 }
 
-async fn list(deps: Arc<GatewayDeps>, p: CronListParams) -> Value {
+async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronListParams) -> Value {
+    if ctx.user_id.trim().is_empty() {
+        return json!({ "error": "missing caller user identity" });
+    }
     let query = ListCronJobsQuery {
         conversation_id: p.conversation_id,
     };
-    match deps.cron_service.list_jobs(&query).await {
+    match deps.cron_service.list_jobs(&ctx.user_id, &query).await {
         Ok(jobs) => ok(jobs.iter().map(cron_job_to_response).collect::<Vec<_>>()),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -98,7 +101,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
     // ── duplicate guard ──────────────────────────────────────────────
     match deps
         .cron_service
-        .list_jobs(&ListCronJobsQuery {
+        .list_jobs(&ctx.user_id, &ListCronJobsQuery {
             conversation_id: Some(target_conv_id),
         })
         .await
@@ -124,17 +127,21 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
         Ok(conv) => {
             let model_missing = conv.model.as_ref().is_none_or(|m| m.provider_id.trim().is_empty());
             if conv.r#type == AgentType::Nomi && model_missing {
-                match tools_provider::resolve_nomi_model(&deps, &ctx, None, None).await {
+                match provider_support::resolve_nomi_model(&deps, &ctx, None, None).await {
                     Ok((m, source)) => {
                         let req = UpdateConversationRequest {
                             name: None,
                             pinned: None,
                             model: Some(m.clone()),
+                            delegation_policy: None,
+                            execution_model_pool: None,
+                            decision_policy: None,
+                            execution_template_id: None,
                             extra: None,
                         };
                         if let Err(e) = deps
                             .conversation_service
-                            .update(&ctx.user_id, &target_conversation, req, &deps.task_manager)
+                            .update(&ctx.user_id, &target_conversation, req, &deps.runtime_registry)
                             .await
                         {
                             return json!({ "error": format!("failed to persist auto-selected model onto the bound conversation: {e}") });
@@ -204,7 +211,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "List scheduled cron jobs (all jobs by default; pass conversation_id to filter to one session).",
             DangerTier::Read,
         ),
-        |deps, _ctx, p| list(deps, p),
+        list,
     ));
     out.push(Capability::new::<CronCreateParams, _, _>(
         CapabilityMeta::new(

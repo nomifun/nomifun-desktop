@@ -9,17 +9,19 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_file::{FileService, IFileService};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 /// A broadcaster that records every event for later assertion.
 struct RecordingBroadcaster {
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+    owners: Mutex<Vec<String>>,
 }
 
 impl RecordingBroadcaster {
     fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            owners: Mutex::new(Vec::new()),
         }
     }
 
@@ -27,10 +29,16 @@ impl RecordingBroadcaster {
         let mut guard = self.events.lock().unwrap();
         std::mem::take(&mut *guard)
     }
+
+    fn take_owners(&self) -> Vec<String> {
+        let mut guard = self.owners.lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
 }
 
-impl EventBroadcaster for RecordingBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for RecordingBroadcaster {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        self.owners.lock().unwrap().push(user_id.to_owned());
         self.events.lock().unwrap().push(event);
     }
 }
@@ -38,8 +46,8 @@ impl EventBroadcaster for RecordingBroadcaster {
 /// No-op broadcaster for tests that don't need event verification.
 struct NoopBroadcaster;
 
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 fn make_service(root: &std::path::Path) -> FileService {
@@ -264,7 +272,10 @@ async fn write_file_normal() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let ok = svc.write_file(file.to_str().unwrap(), b"hello", ws).await.unwrap();
+    let ok = svc
+        .write_file("owner-a", file.to_str().unwrap(), b"hello", ws)
+        .await
+        .unwrap();
 
     assert!(ok);
     assert_eq!(fs::read_to_string(&file).unwrap(), "hello");
@@ -278,7 +289,10 @@ async fn write_file_creates_new_file() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let ok = svc.write_file(file.to_str().unwrap(), b"created", ws).await.unwrap();
+    let ok = svc
+        .write_file("owner-a", file.to_str().unwrap(), b"created", ws)
+        .await
+        .unwrap();
 
     assert!(ok);
     assert!(file.exists());
@@ -292,7 +306,9 @@ async fn write_file_parent_not_exists_returns_error() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let result = svc.write_file(file.to_str().unwrap(), b"data", ws).await;
+    let result = svc
+        .write_file("owner-a", file.to_str().unwrap(), b"data", ws)
+        .await;
 
     assert!(result.is_err());
 }
@@ -303,7 +319,9 @@ async fn write_file_path_traversal_rejected() {
 
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
-    let result = svc.write_file("../../tmp/evil.txt", b"bad", ws).await;
+    let result = svc
+        .write_file("owner-a", "../../tmp/evil.txt", b"bad", ws)
+        .await;
 
     assert!(result.is_err());
 }
@@ -316,7 +334,9 @@ async fn write_file_outside_sandbox_rejected() {
 
     let svc = make_service(sandbox.path());
     let ws = sandbox.path().to_str().unwrap();
-    let result = svc.write_file(target.to_str().unwrap(), b"bad", ws).await;
+    let result = svc
+        .write_file("owner-a", target.to_str().unwrap(), b"bad", ws)
+        .await;
 
     assert!(result.is_err());
 }
@@ -333,11 +353,12 @@ async fn write_file_emits_content_update_event() {
     let (svc, recorder) = make_service_with_recorder(dir.path());
     let ws = dir.path().to_str().unwrap();
 
-    svc.write_file(file.to_str().unwrap(), b"event content", ws)
+    svc.write_file("owner-a", file.to_str().unwrap(), b"event content", ws)
         .await
         .unwrap();
 
     let events = recorder.take_events();
+    assert_eq!(recorder.take_owners(), vec!["owner-a"]);
     assert_eq!(events.len(), 1);
 
     let event = &events[0];
@@ -364,7 +385,9 @@ async fn write_file_binary_omits_content_in_event() {
     let (svc, recorder) = make_service_with_recorder(dir.path());
     let ws = dir.path().to_str().unwrap();
 
-    svc.write_file(file.to_str().unwrap(), &data, ws).await.unwrap();
+    svc.write_file("owner-a", file.to_str().unwrap(), &data, ws)
+        .await
+        .unwrap();
 
     let events = recorder.take_events();
     assert_eq!(events.len(), 1);
@@ -386,7 +409,9 @@ async fn write_file_nested_relative_path() {
     let (svc, recorder) = make_service_with_recorder(dir.path());
     let ws = dir.path().to_str().unwrap();
 
-    svc.write_file(file.to_str().unwrap(), b"export {}", ws).await.unwrap();
+    svc.write_file("owner-a", file.to_str().unwrap(), b"export {}", ws)
+        .await
+        .unwrap();
 
     let events = recorder.take_events();
     assert_eq!(events.len(), 1);
@@ -408,7 +433,7 @@ async fn read_after_write_roundtrip() {
 
     // Write
     let ok = svc
-        .write_file(file.to_str().unwrap(), content.as_bytes(), ws)
+        .write_file("owner-a", file.to_str().unwrap(), content.as_bytes(), ws)
         .await
         .unwrap();
     assert!(ok);
@@ -427,7 +452,9 @@ async fn read_buffer_after_write_roundtrip() {
     let svc = make_service(dir.path());
     let ws = dir.path().to_str().unwrap();
 
-    svc.write_file(file.to_str().unwrap(), &data, ws).await.unwrap();
+    svc.write_file("owner-a", file.to_str().unwrap(), &data, ws)
+        .await
+        .unwrap();
 
     let read_result = svc.read_file_buffer(file.to_str().unwrap(), None).await.unwrap();
     assert_eq!(read_result.as_deref(), Some(data.as_slice()));
@@ -451,7 +478,9 @@ async fn write_file_invalidates_cache() {
 
     // Write a new file (should invalidate cache)
     let new_file = dir.path().join("new.txt");
-    svc.write_file(new_file.to_str().unwrap(), b"new", ws).await.unwrap();
+    svc.write_file("owner-a", new_file.to_str().unwrap(), b"new", ws)
+        .await
+        .unwrap();
 
     // Cache should be invalidated, so we see the new file
     let files = svc.list_workspace_files(ws).await.unwrap();

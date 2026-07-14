@@ -2,10 +2,10 @@ use super::OutputSink;
 
 /// Silent output sink that discards all output.
 ///
-/// Used for sub-agents whose results are collected via `engine.run()` return
-/// value and emitted by the parent as a single `tool_result` event.  This
-/// prevents raw text from leaking into the parent's protocol stream (JSON
-/// Lines) — aligning with the Claude Code pattern where sub-agents never
+/// Used for delegated Agents whose results are collected via
+/// `engine.execute_turn()` and emitted by the caller as one `tool_result` event.
+/// This prevents raw text from leaking into the caller's protocol stream (JSON
+/// Lines), so delegated Agents never
 /// write directly to stdout.
 pub struct NullSink;
 

@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
-import { transformMessage } from '@/common/chat/chatLib';
 import { uuid } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import SendBox from '@/renderer/components/chat/SendBox';
@@ -197,28 +196,13 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
             setAiProcessing(true);
             aiProcessingRef.current = true;
           }
-          const transformedMessage = transformMessage(message);
-          if (transformedMessage) {
-            addOrUpdateMessage(transformedMessage);
-          }
           break;
         }
-        case 'agent_status': {
-          const transformedMessage = transformMessage(message);
-          if (transformedMessage) {
-            addOrUpdateMessage(transformedMessage);
-          }
+        default:
           break;
-        }
-        default: {
-          const transformedMessage = transformMessage(message);
-          if (transformedMessage) {
-            addOrUpdateMessage(transformedMessage);
-          }
-        }
       }
     });
-  }, [conversation_id, addOrUpdateMessage]);
+  }, [conversation_id]);
 
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {

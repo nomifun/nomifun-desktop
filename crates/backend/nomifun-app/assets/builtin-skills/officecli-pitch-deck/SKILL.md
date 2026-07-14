@@ -368,7 +368,7 @@ EOF
 
 ### (3) Solution slide — product in one sentence + 3-step "how it works"
 
-**Visual outcome.** 36pt title naming the product pattern (not "Our Solution"). Below: 3 or 4 rounded boxes horizontally at y=7cm with elbow connectors + triangle arrowheads. Each box = one verb (observe / correlate / resolve). Reuse pptx Recipe (c) flowchart — orchestration, not a new primitive.
+**Visual outcome.** 36pt title naming the product pattern (not "Our Solution"). Below: 3 or 4 rounded boxes horizontally at y=7cm with elbow connectors + triangle arrowheads. Each box = one verb (observe / correlate / resolve). Reuse pptx Recipe (c) flowchart composition instead of inventing a new primitive.
 
 ```bash
 # Title — "a product pattern, not a brand slogan".

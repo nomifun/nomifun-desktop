@@ -7,7 +7,7 @@ use nomifun_api_types::{PluginStatusChangedPayload, PluginStatusResponse, WebSoc
 use nomifun_common::{decrypt_string, encrypt_string, generate_prefixed_id, now_ms};
 use nomifun_db::models::ChannelPluginRow;
 use nomifun_db::{IChannelRepository, UpdatePluginStatusParams};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -36,13 +36,14 @@ use crate::types::{ChannelIncoming, PluginConfig, PluginStatus, PluginType, Unif
 /// `DashMap` for lock-free concurrent access.
 pub struct ChannelManager {
     repo: Arc<dyn IChannelRepository>,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    owner_id: Arc<str>,
+    user_events: Arc<dyn UserEventSink>,
     encryption_key: [u8; 32],
     /// Active plugin instances keyed by `channel_plugins.id` (row id, not
     /// platform — legacy rows keep `id == platform`).
     plugins: DashMap<String, Box<dyn ChannelPlugin>>,
     /// Sender for incoming messages from all plugins, stamped with their
-    /// channel row id. The `ChannelOrchestrator` holds the receiving end.
+    /// channel row id. The `ChannelMessageLoop` holds the receiving end.
     message_tx: mpsc::Sender<ChannelIncoming>,
     /// Sender for tool confirmation callbacks from all plugins.
     confirm_tx: mpsc::Sender<(String, String)>,
@@ -155,20 +156,22 @@ impl ChannelManager {
     /// # Arguments
     ///
     /// - `repo`: Data access for plugin configuration persistence
-    /// - `broadcaster`: WebSocket event broadcaster for status updates
+    /// - `user_events`: owner-scoped event sink for status updates
     /// - `encryption_key`: 32-byte AES-256-GCM key for credential encryption
     /// - `message_tx`: Channel sender for routing incoming messages
     /// - `confirm_tx`: Channel sender for tool confirmation callbacks
     pub fn new(
         repo: Arc<dyn IChannelRepository>,
-        broadcaster: Arc<dyn EventBroadcaster>,
+        user_events: Arc<dyn UserEventSink>,
+        owner_id: impl Into<Arc<str>>,
         encryption_key: [u8; 32],
         message_tx: mpsc::Sender<ChannelIncoming>,
         confirm_tx: mpsc::Sender<(String, String)>,
     ) -> Self {
         Self {
             repo,
-            broadcaster,
+            owner_id: owner_id.into(),
+            user_events,
             encryption_key,
             plugins: DashMap::new(),
             message_tx,
@@ -1075,11 +1078,15 @@ impl ChannelManager {
     pub fn start_weixin_login(&self) {
         use crate::plugins::weixin::weixin_login_stream;
 
-        let broadcaster = self.broadcaster.clone();
+        let user_events = self.user_events.clone();
+        let owner_id = self.owner_id.clone();
         let mut rx = weixin_login_stream();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                broadcaster.broadcast(WebSocketMessage::new("channel.weixin-login", event.to_ws_payload()));
+                user_events.send_to_user(
+                    &owner_id,
+                    WebSocketMessage::new("channel.weixin-login", event.to_ws_payload()),
+                );
             }
         });
     }
@@ -1137,8 +1144,10 @@ impl ChannelManager {
                 return;
             }
         };
-        self.broadcaster
-            .broadcast(WebSocketMessage::new("channel.plugin-status-changed", value));
+        self.user_events.send_to_user(
+            &self.owner_id,
+            WebSocketMessage::new("channel.plugin-status-changed", value),
+        );
     }
 
     /// Converts a DB row + optional live status to a `PluginStatusResponse`.
@@ -1226,7 +1235,7 @@ mod tests {
     use nomifun_db::{DbError, IChannelRepository, UpdatePluginStatusParams};
     use std::sync::Mutex;
 
-    // ── Mock EventBroadcaster ──────────────────────────────────────────
+    // ── Mock owner-scoped event sink ───────────────────────────────────
 
     struct MockBroadcaster {
         events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
@@ -1245,8 +1254,8 @@ mod tests {
         }
     }
 
-    impl EventBroadcaster for MockBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+    impl UserEventSink for MockBroadcaster {
+        fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
             self.events.lock().unwrap().push(event);
         }
     }
@@ -1580,7 +1589,14 @@ mod tests {
         let broadcaster = Arc::new(MockBroadcaster::new());
         let (msg_tx, msg_rx) = mpsc::channel(16);
         let (confirm_tx, _confirm_rx) = mpsc::channel(16);
-        let mgr = ChannelManager::new(repo.clone(), broadcaster.clone(), test_key(), msg_tx, confirm_tx);
+        let mgr = ChannelManager::new(
+            repo.clone(),
+            broadcaster.clone(),
+            "owner-a",
+            test_key(),
+            msg_tx,
+            confirm_tx,
+        );
         (mgr, repo, broadcaster, msg_rx)
     }
 

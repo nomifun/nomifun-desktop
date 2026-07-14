@@ -5,11 +5,11 @@
 //!
 //! Two heuristics live here and MUST stay in sync with the frontend twin:
 //! - [`infer_model_modalities`] — chat-modality signal (currently `"vision"`),
-//!   consumed by the orchestrator router's `needs_vision` hard filter.
+//!   consumed by the execution participant router's `needs_vision` hard filter.
 //! - [`infer_generation_capabilities`] — Creative Workshop signal: does the
 //!   model NAME look like an image/video generator? Returns suggested
 //!   [`ModelType`] tags used as **defaults** the user may override. This is a
-//!   separate function so it has ZERO impact on orchestrator chat routing (a
+//!   separate function so it has ZERO impact on Agent Execution routing (a
 //!   generator model keeps returning no chat modality and stays a router
 //!   baseline member exactly as before).
 
@@ -115,7 +115,7 @@ const VIDEO_GENERATION_INCLUDE: &[&str] = &[
 /// (mirrors the `is_user_selected` semantics on provider capabilities).
 ///
 /// This is intentionally decoupled from [`infer_model_modalities`]: generation
-/// models advertise NO chat modality here, so the orchestrator's chat router is
+/// models advertise NO chat modality here, so the execution participant router is
 /// unaffected.
 pub fn infer_generation_capabilities(model: &str) -> Vec<ModelType> {
     let base = base_model_name(model);
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn generation_models_never_infer_vision_modality() {
         // "生成模型不误判为视觉理解": image/video generators stay out of the
-        // vision-understanding modality that drives the orchestrator router.
+        // vision-understanding modality that drives the execution participant router.
         for m in [
             "gpt-image-1",
             "dall-e-3",

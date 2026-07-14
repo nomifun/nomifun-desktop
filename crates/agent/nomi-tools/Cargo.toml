@@ -1,6 +1,6 @@
 [package]
 name = "nomi-tools"
-description = "Built-in agent tools for Nomi (Read, Write, Edit, Bash, Grep, Glob, Spawn)"
+description = "Built-in agent tools for Nomi (Read, Write, Edit, Bash, Grep, Glob, Delegate)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,7 +17,7 @@ path = "src/bin/pty_test_helper.rs"
 nomi-types.workspace    = true
 nomi-protocol.workspace = true
 nomi-config.workspace   = true
-nomi-execution.workspace = true
+nomi-process-runtime.workspace = true
 
 tracing.workspace     = true
 tokio.workspace       = true
@@ -31,10 +31,10 @@ lru.workspace         = true
 libc.workspace        = true
 uuid.workspace        = true
 which.workspace       = true
+tempfile.workspace    = true
 
 
 [dev-dependencies]
-tempfile.workspace = true
 portable-pty.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -20,13 +20,6 @@
     "skillsMarketDesc": "按需搜索并调用社区 Skills，一次配置，所有Agent通用。",
     "skillsMarketDetails": "详情 >>"
   },
-  "orchestration": {
-    "panelTitle": "编排画布",
-    "planning": "规划中…",
-    "collapseCanvas": "收起编排画布",
-    "expandCanvas": "展开编排画布",
-    "resizeCanvas": "调整画布宽度"
-  },
   "history": {
     "noHistory": "暂无对话历史",
     "deleteTitle": "删除",
@@ -588,20 +581,5 @@
     "success": "上下文已清空",
     "failed": "清空上下文失败",
     "button": "清空上下文"
-  },
-  "cluster": {
-    "stripTitle": "agent 集群",
-    "progress": "{{done}}/{{total}} 节点已交付",
-    "expand": "展开集群进度",
-    "collapse": "收起集群进度",
-    "questionBanner": "节点「{{title}}」有决策问题待你作答",
-    "questionCta": "进入作答 →",
-    "toggleTitle": "集群",
-    "toggleDesc": "需要时拆给多个 agent 并行处理。",
-    "approvalTitle": "节点确认",
-    "approvalDesc": "关键决策先暂停，等你确认。",
-    "pillAria": "agent 集群设置",
-    "pill": "集群",
-    "approvalShort": "审批"
   }
 }

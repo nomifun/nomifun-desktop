@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -40,7 +40,7 @@ pub struct RemoteAgentConfig {
 /// connection protocol. The Rust implementation owns the WebSocket connection
 /// directly (no CLI subprocess).
 pub struct RemoteAgentManager {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     remote_config: RemoteAgentConfig,
     state: RwLock<RemoteState>,
     /// WebSocket sink for sending messages, wrapped in Mutex for concurrency.
@@ -63,7 +63,7 @@ impl RemoteAgentManager {
         workspace: String,
         remote_config: RemoteAgentConfig,
     ) -> Result<Self, AppError> {
-        let runtime = AgentRuntime::new(conversation_id, workspace, 256);
+        let runtime = AgentRuntimeState::new(conversation_id, workspace, 256);
 
         let manager = Self {
             runtime,
@@ -245,10 +245,10 @@ impl RemoteAgentManager {
     }
 }
 
-use crate::shared_kernel::approval_key;
+use crate::session::approval_key;
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for RemoteAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for RemoteAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::Remote
     }
@@ -375,12 +375,12 @@ impl RemoteAgentManager {
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
+        let _ = crate::runtime_handle::AgentRuntimeControl::kill(self, reason);
         Box::pin(std::future::ready(()))
     }
 }
 
-/// Remote-specific operations reached through `AgentInstance::Remote(..)`.
+/// Remote-specific operations reached through `AgentRuntimeHandle::Remote(..)`.
 impl RemoteAgentManager {
     pub fn confirm(&self, _msg_id: &str, call_id: &str, _data: Value, always_allow: bool) -> Result<(), AppError> {
         if let Ok(mut state) = self.state.try_write() {

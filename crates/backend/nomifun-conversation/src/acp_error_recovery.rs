@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use crate::convert::string_to_enum;
 use crate::service::{ConversationService, parse_conv_id};
 use crate::stream_relay::RelayOutcome;
-use nomifun_ai_agent::IWorkerTaskManager;
+use nomifun_ai_agent::AgentRuntimeRegistry;
 
 impl ConversationService {
     async fn clear_conversation_model_seed_after_model_not_found(
@@ -118,7 +118,7 @@ impl ConversationService {
             .source
             .as_deref()
             .and_then(|value| string_to_enum::<ConversationSource>(value).ok());
-        self.broadcast_list_changed(conversation_id, "updated", source.as_ref());
+        self.broadcast_list_changed(&row.user_id, conversation_id, "updated", source.as_ref());
         info!(
             conversation_id,
             ?previous_model_id,
@@ -199,7 +199,7 @@ impl ConversationService {
         conversation_id: &str,
         agent_type: AgentType,
         outcome: &RelayOutcome,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> bool {
         if agent_type != AgentType::Acp || !outcome.terminal.is_error() {
             return false;
@@ -216,8 +216,8 @@ impl ConversationService {
             reason = ?AgentKillReason::AgentErrorRecovery,
             "ACP task marked unhealthy after terminal error; evicting task"
         );
-        task_manager
-            .kill_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
+        runtime_registry
+            .terminate_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
             .await;
         self.clear_persisted_acp_model_after_model_not_found(conversation_id, error_code)
             .await;

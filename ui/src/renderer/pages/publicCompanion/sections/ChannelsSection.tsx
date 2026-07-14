@@ -13,7 +13,7 @@ import type { IPublicAgent } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import type { MasterAgentPlatform } from '@renderer/components/settings/SettingsModal/contents/channels/channelTarget';
+import type { ChannelPlatform } from '@renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 import {
   CHANNEL_PLATFORMS,
   CREDENTIALS_REQUIRED_KEY,
@@ -53,7 +53,7 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
   const [loaded, setLoaded] = useState(false);
   // Config modal target: with channelId = edit that row; without = create mode
   // (the form's first save creates a row bound to this public agent).
-  const [configTarget, setConfigTarget] = useState<{ platform: MasterAgentPlatform; channelId?: string } | null>(null);
+  const [configTarget, setConfigTarget] = useState<{ platform: ChannelPlatform; channelId?: string } | null>(null);
 
   // ── Channel plugin statuses (REST snapshot + WS live updates) ──
   const refreshStatuses = useCallback(async () => {
@@ -123,7 +123,7 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
 
   // ── Row actions ──
   const handleToggleEnabled = useCallback(
-    async (row: IChannelPluginStatus, platform: MasterAgentPlatform, enabled: boolean) => {
+    async (row: IChannelPluginStatus, platform: ChannelPlatform, enabled: boolean) => {
       setBusyRowId(row.id);
       try {
         if (enabled) {
@@ -161,7 +161,7 @@ const ChannelsSection: React.FC<Props> = ({ agent, message }) => {
       try {
         // Backend contract: null public_agent_id clears the binding. Atomic — persists
         // the binding AND resets only this channel row's sessions.
-        await channel.setMasterAgentPublicAgent.invoke({ plugin_id: rowId, public_agent_id: bind ? agent.id : null });
+        await channel.setChannelPublicAgent.invoke({ plugin_id: rowId, public_agent_id: bind ? agent.id : null });
         message.success(
           bind
             ? t('publicCompanion.channels.bindSuccess', {

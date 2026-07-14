@@ -50,7 +50,7 @@ pub struct KnowledgeBindingRow {
     /// knowledge) or `aggressive` (capture anything plausibly relevant). Only
     /// meaningful while `writeback` is true.
     pub writeback_eagerness: String,
-    /// When `true`, an external IM channel master-agent binding may write back
+    /// When `true`, an external IM Channel Agent binding may write back
     /// (forced to STAGED placement). Default `false` — channel writes are
     /// disabled unless the user explicitly re-enables them. Ignored for
     /// non-channel surfaces.

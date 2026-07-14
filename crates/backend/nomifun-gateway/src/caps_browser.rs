@@ -1,5 +1,5 @@
 //! Browser-domain capabilities (registry form, feature-gated). Lets a
-//! remote/master agent drive the desktop's in-process CDP browser, scoped +
+//! remote Agent drive the desktop's in-process CDP browser, scoped +
 //! serialized per companion via [`crate::browser_registry::BrowserRegistry`].
 //!
 //! The GW2 out-of-band approval state machine still gates irreversible browser

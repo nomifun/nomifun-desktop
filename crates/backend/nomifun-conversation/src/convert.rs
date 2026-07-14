@@ -70,6 +70,19 @@ pub fn row_to_response_with_extra(
         .map(serde_json::from_str::<nomifun_api_types::ResolvedPresetSnapshot>)
         .transpose()
         .map_err(|error| AppError::Internal(format!("Invalid preset snapshot JSON: {error}")))?;
+    let delegation_policy = string_to_enum(&row.delegation_policy)?;
+    let execution_model_pool = row
+        .execution_model_pool
+        .as_deref()
+        .map(serde_json::from_str::<nomifun_api_types::ExecutionModelPool>)
+        .transpose()
+        .map_err(|error| AppError::Internal(format!("Invalid execution model pool JSON: {error}")))?;
+    if let Some(pool) = execution_model_pool.as_ref() {
+        pool.validate().map_err(|error| {
+            AppError::Internal(format!("Invalid persisted execution model pool: {error}"))
+        })?;
+    }
+    let decision_policy = string_to_enum(&row.decision_policy)?;
 
     Ok(ConversationResponse {
         id: row.id,
@@ -85,6 +98,13 @@ pub fn row_to_response_with_extra(
         preset_id: row.preset_id,
         preset_revision: row.preset_revision,
         preset_snapshot,
+        delegation_policy,
+        execution_model_pool,
+        decision_policy,
+        execution_template_id: row.execution_template_id,
+        linked_execution_id: None,
+        execution_step_id: None,
+        execution_attempt_id: None,
         created_at: row.created_at,
         modified_at: row.updated_at,
         extra,
@@ -98,7 +118,7 @@ pub fn row_to_response_with_extra(
 /// field that can be an array of model objects. The backend only needs
 /// `provider_id`, `model` (the selected model name), and `use_model`.
 /// Accepts both snake_case and legacy camelCase key names for backward compatibility.
-fn parse_provider_with_model(s: &str) -> Result<ProviderWithModel, AppError> {
+pub(crate) fn parse_provider_with_model(s: &str) -> Result<ProviderWithModel, AppError> {
     let v: serde_json::Value =
         serde_json::from_str(s).map_err(|e| AppError::Internal(format!("Invalid model JSON: {e}")))?;
 
@@ -322,6 +342,10 @@ pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<Mess
         name: row.conversation_name,
         r#type: row.conversation_type,
         extra: row.conversation_extra,
+        delegation_policy: row.conversation_delegation_policy,
+        execution_model_pool: row.conversation_execution_model_pool,
+        decision_policy: row.conversation_decision_policy,
+        execution_template_id: row.conversation_execution_template_id,
         model: row.conversation_model,
         status: row.conversation_status,
         source: row.conversation_source,
@@ -369,6 +393,10 @@ mod tests {
             name: "Test".into(),
             r#type: agent_type.into(),
             extra: extra_json.into(),
+            delegation_policy: "automatic".into(),
+            execution_model_pool: None,
+            decision_policy: "automatic".into(),
+            execution_template_id: None,
             model: model_json.map(|s| s.into()),
             status: Some(status.into()),
             source: source.map(|s| s.into()),
@@ -441,6 +469,10 @@ mod tests {
             name: "Test".into(),
             r#type: "acp".into(),
             extra: "not-json".into(),
+            delegation_policy: "automatic".into(),
+            execution_model_pool: None,
+            decision_policy: "automatic".into(),
+            execution_template_id: None,
             model: None,
             status: Some("pending".into()),
             source: None,
@@ -557,6 +589,10 @@ mod tests {
             name: "Pinned".into(),
             r#type: "acp".into(),
             extra: "{}".into(),
+            delegation_policy: "automatic".into(),
+            execution_model_pool: None,
+            decision_policy: "automatic".into(),
+            execution_template_id: None,
             model: None,
             status: Some("pending".into()),
             source: Some("nomifun".into()),
@@ -655,6 +691,12 @@ mod tests {
             conversation_name: "Test Conv".into(),
             conversation_type: "acp".into(),
             conversation_extra: r#"{"workspace":"/project"}"#.into(),
+            conversation_delegation_policy: "prefer_parallel".into(),
+            conversation_execution_model_pool: Some(
+                r#"{"mode":"range","models":[{"provider_id":"provider-1","model":"model-1"}]}"#.into(),
+            ),
+            conversation_decision_policy: "ask_user".into(),
+            conversation_execution_template_id: None,
             conversation_model: None,
             conversation_status: Some("finished".into()),
             conversation_source: Some("nomifun".into()),
@@ -676,6 +718,23 @@ mod tests {
         assert_eq!(item.conversation.name, "Test Conv");
         assert_eq!(item.conversation.r#type, AgentType::Acp);
         assert_eq!(item.conversation.source, Some(ConversationSource::Nomifun));
+        assert_eq!(
+            item.conversation.delegation_policy,
+            nomifun_common::DelegationPolicy::PreferParallel
+        );
+        assert_eq!(
+            item.conversation.execution_model_pool,
+            Some(nomifun_api_types::ExecutionModelPool::Range {
+                models: vec![nomifun_api_types::ExecutionModelRef {
+                    provider_id: "provider-1".into(),
+                    model: "model-1".into(),
+                }],
+            })
+        );
+        assert_eq!(
+            item.conversation.decision_policy,
+            nomifun_common::DecisionPolicy::AskUser
+        );
         assert_eq!(item.conversation.extra["workspace"], "/project");
         assert_eq!(item.conversation.modified_at, 2000);
     }
@@ -691,6 +750,10 @@ mod tests {
             conversation_name: "Test".into(),
             conversation_type: "invalid_type".into(),
             conversation_extra: "{}".into(),
+            conversation_delegation_policy: "automatic".into(),
+            conversation_execution_model_pool: None,
+            conversation_decision_policy: "automatic".into(),
+            conversation_execution_template_id: None,
             conversation_model: None,
             conversation_status: Some("finished".into()),
             conversation_source: None,
@@ -716,6 +779,10 @@ mod tests {
             conversation_name: "Test".into(),
             conversation_type: "acp".into(),
             conversation_extra: "not valid json".into(),
+            conversation_delegation_policy: "automatic".into(),
+            conversation_execution_model_pool: None,
+            conversation_decision_policy: "automatic".into(),
+            conversation_execution_template_id: None,
             conversation_model: None,
             conversation_status: Some("finished".into()),
             conversation_source: None,

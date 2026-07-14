@@ -5,7 +5,7 @@ use nomifun_api_types::{
     CellCoord, CellRange, ConversionResultDto, ConversionTarget, DocumentConversionResponse, ExcelSheetData,
     ExcelWorkbookData,
 };
-use nomifun_runtime::Builder as CmdBuilder;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use serde_json::Value;
 use tracing::warn;
 

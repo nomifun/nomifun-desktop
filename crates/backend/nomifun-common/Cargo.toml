@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+nomi-types.workspace = true
 thiserror.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -13,8 +14,11 @@ async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 getrandom.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 semver.workspace = true
 tracing.workspace = true
+ts-rs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

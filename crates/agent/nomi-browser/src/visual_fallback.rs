@@ -5,7 +5,7 @@
 //!
 //! Visual fallback is a **last resort after** DOM/aria anchoring fails — never the primary
 //! path. The engine stays LLM-free (no vision-model call in nomi-browser-engine). The
-//! orchestration lives here in the facade (`nomi-browser`).
+//! coordination lives here in the facade (`nomi-browser`).
 //!
 //! # Coordinate Rule (THE KEYSTONE)
 //!
@@ -194,9 +194,9 @@ pub fn should_try_visual(anchor_result: &Result<(), BrowserError>) -> bool {
     }
 }
 
-// ─── VisualFallback Orchestrator ────────────────────────────────────────────
+// ─── VisualFallback Coordinator ───────────────────────────────────────────
 
-/// The visual fallback orchestrator. Takes a failed-anchor context + a screenshot,
+/// The visual fallback coordinator. Takes a failed-anchor context + a screenshot,
 /// calls the vision locator, maps pixel→CSS coords, returns a target point for
 /// engine dispatch.
 pub struct VisualFallback {
@@ -204,7 +204,7 @@ pub struct VisualFallback {
 }
 
 impl VisualFallback {
-    /// Create a new `VisualFallback` orchestrator with the given locator.
+    /// Create a new `VisualFallback` coordinator with the given locator.
     pub fn new(locator: Arc<dyn VisualLocator>) -> Self {
         Self { locator }
     }
@@ -486,5 +486,4 @@ fn som_draw_annotations(png: &[u8], labels: &[SomLabel]) -> Vec<u8> {
         Err(_) => png.to_vec(), // Defensive: should never happen, but don't panic.
     }
 }
-
 

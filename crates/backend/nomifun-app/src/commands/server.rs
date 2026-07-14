@@ -68,7 +68,7 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
     // propagates graceful-shutdown so the scanner exits on SIGINT/SIGTERM.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let idle_scanner_handle =
-        nomifun_ai_agent::start_idle_scanner(services.worker_task_manager.clone(), shutdown_rx, None, None);
+        nomifun_ai_agent::start_idle_scanner(services.agent_runtime_registry.clone(), shutdown_rx, None, None);
 
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {

@@ -225,7 +225,7 @@ pub struct KnowledgeBinding {
     #[serde(default = "default_writeback_eagerness")]
     pub writeback_eagerness: String,
     /// External IM channel write opt-in (forced staged). Default false —
-    /// channel master-agent writes are disabled unless re-enabled here.
+    /// Channel Agent writes are disabled unless re-enabled here.
     #[serde(default)]
     pub channel_write_enabled: bool,
     #[serde(default)]
@@ -708,7 +708,7 @@ impl KnowledgeService {
         connector.validate_credentials(&cred).await
     }
 
-    /// **P3 sync orchestrator** — pull a connector-backed base's remote
+    /// **P3 sync coordinator** — pull a connector-backed base's remote
     /// documents into `{root}/snapshots/*.md` (the snapshot-as-seam invariant:
     /// produces the same markdown shape the URL source does, so retrieval /
     /// mount / search stay untouched). Paginates `list_documents`, serially
@@ -2768,7 +2768,7 @@ impl KnowledgeService {
 /// (hook contract).
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for KnowledgeService {
-    async fn on_conversation_deleted(&self, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
         // Knowledge bindings are keyed by a string `(kind, target_id)`; the
         // integer conversation id is stringified at this domain boundary.
         let target_id = conversation_id.to_string();
@@ -4176,7 +4176,7 @@ mod tests {
         let service = Arc::new(KnowledgeService::new(
             repo,
             &dir.path().join("data"),
-            KnowledgeEventEmitter::new(events),
+            KnowledgeEventEmitter::new(events, Arc::from("test-owner")),
         ));
 
         // Default: no render backend → HTTP fetcher is the only path (zero regression).
@@ -4231,7 +4231,10 @@ mod tests {
         let service = KnowledgeService::new(
             Arc::new(MemRepo::default()),
             &dir.path().join("data"),
-            KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster)),
+            KnowledgeEventEmitter::new(
+                Arc::new(NoopBroadcaster),
+                Arc::from("test-owner"),
+            ),
         )
         .with_url_fetcher(Canned("http"));
 
@@ -5220,7 +5223,10 @@ mod tests {
         let service = KnowledgeService::new(
             repo.clone(),
             dir,
-            KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster)),
+            KnowledgeEventEmitter::new(
+                Arc::new(NoopBroadcaster),
+                Arc::from("test-owner"),
+            ),
         )
         .with_url_fetcher(HttpFetcher::new().allow_private_for_tests());
         (service, repo)
@@ -5958,7 +5964,10 @@ mod tests {
         let service = KnowledgeService::new(
             repo.clone(),
             &dir.path().join("data"),
-            KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster)),
+            KnowledgeEventEmitter::new(
+                Arc::new(NoopBroadcaster),
+                Arc::from("test-owner"),
+            ),
         )
         .with_url_fetcher(HttpFetcher::new().allow_private_for_tests());
 
@@ -6080,8 +6089,12 @@ mod tests {
         names: std::sync::Mutex<Vec<String>>,
     }
 
-    impl nomifun_realtime::EventBroadcaster for RecordingBroadcaster {
-        fn broadcast(&self, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+    impl nomifun_realtime::UserEventSink for RecordingBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
             self.names.lock().unwrap().push(event.name);
         }
     }
@@ -6120,7 +6133,7 @@ mod tests {
             KnowledgeService::new(
                 repo.clone(),
                 &dir.path().join("data"),
-                KnowledgeEventEmitter::new(events.clone()),
+                KnowledgeEventEmitter::new(events.clone(), Arc::from("test-owner")),
             )
             .with_url_fetcher(HttpFetcher::new().allow_private_for_tests()),
         );

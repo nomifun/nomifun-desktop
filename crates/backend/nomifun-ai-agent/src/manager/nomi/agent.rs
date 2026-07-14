@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, broadcast};
 use tracing::{debug, error, info, warn};
 
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::capability::backend_output_sink::BackendOutputSink;
 use crate::capability::backend_protocol_sink::BackendProtocolSink;
 use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStopReason};
@@ -47,11 +47,11 @@ fn apply_provider_context_budget(config: &mut Config, context_limit: Option<u64>
 }
 
 pub struct NomiAgentManager {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     backend_output_sink: Arc<BackendOutputSink>,
     engine: Mutex<AgentEngine>,
     /// Static slash command metadata captured at bootstrap so UI lookups do
-    /// not wait behind an active `engine.run()` turn.
+    /// not wait behind an active `engine.execute_turn()` turn.
     slash_commands: Vec<SlashCommandItem>,
     /// Holds `Arc<McpManager>` instances alive for the duration of this agent's
     /// lifetime. The managers are not accessed after construction — they exist
@@ -60,6 +60,10 @@ pub struct NomiAgentManager {
     /// and `runtime` are dropped. See the explicit `Drop` impl below.
     #[allow(dead_code)] // intentional: lifetime-extension only; see Drop impl
     mcp_managers: Vec<Arc<McpManager>>,
+    /// Main-process backstop for renewable loopback MCP capabilities. Bridge
+    /// children revoke on clean exit; this guard covers abrupt child/runtime
+    /// teardown and construction failure.
+    loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
     approval_manager: Arc<ToolApprovalManager>,
     confirmations: Arc<std::sync::RwLock<Vec<Confirmation>>>,
     /// Durable per-turn cancellation token. Unlike `Notify`, cancellation is
@@ -72,7 +76,7 @@ pub struct NomiAgentManager {
     /// it from replacing the active turn's cancellation token.
     turn_gate: Mutex<()>,
     /// Permanent once `kill` is requested; prevents a raced clone from
-    /// admitting another turn after task-manager eviction.
+    /// admitting another turn after runtime-registry eviction.
     closing: AtomicBool,
     /// Mid-turn steering interjections pushed by `steer()` and drained by the
     /// engine at its loop boundaries. Shared (clone of this Arc handed to the
@@ -103,11 +107,7 @@ pub struct NomiAgentManager {
 
 impl Drop for NomiAgentManager {
     fn drop(&mut self) {
-        // McpManagers are held alive by the `mcp_managers` field specifically
-        // so they outlive the agent's event loop. No explicit cleanup is needed
-        // here — the Arc drop path releases each McpManager's underlying MCP
-        // connection. This impl exists to document the intentional Drop-order
-        // semantics rather than as a lint escape hatch.
+        self.loopback_capability_leases.revoke_all();
     }
 }
 
@@ -220,7 +220,8 @@ impl NomiAgentManager {
         knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
     ) -> Result<Self, AppError> {
-        let runtime = AgentRuntime::new(conversation_id.clone(), workspace.clone(), 128);
+        let runtime = AgentRuntimeState::new(conversation_id.clone(), workspace.clone(), 128);
+        let loopback_capability_leases = config_extra.loopback_capability_leases.clone();
         let image_read_root = config_extra
             .write_root
             .as_deref()
@@ -299,9 +300,9 @@ impl NomiAgentManager {
         if config_extra.browser_use {
             config.tools.browser.enabled = true;
         }
-        // 进程内 Spawn 门控 + per-session 工具白名单（工厂已算好；bootstrap 消费：
-        // 门控包住 SpawnTool 注册，白名单在全部注册后 retain_named 收口）。
-        config.tools.in_process_spawn = config_extra.in_process_spawn;
+        // Per-session 工具白名单（工厂已算好；bootstrap 在全部注册后
+        // retain_named 收口）。Embedded AgentExecution 的 host composition
+        // 不写入 ToolsConfig，而是在 bootstrap builder 上单独注入。
         config.tools.builtin_allowlist = config_extra.allowed_tools.clone();
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
@@ -317,7 +318,7 @@ impl NomiAgentManager {
         // `engine.registry_mut()`, so they would bypass the allowlist. We re-apply
         // it once more after all post-build registration (see below). Empty = no-op
         // = unrestricted (normal sessions), so this is inert unless a restricted
-        // session (orchestrator worker / PublicService exposure) pinned an allowlist.
+        // session (restricted Agent attempt / PublicService exposure) pinned an allowlist.
         let native_allowlist = config_extra.allowed_tools.clone();
         // F1-sec: 把会话的 evaluate「全权模式」LIVE 值灌进 BrowserConfig.full_power（bootstrap 据它
         // 构造 BrowserTool::with_policy 的 evaluate gate）。默认 false（default-deny）。
@@ -384,7 +385,7 @@ impl NomiAgentManager {
         // bootstrap.build) receives this same Arc and reads the LIVE runtime mode through it —
         // a mid-session set_mode to yolo then arms the facade redline gate immediately, not
         // pinned to the construction-time auto_approve snapshot. The same Arc is installed on
-        // the engine via set_approval_manager below, so facade and orchestration share one cell.
+        // the engine via set_approval_manager below, so facade and tool execution share one cell.
         let approval_manager = Arc::new(ToolApprovalManager::new());
         if let Some(mode_str) = &config_extra.session_mode {
             let mode = parse_session_mode(mode_str);
@@ -404,6 +405,9 @@ impl NomiAgentManager {
 
         let mut bootstrap = AgentBootstrap::new(config, &workspace, sink)
             .goal(goal_spec)
+            .install_embedded_agent_execution(
+                config_extra.install_embedded_agent_execution,
+            )
             .approval_manager(approval_manager.clone());
         // P3-X2: thread the per-pet browser secret vault (path + machine-bound key) so the
         // native BrowserTool loads the registered credentials (`secret:NAME`, origin-gated)
@@ -530,7 +534,7 @@ impl NomiAgentManager {
         // knowledge / companion / requirement tools registered above (they were
         // added after bootstrap's own `retain_named`). Empty allowlist = no-op =
         // unrestricted, so normal sessions are unaffected; a PublicService or
-        // orchestrator-worker session keeps ONLY its whitelisted tools.
+        // Restricted Agent-attempt session keeps ONLY its whitelisted tools.
         if !native_allowlist.is_empty() {
             engine.registry_mut().retain_named(&native_allowlist);
             debug!(
@@ -571,6 +575,7 @@ impl NomiAgentManager {
             engine: Mutex::new(engine),
             slash_commands,
             mcp_managers: result.mcp_managers,
+            loopback_capability_leases,
             approval_manager,
             confirmations,
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -619,7 +624,7 @@ impl NomiAgentManager {
             // so notify_waiters would be a no-op AND no terminal event would ever
             // be broadcast — a relay subscribed to this conversation would hang
             // forever in a 'running' spinner. Emit the terminal event directly.
-            // Idempotent via AgentRuntime's absorbing-state guard (a later real
+            // Idempotent via AgentRuntimeState's absorbing-state guard (a later real
             // Finish is absorbed). A later reusable turn receives a fresh token.
             self.runtime
                 .emit_finish_with_reason(None, Some(TurnStopReason::Cancelled));
@@ -636,7 +641,7 @@ impl NomiAgentManager {
 }
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for NomiAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::Nomi
     }
@@ -676,7 +681,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if self.closing.load(Ordering::Acquire) {
                 return Err(AgentSendError::from_app_error(AppError::Conflict(
-                    "Agent task is shutting down; retry on the replacement task".to_owned(),
+                    "Agent runtime is shutting down; retry on the replacement runtime".to_owned(),
                 )));
             }
             let token = tokio_util::sync::CancellationToken::new();
@@ -741,7 +746,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
         let mut engine = self.engine.lock().await;
         engine.set_steering_inbox(Some(self.steering_inbox.clone()));
 
-        // Each iteration runs one engine pass inside the same turn claim. Most
+        // Each iteration runs one engine pass inside the same accepted Agent turn. Most
         // passes finish naturally; this loop re-runs only to absorb steering
         // race-tail interjections or to continue after bounded truncation.
         let mut run_content = Vec::with_capacity(1 + image_blocks.len());
@@ -761,13 +766,13 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                 let cancel = turn_cancel.clone();
                 engine.set_cancel_token(Some(cancel.clone()));
                 let res = engine
-                    .run_with_content(current_content, &data.msg_id)
+                    .execute_turn_with_content(current_content, &data.msg_id)
                     .await;
                 engine.set_cancel_token(None); // reset for the next reused turn
                 if cancel.is_cancelled() {
                     info!(
                         conversation_id = %self.runtime.conversation_id(),
-                        "Nomi engine.run() cooperatively cancelled by stop signal"
+                        "Nomi engine.execute_turn() cooperatively cancelled by stop signal"
                     );
                     None
                 } else {
@@ -775,11 +780,11 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                 }
             } else {
                 tokio::select! {
-                    res = engine.run_with_content(current_content, &data.msg_id) => Some(res),
+                    res = engine.execute_turn_with_content(current_content, &data.msg_id) => Some(res),
                     _ = turn_cancel.cancelled() => {
                         info!(
                             conversation_id = %self.runtime.conversation_id(),
-                            "Nomi engine.run() cancelled by stop signal"
+                            "Nomi engine.execute_turn() cancelled by stop signal"
                         );
                         engine.abort_current_turn("Tool execution canceled by user");
                         None
@@ -873,7 +878,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                     input_tokens = agent_result.usage.input_tokens,
                     output_tokens = agent_result.usage.output_tokens,
                     ?stop_reason,
-                    "Nomi engine.run() completed, emitting Finish"
+                    "Nomi engine.execute_turn() completed, emitting Finish"
                 );
 
                 // Phase 3 observability: a per-turn metrics event the UI shows as
@@ -930,7 +935,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
                     conversation_id = %self.runtime.conversation_id(),
                     elapsed_ms,
                     error = %ErrorChain(&e),
-                    "Nomi engine.run() failed, emitting Error+Finish"
+                    "Nomi engine.execute_turn() failed, emitting Error+Finish"
                 );
                 let send_error = nomi_engine_error_to_send_error(error_msg);
                 self.runtime.emit_error_data(send_error.stream_error().clone());
@@ -964,6 +969,7 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
 
     fn kill(&self, reason: Option<AgentKillReason>) -> Result<(), AppError> {
         self.request_stop(reason, "kill", true);
+        self.loopback_capability_leases.revoke_all();
         Ok(())
     }
 }
@@ -972,10 +978,10 @@ impl crate::agent_task::IAgentTask for NomiAgentManager {
 /// `send_message` unwinds abnormally (engine panic / unexpected early-return).
 /// On the normal path `send_message` emits the real terminal event and then
 /// disarms the guard; on an abnormal unwind the still-armed guard fires on drop.
-/// The emit is idempotent via `AgentRuntime`'s absorbing-state guard, so this can
+/// The emit is idempotent via `AgentRuntimeState`'s absorbing-state guard, so this can
 /// never leak a spurious terminal event past a real one. (Phase 0 F0.2)
 struct TurnTerminationGuard {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     armed: bool,
 }
 
@@ -999,7 +1005,7 @@ impl NomiAgentManager {
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
+        let _ = crate::runtime_handle::AgentRuntimeControl::kill(self, reason);
         let runtime = self.runtime.clone();
         Box::pin(async move {
             const TEARDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1026,7 +1032,7 @@ impl NomiAgentManager {
     }
 }
 
-/// Nomi-specific operations reached through `AgentInstance::Nomi(..)`
+/// Nomi-specific operations reached through `AgentRuntimeHandle::Nomi(..)`
 /// matches in the routes + services.
 impl NomiAgentManager {
     /// Push a user interjection into the running turn's steering inbox.
@@ -1127,7 +1133,7 @@ impl NomiAgentManager {
             conversation_id = %self.runtime.conversation_id(),
             "Clearing Nomi context"
         );
-        // Signal any in-flight engine.run() to abort so we don't clear
+        // Signal any in-flight engine.execute_turn() to abort so we don't clear
         // mid-turn; the engine lock below then waits for it to release.
         self.request_stop(None, "clear_context", false);
         let mut engine = self.engine.lock().await;
@@ -1192,7 +1198,7 @@ fn nomi_engine_error_to_send_error(error_msg: String) -> AgentSendError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::IAgentTask;
+    use crate::runtime_handle::AgentRuntimeControl;
     use nomi_providers::{LlmProvider, ProviderError};
     use nomi_tools::registry::ToolRegistry;
     use nomi_types::llm::{LlmEvent, LlmRequest};
@@ -1213,6 +1219,7 @@ mod tests {
             session_directory: std::env::temp_dir().join("nomi-test-sessions"),
             session_mode: None,
             extra_mcp_servers: std::collections::HashMap::new(),
+            loopback_capability_leases: Default::default(),
             bedrock_config: None,
             computer_use: false,
             browser_use: false,
@@ -1227,7 +1234,7 @@ mod tests {
             goal: None,
             browser_secret_vault: None,
             owner_token: None,
-            in_process_spawn: true,
+            install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),
             write_root: None,
         }
@@ -1349,7 +1356,7 @@ mod tests {
     }
 
     fn make_agent_with_provider(provider: Arc<dyn LlmProvider>) -> NomiAgentManager {
-        let runtime = AgentRuntime::new("conv-auto-continue", "/project", 128);
+        let runtime = AgentRuntimeState::new("conv-auto-continue", "/project", 128);
         let backend_output_sink = Arc::new(BackendOutputSink::new(runtime.event_sender()));
         let output: Arc<dyn OutputSink> = backend_output_sink.clone();
         let config = make_test_engine_config();
@@ -1369,6 +1376,7 @@ mod tests {
             engine: Mutex::new(engine),
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
+            loopback_capability_leases: Default::default(),
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -1434,7 +1442,7 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             usage: Default::default(),
         }]]));
-        let runtime = AgentRuntime::new("conv-text-only", "/project", 128);
+        let runtime = AgentRuntimeState::new("conv-text-only", "/project", 128);
         let backend_output_sink = Arc::new(BackendOutputSink::new(runtime.event_sender()));
         let output: Arc<dyn OutputSink> = backend_output_sink.clone();
         let mut config = make_test_engine_config();
@@ -1454,6 +1462,7 @@ mod tests {
             engine: Mutex::new(engine),
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
+            loopback_capability_leases: Default::default(),
             approval_manager,
             confirmations: Arc::new(std::sync::RwLock::new(Vec::new())),
             turn_cancel: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
@@ -1650,6 +1659,35 @@ mod tests {
         assert_eq!(agent.conversation_id(), "conv-1");
     }
 
+    #[tokio::test]
+    async fn manager_threads_embedded_agent_execution_host_composition_into_bootstrap() {
+        let mut config = make_test_config();
+        config.install_embedded_agent_execution = false;
+        let agent = NomiAgentManager::new(
+            "conv-no-embedded-execution".into(),
+            "/project".into(),
+            config,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let names = agent.engine.lock().await.tool_names();
+        assert!(
+            !names.iter().any(|name| name == "nomi_delegate"),
+            "manager must preserve the backend host-composition decision"
+        );
+    }
+
     // -- distillation eligibility gates (construction-time) -------------------
 
     struct StubCompanionSink;
@@ -1749,7 +1787,7 @@ mod tests {
         assert!(agent.kill(None).is_ok());
         // Idle kill now emits a terminal event and transitions to Finished so a
         // subscribed relay cannot hang in a 'running' spinner (Phase 0 F0.2);
-        // task-manager removal still owns the heavier lifecycle cleanup.
+        // runtime-registry removal still owns the heavier lifecycle cleanup.
         assert_eq!(agent.status(), Some(ConversationStatus::Finished));
     }
 
@@ -1897,7 +1935,7 @@ mod tests {
         let _engine_guard = agent.engine.lock().await;
         let commands = tokio::time::timeout(std::time::Duration::from_millis(50), agent.get_slash_commands())
             .await
-            .expect("slash command metadata should not wait for an active engine run")
+            .expect("slash command metadata should not wait for an active turn execution")
             .unwrap();
 
         assert!(!commands.is_empty());
@@ -1944,7 +1982,7 @@ mod tests {
         // The guard backstops panics / unexpected early-returns in send_message:
         // if the turn unwinds without emitting a terminal event, dropping the
         // armed guard must still broadcast one so the relay does not hang. (F0.2)
-        let rt = AgentRuntime::new("c-guard", "/w", 16);
+        let rt = AgentRuntimeState::new("c-guard", "/w", 16);
         let mut rx = rt.subscribe();
         {
             let _g = TurnTerminationGuard {
@@ -1963,7 +2001,7 @@ mod tests {
     async fn termination_guard_silent_when_disarmed() {
         // On the normal path send_message disarms the guard after emitting the
         // real terminal event; a disarmed guard must stay silent on drop.
-        let rt = AgentRuntime::new("c-guard2", "/w", 16);
+        let rt = AgentRuntimeState::new("c-guard2", "/w", 16);
         let mut rx = rt.subscribe();
         {
             let mut g = TurnTerminationGuard {

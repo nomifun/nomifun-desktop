@@ -20,7 +20,7 @@ mod dingtalk_tests {
     use nomifun_channel::plugins::dingtalk::DingtalkPlugin;
     use nomifun_channel::types::{PluginConfig, PluginCredentials, PluginStatus, PluginType};
     use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
-    use nomifun_realtime::EventBroadcaster;
+    use nomifun_realtime::UserEventSink;
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -38,8 +38,8 @@ mod dingtalk_tests {
         }
     }
 
-    impl EventBroadcaster for MockBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+    impl UserEventSink for MockBroadcaster {
+        fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
             self.events.lock().unwrap().push(event);
         }
     }
@@ -58,6 +58,7 @@ mod dingtalk_tests {
         let manager = ChannelManager::new(
             repo.clone(),
             broadcaster.clone(),
+            "owner-a",
             make_encryption_key(),
             message_tx,
             confirm_tx,

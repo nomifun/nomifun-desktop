@@ -11,7 +11,7 @@ use crate::goal::state::{GoalState, GoalStatus};
 
 /// Lets the model declare the terminal state of the current session goal.
 /// Engine-internal (no `RequirementSink`) — deliberately NOT reusing
-/// `requirement_complete`, which routes to the AutoWork orchestrator.
+/// `requirement_complete`, which routes to the AutoWork runner.
 pub struct UpdateGoalTool {
     state: Arc<Mutex<GoalState>>,
 }

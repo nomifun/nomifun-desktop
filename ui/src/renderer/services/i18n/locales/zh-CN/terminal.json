@@ -5,16 +5,27 @@
   "empty": "暂无终端",
   "extended": {
     "autoworkApplyFailed": "终端已创建，但自动工作启用失败，可在终端内重试",
-    "autoworkDesc": "让编排器在该终端按需求标签自动驱动并裁决完成（Claude / Codex，含 stepcode claude 等代理形式）",
+    "autoworkDesc": "让自动任务按需求标签驱动该终端并确认完成（Claude / Codex，含 stepcode claude 等代理形式）",
     "autoworkLabel": "自动工作",
     "autoworkRequiresAgent": "自动工作需要 Claude / Codex 终端（含 stepcode claude 等代理形式）",
     "idmmApplyFailed": "终端已创建，但智能决策启用失败，可在终端内重试",
     "idmmApplyNote": "创建终端后立即生效，可在终端内继续调整。",
-    "knowledgeConnectNote": "内置 Claude / Codex 挂载即自动注入；包装命令 / 自定义 / 外置终端请用「一键接入」写入工作路径。",
+    "knowledgeConnectNote": "平台终端会自动注入；包装命令、自定义或外置终端可把无密钥命令注册到工作路径。",
     "knowledgeDesc": "挂载知识库到工作路径，供该终端的 Agent 检索。",
     "knowledgeLabel": "平台知识库",
     "subtitle": "把平台能力开放给该终端启动的 Agent CLI",
     "title": "扩展能力"
+  },
+  "registerKnowledge": {
+    "button": "一键接入平台知识库",
+    "buttonCompact": "接入知识库",
+    "confirm": "接入",
+    "cwdRequired": "请先选择工作目录",
+    "modalDesc": "选择 CLI 类型，一键把知识库 MCP 命令合并到配置；现有配置不会被覆盖。",
+    "modalTitle": "接入平台知识库",
+    "securityDesc": "配置中不会保存端口或凭据。CLI 启动时通过当前系统用户专属的本地安全通道获取工作区权限；NomiFun 需要保持运行。",
+    "codexScope": "写入用户级配置",
+    "projectScope": "写入项目配置"
   },
   "batchSelect": "选择",
   "selectAll": "全选",
@@ -31,19 +42,6 @@
   "quickCommand": {
     "clear": "清空终端",
     "interrupt": "发送 Ctrl-C（中断）"
-  },
-  "registerKnowledge": {
-    "button": "一键接入平台知识库",
-    "buttonCompact": "接入知识库",
-    "confirm": "接入",
-    "cwdRequired": "请先选择工作目录",
-    "familyNote": {
-      "claude": "写项目配置文件",
-      "codex": "写全局 ~/.codex/config.toml",
-      "gemini": "写项目配置文件"
-    },
-    "modalDesc": "选择 CLI 类型，一键将知识检索 MCP 写入工作路径配置文件。",
-    "modalTitle": "接入平台知识库"
   },
   "preset": {
     "shell": "自定义",
@@ -69,10 +67,11 @@
     "command": "启动命令",
     "commandHint": "可以自定义启动命令，创建终端时自动注入。",
     "mcpPanel": {
-      "claudeCmd": "Claude 命令",
+      "claudeCommand": "Claude Shell 命令",
       "claudeJson": "Claude .mcp.json",
+      "claudePowerShellCommand": "Claude PowerShell 命令",
       "codexToml": "Codex config.toml",
-      "description": "使用自定义或外置终端时，将下方配置注册到你的 CLI，即可使用平台知识库。凭据由桥在运行时安全获取，不会写入你的配置文件。需要 NomiFun 桌面应用正在运行。",
+      "description": "模板只包含启动命令，不包含端口或凭据。外部 CLI 启动时通过当前系统用户专属的本地安全通道获取工作区权限；NomiFun 需要保持运行。",
       "geminiJson": "Gemini settings.json",
       "loading": "加载中...",
       "title": "高级：手动注册到其它 CLI / 外置终端",

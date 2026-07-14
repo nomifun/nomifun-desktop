@@ -8,7 +8,7 @@ import { ipcBridge } from '@/common';
 import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
 import addChatIcon from '@/renderer/assets/icons/add-chat.svg';
 import { CronJobManager } from '@/renderer/pages/cron';
-import { usePresetInfo, resolvePresetConfigId } from '@/renderer/hooks/agent/usePresetInfo';
+import { usePresetInfo } from '@/renderer/hooks/agent/usePresetInfo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu, Message, Tooltip, Typography } from '@arco-design/web-react';
 import { ChartHistogram, History } from '@icon-park/react';
@@ -34,17 +34,21 @@ import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
 import GuidCollaboratorSelector from '@/renderer/pages/guid/components/GuidCollaboratorSelector';
-import ClusterModePill from './ClusterModePill';
-import type { TModelRange, TModelRef } from '@/common/types/orchestrator/orchestratorTypes';
-import { OrchestrationProvider, useOrchestration } from '../orchestration/OrchestrationContext';
-import OrchestrationTopPanel from '../orchestration/OrchestrationTopPanel';
-import ConversationContentSwitcher from '../orchestration/ConversationContentSwitcher';
-import PlanApprovalBanner from '../orchestration/PlanApprovalBanner';
+import {
+  toAppliedCollaborationTemplate,
+  type AppliedCollaborationTemplate,
+} from '@/renderer/components/collaboration/collaborationTemplateModel';
+import CollaborationPolicyControl, {
+  type CollaborationPolicyValue,
+} from '@/renderer/components/collaboration/CollaborationPolicyControl';
+import type { TExecutionModelPool, TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
+import { ExecutionProvider } from '../execution/ExecutionContext';
+import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
+import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import StarOfficeMonitorCard from '../platforms/openclaw/StarOfficeMonitorCard.tsx';
 import NomiSessionMetricsPanel from '../platforms/nomi/NomiSessionMetricsPanel';
-import { STATUS_META } from '@/renderer/pages/orchestrator/RunDetail/runStatusMeta';
-import { useModelRange } from '@/renderer/pages/orchestrator/useModelRange';
-import { reconcileModelRefs, sameModelRefs } from '@/renderer/pages/orchestrator/collaboratorModelRefs';
+import { useExecutionModelPool } from '../execution/useExecutionModelPool';
+import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 // import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
 
 /** Check whether a specific skill is mounted on the conversation. */
@@ -53,9 +57,25 @@ const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: 
   return skills?.includes(skillName) ?? false;
 };
 
+const buildConversationModelPool = (
+  mainRef: TExecutionModelRef | null,
+  collaborators: TExecutionModelRef[],
+): TExecutionModelPool | null => {
+  if (!mainRef?.provider_id || !mainRef.model) return null;
+  const seen = new Set<string>();
+  const models = [mainRef, ...collaborators].filter((candidate) => {
+    if (!candidate.provider_id || !candidate.model) return false;
+    const key = `${candidate.provider_id}\u0000${candidate.model}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return models.length === 1 ? { mode: 'single', model: models[0] } : { mode: 'range', models };
+};
+
 const _AssociatedConversation: React.FC<{ conversation_id: number }> = ({ conversation_id }) => {
   const { data } = useSWR(['getAssociateConversation', conversation_id], () =>
-    ipcBridge.conversation.getAssociateConversation.invoke({ conversation_id })
+    ipcBridge.conversation.getAssociateConversation.invoke({ conversation_id }),
   );
   const navigate = useNavigate();
   const list = useMemo(() => {
@@ -132,7 +152,11 @@ const _AddNewConversation: React.FC<{ conversation: TChatConversation }> = ({ co
                 // Clear ACP session fields to prevent new conversation from inheriting old session context
                 extra:
                   source.type === 'acp'
-                    ? { ...source.extra, acp_session_id: undefined, acp_session_updated_at: undefined }
+                    ? {
+                        ...source.extra,
+                        acp_session_id: undefined,
+                        acp_session_updated_at: undefined,
+                      }
                     : source.extra,
               } as TChatConversation,
             });
@@ -155,14 +179,20 @@ type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
 const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
-  chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceOrchestration' | 'workspaceExtraTabs'>;
+  chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   collaboratorSelectorNode: React.ReactNode;
+  collaborationPolicyNode: React.ReactNode;
   presetPresetName?: string;
-}> = ({ conversation, chatLayoutProps, modelSelection, collaboratorSelectorNode, presetPresetName }) => {
+}> = ({
+  conversation,
+  chatLayoutProps,
+  modelSelection,
+  collaboratorSelectorNode,
+  collaborationPolicyNode,
+  presetPresetName,
+}) => {
   const { t } = useTranslation();
-  const orchestration = useOrchestration();
-  const status = orchestration.detail?.run.status ?? '';
   const workspaceExtraTabs = useMemo(
     () => [
       {
@@ -172,120 +202,132 @@ const NomiConversationLayout: React.FC<{
         content: <NomiSessionMetricsPanel conversation={conversation} />,
       },
     ],
-    [conversation, t]
+    [conversation, t],
   );
 
   return (
-    <ChatLayout
+    <ExecutionConversationLayout
       {...chatLayoutProps}
       sider={<ChatSlider conversation={conversation} extraTabs={workspaceExtraTabs} />}
       conversation_id={conversation.id}
       workspaceExtraTabs={workspaceExtraTabs}
-      workspaceOrchestration={{
-        active: orchestration.canvasOpen,
-        available: Boolean(orchestration.runId),
-        statusColor: STATUS_META[status]?.color,
-        onClick: orchestration.toggleCanvas,
-      }}
     >
-      <div className='flex flex-row flex-1 min-h-0'>
-        <div className='flex-1 min-w-0 min-h-0 flex flex-col'>
-          <PlanApprovalBanner />
-          <ConversationContentSwitcher>
-            <NomiChat
-              conversation_id={conversation.id}
-              workspace={conversation.extra.workspace}
-              modelSelection={modelSelection}
-              session_mode={conversation.extra?.session_mode}
-              cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
-              loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-              loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
-              loadedMcpStatuses={
-                (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-              }
-              agent_name={presetPresetName}
-              collaboratorSelectorNode={collaboratorSelectorNode}
-              extraRightTools={<ClusterModePill conversation={conversation} />}
-              isProcessing={isConversationProcessing(conversation)}
-            />
-          </ConversationContentSwitcher>
-        </div>
-        <OrchestrationTopPanel />
-      </div>
-    </ChatLayout>
+      <NomiChat
+        conversation_id={conversation.id}
+        workspace={conversation.extra.workspace}
+        modelSelection={modelSelection}
+        session_mode={conversation.extra?.session_mode}
+        cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+        loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
+        loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
+        loadedMcpStatuses={
+          (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
+        }
+        agent_name={presetPresetName}
+        collaboratorSelectorNode={collaboratorSelectorNode}
+        extraRightTools={collaborationPolicyNode}
+        isProcessing={isConversationProcessing(conversation)}
+      />
+    </ExecutionConversationLayout>
   );
 };
 
-const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTitle: React.ReactNode }> = ({
-  conversation,
-  sliderTitle,
-}) => {
-  // 协作模型池:每会话的真源是 `extra.orchestrator_model_range`。水合时 models[0] 是
-  // 主模型(lead/planner),其余为协作池。面板以 `key={conversation.id}` 挂载,切换会话
-  // 会重挂并按新会话 extra 重新水合。
-  const [collaborators, setCollaboratorsState] = useState<TModelRef[]>(() => {
-    const range = conversation.extra?.orchestrator_model_range;
-    return range?.mode === 'range' ? range.models.slice(1) : [];
+const NomiConversationPanel: React.FC<{
+  conversation: NomiConversation;
+  sliderTitle: React.ReactNode;
+}> = ({ conversation, sliderTitle }) => {
+  const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
+    const pool = conversation.execution_model_pool;
+    return pool?.mode === 'range' ? pool.models.slice(1) : [];
   });
-  const {
-    configuredPairs,
-    allPairs,
-    isLoading: isModelCatalogLoading,
-  } = useModelRange();
+  const [collaborationPolicy, setCollaborationPolicy] = useState<CollaborationPolicyValue>({
+    delegationPolicy: conversation.delegation_policy ?? 'automatic',
+    decisionPolicy: conversation.decision_policy ?? 'automatic',
+  });
+  const [selectedCollaborationTemplate, setSelectedCollaborationTemplate] =
+    useState<AppliedCollaborationTemplate | null>(null);
+  useEffect(() => {
+    setCollaborationPolicy({
+      delegationPolicy: conversation.delegation_policy ?? 'automatic',
+      decisionPolicy: conversation.decision_policy ?? 'automatic',
+    });
+  }, [conversation.decision_policy, conversation.delegation_policy]);
+
+  const storedExecutionTemplateId = conversation.execution_template_id?.trim() || null;
+  useEffect(() => {
+    if (!storedExecutionTemplateId) {
+      setSelectedCollaborationTemplate(null);
+      return;
+    }
+    let cancelled = false;
+    void ipcBridge.agentExecutionTemplate.get
+      .invoke({ id: storedExecutionTemplateId })
+      .then((template) => {
+        if (!cancelled) {
+          setSelectedCollaborationTemplate(toAppliedCollaborationTemplate(template));
+        }
+      })
+      .catch((error) => {
+        console.error('[ChatConversation] Failed to resolve collaboration template:', error);
+        if (!cancelled) setSelectedCollaborationTemplate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storedExecutionTemplateId]);
+  const { configuredPairs, allPairs, isLoading: isModelCatalogLoading } = useExecutionModelPool();
   const collaboratorReconciliation = useMemo(
-    () =>
-      isModelCatalogLoading ? null : reconcileModelRefs(collaborators, configuredPairs, allPairs),
-    [allPairs, collaborators, configuredPairs, isModelCatalogLoading]
+    () => (isModelCatalogLoading ? null : reconcileModelRefs(collaborators, configuredPairs, allPairs)),
+    [allPairs, collaborators, configuredPairs, isModelCatalogLoading],
   );
   const activeCollaborators = collaboratorReconciliation?.active ?? [];
 
-  // 写回:主模型 FIRST(models[0]=lead/planner)+ 协作池,按 `${provider_id} ${model}`
-  // 去重(与旧 useGuidSend 一致),整体作为 range 落到会话 extra;后端 caps_orchestrator
-  // 的 read_conversation_model_range 只读回来构建 run 的 fleet(确定性,不经 LLM)。
-  const persistModelRange = useCallback(
-    async (mainRef: TModelRef | null, collabs: TModelRef[]) => {
-      if (!mainRef) return;
-      const seen = new Set<string>();
-      const models = [mainRef, ...collabs].filter((r) => {
-        if (!r?.provider_id || !r.model) return false;
-        const key = `${r.provider_id} ${r.model}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      const orchestrator_model_range: TModelRange = { mode: 'range', models };
-      // extra 顶层浅合并(后端保留同级 extra 键),只覆盖 orchestrator_model_range。
-      // 内部吞掉失败并 console.error:未持久化的模型范围是低危状态(下次选择即重试),
-      // 不值得打断用户;此处兜底也让两处 `void persistModelRange(...)` 调用点不会产生
-      // 未处理的 promise rejection。
+  const persistModelPool = useCallback(
+    async (mainRef: TExecutionModelRef | null, collabs: TExecutionModelRef[]) => {
+      const execution_model_pool = buildConversationModelPool(mainRef, collabs);
+      if (!execution_model_pool) return;
       try {
         await ipcBridge.conversation.update.invoke({
           id: conversation.id,
-          updates: { extra: { orchestrator_model_range } as TChatConversation['extra'] },
+          updates: { execution_model_pool },
         });
       } catch (err) {
-        console.error('[ChatConversation] persist orchestrator_model_range failed', err);
+        console.error('[ChatConversation] Failed to persist execution model pool:', err);
       }
     },
-    [conversation.id]
+    [conversation.id],
   );
 
   const { t } = useTranslation();
   const onSelectModel = useCallback(
     async (_provider: IProvider, modelName: string) => {
-      const selected = { ..._provider, use_model: modelName } as TProviderWithModel;
+      const selected = {
+        ..._provider,
+        use_model: modelName,
+      } as TProviderWithModel;
       // Kill running agent on model switch — will be rebuilt with new model on next message
-      await ipcBridge.conversation.stop.invoke({ conversation_id: conversation.id });
-      const ok = await ipcBridge.conversation.update.invoke({ id: conversation.id, updates: { model: selected } });
+      await ipcBridge.conversation.stop.invoke({
+        conversation_id: conversation.id,
+      });
+      const execution_model_pool = buildConversationModelPool(
+        { provider_id: _provider.id, model: modelName },
+        activeCollaborators,
+      );
+      if (!execution_model_pool) return false;
+      const ok = await ipcBridge.conversation.update.invoke({
+        id: conversation.id,
+        // The lead model and its collaboration authority are one atomic
+        // Conversation preference update; never expose a mixed intermediate
+        // state to Gateway delegation.
+        updates: { model: selected, execution_model_pool, execution_template_id: null },
+      });
       if (ok) {
+        setSelectedCollaborationTemplate(null);
         void saveNomiDefaultModel(_provider.id, modelName);
-        // 主模型即 range 的 models[0](lead/planner):切换主模型后同步重写 range,
-        // 让协作池仍钉在新主模型之后。
-        void persistModelRange({ provider_id: _provider.id, model: modelName }, activeCollaborators);
       }
       return Boolean(ok);
     },
-    [activeCollaborators, conversation.id, persistModelRange]
+    [activeCollaborators, conversation.id],
   );
 
   const modelSelection = useNomiModelSelection({
@@ -294,37 +336,91 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
   });
 
   // 主模型引用(range 的 models[0]),供协作选择器钉选与写回。
-  const mainModelRef = useMemo<TModelRef | null>(
+  const mainModelRef = useMemo<TExecutionModelRef | null>(
     () =>
       modelSelection.current_model
-        ? { provider_id: modelSelection.current_model.id, model: modelSelection.current_model.use_model }
+        ? {
+            provider_id: modelSelection.current_model.id,
+            model: modelSelection.current_model.use_model,
+          }
         : null,
-    [modelSelection.current_model?.id, modelSelection.current_model?.use_model]
+    [modelSelection.current_model?.id, modelSelection.current_model?.use_model],
   );
 
   const onCollaboratorsChange = useCallback(
-    (next: TModelRef[]) => {
+    (next: TExecutionModelRef[]) => {
       setCollaboratorsState(next);
-      void persistModelRange(mainModelRef, next);
+      void persistModelPool(mainModelRef, next);
     },
-    [mainModelRef, persistModelRange]
+    [mainModelRef, persistModelPool],
+  );
+
+  const persistCollaborationTemplate = useCallback(
+    async (next: AppliedCollaborationTemplate | null) => {
+      const previous = selectedCollaborationTemplate;
+      setSelectedCollaborationTemplate(next);
+      try {
+        await ipcBridge.conversation.update.invoke({
+          id: conversation.id,
+          updates: {
+            execution_template_id: next?.id ?? null,
+          },
+        });
+      } catch (error) {
+        setSelectedCollaborationTemplate(previous);
+        console.error('[ChatConversation] Failed to persist collaboration template:', error);
+        Message.error(t('common.failed', { defaultValue: '保存协作方案失败' }));
+      }
+    },
+    [conversation.id, selectedCollaborationTemplate, t],
   );
 
   useEffect(() => {
     if (!collaboratorReconciliation || collaboratorReconciliation.removed.length === 0) return;
     if (sameModelRefs(collaborators, collaboratorReconciliation.retained)) return;
     setCollaboratorsState(collaboratorReconciliation.retained);
-    void persistModelRange(mainModelRef, collaboratorReconciliation.retained);
-  }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelRange]);
+    void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
+  }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
 
-  // 会话内「协作模型」选择器:紧跟主模型选择器渲染。集群开关另放到权限旁边，
-  // 避免把主模型 / 协作模型的关系打断。
+  // 会话内「协作模型」选择器紧跟主模型选择器，保持主模型与协作者模型的关系清晰。
   const collaboratorSelectorNode = (
     <GuidCollaboratorSelector
       value={activeCollaborators}
       onChange={onCollaboratorsChange}
       mainModel={mainModelRef}
+      selectedTemplate={selectedCollaborationTemplate}
+      workDir={conversation.extra?.workspace}
+      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
+      onTemplateClear={() => void persistCollaborationTemplate(null)}
       className='nomi-sendbox-model-btn'
+    />
+  );
+
+  const onCollaborationPolicyChange = useCallback(
+    async (next: CollaborationPolicyValue) => {
+      setCollaborationPolicy(next);
+      try {
+        await ipcBridge.conversation.update.invoke({
+          id: conversation.id,
+          updates: {
+            delegation_policy: next.delegationPolicy,
+            decision_policy: next.decisionPolicy,
+          },
+        });
+      } catch (error) {
+        console.error('[ChatConversation] Failed to persist collaboration policy:', error);
+      }
+    },
+    [conversation.id],
+  );
+
+  const collaborationPolicyNode = (
+    <CollaborationPolicyControl
+      runtimeType={conversation.type}
+      delegationPolicy={collaborationPolicy.delegationPolicy}
+      decisionPolicy={collaborationPolicy.decisionPolicy}
+      onChange={onCollaborationPolicyChange}
+      compact
     />
   );
 
@@ -336,19 +432,31 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
       conversation.model,
       healProviders,
       healGetAvailable,
-      saved && typeof saved === 'object' && 'id' in saved ? saved : undefined
+      saved && typeof saved === 'object' && 'id' in saved ? saved : undefined,
     );
     if (!heal) return;
     void (async () => {
-      const selected = { ...heal.provider, use_model: heal.use_model } as TProviderWithModel;
-      const ok = await ipcBridge.conversation.update.invoke({ id: conversation.id, updates: { model: selected } });
+      const selected = {
+        ...heal.provider,
+        use_model: heal.use_model,
+      } as TProviderWithModel;
+      const execution_model_pool = buildConversationModelPool(
+        { provider_id: heal.provider.id, model: heal.use_model },
+        activeCollaborators,
+      );
+      if (!execution_model_pool) return;
+      const ok = await ipcBridge.conversation.update.invoke({
+        id: conversation.id,
+        updates: { model: selected, execution_model_pool, execution_template_id: null },
+      });
       if (ok) {
+        setSelectedCollaborationTemplate(null);
         void saveNomiDefaultModel(heal.provider.id, heal.use_model);
-        void persistModelRange(
-          { provider_id: heal.provider.id, model: heal.use_model },
-          activeCollaborators
+        Message.info(
+          t('conversation.chat.modelHealedToDefault', {
+            model: heal.use_model,
+          }),
         );
-        Message.info(t('conversation.chat.modelHealedToDefault', { model: heal.use_model }));
       }
     })();
     // 仅在会话或供应商列表变化时评估
@@ -359,13 +467,11 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     conversation.model?.use_model,
     healProviders,
     healGetAvailable,
-    persistModelRange,
     t,
   ]);
 
   const workspaceEnabled = Boolean(conversation.extra?.workspace);
   const { info: presetPresetInfo } = usePresetInfo(conversation);
-  const nomiPresetId = resolvePresetConfigId(conversation) ?? undefined;
 
   const chatLayoutProps = {
     title: conversation.name,
@@ -373,10 +479,8 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
-        {/* 编排画布 (Option B): the orchestration canvas + run controls live in a
-            collapsible panel pinned to the TOP of the content area (no floating
-            overlay, no right-rail tab). The header keeps just the existing
-            capability controls (CronJobManager). */}
+        {/* The collaboration canvas lives beside the mounted conversation; the
+            header keeps the existing capability controls. */}
         <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.extra?.cron_job_id as string | undefined}
@@ -389,19 +493,18 @@ const NomiConversationPanel: React.FC<{ conversation: NomiConversation; sliderTi
     isTemporaryWorkspace: (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
       ?.is_temporary_workspace,
     backend: 'nomi' as const,
-    presetPreset: presetPresetInfo ? { ...presetPresetInfo, id: nomiPresetId } : undefined,
+    preset: presetPresetInfo ?? undefined,
   };
 
   return (
-    <OrchestrationProvider conversation={conversation}>
-      <NomiConversationLayout
-        conversation={conversation}
-        chatLayoutProps={chatLayoutProps}
-        modelSelection={modelSelection}
-        collaboratorSelectorNode={collaboratorSelectorNode}
-        presetPresetName={presetPresetInfo?.name}
-      />
-    </OrchestrationProvider>
+    <NomiConversationLayout
+      conversation={conversation}
+      chatLayoutProps={chatLayoutProps}
+      modelSelection={modelSelection}
+      collaboratorSelectorNode={collaboratorSelectorNode}
+      collaborationPolicyNode={collaborationPolicyNode}
+      presetPresetName={presetPresetInfo?.name}
+    />
   );
 };
 
@@ -418,7 +521,6 @@ const ChatConversation: React.FC<{
   // Use unified hook for preset preset info (ACP/Codex conversations)
   const acpConversation = isNomiConversation ? undefined : conversation;
   const { info: presetPresetInfo, isLoading: isLoadingPreset } = usePresetInfo(acpConversation);
-  const acpPresetId = acpConversation ? (resolvePresetConfigId(acpConversation) ?? undefined) : undefined;
 
   const conversationAgentName = (conversation?.extra as { agent_name?: string } | undefined)?.agent_name;
   const presetDisplayName = presetPresetInfo?.name || conversationAgentName;
@@ -426,28 +528,30 @@ const ChatConversation: React.FC<{
   const conversationNode = useMemo(() => {
     if (!conversation || isNomiConversation) return null;
     switch (conversation.type) {
-      case 'acp':
-        {
-          const extra = conversation.extra as { backend?: string; current_model_id?: string };
-          return (
-            <AcpChat
-              key={conversation.id}
-              conversation_id={conversation.id}
-              workspace={conversation.extra?.workspace}
-              backend={extra.backend || 'claude'}
-              initialModelId={extra.current_model_id}
-              session_mode={conversation.extra?.session_mode}
-              agent_name={presetDisplayName}
-              cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
-              hideSendBox={hideSendBox}
-              loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
-              loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
-              loadedMcpStatuses={
-                (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
-              }
-            ></AcpChat>
-          );
-        }
+      case 'acp': {
+        const extra = conversation.extra as {
+          backend?: string;
+          current_model_id?: string;
+        };
+        return (
+          <AcpChat
+            key={conversation.id}
+            conversation_id={conversation.id}
+            workspace={conversation.extra?.workspace}
+            backend={extra.backend || 'claude'}
+            initialModelId={extra.current_model_id}
+            session_mode={conversation.extra?.session_mode}
+            agent_name={presetDisplayName}
+            cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            hideSendBox={hideSendBox}
+            loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
+            loadedMcpServers={(conversation.extra as { mcp_servers?: string[] } | undefined)?.mcp_servers}
+            loadedMcpStatuses={
+              (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
+            }
+          ></AcpChat>
+        );
+      }
       case 'gemini':
         // Legacy Gemini conversation: the dedicated Gemini runtime has been
         // removed. The message history is still served by the shared messages
@@ -496,6 +600,7 @@ const ChatConversation: React.FC<{
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
         );
@@ -506,6 +611,7 @@ const ChatConversation: React.FC<{
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
         );
@@ -516,6 +622,7 @@ const ChatConversation: React.FC<{
             conversation_id={conversation.id}
             workspace={conversation.extra?.workspace ?? ''}
             cron_job_id={(conversation.extra as { cron_job_id?: string })?.cron_job_id}
+            hideSendBox={hideSendBox}
             loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
           />
         );
@@ -532,20 +639,63 @@ const ChatConversation: React.FC<{
     );
   }, [t]);
 
+  const isRetainedAttemptTranscript = Boolean(
+    conversation?.execution_step_id || conversation?.execution_attempt_id,
+  );
+
+  // An Attempt Conversation is immutable execution audit data, not a second
+  // ordinary chat entry point. Direct/history navigation therefore uses the
+  // same read-only projection as the collaboration canvas; decisions, steer,
+  // retry and lifecycle changes remain AgentExecution commands.
+  if (conversation && isRetainedAttemptTranscript) {
+    return (
+      <ExecutionProvider conversation={conversation}>
+        <ExecutionConversationLayout
+          title={conversation.name}
+          conversation_id={conversation.id}
+          hideAdvancedControls
+          disableRename
+          siderTitle={sliderTitle}
+          sider={<ChatSlider conversation={conversation} />}
+          workspaceEnabled={Boolean(conversation.extra?.workspace)}
+          workspacePath={conversation.extra?.workspace}
+          isTemporaryWorkspace={
+            (conversation.extra as { is_temporary_workspace?: boolean } | undefined)
+              ?.is_temporary_workspace
+          }
+        >
+          <ReadOnlyConversationView
+            conversation={conversation}
+            agent_name={(conversation.extra as { agent_name?: string } | undefined)?.agent_name}
+          />
+        </ExecutionConversationLayout>
+      </ExecutionProvider>
+    );
+  }
+
   if (conversation && conversation.type === 'nomi') {
     // 桌面伙伴的专属会话（单会话契约）走受限面板：保留锁定模型/隐藏高级控制/强制 yolo/
-    // 固定工作区（详见 CompanionChatPanel → CompanionConversation），而非全功能编排面板。
+    // 固定工作区（详见 CompanionChatPanel → CompanionConversation）。伙伴专属的
+    // 配置控制仍受限，但 linked AgentExecution 的进度、决策和生命周期不能被隐藏。
     if (conversation.extra?.companionSession) {
-      return <CompanionChatPanel key={conversation.id} conversation={conversation} />;
+      return (
+        <ExecutionProvider conversation={conversation}>
+          <CompanionChatPanel key={conversation.id} conversation={conversation} />
+        </ExecutionProvider>
+      );
     }
-    return <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} />;
+    return (
+      <ExecutionProvider conversation={conversation}>
+        <NomiConversationPanel key={conversation.id} conversation={conversation} sliderTitle={sliderTitle} />
+      </ExecutionProvider>
+    );
   }
 
   // 如果有设定快照，使用快照中的 logo 和名称；加载中时不进入 fallback；否则使用 backend 的 logo
   // If preset preset info exists, use preset logo/name; while loading, avoid fallback; otherwise use backend logo
   const chatLayoutProps = presetPresetInfo
     ? {
-        presetPreset: { ...presetPresetInfo, id: acpPresetId },
+        preset: presetPresetInfo,
       }
     : isLoadingPreset
       ? {} // Still loading custom agents — avoid showing backend logo prematurely
@@ -586,8 +736,8 @@ const ChatConversation: React.FC<{
     </div>
   );
 
-  return (
-    <ChatLayout
+  const layout = (
+    <ExecutionConversationLayout
       title={conversation?.name}
       {...chatLayoutProps}
       headerExtra={headerExtraNode}
@@ -601,8 +751,25 @@ const ChatConversation: React.FC<{
       conversation_id={conversation?.id}
     >
       {conversationNode}
-    </ChatLayout>
+    </ExecutionConversationLayout>
   );
+
+  if (!conversation) {
+    return (
+      <ChatLayout
+        title={undefined}
+        {...chatLayoutProps}
+        headerExtra={headerExtraNode}
+        siderTitle={sliderTitle}
+        sider={<ChatSlider conversation={undefined} />}
+        workspaceEnabled={workspaceEnabled}
+      >
+        {conversationNode}
+      </ChatLayout>
+    );
+  }
+
+  return <ExecutionProvider conversation={conversation}>{layout}</ExecutionProvider>;
 };
 
 export default ChatConversation;

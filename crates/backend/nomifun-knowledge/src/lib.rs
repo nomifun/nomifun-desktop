@@ -24,6 +24,7 @@ pub mod events;
 pub mod export;
 pub mod feishu_md;
 pub mod mcp_server;
+mod broker;
 pub mod mount;
 pub mod routes;
 pub mod service;
@@ -39,6 +40,9 @@ pub use autogen::KnowledgeCompleter;
 pub use context::{KnowledgeContextFormat, KnowledgeContextOptions, WritebackEagerness, WritebackMode, build_knowledge_context};
 pub use events::KnowledgeEventEmitter;
 pub use mcp_server::KnowledgeMcpServer;
+pub use broker::{
+    ExternalKnowledgeBrokerConnection, connect_external_knowledge_broker,
+};
 pub use routes::knowledge_routes;
 pub use service::{
     AutogenOutcome, ConsumerInfo, InboxDiff, InboxEntry, InboxMergeResult, KB_INBOX_REL_DIR, KnowledgeBinding,

@@ -24,7 +24,7 @@ pub(crate) mod windows_shell;
 
 #[cfg(test)]
 mod windows_shell_tests {
-    use nomi_execution::Transport;
+    use nomi_process_runtime::Transport;
 
     use super::windows_shell::{shell_transport, validate_shell_script};
 
@@ -253,7 +253,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Return any hooks declared in the skill's frontmatter for dynamic registration.
-    /// Called after a successful execute() so the orchestration layer can merge
+    /// Called after a successful execute() so the tool-execution layer can merge
     /// the returned hooks into the active HookEngine.
     /// Only SkillTool overrides this; all other tools return None.
     fn skill_hooks_for(&self, _input: &Value) -> Option<HooksConfig> {

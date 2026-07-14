@@ -2,7 +2,7 @@
 //! AutoWork binding for a conversation or terminal target.
 //!
 //! Mirrors `POST /api/requirements/autowork`: persist the config via
-//! `RequirementService`, then start/stop the live orchestrator loop and
+//! `RequirementService`, then start/stop the live AutoWork runner and
 //! broadcast the state — a config write alone would only take effect after the
 //! next desktop boot.
 
@@ -54,7 +54,7 @@ fn parse_conv_id(target_id: &str) -> Result<i64, nomifun_common::AppError> {
         .map_err(|_| nomifun_common::AppError::NotFound(format!("conversation {target_id}")))
 }
 
-/// Assemble the persisted config + the orchestrator's live view into one
+/// Assemble the persisted config + the AutoWork runner's live view into one
 /// `AutoWorkState` (the same shape the REST routes return and broadcast).
 async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &str) -> Result<AutoWorkState, Value> {
     let (enabled, tag, _max) = deps
@@ -62,10 +62,10 @@ async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &s
         .read_autowork_config(kind, target_id)
         .await
         .map_err(|e| json!({ "error": e.to_string() }))?;
-    let running = deps.autowork_orchestrator.is_running(kind, target_id);
-    let live_tag = deps.autowork_orchestrator.running_tag(kind, target_id).or(tag);
+    let running = deps.auto_work_runner.is_running(kind, target_id);
+    let live_tag = deps.auto_work_runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) = deps
-        .autowork_orchestrator
+        .auto_work_runner
         .live_progress(kind, target_id)
         .unwrap_or((None, 0));
     let run_state = AutoWorkState::run_state(enabled, current_requirement_id.as_deref());
@@ -122,11 +122,11 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
 
     if p.enabled {
         if let Some(tag) = p.tag.clone() {
-            deps.autowork_orchestrator
+            deps.auto_work_runner
                 .start(kind, target_id.clone(), tag, p.max_requirements);
         }
     } else {
-        deps.autowork_orchestrator.stop(kind, &target_id);
+        deps.auto_work_runner.stop(kind, &target_id);
     }
 
     match build_state(&deps, kind, &target_id).await {

@@ -29,6 +29,28 @@ pub struct AuthState {
     pub user_repo: Arc<dyn IUserRepository>,
 }
 
+/// Stable authorization state for installation-scoped control planes.
+///
+/// This is deliberately an immutable user id, not a username or an `admin`
+/// flag. The application resolves it once from the canonical system-user row
+/// during boot and shares the same value with every transport boundary.
+#[derive(Clone, Debug)]
+pub struct InstanceOwnerState {
+    pub authoritative_user_id: Arc<str>,
+}
+
+impl InstanceOwnerState {
+    pub fn new(authoritative_user_id: Arc<str>) -> Self {
+        Self {
+            authoritative_user_id,
+        }
+    }
+
+    pub fn permits(&self, user_id: &str) -> bool {
+        user_id == self.authoritative_user_id.as_ref()
+    }
+}
+
 /// Authentication middleware that verifies JWT tokens and injects `CurrentUser`.
 ///
 /// Flow:
@@ -76,4 +98,43 @@ pub async fn auth_middleware(
     });
 
     Ok(next.run(request).await)
+}
+
+/// Require the already-authenticated caller to be the installation owner.
+///
+/// Layer this *inside* [`auth_middleware`] so [`CurrentUser`] is present. A
+/// missing identity fails closed; this middleware never falls back to a
+/// username, local-mode guess, or a hard-coded caller supplied by the route.
+pub async fn require_instance_owner_middleware(
+    State(state): State<InstanceOwnerState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    let current = request
+        .extensions()
+        .get::<CurrentUser>()
+        .ok_or_else(|| AppError::Forbidden("Authentication required".into()))?;
+
+    if !state.permits(&current.id) {
+        return Err(AppError::Forbidden(
+            "Installation owner access required".into(),
+        ));
+    }
+
+    Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod instance_owner_tests {
+    use super::InstanceOwnerState;
+    use std::sync::Arc;
+
+    #[test]
+    fn owner_identity_is_exact_and_username_independent() {
+        let state = InstanceOwnerState::new(Arc::from("system_default_user"));
+        assert!(state.permits("system_default_user"));
+        assert!(!state.permits("admin"));
+        assert!(!state.permits("SYSTEM_DEFAULT_USER"));
+        assert!(!state.permits(""));
+    }
 }

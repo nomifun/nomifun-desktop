@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_ai_agent::IWorkerTaskManager;
+use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{
     CreateConversationRequest, ListConversationsQuery, UpdateConversationRequest, WebSocketMessage,
 };
@@ -8,7 +8,7 @@ use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, C
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
 use nomifun_db::{SqliteConversationRepository, init_database_memory};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -31,41 +31,41 @@ impl TestBroadcaster {
     }
 }
 
-impl EventBroadcaster for TestBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for TestBroadcaster {
+    fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
     }
 }
 
-struct NoopTaskManager;
+struct NoopAgentRuntimeRegistry;
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for NoopTaskManager {
-    fn get_task(&self, _: &str) -> Option<nomifun_ai_agent::AgentInstance> {
+impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
+    fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> {
         None
     }
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         _: &str,
-        _: nomifun_ai_agent::types::BuildTaskOptions,
-    ) -> Result<nomifun_ai_agent::AgentInstance, AppError> {
+        _: nomifun_ai_agent::types::AgentRuntimeBuildOptions,
+    ) -> Result<nomifun_ai_agent::AgentRuntimeHandle, AppError> {
         Err(AppError::Internal("noop".into()))
     }
-    fn kill(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         _: &str,
         _: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(std::future::ready(()))
     }
-    fn clear(&self) {}
-    fn active_count(&self) -> usize {
+    fn terminate_all(&self) {}
+    fn active_runtime_count(&self) -> usize {
         0
     }
-    fn collect_idle(&self, _: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
@@ -92,13 +92,13 @@ impl SkillResolver for EmptySkillResolver {
     }
 }
 
-async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn IWorkerTaskManager>) {
+async fn setup() -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeRegistry>) {
     setup_with_workspace_root(std::env::temp_dir()).await
 }
 
 async fn setup_with_workspace_root(
     workspace_root: PathBuf,
-) -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn IWorkerTaskManager>) {
+) -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeRegistry>) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
     let broadcaster = Arc::new(TestBroadcaster::new());
@@ -106,17 +106,19 @@ async fn setup_with_workspace_root(
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
     let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
         Arc::new(nomifun_db::SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
     let svc = ConversationService::new(
+        Arc::<str>::from(USER_ID),
         workspace_root,
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        task_mgr.clone(),
+        runtime_registry.clone(),
         repo,
         agent_metadata_repo,
         acp_session_repo,
+        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
-    (svc, broadcaster, task_mgr)
+    (svc, broadcaster, runtime_registry)
 }
 
 const USER_ID: &str = "system_default_user";
@@ -141,7 +143,7 @@ fn make_auto_workspace_create_req() -> CreateConversationRequest {
 
 #[tokio::test]
 async fn t1_1_create_with_defaults() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
+    let (svc, broadcaster, _runtime_registry) = setup().await;
 
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
@@ -232,7 +234,7 @@ async fn delete_removes_managed_auto_workspace() {
 
 #[tokio::test]
 async fn t1_2_create_each_agent_type() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let types = vec![
         ("acp", AgentType::Acp),
@@ -268,7 +270,7 @@ async fn t1_2_create_each_agent_type() {
 
 #[tokio::test]
 async fn t1_3_create_with_optional_fields() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -289,7 +291,7 @@ async fn t1_3_create_with_optional_fields() {
 
 #[tokio::test]
 async fn t2_1_list_empty() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let result = svc.list(USER_ID, ListConversationsQuery::default(), false).await.unwrap();
     assert!(result.items.is_empty());
     assert_eq!(result.total, 0);
@@ -298,7 +300,7 @@ async fn t2_1_list_empty() {
 
 #[tokio::test]
 async fn t2_2_list_basic() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     for _ in 0..3 {
         svc.create(USER_ID, make_create_req()).await.unwrap();
     }
@@ -310,7 +312,7 @@ async fn t2_2_list_basic() {
 
 #[tokio::test]
 async fn t2_3_cursor_pagination() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     for _ in 0..5 {
         svc.create(USER_ID, make_create_req()).await.unwrap();
     }
@@ -361,7 +363,7 @@ async fn t2_3_cursor_pagination() {
 
 #[tokio::test]
 async fn t2_4_source_filter() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     // 2 nomifun + 1 telegram
     svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -386,14 +388,14 @@ async fn t2_4_source_filter() {
 
 #[tokio::test]
 async fn t2_5_pinned_filter() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
 
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     svc.create(USER_ID, make_create_req()).await.unwrap();
 
     // Pin one
     let pin_req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    svc.update(USER_ID, &conv.id.to_string(), pin_req, &task_mgr).await.unwrap();
+    svc.update(USER_ID, &conv.id.to_string(), pin_req, &runtime_registry).await.unwrap();
 
     let query = ListConversationsQuery {
         pinned: Some(true),
@@ -408,7 +410,7 @@ async fn t2_5_pinned_filter() {
 
 #[tokio::test]
 async fn t3_1_get_existing() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let created = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let fetched = svc.get(USER_ID, &created.id.to_string()).await.unwrap();
@@ -420,7 +422,7 @@ async fn t3_1_get_existing() {
 
 #[tokio::test]
 async fn t3_2_get_not_found() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let err = svc.get(USER_ID, "non-existent-uuid").await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
@@ -429,12 +431,12 @@ async fn t3_2_get_not_found() {
 
 #[tokio::test]
 async fn t4_1_update_name() {
-    let (svc, broadcaster, task_mgr) = setup().await;
+    let (svc, broadcaster, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "New Name" })).unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     assert_eq!(updated.name, "New Name");
     assert!(updated.modified_at >= conv.modified_at);
@@ -446,11 +448,11 @@ async fn t4_1_update_name() {
 
 #[tokio::test]
 async fn t4_2_pin_conversation() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     assert!(updated.pinned);
     assert!(updated.pinned_at.is_some());
@@ -458,24 +460,24 @@ async fn t4_2_pin_conversation() {
 
 #[tokio::test]
 async fn t4_3_unpin_clears_pinned_at() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     // Pin
     let pin: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let pinned = svc.update(USER_ID, &conv.id.to_string(), pin, &task_mgr).await.unwrap();
+    let pinned = svc.update(USER_ID, &conv.id.to_string(), pin, &runtime_registry).await.unwrap();
     assert!(pinned.pinned_at.is_some());
 
     // Unpin
     let unpin: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": false })).unwrap();
-    let unpinned = svc.update(USER_ID, &conv.id.to_string(), unpin, &task_mgr).await.unwrap();
+    let unpinned = svc.update(USER_ID, &conv.id.to_string(), unpin, &runtime_registry).await.unwrap();
     assert!(!unpinned.pinned);
     assert!(unpinned.pinned_at.is_none());
 }
 
 #[tokio::test]
 async fn t4_4_extra_merge_preserves_existing_keys() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -487,7 +489,7 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
     // Update only workspace
     let update_req: UpdateConversationRequest =
         serde_json::from_value(json!({ "extra": { "workspace": "/new" } })).unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), update_req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), update_req, &runtime_registry).await.unwrap();
 
     assert_eq!(updated.extra["workspace"], "/new");
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
@@ -495,7 +497,7 @@ async fn t4_4_extra_merge_preserves_existing_keys() {
 
 #[tokio::test]
 async fn t4_5_update_model() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
 
     // Top-level model updates are only valid on nomi conversations
     // (Task 8 enforces the nomi-only rule in update).
@@ -511,7 +513,7 @@ async fn t4_5_update_model() {
         "model": { "provider_id": "p2", "model": "new-model" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     let model = updated.model.unwrap();
     assert_eq!(model.provider_id, "p2");
@@ -520,9 +522,9 @@ async fn t4_5_update_model() {
 
 #[tokio::test]
 async fn t4_6_update_not_found() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    let err = svc.update(USER_ID, "non-existent", req, &task_mgr).await.unwrap_err();
+    let err = svc.update(USER_ID, "non-existent", req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -530,7 +532,7 @@ async fn t4_6_update_not_found() {
 
 #[tokio::test]
 async fn t5_1_delete_conversation() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
+    let (svc, broadcaster, _runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
@@ -549,7 +551,7 @@ async fn t5_1_delete_conversation() {
 
 #[tokio::test]
 async fn t5_2_delete_then_get_returns_404() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     svc.delete(USER_ID, &conv.id.to_string()).await.unwrap();
@@ -559,7 +561,7 @@ async fn t5_2_delete_then_get_returns_404() {
 
 #[tokio::test]
 async fn t5_3_delete_not_found() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let err = svc.delete(USER_ID, "non-existent").await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
@@ -568,7 +570,7 @@ async fn t5_3_delete_not_found() {
 
 #[tokio::test]
 async fn t11_1_create_broadcasts_created() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
+    let (svc, broadcaster, _runtime_registry) = setup().await;
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let events = broadcaster.take_events();
@@ -580,12 +582,12 @@ async fn t11_1_create_broadcasts_created() {
 
 #[tokio::test]
 async fn t11_2_update_broadcasts_updated() {
-    let (svc, broadcaster, task_mgr) = setup().await;
+    let (svc, broadcaster, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     let events = broadcaster.take_events();
     assert_eq!(events[0].data["action"], "updated");
@@ -593,7 +595,7 @@ async fn t11_2_update_broadcasts_updated() {
 
 #[tokio::test]
 async fn t11_3_delete_broadcasts_deleted() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
+    let (svc, broadcaster, _runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
     broadcaster.take_events();
 
@@ -607,7 +609,7 @@ async fn t11_3_delete_broadcasts_deleted() {
 
 #[tokio::test]
 async fn t12_1_long_name() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
     let long_name = "x".repeat(1000);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -622,7 +624,7 @@ async fn t12_1_long_name() {
 
 #[tokio::test]
 async fn t12_2_large_extra_json() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let large_extra = json!({
         "workspace": "/project",
@@ -648,7 +650,7 @@ async fn t12_2_large_extra_json() {
 
 #[tokio::test]
 async fn t12_3_concurrent_creates() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let mut handles = vec![];
     for _ in 0..10 {
@@ -673,7 +675,7 @@ async fn t12_3_concurrent_creates() {
 
 #[tokio::test]
 async fn full_lifecycle_create_get_update_delete() {
-    let (svc, broadcaster, task_mgr) = setup().await;
+    let (svc, broadcaster, runtime_registry) = setup().await;
 
     // Create
     let created = svc.create(USER_ID, make_create_req()).await.unwrap();
@@ -690,7 +692,7 @@ async fn full_lifecycle_create_get_update_delete() {
         "extra": { "workspace": "/updated" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &created.id.to_string(), update_req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &created.id.to_string(), update_req, &runtime_registry).await.unwrap();
     assert_eq!(updated.name, "Updated");
     assert!(updated.pinned);
     assert_eq!(updated.extra["workspace"], "/updated");
@@ -711,7 +713,7 @@ async fn full_lifecycle_create_get_update_delete() {
 
 #[tokio::test]
 async fn create_rejects_top_level_model_for_acp() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -732,7 +734,7 @@ async fn create_rejects_top_level_model_for_acp() {
 
 #[tokio::test]
 async fn create_rejects_top_level_model_for_remote() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "remote",
@@ -746,7 +748,7 @@ async fn create_rejects_top_level_model_for_remote() {
 
 #[tokio::test]
 async fn create_accepts_top_level_model_for_nomi() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -764,7 +766,7 @@ async fn create_accepts_top_level_model_for_nomi() {
 
 #[tokio::test]
 async fn create_nomi_strips_extra_model_field() {
-    let (svc, _, _task_mgr) = setup().await;
+    let (svc, _, _runtime_registry) = setup().await;
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -788,7 +790,7 @@ async fn create_nomi_strips_extra_model_field() {
 
 #[tokio::test]
 async fn update_rejects_top_level_model_for_acp() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({
@@ -796,7 +798,7 @@ async fn update_rejects_top_level_model_for_acp() {
     }))
     .unwrap();
 
-    let err = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap_err();
+    let err = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap_err();
     assert!(
         matches!(err, AppError::BadRequest(_)),
         "expected BadRequest, got {err:?}"
@@ -805,7 +807,7 @@ async fn update_rejects_top_level_model_for_acp() {
 
 #[tokio::test]
 async fn update_accepts_top_level_model_for_nomi() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -819,32 +821,32 @@ async fn update_accepts_top_level_model_for_nomi() {
         "model": { "provider_id": "p1", "model": "gpt-4o-mini" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
     assert_eq!(updated.model.unwrap().model, "gpt-4o-mini");
 }
 
 #[tokio::test]
 async fn update_non_nomi_extra_model_does_not_kill_task() {
     // Verifies the explicit rule that `extra.model` changes for non-nomi
-    // do NOT trigger task_manager.kill. Since our `NoopTaskManager::kill` is
+    // do NOT trigger runtime_registry.kill. Since our `NoopAgentRuntimeRegistry::kill` is
     // a no-op we can't assert the negative directly; we assert the update
     // succeeds and the merged extra carries the new field, and that top-level
     // model remains None.
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({
         "extra": { "current_model_id": "claude-opus-4" }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
     assert_eq!(updated.extra["current_model_id"], "claude-opus-4");
     assert!(updated.model.is_none());
 }
 
 #[tokio::test]
 async fn update_nomi_strips_extra_model_from_patch() {
-    let (svc, _, task_mgr) = setup().await;
+    let (svc, _, runtime_registry) = setup().await;
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -860,7 +862,7 @@ async fn update_nomi_strips_extra_model_from_patch() {
         "extra": { "model": "legacy-value", "last_token_usage": { "total_tokens": 42 } }
     }))
     .unwrap();
-    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     assert!(
         !updated.extra.as_object().unwrap().contains_key("model"),
@@ -884,15 +886,17 @@ async fn create_acp_seeds_acp_session_runtime_from_extra() {
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
     let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
         Arc::new(SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
     let svc = nomifun_conversation::ConversationService::new(
+        Arc::<str>::from(USER_ID),
         std::env::temp_dir(),
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        task_mgr,
+        runtime_registry,
         repo,
         agent_metadata_repo,
         acp_session_repo.clone(),
+        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -934,15 +938,17 @@ async fn create_acp_skips_seed_when_extra_has_empty_runtime_fields() {
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
     let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
         Arc::new(SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
     let svc = nomifun_conversation::ConversationService::new(
+        Arc::<str>::from(USER_ID),
         std::env::temp_dir(),
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        task_mgr,
+        runtime_registry,
         repo,
         agent_metadata_repo,
         acp_session_repo.clone(),
+        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
 
     // Both fields present but empty — treated as absent, no save_runtime_state call.
@@ -961,55 +967,4 @@ async fn create_acp_skips_seed_when_extra_has_empty_runtime_fields() {
             .is_none_or(|r| r.current_mode_id.is_none() && r.current_model_id.is_none()),
         "empty runtime fields should not produce a seed: got {runtime:?}"
     );
-}
-
-// ── link_orchestrator_run: merge extra.orchestrator_run_id + broadcast ──
-
-#[tokio::test]
-async fn link_orchestrator_run_merges_run_id_and_broadcasts() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
-
-    // Seed a conversation with a pre-existing extra key (workspace) so we can
-    // prove the link MERGES rather than replaces extra.
-    let req: CreateConversationRequest = serde_json::from_value(json!({
-        "type": "acp",
-        "extra": { "workspace": "/home/user/project" }
-    }))
-    .unwrap();
-    let conv = svc.create(USER_ID, req).await.unwrap();
-    // Discard the create broadcast so we only observe the link event.
-    broadcaster.take_events();
-
-    svc.link_orchestrator_run(&conv.id.to_string(), "run_abc").await.unwrap();
-
-    // Re-read the conversation: the run id is written and workspace survives.
-    let fetched = svc.get(USER_ID, &conv.id.to_string()).await.unwrap();
-    assert_eq!(
-        fetched.extra["orchestrator_run_id"], "run_abc",
-        "link must write extra.orchestrator_run_id"
-    );
-    assert_eq!(
-        fetched.extra["workspace"], "/home/user/project",
-        "link must merge (not replace) extra — workspace must survive"
-    );
-
-    // Exactly one conversation.listChanged(updated) for this conversation.
-    let events = broadcaster.take_events();
-    assert_eq!(events.len(), 1, "link must broadcast exactly one event");
-    assert_eq!(events[0].name, "conversation.listChanged");
-    assert_eq!(events[0].data["action"], "updated");
-    assert_eq!(events[0].data["conversation_id"], conv.id);
-}
-
-#[tokio::test]
-async fn link_orchestrator_run_empty_conversation_id_is_noop() {
-    let (svc, broadcaster, _task_mgr) = setup().await;
-
-    // Empty conversation_id (MCP / no-session callers) must be a silent no-op:
-    // Ok(()) and zero broadcasts.
-    let result = svc.link_orchestrator_run("", "run_x").await;
-    assert!(result.is_ok(), "empty conversation_id must return Ok(()): {result:?}");
-
-    let events = broadcaster.take_events();
-    assert!(events.is_empty(), "empty conversation_id must broadcast nothing, got {events:?}");
 }

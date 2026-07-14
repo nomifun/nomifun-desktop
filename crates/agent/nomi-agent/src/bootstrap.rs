@@ -273,12 +273,13 @@ pub struct BootstrapResult {
 /// Builder for creating a fully-initialized `AgentEngine`.
 ///
 /// Encapsulates the complete initialization pipeline so all consumers
-/// (CLI, backend, sub-agents) get consistent behavior:
+/// (CLI, backend, delegated Agents) get consistent behavior:
 ///
 /// - System prompt always includes model identity, working directory, date
 /// - Tool usage guidance is always injected
 /// - AGENTS.md is loaded from the workspace hierarchy
-/// - Skills, MCP, plan mode, spawn are enabled based on `Config` fields
+/// - Skills, MCP, and plan mode are enabled from `Config`
+/// - Embedded AgentExecution is installed only when selected by the host
 pub struct AgentBootstrap {
     config: Config,
     workspace: String,
@@ -287,6 +288,11 @@ pub struct AgentBootstrap {
     resume_session: Option<Session>,
     extra_skill_dirs: Vec<PathBuf>,
     goal: Option<crate::goal::runtime::GoalSpec>,
+    /// Host composition switch for embedded AgentExecution. CLI
+    /// and standalone embeddings default to installing it; backend sessions
+    /// explicitly disable it when Platform Gateway owns persistent execution
+    /// or the caller is outside the trusted local-owner boundary.
+    install_embedded_agent_execution: bool,
     /// **P3-X1: the session's shared runtime approval-mode handle** (the same
     /// `Arc<ToolApprovalManager>` the host later installs on the engine via
     /// `set_approval_manager`). When present it is threaded into the native
@@ -323,6 +329,7 @@ impl AgentBootstrap {
             resume_session: None,
             extra_skill_dirs: Vec::new(),
             goal: None,
+            install_embedded_agent_execution: true,
             approval_manager: None,
             browser_secret_source: None,
             #[cfg(feature = "browser-use")]
@@ -343,10 +350,18 @@ impl AgentBootstrap {
         self
     }
 
+    /// Select whether this host installs embedded AgentExecution.
+    /// This is deliberately not part of [`Config`]: composition belongs to the
+    /// embedding host, not to user TOML or model-writable runtime state.
+    pub fn install_embedded_agent_execution(mut self, install: bool) -> Self {
+        self.install_embedded_agent_execution = install;
+        self
+    }
+
     /// **P3-X1: provide the session's shared `Arc<ToolApprovalManager>`** so the native
     /// `BrowserTool`'s redline gate reads the *runtime* approval mode LIVE (a mid-session
     /// `set_mode` to yolo arms the gate immediately). Pass the *same* Arc that is later
-    /// installed on the engine via `set_approval_manager`, so the facade and orchestration
+    /// installed on the engine via `set_approval_manager`, so the facade and tool-execution
     /// observe one mode cell with zero drift. Omit it (the default) to keep the
     /// construction-time `auto_approve` snapshot as the (fail-closed) source of truth.
     pub fn approval_manager(mut self, mgr: Arc<nomi_protocol::ToolApprovalManager>) -> Self {
@@ -469,17 +484,16 @@ impl AgentBootstrap {
             registry.register(Box::new(crate::memory_tools::RememberTool::new(mem_dir)));
         }
         let process_supervisor =
-            nomi_execution::ProcessSupervisor::new(nomi_execution::SupervisorConfig::default());
-        let execution_capability = nomi_execution::CapabilityPolicy {
+            nomi_process_runtime::ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default());
+        let process_capability = nomi_process_runtime::CapabilityPolicy {
             cwd_roots: vec![cwd_path.to_path_buf()],
             sandbox: if self.config.tools.bash_sandbox {
-                nomi_execution::SandboxPolicy::MacSeatbelt {
+                nomi_process_runtime::SandboxPolicy::MacSeatbelt {
                     write_roots: vec![cwd_path.to_path_buf()],
                 }
             } else {
-                nomi_execution::SandboxPolicy::UnrestrictedLocalOwner
+                nomi_process_runtime::SandboxPolicy::UnrestrictedLocalOwner
             },
-            allow_hand_off: false,
         };
         if self.config.tools.persistent_shell {
             tracing::warn!(
@@ -490,7 +504,7 @@ impl AgentBootstrap {
         registry.register(Box::new(nomi_tools::bash::BashTool::new(
             Arc::clone(&process_supervisor),
             cwd_path.to_path_buf(),
-            execution_capability.clone(),
+            process_capability.clone(),
         )));
         registry.register(Box::new(nomi_tools::grep::GrepTool::new(
             cwd_path.to_path_buf(),
@@ -499,7 +513,7 @@ impl AgentBootstrap {
             cwd_path.to_path_buf(),
         )));
 
-        // Legacy interactive schemas share the same supervisor as Bash. The
+        // Numeric-session schemas share the same supervisor as Bash. The
         // ProcessStore is only a numeric-id adapter; it owns no OS process.
         // Register these before the builtin-name snapshot so an MCP tool with
         // the same name is namespaced instead of shadowing the native tool.
@@ -508,7 +522,7 @@ impl AgentBootstrap {
             Arc::clone(&process_supervisor),
             Arc::clone(&process_store),
             cwd_path.to_path_buf(),
-            execution_capability.clone(),
+            process_capability.clone(),
         )));
         registry.register(Box::new(nomi_tools::write_stdin::WriteStdinTool::new(
             Arc::clone(&process_supervisor),
@@ -592,35 +606,48 @@ impl AgentBootstrap {
             self.config.tools.skills.allow.clone(),
             self.config.tools.auto_approve,
         );
-        registry.register(Box::new(crate::skill_tool::SkillTool::new(
-            skills_arc,
-            cwd.to_string(),
-            skill_checker,
-        )));
-
-        // 进程内 Spawn 门控（默认开）：桌面后端会话由工厂置 false —— 子 agent
-        // 改走可视化的 nomi_spawn 编排扇出（DAG 画布/转录）；CLI/独立模式保持
-        // 进程内 Spawn（其唯一扇出手段）。
-        if self.config.tools.in_process_spawn {
-            let spawner = Arc::new(
-                crate::spawner::AgentSpawner::new(
+        // No-gateway CLI/embedded engines share one Agent invocation runner
+        // between fork-mode skills and embedded `nomi_delegate`. Platform
+        // Gateway sessions disable the embedded deployment and expose the same
+        // AgentExecution contract through the platform, so a model sees one tool.
+        let local_invocation_runner = if self.install_embedded_agent_execution {
+            Some(Arc::new(
+                crate::local_agent_invocation::LocalAgentInvocationRunner::new(
                     provider.clone(),
                     self.config.clone(),
                     cwd_path.to_path_buf(),
                 )
-                .with_execution_policy(
-                    execution_capability.clone(),
+                .with_process_capability(
+                    process_capability.clone(),
                     write_root.clone(),
                     self.config.tools.builtin_allowlist.clone(),
                 )
                 .with_token_budget(
                     self.config
                         .tools
-                        .subagent_token_budget
-                        .map(|limit| Arc::new(crate::spawner::TokenBudget::new(limit))),
+                        .delegation_token_budget
+                        .map(|limit| {
+                            Arc::new(crate::local_agent_invocation::TokenBudget::new(limit))
+                        }),
                 ),
-            );
-            registry.register(Box::new(crate::spawn_tool::SpawnTool::new(spawner)));
+            ))
+        } else {
+            None
+        };
+        let skill_invocation_runner = local_invocation_runner.as_ref().map(|runner| {
+            Arc::clone(runner) as Arc<dyn nomi_types::agent::AgentInvocationRunner>
+        });
+        registry.register(Box::new(
+            crate::skill_tool::SkillTool::with_invocation_runner(
+                skills_arc,
+                cwd.to_string(),
+                skill_checker,
+                None,
+                skill_invocation_runner,
+            ),
+        ));
+        if let Some(runner) = local_invocation_runner {
+            registry.register(Box::new(crate::local_delegate_tool::LocalDelegateTool::new(runner)));
         }
 
         let plan_active_flag = Arc::new(AtomicBool::new(false));
@@ -675,7 +702,7 @@ impl AgentBootstrap {
             // F1-sec: thread the session-bypass policy + evaluate full-power into the
             // facade so its independent fail-closed redline gate (裁决⑧) actually fires
             // and the evaluate gate (裁决⑨) reflects the user's opt-in. `auto_approve`
-            // is `true` iff orchestration approval is bypassed (yolo / companion-forced-yolo
+            // is `true` iff tool-execution approval is bypassed (yolo / companion-forced-yolo
             // / --auto-approve — see BrowserTool::session_bypasses_approval doc); the
             // `browser.full_power` flag carries the LIVE `agent.browserUse.fullPower` pref
             // (set by the backend factory per session). Constructed here where the full

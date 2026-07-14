@@ -517,9 +517,9 @@ fn merge_update(mut p: PresetResponse, r: UpdatePresetRequest) -> PresetResponse
 }
 
 fn apply_state(response:&mut PresetResponse,state:Option<&nomifun_db::PresetUserStateRow>){if let Some(s)=state{response.enabled=s.enabled;response.auto_selectable=s.auto_selectable;response.preferred_agent_id=s.preferred_agent_id.clone();response.sort_order=s.sort_order;response.last_used_at=s.last_used_at}}
-fn default_targets()->Vec<PresetTarget>{vec![PresetTarget::Conversation,PresetTarget::ClusterMember,PresetTarget::Companion,PresetTarget::Cron]}
-fn target_strings(v:&[PresetTarget])->Vec<String>{v.iter().map(|v|match v{PresetTarget::Conversation=>"conversation",PresetTarget::ClusterMember=>"cluster_member",PresetTarget::Companion=>"companion",PresetTarget::PublicCompanion=>"public_companion",PresetTarget::Cron=>"cron"}.into()).collect()}
-fn parse_target(v:&str)->Option<PresetTarget>{match v{"conversation"=>Some(PresetTarget::Conversation),"cluster_member"=>Some(PresetTarget::ClusterMember),"companion"=>Some(PresetTarget::Companion),"public_companion"=>Some(PresetTarget::PublicCompanion),"cron"=>Some(PresetTarget::Cron),_=>None}}
+fn default_targets()->Vec<PresetTarget>{vec![PresetTarget::Conversation,PresetTarget::ExecutionStep,PresetTarget::Companion,PresetTarget::Cron]}
+fn target_strings(v:&[PresetTarget])->Vec<String>{v.iter().map(|v|match v{PresetTarget::Conversation=>"conversation",PresetTarget::ExecutionStep=>"execution_step",PresetTarget::Companion=>"companion",PresetTarget::PublicCompanion=>"public_companion",PresetTarget::Cron=>"cron"}.into()).collect()}
+fn parse_target(v:&str)->Option<PresetTarget>{match v{"conversation"=>Some(PresetTarget::Conversation),"execution_step"=>Some(PresetTarget::ExecutionStep),"companion"=>Some(PresetTarget::Companion),"public_companion"=>Some(PresetTarget::PublicCompanion),"cron"=>Some(PresetTarget::Cron),_=>None}}
 fn dimension_str(v:PresetTagDimension)->&'static str{match v{PresetTagDimension::Audience=>"audience",PresetTagDimension::Scenario=>"scenario"}}
 fn parse_dimension(v:&str)->PresetTagDimension{if v=="scenario"{PresetTagDimension::Scenario}else{PresetTagDimension::Audience}}
 fn localized_value(map:&HashMap<String,String>,locale:&str)->Option<String>{map.get(locale).cloned().or_else(||map.get(locale.split('-').next().unwrap_or(locale)).cloned())}

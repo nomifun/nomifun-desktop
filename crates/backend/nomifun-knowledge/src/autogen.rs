@@ -3,7 +3,7 @@
 //! reply.
 //!
 //! This module only owns the LLM **seam** ([`KnowledgeCompleter`]), the
-//! sampling/prompt/parse pure logic, and the constants. Orchestration
+//! sampling/prompt/parse pure logic, and the constants. Coordination
 //! (loading the base row, writing files, emitting events) lives in
 //! `service::KnowledgeService::generate_overview`. The production completer
 //! implementation lives in `nomifun-ai-agent` (same layering as the companion

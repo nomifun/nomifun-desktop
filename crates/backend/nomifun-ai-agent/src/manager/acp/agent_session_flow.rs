@@ -4,7 +4,7 @@ use crate::protocol::events::{
     AgentStreamEvent, AvailableCommandsEventData, ErrorEventData, SessionAssignedEventData, StartEventData,
     TurnStopReason,
 };
-use crate::shared_kernel::SessionId as DomainSessionId;
+use crate::session::SessionId as DomainSessionId;
 use crate::types::SendMessageData;
 use agent_client_protocol::schema::{ContentBlock, LoadSessionRequest, PromptRequest, SessionId, StopReason};
 use nomifun_api_types::{
@@ -469,7 +469,7 @@ mod tests {
     //! `session_id()` — the same terminal state the real `open_session_new`
     //! / `open_session_resume` helpers leave behind.
     use crate::manager::acp::{AcpSession, AcpSessionEvent};
-    use crate::shared_kernel::SessionId as DomainSessionId;
+    use crate::session::SessionId as DomainSessionId;
     use agent_client_protocol::schema::AgentCapabilities;
 
     fn make_session() -> AcpSession {

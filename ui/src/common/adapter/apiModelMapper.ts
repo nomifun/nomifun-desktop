@@ -61,11 +61,18 @@ export type ApiConversationPinnedFields = {
   pinned_at?: number | null;
 };
 
+/** First-class Conversation collaboration authoring reference. It is never
+ * read from or mirrored into `extra`. */
+export type ApiConversationExecutionTemplateFields = {
+  execution_template_id?: string | null;
+};
+
 export function fromApiConversation<T>(raw: T): T {
   if (!raw || typeof raw !== 'object') return raw;
 
   const r = raw as T &
-    ApiConversationPinnedFields & {
+    ApiConversationPinnedFields &
+    ApiConversationExecutionTemplateFields & {
       model?: ApiProviderWithModel | null;
       extra?: Record<string, unknown> | null;
       /** Promoted to a top-level conversations column (was extra.cronJobId). */

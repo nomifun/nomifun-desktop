@@ -111,9 +111,9 @@ pub enum Command {
     /// (`knowledge_search`; spawned by the ACP agent CLI when knowledge bases are
     /// mounted into the session).
     McpKnowledgeStdio,
-    /// MCP stdio server for the Desktop Gateway tools (`nomi_*` — conversations,
+    /// MCP stdio server for the Platform Gateway tools (`nomi_*` — conversations,
     /// cron jobs, global memory, requirements; spawned by agent sessions that
-    /// carry the backend-set `desktopGateway` extra flag).
+    /// receive a process-issued scoped capability).
     McpGatewayStdio,
     /// MCP stdio server exposing a single reliable `open` tool (URL / file /
     /// folder / application via ShellExecute; spawned by the ACP agent CLI on
@@ -151,25 +151,10 @@ pub enum Command {
     /// Endpoint/token from `--url`/`--token` or `NOMIFUN_URL` /
     /// `NOMIFUN_COMPANION_TOKEN`.
     Call {
-        /// Capability name, e.g. `nomi_agent_run` (see `nomicore tools`).
+        /// Capability name, e.g. `nomi_cron_list` (see `nomicore tools`).
         name: String,
         /// JSON arguments object (default `{}`).
         args: Option<String>,
-        /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
-        #[arg(long)]
-        url: Option<String>,
-        /// Per-companion access token (default `$NOMIFUN_COMPANION_TOKEN`).
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Delegate a goal to an autonomous NomiFun agent on a running instance
-    /// (convenience wrapper over the `nomi_agent_run` capability).
-    Agent {
-        /// The goal / task to delegate.
-        goal: String,
-        /// Max seconds to wait before returning a running-handle (default 300).
-        #[arg(long)]
-        timeout_secs: Option<u64>,
         /// Instance base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
         #[arg(long)]
         url: Option<String>,

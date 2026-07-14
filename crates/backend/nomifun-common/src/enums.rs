@@ -197,24 +197,17 @@ pub enum RemoteAgentStatus {
 pub enum AgentKillReason {
     IdleTimeout,
     /// The ACP session ended a turn with a terminal error. The conversation is
-    /// preserved; only the in-memory agent task is recycled before the next send
+    /// preserved; only the in-memory Agent runtime is recycled before the next send
     /// so a potentially desynchronised upstream session is not reused.
     AgentErrorRecovery,
-    /// Team session is rebuilding the agent process to inject a fresh
-    /// `team_mcp_stdio_config`. The conversation is preserved; only the
-    /// in-memory ACP CLI is recycled.
-    TeamMcpRebuild,
     /// The session's bound knowledge bases changed (a `挂载知识库` toggle, a
     /// rebind, or a write-back mode switch). The agent bakes the knowledge
     /// retrieval-protocol section at build time and is cached per
-    /// conversation, so the in-memory task is recycled to force a rebuild —
+    /// conversation, so the in-memory Agent runtime is recycled to force a rebuild —
     /// honoring the UI contract that a binding change "takes effect on the
     /// next message". The conversation (and any persisted ACP session) is
     /// preserved; the rebuilt agent resumes and re-delivers the section.
     KnowledgeBindingChanged,
-    /// Team is being deleted; every agent process under it must be torn
-    /// down before the team's conversations / rows are removed.
-    TeamDeleted,
     /// The owning conversation was deleted via `DELETE /api/conversations/{id}`.
     /// The agent process must be torn down so it stops emitting stream events
     /// for a conversation row that no longer exists.

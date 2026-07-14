@@ -13,7 +13,7 @@ import WorkspaceToolRail, {
   WORKSPACE_PANEL_META_EVENT,
   dispatchWorkspacePanelTabEvent,
   type WorkspacePanelMetaDetail,
-  type WorkspaceToolRailOrchestration,
+  type WorkspaceToolRailCollaboration,
 } from './WorkspaceToolRail';
 import { useContainerWidth } from '@/renderer/pages/conversation/hooks/useContainerWidth';
 import { useLayoutConstraints } from '@/renderer/pages/conversation/hooks/useLayoutConstraints';
@@ -87,12 +87,12 @@ export interface ChatLayoutProps {
   workspacePreferenceKey?: string;
   /** Custom rename handler; when provided, replaces the default conversation.update rename flow */
   onRenameTitle?: (new_name: string) => Promise<boolean>;
-  /** Optional override for the leading icon shown before the title (e.g. team Peoples icon) */
+  /** Optional override for the leading icon shown before the title. */
   headerLeading?: React.ReactNode;
   /** Extra panels exposed by the persistent vertical tool rail. */
   workspaceExtraTabs?: WorkspaceExtraTab[];
-  /** Optional orchestration canvas entry merged into the same tool rail. */
-  workspaceOrchestration?: WorkspaceToolRailOrchestration;
+  /** Optional collaboration progress entry merged into the same tool rail. */
+  workspaceCollaboration?: WorkspaceToolRailCollaboration;
 }
 
 /**
@@ -144,20 +144,20 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const selectWorkspaceTool = (tab: string) => {
     const nextTab = tab as WorkspaceTab;
     const clickingActivePanel = !rightSiderCollapsed && activeWorkspaceTab === nextTab;
-    if (props.workspaceOrchestration?.active) props.workspaceOrchestration.onClick();
+    if (props.workspaceCollaboration?.active) props.workspaceCollaboration.onClick();
     setActiveWorkspaceTab(nextTab);
     dispatchWorkspacePanelTabEvent(nextTab, conversation_id != null ? String(conversation_id) : undefined);
     persistRightSiderCollapsed(clickingActivePanel);
   };
 
-  const workspaceOrchestration = props.workspaceOrchestration
+  const workspaceCollaboration = props.workspaceCollaboration
     ? {
-        ...props.workspaceOrchestration,
+        ...props.workspaceCollaboration,
         onClick: () => {
-          if (!props.workspaceOrchestration?.active) {
+          if (!props.workspaceCollaboration?.active) {
             setRightSiderCollapsed(true);
           }
-          props.workspaceOrchestration?.onClick();
+          props.workspaceCollaboration?.onClick();
         },
       }
     : undefined;
@@ -467,14 +467,14 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             onSelect={selectWorkspaceTool}
             changeCount={workspaceChangeCount}
             extraTabs={props.workspaceExtraTabs}
-            orchestration={workspaceOrchestration}
+            collaboration={workspaceCollaboration}
             footer={
               <button
                 type='button'
                 className='workspace-tool-rail__item workspace-tool-rail__item--collapse'
                 onClick={() => {
-                  if (rightSiderCollapsed && props.workspaceOrchestration?.active) {
-                    props.workspaceOrchestration.onClick();
+                  if (rightSiderCollapsed && props.workspaceCollaboration?.active) {
+                    props.workspaceCollaboration.onClick();
                   }
                   persistRightSiderCollapsed(!rightSiderCollapsed);
                 }}

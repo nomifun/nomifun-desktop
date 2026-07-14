@@ -20,7 +20,7 @@ import CreateTaskDialog from './CreateTaskDialog';
 import { getJobAgentMeta } from './jobAgentMeta';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
 import { filterCronJobsByQuery } from './cronJobSearch';
-import { parseScheduledCreateTarget } from './scheduledCreateTarget';
+import { parseScheduledConversationId } from './scheduledConversationId';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
 
@@ -38,10 +38,10 @@ const ScheduledTasksPage: React.FC = () => {
   const { keepAwake, setKeepAwake } = useKeepAwake();
 
   useEffect(() => {
-    const createTarget = parseScheduledCreateTarget(searchParams);
-    if (!createTarget) return;
+    const conversationId = parseScheduledConversationId(searchParams);
+    if (!conversationId) return;
 
-    setLockedCreateConversationId(createTarget.conversationId);
+    setLockedCreateConversationId(conversationId);
     setCreateDialogVisible(true);
 
     const next = new URLSearchParams(searchParams);
@@ -206,7 +206,7 @@ const ScheduledTasksPage: React.FC = () => {
                 const agentMeta = getJobAgentMeta(job, cliAgents);
                 const isManualOnly = job.schedule.kind === 'cron' && !job.schedule.expr;
                 const executionModeLabel =
-                  job.target.execution_mode === 'new_conversation'
+                  job.execution_mode === 'new_conversation'
                     ? t('cron.page.form.newConversation')
                     : t('cron.page.form.existingConversation');
 

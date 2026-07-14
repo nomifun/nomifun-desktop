@@ -1,17 +1,17 @@
 //! Integration tests for agent type implementations and auxiliary features.
 //!
 //! These tests validate:
-//! - Each agent manager implements IAgentTask correctly
+//! - Each agent manager implements AgentRuntimeControl correctly
 //! - Agent factory can build all agent types
-//! - Idle scanner finds eligible tasks
+//! - Idle scanner finds eligible runtimes
 //! - Workspace browsing works with real filesystem
 //! - Nomi stub returns appropriate errors
 
 use std::sync::Arc;
 
 use nomifun_ai_agent::manager::nomi::NomiAgentManager;
-use nomifun_ai_agent::task_manager::AgentFactory;
-use nomifun_ai_agent::types::{BuildTaskOptions, NomiResolvedConfig, SendMessageData};
+use nomifun_ai_agent::runtime_registry::AgentRuntimeFactory;
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, NomiResolvedConfig, SendMessageData};
 use nomifun_ai_agent::*;
 use nomifun_ai_agent::{SkillIndex, build_system_instructions_with_skills_index};
 use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, ProviderWithModel, TimestampMs, now_ms};
@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
-// Mock agent for WorkerTaskManager tests with different agent types
+// Mock agent for AgentRuntimeRegistry tests with different agent types
 // ---------------------------------------------------------------------------
 
 struct TypedMockAgent {
@@ -52,7 +52,7 @@ impl TypedMockAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for TypedMockAgent {
+impl AgentRuntimeControl for TypedMockAgent {
     fn agent_type(&self) -> AgentType {
         self.agent_type
     }
@@ -82,7 +82,7 @@ impl IAgentTask for TypedMockAgent {
     }
 }
 
-impl IMockAgent for TypedMockAgent {}
+impl MockAgentRuntime for TypedMockAgent {}
 
 // ---------------------------------------------------------------------------
 // Nomi agent tests (real implementation with AgentEngine)
@@ -102,6 +102,7 @@ fn make_nomi_config() -> NomiResolvedConfig {
         session_directory: std::env::temp_dir().join("nomi-test-sessions"),
         session_mode: None,
         extra_mcp_servers: Default::default(),
+        loopback_capability_leases: Default::default(),
         bedrock_config: None,
         computer_use: false,
         browser_use: false,
@@ -116,7 +117,7 @@ fn make_nomi_config() -> NomiResolvedConfig {
         goal: None,
         browser_secret_vault: None,
         owner_token: None,
-        in_process_spawn: true,
+        install_embedded_agent_execution: true,
         allowed_tools: Vec::new(),
         write_root: None,
     }
@@ -137,7 +138,7 @@ async fn nomi_agent_confirm_succeeds() {
         .await
         .unwrap();
     // `confirm` is an inherent method on `NomiAgentManager` (reached via
-    // `AgentInstance::Nomi(..)` in production); the test calls it
+    // `AgentRuntimeHandle::Nomi(..)` in production); the test calls it
     // directly on the concrete manager.
     let result = agent.confirm("msg", "call", json!({}), false);
     assert!(result.is_ok());
@@ -157,7 +158,7 @@ async fn nomi_agent_metadata() {
 }
 
 // ---------------------------------------------------------------------------
-// Idle scanner: collect_idle only finds ACP tasks
+// Idle scanner: collect_idle_runtimes only finds ACP runtimes
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -166,7 +167,7 @@ async fn collect_idle_ignores_non_acp_agent_types() {
     let old_ts = now_ms() - 600_000; // 10 min ago
 
     // Build a factory that creates typed mocks (all finished + old)
-    let factory: AgentFactory = Arc::new(move |opts: BuildTaskOptions| {
+    let factory: AgentRuntimeFactory = Arc::new(move |opts: AgentRuntimeBuildOptions| {
         async move {
             let mock = TypedMockAgent::new(
                 opts.agent_type,
@@ -174,13 +175,14 @@ async fn collect_idle_ignores_non_acp_agent_types() {
                 Some(ConversationStatus::Finished),
             )
             .with_last_activity(old_ts);
-            Ok(AgentInstance::Mock(Arc::new(mock)))
+            Ok(AgentRuntimeHandle::Mock(Arc::new(mock)))
         }
         .boxed()
     });
-    let mgr = WorkerTaskManagerImpl::new(factory);
+    let registry = InMemoryAgentRuntimeRegistry::new(factory);
 
-    let make_opts = |agent_type: AgentType, id: &str| BuildTaskOptions {
+    let make_opts = |agent_type: AgentType, id: &str| AgentRuntimeBuildOptions {
+        user_id: "test-user".into(),
         agent_type,
         workspace: "/tmp".into(),
         model: ProviderWithModel {
@@ -189,27 +191,28 @@ async fn collect_idle_ignores_non_acp_agent_types() {
             use_model: None,
         },
         conversation_id: id.into(),
+        delegation_policy: Default::default(),
         conversation_created_at: None,
         extra: json!(null),
     };
 
-    mgr.get_or_build_task("nanobot-1", make_opts(AgentType::Nanobot, "nanobot-1"))
+    registry.get_or_create_runtime("nanobot-1", make_opts(AgentType::Nanobot, "nanobot-1"))
         .await
         .unwrap();
-    mgr.get_or_build_task("openclaw-1", make_opts(AgentType::OpenclawGateway, "openclaw-1"))
+    registry.get_or_create_runtime("openclaw-1", make_opts(AgentType::OpenclawGateway, "openclaw-1"))
         .await
         .unwrap();
-    mgr.get_or_build_task("acp-1", make_opts(AgentType::Acp, "acp-1"))
+    registry.get_or_create_runtime("acp-1", make_opts(AgentType::Acp, "acp-1"))
         .await
         .unwrap();
-    mgr.get_or_build_task("remote-1", make_opts(AgentType::Remote, "remote-1"))
+    registry.get_or_create_runtime("remote-1", make_opts(AgentType::Remote, "remote-1"))
         .await
         .unwrap();
 
-    assert_eq!(mgr.active_count(), 4);
+    assert_eq!(registry.active_runtime_count(), 4);
 
     // Only ACP should be collected
-    let idle = mgr.collect_idle(300_000); // 5-min threshold
+    let idle = registry.collect_idle_runtimes(300_000); // 5-min threshold
     assert_eq!(idle.len(), 1);
     assert_eq!(idle[0], "acp-1");
 }

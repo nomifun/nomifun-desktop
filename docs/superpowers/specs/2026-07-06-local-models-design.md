@@ -29,7 +29,7 @@
 2. **数据驱动、可扩展**:支持哪些模型由**远程目录(catalog)**决定,不硬编码;用户可自定义导入(HF/ModelScope 仓库或本地 GGUF)。
 3. **OpenAI 兼容是唯一接入语言**:所有本地能力以 OpenAI 兼容面(chat/embeddings/images/audio)进入平台,复用既有 provider 体系,**不为"本地"发明第二套模型消费协议**。
 4. **本地模型 = 一个受管 provider**:对会话/编排/IDMM/failover/创意工坊而言,本地与云只是不同的 provider 行,能力面完全同构——这是"少返工"的核心。
-5. **进程必须可收尸**:一切 sidecar 走 `nomifun-runtime::Builder`(Job Object/PDEATHSIG,随主进程死),杜绝僵尸锁文件。
+5. **进程必须可收尸**:一切 sidecar 走 `nomi-process-runtime::ChildProcessBuilder`(Job Object/PDEATHSIG,随主进程死),杜绝僵尸锁文件。
 6. **中国网络友好**:ModelScope/hf-mirror 优先、canonical 兜底、env 覆写指向内网源(沿用 `NOMIFUN_CHROME_BINARY` 的优先级设计)。
 
 ## 2. 总体架构
@@ -184,7 +184,7 @@ token:首次启用领域时生成一枚**长期 token**(加密落 `{data_dir}/lo
 
 ## 6. InstanceSupervisor 与 ResourceBroker
 
-- **实例状态机**:`stopped → starting(下载缺件→spawn→就绪探针) → ready → idle(TTL 计时) → stopping`;崩溃→退避重启(1s/5s/30s,三次进 `failed` 并缓存失败态,学 browser_fetcher 不无限重拉);全部经 `nomifun-runtime::Builder`(Job Object/CREATE_NO_WINDOW),端口用 `bind_with_fallback` 语义取临时口。
+- **实例状态机**:`stopped → starting(下载缺件→spawn→就绪探针) → ready → idle(TTL 计时) → stopping`;崩溃→退避重启(1s/5s/30s,三次进 `failed` 并缓存失败态,学 browser_fetcher 不无限重拉);全部经 `nomi-process-runtime::ChildProcessBuilder`(Job Object/CREATE_NO_WINDOW),端口用 `bind_with_fallback` 语义取临时口。
 - **ResourceBroker**:硬件探测(总/可用 RAM;VRAM 经 Vulkan 枚举,探不到则保守按 RAM 模式);每模型内存需求来自目录 `requirements`;加载前预算检查,不足时按策略逐出——llama 内部靠 router LRU(`--models-max` 由预算折算),跨家族(要开 sd-server 而 llama 占满)由 broker 令 llama 卸载模型或停机;**用户可 pin 常驻**(pin 的不逐出,预算不够直接明示)。并发钳制:llama `--parallel` 默认 1-2(KV cache×并发×上下文是 OOM 主因——Ollama 的教训),生图任务经创意工坊队列天然串行。
 - **配置走文件不走 env**(Ollama 守护进程 env 不可见的教训):所有实例参数(ctx/gpu-layers/TTL/pin)入 config.json,UI 改即热重载。
 

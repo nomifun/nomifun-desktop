@@ -1,20 +1,20 @@
 //! Phase 3 模型故障转移 seam(plan D3/D5/D6)的会话服务侧实现。
 //!
 //! 纯逻辑(挑选器 / 配置读写 / 故障分类)在 [`crate::model_failover`];本模块只放
-//! 需要 `&ConversationService`(仓库 + task_manager)的有副作用步骤,并把
+//! 需要 `&ConversationService`(仓库 + runtime_registry)的有副作用步骤,并把
 //! 「挑下一候选 → 写 `conversation.model` →(可选)标失败模型 Unhealthy →
 //! kill_and_wait → 重建任务」抽成**一个** pub 方法 [`ConversationService::perform_model_failover`],
 //! 供 send-loop(D3)与 IDMM 故障值守(D6,Task 3)共用同一份实现。
 //!
 //! 这是 [`crate::acp_error_recovery::ConversationService::evict_acp_task_after_terminal_error`]
-//! 的泛化:那条路径在 ACP 终态错误后 kill 任务,这条路径换模型后重建并交回新句柄。
+//! 的泛化:那条路径在 ACP 终态错误后终止 runtime,这条路径换模型后重建并交回新句柄。
 
 use std::sync::Arc;
 
-use nomifun_api_types::{HealthStatus, ModelHealthStatus};
+use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef, HealthStatus, ModelHealthStatus};
 use nomifun_common::{AgentKillReason, AgentType, ErrorChain, ProviderWithModel, now_ms};
 use nomifun_db::{ConversationRowUpdate, UpdateProviderParams};
-use nomifun_ai_agent::{AgentInstance, IWorkerTaskManager};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
 use tracing::{info, warn};
 
 use crate::convert::string_to_enum;
@@ -23,14 +23,56 @@ use crate::model_failover::{
 };
 use crate::service::{ConversationService, parse_conv_id};
 use crate::stream_relay::RelayOutcome;
-use crate::task_options::provider_model_from_conversation_row;
+use crate::runtime_options::provider_model_from_conversation_row;
 
 /// 一次成功的故障转移结果:重建后的新任务句柄 + 被选中的候选模型。
 pub struct FailoverSwitch {
     /// 换模型并重建后的 agent 句柄。send-loop 用它 `subscribe()` + 重发同一内容。
-    pub agent: AgentInstance,
+    pub agent: AgentRuntimeHandle,
     /// 本次切换到的 `(provider_id, model)`(已写入 `conversation.model`)。
     pub picked: ProviderWithModel,
+}
+
+fn selected_model_ref(model: &ProviderWithModel) -> ExecutionModelRef {
+    ExecutionModelRef {
+        provider_id: model.provider_id.clone(),
+        model: model
+            .use_model
+            .clone()
+            .unwrap_or_else(|| model.model.clone()),
+    }
+}
+
+fn rewrite_execution_model_pool_for_failover(
+    encoded: Option<&str>,
+    failed: &ProviderWithModel,
+    picked: &ProviderWithModel,
+) -> Result<Option<String>, String> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let current: ExecutionModelPool = serde_json::from_str(encoded)
+        .map_err(|error| format!("invalid persisted execution model pool: {error}"))?;
+    current.validate()?;
+    let failed = selected_model_ref(failed);
+    let picked = selected_model_ref(picked);
+    let rewritten = match current {
+        ExecutionModelPool::Automatic => ExecutionModelPool::Automatic,
+        ExecutionModelPool::Single { .. } => ExecutionModelPool::Single { model: picked },
+        ExecutionModelPool::Range { models } => {
+            let mut retained = vec![picked.clone()];
+            retained.extend(
+                models
+                    .into_iter()
+                    .filter(|model| model != &failed && model != &picked),
+            );
+            ExecutionModelPool::Range { models: retained }
+        }
+    };
+    rewritten.validate()?;
+    serde_json::to_string(&rewritten)
+        .map(Some)
+        .map_err(|error| format!("encode execution model pool: {error}"))
 }
 
 impl ConversationService {
@@ -102,7 +144,7 @@ impl ConversationService {
     /// 挑下一候选 → 写 `conversation.model`(origin 标记,非用户编辑)→
     /// (`stamp_unhealthy` 则)标失败模型 Unhealthy → `kill_and_wait`(镜像
     /// [`Self::evict_acp_task_after_terminal_error`])→ 用刷新后的行
-    /// `build_task_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
+    /// `build_runtime_options` 重建任务。返回 `Some(FailoverSwitch)` 表示换好新模型、
     /// 新句柄就绪;返回 `None` 表示**队列耗尽**(无可用候选)—— 调用方据此回落到
     /// 「emit 原始错误」,绝不无限切换。
     ///
@@ -110,7 +152,7 @@ impl ConversationService {
     ///
     /// **ACP 边界(review #9,plan D7)**:加载会话行后在此**统一**判定 agent 类型——
     /// 仅 `AgentType::Nomi` 放行,其余(ACP / 终端 CLI / 远程 …)`warn` + 返回 `None`
-    /// (不 kill、不写 model)。send-loop 自己也有一道便宜的早闸,但**这里**才是
+    /// (不终止 runtime、不写 model)。send-loop 自己也有一道便宜的早闸,但**这里**才是
     /// 唯一的强制点:send-loop 与 IDMM 两条路径都过这道闸,所以 ACP 会话无论从哪条
     /// 路径进来都安全地被拒。
     ///
@@ -125,7 +167,7 @@ impl ConversationService {
         conversation_id: &str,
         config: &nomifun_api_types::ModelFailoverConfig,
         tried: &[ProviderWithModel],
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Option<FailoverSwitch> {
         let Some((provider_repo, _)) = self.failover_deps() else {
             return None;
@@ -145,7 +187,7 @@ impl ConversationService {
 
         // ACP 边界(review #9,plan D7)的**唯一强制闸**:仅 nomi 自有引擎的普通会话
         // 可换模型重建。ACP / 终端 / 远程等 agent 自管模型(独立 reconcile),在此被
-        // fail-safe 拒绝——不 kill、不写 model。send-loop 与 IDMM inject 都走这条
+        // fail-safe 拒绝——不终止 runtime、不写 model。send-loop 与 IDMM inject 都走这条
         // 路径,故两处都被这一道闸覆盖。
         let agent_type: AgentType = match string_to_enum(&row.r#type) {
             Ok(t) => t,
@@ -176,7 +218,7 @@ impl ConversationService {
         let picked = next_failover_model(&config.queue, &failed, tried, &providers)?;
 
         // 写 conversation.model(origin 标记:非用户编辑)。这正是 spec §5.5 锚定的
-        // service.rs:896-927「改模型 + kill → 下次 send 重建」形状,只是这里立刻重建。
+        // 「改模型 + 终止 runtime → 下次 send 重建」形状,只是这里立刻重建。
         // 同时这会改掉 IDMM 默认 bypass 模型(可接受:换走的正是那个故障模型)。
         let model_json = match serde_json::to_string(&picked) {
             Ok(json) => json,
@@ -185,8 +227,21 @@ impl ConversationService {
                 return None;
             }
         };
+        let execution_model_pool = match rewrite_execution_model_pool_for_failover(
+            row.execution_model_pool.as_deref(),
+            &failed,
+            &picked,
+        ) {
+            Ok(pool) => pool,
+            Err(error) => {
+                warn!(%error, conversation_id, "Failover aborted: invalid execution model authority");
+                return None;
+            }
+        };
         let update = ConversationRowUpdate {
             model: Some(Some(model_json)),
+            execution_model_pool: Some(execution_model_pool),
+            execution_template_id: Some(None),
             updated_at: Some(now_ms()),
             ..Default::default()
         };
@@ -211,8 +266,8 @@ impl ConversationService {
 
         // kill_and_wait,镜像 evict_acp_task_after_terminal_error(acp_error_recovery.rs):
         // 旧任务句柄绑定旧 provider/model,必须等它落幕再用新行重建。
-        task_manager
-            .kill_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
+        runtime_registry
+            .terminate_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
             .await;
 
         // 用**刷新后**的行重建。re-fetch 以拿到刚写入的新 model 列。
@@ -227,14 +282,14 @@ impl ConversationService {
                 return None;
             }
         };
-        let build_opts = match self.build_task_options(&refreshed) {
+        let runtime_options = match self.build_runtime_options(&refreshed) {
             Ok(opts) => opts,
             Err(e) => {
-                warn!(error = %ErrorChain(&e), conversation_id, "Failover aborted: build_task_options on refreshed row failed");
+                warn!(error = %ErrorChain(&e), conversation_id, "Failover aborted: build_runtime_options on refreshed row failed");
                 return None;
             }
         };
-        let agent = match task_manager.get_or_build_task(conversation_id, build_opts).await {
+        let agent = match runtime_registry.get_or_create_runtime(conversation_id, runtime_options).await {
             Ok(agent) => agent,
             Err(e) => {
                 warn!(error = %ErrorChain(&e), conversation_id, "Failover aborted: rebuild task failed");
@@ -245,14 +300,14 @@ impl ConversationService {
         Some(FailoverSwitch { agent, picked })
     }
 
-    /// 同模型"剔图重建":标记 registry(该 provider+model 不支持图片)→ kill →
+    /// 同模型"剔图重建":标记 registry(该 provider+model 不支持图片)→终止 runtime→
     /// 用同一行重建任务。重建时工厂重新读 registry → compat.supports_image=false →
     /// build_messages 剔图。仅 nomi 会话放行;返回新句柄或 None(不可重建)。
     pub(crate) async fn strip_images_and_rebuild(
         &self,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
-    ) -> Option<AgentInstance> {
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Option<AgentRuntimeHandle> {
         let conv_id = parse_conv_id(conversation_id).ok()?;
         let row = match self.conversation_repo().get(conv_id).await {
             Ok(Some(row)) => row,
@@ -272,18 +327,18 @@ impl ConversationService {
         let pm = provider_model_from_conversation_row(&row);
         nomifun_common::VisionUnsupportedRegistry::global().mark_unsupported(&pm.provider_id, &pm.model);
 
-        task_manager
-            .kill_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
+        runtime_registry
+            .terminate_and_wait(conversation_id, Some(AgentKillReason::AgentErrorRecovery))
             .await;
 
-        let build_opts = match self.build_task_options(&row) {
+        let runtime_options = match self.build_runtime_options(&row) {
             Ok(opts) => opts,
             Err(e) => {
-                warn!(error = %ErrorChain(&e), conversation_id, "strip_images_and_rebuild aborted: build_task_options failed");
+                warn!(error = %ErrorChain(&e), conversation_id, "strip_images_and_rebuild aborted: build_runtime_options failed");
                 return None;
             }
         };
-        match task_manager.get_or_build_task(conversation_id, build_opts).await {
+        match runtime_registry.get_or_create_runtime(conversation_id, runtime_options).await {
             Ok(agent) => Some(agent),
             Err(e) => {
                 warn!(error = %ErrorChain(&e), conversation_id, "strip_images_and_rebuild aborted: rebuild failed");
@@ -316,7 +371,7 @@ impl ConversationService {
         switches_done: u32,
         tried: &[ProviderWithModel],
         extra_json: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Option<FailoverSwitch> {
         // (5) 仅 nomi 自有引擎的普通会话。便宜的早闸(避免无谓加载);真正的强制点
         //     在 `perform_model_failover` 的 ACP 边界闸(review #9),send-loop 与 IDMM
@@ -362,7 +417,7 @@ impl ConversationService {
             return None;
         }
 
-        self.perform_model_failover(conversation_id, &config, tried, task_manager)
+        self.perform_model_failover(conversation_id, &config, tried, runtime_registry)
             .await
     }
 
@@ -391,7 +446,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<bool, nomifun_common::AppError> {
         let conv_id = parse_conv_id(conversation_id)?;
         let extra_json = match self.conversation_repo().get(conv_id).await {
@@ -413,7 +468,7 @@ impl ConversationService {
         // 同一份换模型 + 重建实现(send-loop 也调它)。None = 队列耗尽 → 不转移。
         // IDMM 每次 Failover 只切一次,无跨回合累积,故 `tried` 传空切片(review #2)。
         if self
-            .perform_model_failover(conversation_id, &config, &[], task_manager)
+            .perform_model_failover(conversation_id, &config, &[], runtime_registry)
             .await
             .is_none()
         {
@@ -430,8 +485,74 @@ impl ConversationService {
             origin: Some("idmm".into()),
             channel_platform: None,
         };
-        self.send_message(user_id, conversation_id, req, task_manager)
+        self.send_message(user_id, conversation_id, req, runtime_registry)
             .await
             .map(|_| true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(provider_id: &str, model: &str) -> ProviderWithModel {
+        ProviderWithModel {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+            use_model: Some(model.to_owned()),
+        }
+    }
+
+    #[test]
+    fn failover_atomically_replaces_the_lead_and_preserves_collaborator_order() {
+        let encoded = serde_json::to_string(&ExecutionModelPool::Range {
+            models: vec![
+                selected_model_ref(&provider("failed", "m1")),
+                selected_model_ref(&provider("picked", "m2")),
+                selected_model_ref(&provider("other", "m3")),
+            ],
+        })
+        .unwrap();
+        let rewritten = rewrite_execution_model_pool_for_failover(
+            Some(&encoded),
+            &provider("failed", "m1"),
+            &provider("picked", "m2"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ExecutionModelPool>(&rewritten).unwrap(),
+            ExecutionModelPool::Range {
+                models: vec![
+                    selected_model_ref(&provider("picked", "m2")),
+                    selected_model_ref(&provider("other", "m3")),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn failover_preserves_inherited_and_explicit_automatic_modes() {
+        assert_eq!(
+            rewrite_execution_model_pool_for_failover(
+                None,
+                &provider("failed", "m1"),
+                &provider("picked", "m2"),
+            )
+            .unwrap(),
+            None,
+        );
+        let automatic = serde_json::to_string(&ExecutionModelPool::Automatic).unwrap();
+        let rewritten = rewrite_execution_model_pool_for_failover(
+            Some(&automatic),
+            &provider("failed", "m1"),
+            &provider("picked", "m2"),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ExecutionModelPool>(&rewritten).unwrap(),
+            ExecutionModelPool::Automatic,
+        );
     }
 }

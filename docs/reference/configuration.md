@@ -48,7 +48,7 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 |---|---|
 | `mcp-requirement-stdio` | MCP stdio server for AutoWork requirement declaration tools. |
 | `mcp-knowledge-stdio` | MCP stdio server for per-session knowledge search. |
-| `mcp-gateway-stdio` | MCP stdio server for Desktop Gateway tools. |
+| `mcp-gateway-stdio` | Internal stdio transport for platform Gateway tools; accepts only a host-issued scoped, expiring signed claim. |
 | `mcp-open-stdio` | MCP stdio server exposing a reliable OS `open` tool. |
 | `mcp-computer-stdio` | MCP stdio server exposing desktop computer-use tools. |
 | `mcp-browser-stdio` | MCP stdio server exposing browser-use tools. |
@@ -56,7 +56,6 @@ Subcommands (used internally by the agent CLI bridge and for diagnostics):
 | `doctor` | Self-check: hydrate the agent registry, probe every CLI on `$PATH`, print a per-agent availability table. |
 | `tools` | List public Remote capability names and descriptions as JSON. |
 | `call <name> [json-args]` | Invoke a public Remote capability on a running instance via `/v1`. |
-| `agent "<goal>"` | Convenience wrapper over the `nomi_agent_run` capability. |
 
 ## Shared environment variables
 
@@ -69,8 +68,8 @@ These are read by the backend regardless of which host embeds it.
 | `JWT_SECRET` | `nomifun-app` | Secret used to sign session JWTs. See [Auth secret resolution](#auth-secret-resolution) for the resolution order. |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | When truthy, session and CSRF cookies get the `Secure` flag and `SameSite=Strict`. Set it whenever the app is reached over HTTPS (TLS reverse proxy, etc.). Default is `false` → no `Secure` flag, `SameSite=Lax`. |
 | `SHELL` | agent engine (Linux/macOS) | Shell used when the agent engine spawns child processes. On Linux servers under systemd, set this explicitly (the system account often has no `$SHELL`). |
-| `NOMIFUN_URL` | `nomicore call`, `nomicore agent` | Base URL for a running instance when invoking Remote capabilities. |
-| `NOMIFUN_COMPANION_TOKEN` | `nomicore call`, `nomicore agent` | Companion access token used against `/v1` Remote capability routes. |
+| `NOMIFUN_URL` | `nomicore call` | Base URL for a running instance when invoking Remote capabilities. |
+| `NOMIFUN_COMPANION_TOKEN` | `nomicore call` | Companion access token used against `/v1` Remote capability routes. |
 
 There is no `SENTRY_DSN` integration: the codebase does not read that environment variable.
 

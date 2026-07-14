@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
 use crate::factory::context::FactoryContext;
 use crate::manager::acp::{AcpAgentManager, CatalogForwarder};
-use crate::types::BuildTaskOptions;
+use crate::types::AgentRuntimeBuildOptions;
 use agent_client_protocol::schema::{
     EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
 };
@@ -19,11 +19,12 @@ use tracing::{info, warn};
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
+    options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
-) -> Result<AgentInstance, AppError> {
+) -> Result<AgentRuntimeHandle, AppError> {
     let mut config: AcpBuildExtra = serde_json::from_value(options.extra)
         .map_err(|e| AppError::BadRequest(format!("Invalid ACP build options: {e}")))?;
+    config.user_id = Some(options.user_id.clone());
 
     // Resolve the catalog row — prefer explicit agent_id, fall
     // back to a vendor-label match for legacy payloads.
@@ -48,72 +49,35 @@ pub(super) async fn build(
         config.backend.clone_from(&meta.backend);
     }
 
-    // Inject the requirement MCP config so AutoWork-driven ACP sessions expose
-    // the requirement_complete / requirement_update_status declaration tools.
-    // Independent of team membership (AutoWork can drive any ACP session); the
-    // tools are inert until the AutoWork prompt references a requirement id. The
-    // bootstrap flag `OrchestratorDeps::requirement_mcp_enabled` is kept in
-    // lock-step with `deps.requirement_mcp_config` so the prompt never names a
-    // tool the session lacks.
-    if config.requirement_mcp_config.is_none() {
-        config
-            .requirement_mcp_config
-            .clone_from(&deps.requirement_mcp_config);
-    }
+    // `factory::build_agent` admits ACP only for the installation owner.  All
+    // capability configs are therefore reconstructed from process-owned deps;
+    // serialized Conversation JSON is never an authority source.
+    config
+        .requirement_mcp_config
+        .clone_from(&deps.requirement_mcp_config);
+    config.knowledge_mcp_config = if config.knowledge_mounts.is_empty() {
+        None
+    } else {
+        deps.knowledge_mcp_config.clone()
+    };
+    config.open_mcp_config.clone_from(&deps.open_mcp_config);
+    config
+        .computer_mcp_config
+        .clone_from(&deps.computer_mcp_config);
+    config
+        .browser_mcp_config
+        .clone_from(&deps.browser_mcp_config);
 
-    // Inject the scoped knowledge-search MCP config ONLY when the session has
-    // bound knowledge bases. Gated on `!knowledge_mounts.is_empty()` — NOT on
-    // `desktop_gateway` (the knowledge server reaches only its own port/token,
-    // never the gateway). A session with no mounted bases never gets the
-    // knowledge_search tool, so the model cannot reach the retrieval gateway.
-    if config.knowledge_mcp_config.is_none() && !config.knowledge_mounts.is_empty() {
-        config
-            .knowledge_mcp_config
-            .clone_from(&deps.knowledge_mcp_config);
-    }
+    // Every owner ACP runtime is entitled to the platform gateway.  The grant
+    // is derived here and represented solely by the process-owned scoped
+    // config; there is no persisted boolean authority flag.
+    config.gateway_mcp_config.clone_from(&deps.gateway_mcp_config);
 
-    // Inject the reliable-launch (`open`) MCP config unconditionally (like the
-    // requirement MCP): it gives every session a dependable URL/file/app open
-    // path instead of fragile `cmd /c start`. `deps.open_mcp_config` is `Some`
-    // only on Windows, so this is a no-op on macOS/Linux.
-    if config.open_mcp_config.is_none() {
-        config.open_mcp_config.clone_from(&deps.open_mcp_config);
-    }
-
-    // Inject the computer-use discrete-tool MCP config unconditionally too —
-    // no vendor allowlist: every ACP backend (builtin claude/codex/gemini/
-    // codebuddy and custom-registered ACP agents alike) gets it. `deps.
-    // computer_mcp_config` is `Some` on every desktop OS built with the
-    // `computer-use` feature, `None` on web/headless, so this is a no-op there.
-    if config.computer_mcp_config.is_none() {
-        config
-            .computer_mcp_config
-            .clone_from(&deps.computer_mcp_config);
-    }
-
-    // Inject the browser-use discrete-tool MCP config unconditionally too —
-    // symmetric with computer-use (裁决①). Every ACP backend gets it; `deps.
-    // browser_mcp_config` is `Some` on every desktop OS built with the
-    // `browser-use` feature, `None` on web/headless, so this is a no-op there.
-    // The bridge is stateless fail-safe (R2: no per-pet context).
-    if config.browser_mcp_config.is_none() {
-        config
-            .browser_mcp_config
-            .clone_from(&deps.browser_mcp_config);
-    }
-
-    // Inject the Desktop Gateway MCP config for sessions that carry the
-    // backend-set `desktopGateway` extra flag (channel master-agent sessions,
-    // companion companion threads). Unlike the requirement MCP this is NOT injected
-    // unconditionally — the gateway grants full desktop control.
-    if config.desktop_gateway && config.gateway_mcp_config.is_none() {
-        config
-            .gateway_mcp_config
-            .clone_from(&deps.gateway_mcp_config);
+    if config.gateway_mcp_config.is_some() {
         info!(
             ctx.conversation_id,
-            gateway_mcp_port = deps.gateway_mcp_config.as_ref().map(|c| c.port),
-            "gateway_mcp: injected into desktopGateway session"
+            gateway_mcp_port = deps.gateway_mcp_config.as_ref().map(|config| config.port()),
+            "gateway_mcp: injected into owner ACP session"
         );
     }
 
@@ -238,7 +202,7 @@ pub(super) async fn build(
     arc.start_session_event_tracker(notification_rx);
     CatalogForwarder::spawn(
         arc.agent_id().to_owned(),
-        crate::IAgentTask::subscribe(arc.as_ref()),
+        crate::AgentRuntimeControl::subscribe(arc.as_ref()),
         catalog_tx,
     );
 
@@ -260,7 +224,7 @@ pub(super) async fn build(
     // the caller sees "warmed up" == "ready for PUT /mode | /model".
     arc.warmup_session().await?;
 
-    let instance = AgentInstance::Acp(Arc::clone(&arc));
+    let instance = AgentRuntimeHandle::Acp(Arc::clone(&arc));
 
     // Hand the service the domain event receiver so it can
     // persist user intent changes without reverse-engineering

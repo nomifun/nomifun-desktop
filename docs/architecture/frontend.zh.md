@@ -104,7 +104,7 @@ export function getBaseUrl(): string {
 1. Tauri 外壳通过 `tauri://` / `file://` 协议加载 SPA；`BrowserRouter` 在该协议下经历的页面重新加载（如深链接或应用内导航）后无法保留状态。
 2. Web 宿主通过 `tower_http::services::ServeDir` 提供 SPA，并启用 `append_index_html_on_directories(true)`。Hash 路由意味着浏览器访问的任何路径都返回 `index.html`，由 SPA 完成其余工作 —— 静态服务器无需自定义 catch-all。
 
-路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）以及认证（`/login`）。旧 settings 路径只作为重定向保留；当前没有 `/team/:id` 前端路由。
+路由表的顶层条目涵盖会话运行时（`/guid`、`/conversation/:id`）、模型（`/models`）、设定（`/presets`）、技能（`/skills`）、MCP（`/mcp`）、开放能力（`/open-capabilities`）、终端（`/terminal-new`、`/terminal/:id`）、需求/AutoWork（`/requirements/*`、`/autowork` redirect）、定时任务（`/scheduled`、`/scheduled/:job_id`）、桌面伙伴（`/nomi` 配置页、`/companion` 桌面窗口）、知识库（`/knowledge`、`/knowledge/:id`）以及认证（`/login`）。旧 settings 路径只作为重定向保留。Agent 协作不建立独立路由或单独页面；AgentExecution 投影直接显示在所属 Conversation 内，避免导航层再产生一个产品对象。
 
 页面通过 `React.lazy` 加载，使用 `<AppLoader>` 作为 fallback，使初始包保持精简。
 

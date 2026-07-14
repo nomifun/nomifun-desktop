@@ -12,10 +12,12 @@ use async_trait::async_trait;
 /// Implementors are responsible for cleaning up their per-conversation state
 /// (kill agent processes, drop cron jobs, etc.). Hooks run sequentially in
 /// registration order; failures must be logged inside the hook and not
-/// propagated.
+/// propagated. `user_id` is the verified conversation owner captured before
+/// deletion, so cleanup code can emit owner-scoped lifecycle events even after
+/// the conversation row no longer exists.
 #[async_trait]
 pub trait OnConversationDelete: Send + Sync {
-    async fn on_conversation_deleted(&self, conversation_id: i64);
+    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: i64);
 }
 
 /// Notified when a terminal session row is deleted via
@@ -29,10 +31,12 @@ pub trait OnConversationDelete: Send + Sync {
 ///
 /// Implementors are responsible for cleaning up their per-terminal state. Hooks
 /// run sequentially in registration order; failures must be logged inside the
-/// hook and not propagated.
+/// hook and not propagated. `user_id` is the verified terminal owner captured
+/// before deletion, so polymorphic cleanup remains owner-scoped after the row
+/// itself is gone.
 #[async_trait]
 pub trait OnTerminalDelete: Send + Sync {
-    async fn on_terminal_deleted(&self, terminal_id: i64);
+    async fn on_terminal_deleted(&self, user_id: &str, terminal_id: i64);
 }
 
 /// Creates a tracked requirement from an inbound channel message (the opt-in

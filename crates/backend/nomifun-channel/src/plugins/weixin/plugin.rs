@@ -429,7 +429,6 @@ fn chrono_now() -> i64 {
 mod tests {
     use super::*;
     use crate::types::PluginCredentials;
-    use std::collections::HashMap;
 
     // -- extract_content -------------------------------------------------------
 

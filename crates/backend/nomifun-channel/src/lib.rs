@@ -7,7 +7,7 @@ pub mod formatter;
 pub mod manager;
 pub mod media_refs;
 pub mod message_service;
-pub mod orchestrator;
+pub mod message_loop;
 pub mod pairing;
 pub mod pending_decision;
 pub mod plugin;

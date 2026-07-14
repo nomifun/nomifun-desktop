@@ -18,15 +18,23 @@ use serde_json::json;
 /// (same pattern as `knowledge_search_e2e`).
 struct NoopBroadcaster;
 
-impl nomifun_realtime::EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+impl nomifun_realtime::UserEventSink for NoopBroadcaster {
+    fn send_to_user(
+        &self,
+        _user_id: &str,
+        _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+    ) {
+    }
 }
 
 async fn build_service() -> (Arc<nomifun_knowledge::KnowledgeService>, tempfile::TempDir) {
     let db = nomifun_db::init_database_memory().await.expect("in-memory db");
     let repo = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(db.pool().clone()));
     let tmp = tempfile::tempdir().unwrap();
-    let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster));
+    let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(
+        Arc::new(NoopBroadcaster),
+        Arc::from("system_default_user"),
+    );
     let svc = Arc::new(nomifun_knowledge::KnowledgeService::new(repo, tmp.path(), emitter));
     (svc, tmp)
 }

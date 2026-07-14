@@ -15,11 +15,8 @@ function job(overrides: Partial<ICronJob>): ICronJob {
     description: 'Summarize project work',
     enabled: true,
     schedule: { kind: 'cron', expr: '0 0 9 * * ?', description: 'Every day at 09:00' },
-    target: {
-      payload: { kind: 'message', text: 'Collect yesterday progress' },
-      execution_mode: 'new_conversation',
-      target_kind: 'agent',
-    },
+    message: 'Collect yesterday progress',
+    execution_mode: 'new_conversation',
     metadata: {
       conversation_id: 1001,
       conversation_title: 'Engineering Room',
@@ -46,11 +43,8 @@ describe('filterCronJobsByQuery', () => {
       name: 'Release notes',
       description: 'Prepare customer changelog',
       schedule: { kind: 'cron', expr: '0 30 17 * * ?', description: 'Every day at 17:30' },
-      target: {
-        payload: { kind: 'message', text: 'Draft the changelog from merged PRs' },
-        execution_mode: 'existing',
-        target_kind: 'agent',
-      },
+      message: 'Draft the changelog from merged PRs',
+      execution_mode: 'existing',
       metadata: {
         conversation_id: 2002,
         conversation_title: 'Launch Plan',
@@ -67,7 +61,7 @@ describe('filterCronJobsByQuery', () => {
     expect(filterCronJobsByQuery(jobs, '   ')).toEqual(jobs);
   });
 
-  test('matches job metadata, prompt, schedule, and target fields case-insensitively', () => {
+  test('matches job metadata, message, schedule, and execution fields case-insensitively', () => {
     expect(filterCronJobsByQuery(jobs, 'launch').map((item) => item.id)).toEqual(['cron_beta']);
     expect(filterCronJobsByQuery(jobs, 'MERGED prs').map((item) => item.id)).toEqual(['cron_beta']);
     expect(filterCronJobsByQuery(jobs, '09:00').map((item) => item.id)).toEqual(['cron_alpha']);

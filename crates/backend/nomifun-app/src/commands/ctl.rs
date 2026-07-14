@@ -1,7 +1,7 @@
-//! `nomicore` user-facing CLI verbs (the CLI adapter): `tools`, `call`, `agent`.
+//! `nomicore` user-facing CLI verbs (the CLI adapter): `tools` and `call`.
 //!
 //! `tools` is offline — it reads the deps-free capability Registry directly.
-//! `call` / `agent` are thin HTTP clients to a RUNNING instance's REST `/v1`
+//! `call` is a thin HTTP client to a RUNNING instance's REST `/v1`
 //! adapter (they do NOT boot a second backend — the exclusive `server.lock`
 //! forbids that). Endpoint + token come from `--url`/`--token` or the
 //! `NOMIFUN_URL` / `NOMIFUN_COMPANION_TOKEN` env vars (the token is a
@@ -89,14 +89,4 @@ pub async fn run_call(name: &str, args: Option<&str>, url: Option<String>, token
             ExitCode::from(1)
         }
     }
-}
-
-/// `nomicore agent "<goal>"` — convenience wrapper that delegates a goal via
-/// `nomi_agent_run` against a running instance.
-pub async fn run_agent(goal: &str, timeout_secs: Option<u64>, url: Option<String>, token: Option<String>) -> ExitCode {
-    let mut args = json!({ "goal": goal });
-    if let Some(t) = timeout_secs {
-        args["timeout_secs"] = json!(t);
-    }
-    run_call("nomi_agent_run", Some(&args.to_string()), url, token).await
 }

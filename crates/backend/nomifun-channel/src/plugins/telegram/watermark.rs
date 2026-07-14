@@ -5,9 +5,9 @@
 //! Telegram's long-polling model only confirms a batch of updates when the
 //! NEXT `getUpdates` call carries an advanced `offset`. The poll loop used to
 //! keep that offset purely in memory (starting at `None`), so if the process
-//! restarted after dispatching a batch to the orchestrator but before issuing
+//! restarted after dispatching a batch to the message loop but before issuing
 //! the next poll, Telegram redelivered the entire batch on startup — and the
-//! channel master session (which auto-approves tools) re-executed every
+//! channel Agent session (which auto-approves tools) re-executed every
 //! contained action. Creation-style actions thus ran twice (one situational
 //! cause of the "duplicate companion creation" bug).
 //!
@@ -47,7 +47,7 @@
 //! ## Crash-window semantics: prefer loss over duplication
 //!
 //! The watermark is advanced and persisted IMMEDIATELY AFTER an update is
-//! dispatched onto the orchestrator's queue — not after the agent finishes
+//! dispatched onto the message loop's queue — not after the agent finishes
 //! handling it. Two asymmetric crash windows follow:
 //!
 //!  - duplication window (tiny): dying between dispatch and persist re-runs
