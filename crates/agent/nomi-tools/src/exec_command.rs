@@ -27,6 +27,7 @@ use uuid::Uuid;
 use crate::{
     Tool,
     process_store::{LegacySessionBinding, ProcessStore, missed_bytes},
+    windows_shell::{shell_transport, validate_shell_script},
 };
 
 const DEFAULT_YIELD_MS: u64 = 10_000;
@@ -40,8 +41,6 @@ const PYTHON_PROBE_INTERRUPT_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_REAP_GRACE: Duration = Duration::from_millis(100);
 const PYTHON_PROBE_CLEANUP_BUDGET: Duration = Duration::from_millis(150);
-const PTY_COLS: u16 = 120;
-const PTY_ROWS: u16 = 30;
 const SCRIPT_TIMEOUT_GUIDANCE: &str = "The script was stopped before completion. Do not assume its side effects finished. Inspect the partial state before retrying or running dependent steps.";
 
 struct PreparedInvocation {
@@ -520,16 +519,18 @@ impl Tool for ExecCommandTool {
          In legacy cmd mode, the command is executed by the platform shell. On Windows this is PowerShell \
          (use PowerShell syntax such as Get-ChildItem, $env:NAME, and ';' for sequencing; \
          run cmd /C \"...\" explicitly when cmd.exe syntax is required). On macOS/Linux this \
-         is POSIX sh.\n\n\
+         is POSIX sh. Separate Windows consoles and GUI launches are rejected; use the dedicated launch tool.\n\n\
          Script mode requires script, language (shell or python), and a hard timeout in milliseconds. \
          It is for deterministic, homogeneous local batches that need no intermediate model decision \
-         or approval. It always uses pipe transport, never returns a live session, and does not download \
+         or approval. On Windows, shell commands always use an isolated PTY; on macOS/Linux script mode \
+         uses pipe transport. Script mode never returns a live session and does not download \
          Python when the host has no Python 3 interpreter. Validate preconditions, fail non-zero on a \
          dependent-operation failure, bound output, and print a concise final summary. Do not use scripts \
          to bypass dedicated file, browser, UI, MCP, or approval-aware tools.\n\n\
-         Use tty=true for REPLs, TUIs, and interactive installers.\n\n\
-         - tty=false uses separate stdout/stderr pipe streams.\n\
-         - tty=true uses a merged PTY stream for interactive programs.\n\
+         On macOS/Linux, use tty=true for REPLs, TUIs, and interactive installers.\n\n\
+         - On Windows, shell commands always use an isolated PTY with a merged terminal stream.\n\
+         - On macOS/Linux, tty=false uses separate stdout/stderr pipe streams.\n\
+         - On macOS/Linux, tty=true uses a merged PTY stream for interactive programs.\n\
          - If the process exits within yield_time_ms, the result reports its exit_code and no \
          session_id.\n\
          - If it remains live, use write_stdin with the returned session_id.\n\n\
@@ -562,7 +563,7 @@ impl Tool for ExecCommandTool {
                 },
                 "tty": {
                     "type": "boolean",
-                    "description": "Use PTY transport. Defaults to false (pipe)."
+                    "description": "Use PTY transport on macOS/Linux. Defaults to false (pipe) there; Windows always uses an isolated PTY."
                 },
                 "yield_time_ms": {
                     "type": "number",
@@ -759,15 +760,9 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
             .filter(|command| !command.is_empty())
             .ok_or_else(|| "cmd must be a non-empty string".to_string())?
             .to_owned();
+        validate_shell_script(&command)?;
         let tty = input.get("tty").and_then(Value::as_bool).unwrap_or(false);
-        let transport = if tty {
-            Transport::Pty {
-                cols: PTY_COLS,
-                rows: PTY_ROWS,
-            }
-        } else {
-            Transport::Pipe
-        };
+        let transport = shell_transport(tty);
         let yield_ms = input
             .get("yield_time_ms")
             .and_then(Value::as_u64)
@@ -814,6 +809,9 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
         .get("language")
         .and_then(Value::as_str)
         .ok_or_else(|| "script mode requires language=shell or language=python".to_string())?;
+    if language == "shell" {
+        validate_shell_script(&script)?;
+    }
 
     let (command, interpreter, env, language) = match language {
         "shell" => (
@@ -847,7 +845,11 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
     Ok(PreparedInvocation {
         command,
         env,
-        transport: Transport::Pipe,
+        transport: if language == "shell" {
+            shell_transport(false)
+        } else {
+            Transport::Pipe
+        },
         mode: InvocationMode::Script {
             language,
             interpreter,
@@ -1444,6 +1446,10 @@ mod tests {
         assert_eq!(properties["timeout"]["maximum"], 600_000);
         assert!(schema.get("oneOf").is_some());
         assert_eq!(schema["additionalProperties"], false);
+        assert!(properties["tty"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Windows always uses an isolated PTY"));
     }
 
     #[tokio::test]
@@ -1702,6 +1708,48 @@ mod tests {
     }
 
     #[test]
+    fn noninteractive_shell_transport_is_platform_appropriate() {
+        let legacy = requested_invocation(&json!({
+            "cmd": "Write-Output ok",
+            "tty": false
+        }))
+        .expect("legacy shell command should prepare");
+        let script = requested_invocation(&json!({
+            "script": "Write-Output ok",
+            "language": "shell",
+            "timeout": 1000
+        }))
+        .expect("shell script should prepare");
+
+        #[cfg(windows)]
+        {
+            assert_eq!(legacy.transport, Transport::Pty { cols: 120, rows: 30 });
+            assert_eq!(script.transport, Transport::Pty { cols: 120, rows: 30 });
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(legacy.transport, Transport::Pipe);
+            assert_eq!(script.transport, Transport::Pipe);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_and_script_shell_reject_explicit_window_launches() {
+        for input in [
+            json!({"cmd": "cmd /k echo hi"}),
+            json!({"cmd": "Start-Process notepad"}),
+            json!({
+                "script": "cmd /c start notepad",
+                "language": "shell",
+                "timeout": 1000
+            }),
+        ] {
+            assert!(requested_invocation(&input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
     fn timeout_lost_outcome_preserves_the_pre_cleanup_snapshot() {
         let captured = OutputSnapshot {
             chunks: vec![nomi_execution::OutputChunk {
@@ -1786,6 +1834,9 @@ mod tests {
         assert!(description.contains("Get-ChildItem"));
         assert!(description.contains("$env:NAME"));
         assert!(description.contains("cmd /C"));
+        assert!(description.contains("On Windows, shell commands always use an isolated PTY"));
+        assert!(description.contains("tty=false uses separate stdout/stderr pipe streams"));
+        assert!(description.contains("Separate Windows consoles and GUI launches are rejected"));
         assert!(description.contains("\"\\r\") as its own write_stdin call"));
     }
 }

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use nomi_execution::{
     CapabilityPolicy, CleanupReport, CommandSpec, ExecutionError, ExecutionOutcome,
     ExecutionOwner, ExecutionPolicy, OutputCursor, OutputSnapshot, OutputStream, PollResult,
-    ProcessSupervisor, ShellKind, Transport, normalize_request,
+    ProcessSupervisor, ShellKind, normalize_request,
 };
 use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::Tool;
+use crate::{
+    Tool,
+    windows_shell::{shell_transport, validate_shell_script},
+};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -72,7 +75,7 @@ impl BashTool {
             },
             cwd: cwd.clone(),
             env: BTreeMap::new(),
-            transport: Transport::Pipe,
+            transport: shell_transport(false),
             policy: ExecutionPolicy {
                 output_limit_bytes: BASH_OUTPUT_MAX_BYTES,
                 deadline: Some(deadline),
@@ -188,6 +191,7 @@ impl Tool for BashTool {
              - Write files: use Write (not echo redirection or cat with heredoc)\n\n\
              # Instructions\n\
              - For shell-only work, use PowerShell syntax: Get-ChildItem, Get-Content, Set-Location, $env:NAME, and ';' for sequencing. Run cmd /C \"...\" explicitly only when cmd.exe syntax is required.\n\
+             - Do not use start, Start-Process, or cmd /K. This tool rejects separate Windows consoles and GUI launches; use the Computer launch action instead.\n\
              - Use absolute paths to avoid working directory confusion.\n\
              - Validate browser behavior with the Browser tool. Do not emulate DOM, AudioContext, canvas, or other Web APIs in a long inline `node -e` command.\n\
              - For multiline code, use Write to create a temporary script in the workspace, execute that script, then remove it if appropriate. This avoids PowerShell interpolation, quoting, and command-length failures.\n\
@@ -247,6 +251,9 @@ impl Tool for BashTool {
                 images: Vec::new(),
             };
         };
+        if let Err(error) = validate_shell_script(command) {
+            return ToolResult::error(error);
+        }
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -617,6 +624,33 @@ mod tests {
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("hello_bash"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_runs_cmd_c_inside_the_pseudoconsole() {
+        let result = tool(std::env::temp_dir())
+            .execute(json!({"command": "cmd /c echo conpty_marker"}))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("conpty_marker"), "{}", result.content);
+        assert!(result.content.contains("PTY:\n"), "{}", result.content);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_rejects_explicit_window_launch_before_execution() {
+        let result = tool(std::env::temp_dir())
+            .execute(json!({"command": "Start-Process notepad"}))
+            .await;
+
+        assert!(result.is_error, "{}", result.content);
+        assert!(
+            result.content.contains("cannot open a separate console"),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]
