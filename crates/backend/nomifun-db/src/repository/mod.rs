@@ -1,5 +1,7 @@
 pub mod acp_session;
 pub mod agent_metadata;
+pub mod agent_execution;
+pub mod agent_execution_template;
 mod bind;
 pub mod attachment;
 pub mod channel;
@@ -14,9 +16,6 @@ pub mod knowledge;
 pub mod mcp_server;
 pub mod model_profile;
 pub mod oauth_token;
-pub mod orch_fleet;
-pub mod orch_run;
-pub mod orch_workspace;
 pub mod provider;
 pub mod preset;
 pub mod remote_agent;
@@ -25,6 +24,8 @@ mod settings;
 pub mod skill_tag;
 mod sqlite_acp_session;
 mod sqlite_agent_metadata;
+mod sqlite_agent_execution;
+mod sqlite_agent_execution_template;
 mod sqlite_attachment;
 mod sqlite_channel;
 mod sqlite_client_preference;
@@ -38,9 +39,6 @@ mod sqlite_knowledge;
 mod sqlite_mcp_server;
 mod sqlite_model_profile;
 mod sqlite_oauth_token;
-mod sqlite_orch_fleet;
-mod sqlite_orch_run;
-mod sqlite_orch_workspace;
 mod sqlite_provider;
 mod sqlite_preset;
 mod sqlite_remote_agent;
@@ -60,6 +58,8 @@ pub mod workshop;
 
 pub use acp_session::{CreateAcpSessionParams, IAcpSessionRepository, PersistedSessionState, SaveRuntimeStateParams};
 pub use agent_metadata::IAgentMetadataRepository;
+pub use agent_execution::*;
+pub use agent_execution_template::*;
 pub use attachment::IAttachmentRepository;
 pub use channel::IChannelRepository;
 pub use client_preference::IClientPreferenceRepository;
@@ -69,20 +69,12 @@ pub use creation_task::{
     CreateCreationTaskParams, ICreationTaskRepository, ListCreationTasksParams, UpdateCreationTaskParams,
 };
 pub use cron::ICronRepository;
-pub use idmm_intervention::{GLOBAL_CAP, IIdmmInterventionRepository, PER_TARGET_CAP, TTL_MS};
+pub use idmm_intervention::{IIdmmInterventionRepository, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP, TTL_MS};
 pub use companion_token::ICompanionTokenRepository;
 pub use knowledge::IKnowledgeRepository;
 pub use mcp_server::IMcpServerRepository;
 pub use model_profile::IModelProfileRepository;
 pub use oauth_token::IOAuthTokenRepository;
-pub use orch_fleet::{CreateFleetParams, IFleetRepository, NewFleetMember, UpdateFleetParams};
-pub use orch_run::{
-    CreateAssignmentParams, CreateRunParams, CreateTaskParams, IRunRepository, ReconcileDepRef,
-    ReconcileNewTask, ReconcilePlan, UpdateRunParams, UpdateTaskParams,
-};
-pub use orch_workspace::{
-    CreateOrchWorkspaceParams, IOrchWorkspaceRepository, UpdateOrchWorkspaceParams,
-};
 pub use provider::IProviderRepository;
 pub use preset::{IPresetRepository, IPresetStateRepository, IPresetTagRepository};
 pub use remote_agent::IRemoteAgentRepository;
@@ -91,6 +83,8 @@ pub use settings::ISettingsRepository;
 pub use skill_tag::ISkillTagRepository;
 pub use sqlite_acp_session::SqliteAcpSessionRepository;
 pub use sqlite_agent_metadata::SqliteAgentMetadataRepository;
+pub use sqlite_agent_execution::SqliteAgentExecutionRepository;
+pub use sqlite_agent_execution_template::SqliteAgentExecutionTemplateRepository;
 pub use sqlite_attachment::SqliteAttachmentRepository;
 pub use sqlite_channel::SqliteChannelRepository;
 pub use sqlite_client_preference::SqliteClientPreferenceRepository;
@@ -104,9 +98,6 @@ pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
 pub use sqlite_model_profile::SqliteModelProfileRepository;
 pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
-pub use sqlite_orch_fleet::SqliteFleetRepository;
-pub use sqlite_orch_run::SqliteRunRepository;
-pub use sqlite_orch_workspace::SqliteOrchWorkspaceRepository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_preset::{SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository};
 pub use sqlite_remote_agent::SqliteRemoteAgentRepository;

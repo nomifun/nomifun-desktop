@@ -1,19 +1,22 @@
-//! WS push events for the companion domain. Same shape as `CronEventEmitter`:
-//! a thin wrapper over the global `EventBroadcaster`.
+//! Owner-scoped realtime events for the personal companion domain.
 
 use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 #[derive(Clone)]
 pub struct CompanionEventEmitter {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    owner_id: Arc<str>,
+    user_events: Arc<dyn UserEventSink>,
 }
 
 impl CompanionEventEmitter {
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>) -> Self {
-        Self { broadcaster }
+    pub fn new(user_events: Arc<dyn UserEventSink>, owner_id: impl Into<Arc<str>>) -> Self {
+        Self {
+            owner_id: owner_id.into(),
+            user_events,
+        }
     }
 
     fn broadcast<T: serde::Serialize>(&self, event_name: &str, payload: &T) {
@@ -24,7 +27,8 @@ impl CompanionEventEmitter {
                 return;
             }
         };
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, value));
+        self.user_events
+            .send_to_user(&self.owner_id, WebSocketMessage::new(event_name, value));
     }
 
     /// 把 `companion_id` 合并进结构体序列化出的对象顶层后广播。用于 learn/evolve
@@ -43,7 +47,10 @@ impl CompanionEventEmitter {
             }
         };
         map.insert("companion_id".into(), serde_json::Value::String(companion_id.to_owned()));
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, serde_json::Value::Object(map)));
+        self.user_events.send_to_user(
+            &self.owner_id,
+            WebSocketMessage::new(event_name, serde_json::Value::Object(map)),
+        );
     }
 
     pub fn emit_suggestion_created(&self, companion_id: &str, suggestion: &crate::store::CompanionSuggestion) {

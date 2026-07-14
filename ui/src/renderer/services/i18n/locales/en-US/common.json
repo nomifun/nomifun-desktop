@@ -14,6 +14,10 @@
   "confirm": "Confirm",
   "file": "File",
   "folder": "Folder",
+  "filePicker": {
+    "recent": "Recent",
+    "chooseDifferentFolder": "Choose a different folder"
+  },
   "upload": "Upload",
   "model": "Model",
   "skills": "Skills",

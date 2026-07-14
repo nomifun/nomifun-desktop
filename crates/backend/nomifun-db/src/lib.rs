@@ -7,13 +7,18 @@ mod repository;
 pub use database::{Database, init_database, init_database_memory};
 pub use error::DbError;
 pub use models::{
+    AgentExecutionAttemptDetailRow, AgentExecutionAttemptRow, AgentExecutionDetailRows,
+    AgentExecutionEventRow, AgentExecutionParticipantRow, AgentExecutionRow,
+    AgentExecutionStepDependencyRow, AgentExecutionStepDetailRow, AgentExecutionStepRow,
+    AgentExecutionTemplateDetailRows, AgentExecutionTemplateParticipantRow,
+    AgentExecutionTemplateRow,
     AgentMetadataRow, ConnectorCredentialRow,
     ConversationArtifactRow,
     CreateKnowledgeTagParams, CreationTaskRow, CronJobRunRow, KnowledgeBaseRow, KnowledgeBindingRow,
     KnowledgeTagRow, SkillTagRow, TagSettingRow, TerminalSessionRow, UpdateAgentHandshakeParams,
     UpdateKnowledgeTagParams,
     UpsertAgentMetadataParams, UpsertSkillTagParams, WebhookRow,
-    WorkshopAssetRow, WorkshopCanvasRow,
+    WorkshopAssetRow, WorkshopCanvasRow, ConversationExecutionLinkRow,
 };
 pub use models::{
     CreatePresetTagParams, PresetAgentPreferenceRow, PresetExampleRow,
@@ -25,7 +30,8 @@ pub use models::{
 pub use models::{ModelProfileRow, UpsertModelProfileParams};
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::conversation::{
-    ConversationFilters, ConversationRowUpdate, MessageRowUpdate, MessageSearchRow, SortOrder,
+    ConversationFilters, ConversationMessageProjection, ConversationRowUpdate, MessageRowUpdate,
+    MessageSearchRow, SortOrder,
 };
 pub use repository::cron::{CRON_RUN_HISTORY_LIMIT, UpdateCronJobParams};
 pub use repository::mcp_server::{CreateMcpServerParams, UpdateMcpServerParams};
@@ -33,15 +39,29 @@ pub use repository::oauth_token::UpsertOAuthTokenParams;
 pub use repository::provider::{CreateProviderParams, UpdateProviderParams};
 pub use repository::remote_agent::{CreateRemoteAgentParams, UpdateRemoteAgentParams};
 pub use repository::{
-    CreateAcpSessionParams, CreateTerminalParams, GLOBAL_CAP, IAcpSessionRepository,
+    AdoptAgentExecutionStepOutputParams, AgentExecutionLeaseToken,
+    AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
+    AppendAgentExecutionStepsParams,
+    AttemptConversationEffectParams, CreateAgentExecutionAttemptParams,
+    CreateAgentExecutionParams, IAgentExecutionRepository,
+    CreateAgentExecutionTemplateParams, IAgentExecutionTemplateRepository,
+    NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
+    NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
+    NewAgentExecutionTemplateParticipant, UpdateAgentExecutionTemplateParams,
+    LoopRepeatResetParams,
+    RetryAgentExecutionStep, SettleAgentExecutionAttemptParams, UpdateAgentExecutionParams,
+    CreateAcpSessionParams, CreateTerminalParams, IAcpSessionRepository,
     IAgentMetadataRepository, IAttachmentRepository, IChannelRepository,
     IClientPreferenceRepository, ICompanionTokenRepository, IConnectorCredentialRepository,
     IConversationRepository, ICronRepository, IIdmmInterventionRepository, IKnowledgeRepository,
     IMcpServerRepository, IModelProfileRepository, IOAuthTokenRepository, IProviderRepository,
     IRemoteAgentRepository, IRequirementRepository, ISettingsRepository, ISkillTagRepository,
     ITagSettingRepository, ITerminalRepository, IUserRepository, IWebhookRepository,
-    ListRequirementsParams, PER_TARGET_CAP, PersistedSessionState, SaveRuntimeStateParams,
+    ListRequirementsParams, PER_TARGET_CAP, PER_USER_ACTIVITY_CAP, PersistedSessionState,
+    SaveRuntimeStateParams,
     SqliteAcpSessionRepository, SqliteAgentMetadataRepository, SqliteAttachmentRepository,
+    SqliteAgentExecutionRepository,
+    SqliteAgentExecutionTemplateRepository,
     SqliteChannelRepository, SqliteClientPreferenceRepository, SqliteCompanionTokenRepository,
     SqliteConnectorCredentialRepository, SqliteConversationRepository, SqliteCronRepository,
     SqliteIdmmInterventionRepository, SqliteKnowledgeRepository, SqliteMcpServerRepository,
@@ -53,14 +73,6 @@ pub use repository::{
 pub use repository::{
     IPresetRepository, IPresetStateRepository, IPresetTagRepository,
     SqlitePresetRepository, SqlitePresetStateRepository, SqlitePresetTagRepository,
-};
-// Orchestration (智能编排) repository traits + sqlite impls + params.
-pub use repository::{
-    CreateAssignmentParams, CreateFleetParams, CreateOrchWorkspaceParams, CreateRunParams,
-    CreateTaskParams, IFleetRepository, IOrchWorkspaceRepository, IRunRepository, NewFleetMember,
-    ReconcileDepRef, ReconcileNewTask, ReconcilePlan, SqliteFleetRepository,
-    SqliteOrchWorkspaceRepository, SqliteRunRepository, UpdateFleetParams,
-    UpdateOrchWorkspaceParams, UpdateRunParams, UpdateTaskParams,
 };
 // 创意工坊 (Creative Workshop) + 生成引擎 (creation) repository traits + sqlite impls + params.
 pub use repository::{

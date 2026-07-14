@@ -34,7 +34,8 @@ describe('Open Capabilities WebUI entry', () => {
 
     expect(footerSource.includes('SiderWebuiControl')).toBe(false);
     expect(pageSource.includes("<WebuiControlPanel mode='page' />")).toBe(true);
-    expect(pageSource.includes('RegisterKnowledgeButton')).toBe(true);
+    expect(pageSource.includes('RegisterKnowledgeButton')).toBe(false);
+    expect(pageSource.includes('projectRegisterTitle')).toBe(false);
   });
 
   test('splits WebUI and MCP into subtabs instead of coupling both surfaces on one page', () => {

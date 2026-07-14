@@ -4,7 +4,7 @@
 //! When a remote-channel-driven conversation hits a blocking decision (the
 //! agent asks the user to choose / grant permission), the relay records the
 //! pending decision here and forwards a numbered text list to the channel.
-//! The orchestrator's inbound interception reads it back to map the user's
+//! The message loop's inbound interception reads it back to map the user's
 //! numeric reply onto an option, then clears it.
 
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ pub struct PendingDecision {
 ///
 /// At most one decision is outstanding per conversation (a new decision for
 /// the same conversation overwrites the previous one). Shared by the relay
-/// (writer) and the orchestrator + message service (reader / clearer).
+/// (writer) and the message loop + message service (reader / clearer).
 #[derive(Default)]
 pub struct PendingDecisionStore {
     inner: Mutex<HashMap<String, PendingDecision>>,
@@ -36,7 +36,7 @@ pub struct PendingDecisionStore {
 
 impl PendingDecisionStore {
     /// Creates an empty store behind an `Arc` for sharing across the relay,
-    /// orchestrator, and message service.
+    /// message loop, and message service.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }

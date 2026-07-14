@@ -22,7 +22,7 @@ use tokio::time::sleep_until;
 use tracing::{debug, warn};
 
 use crate::manager::acp::agent_event_tracker::AcpSessionEvent;
-use crate::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState};
+use crate::session::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 
@@ -279,7 +279,7 @@ async fn flush(repo: &Arc<dyn IAcpSessionRepository>, conversation_id: &str, pen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared_kernel::SessionId;
+    use crate::session::SessionId;
     use nomifun_db::{CreateAcpSessionParams, SqliteAcpSessionRepository, init_database_memory};
     use tokio::time::sleep;
 

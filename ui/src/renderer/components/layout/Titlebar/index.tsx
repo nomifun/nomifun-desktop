@@ -371,7 +371,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
       </div>
       <div
         className={classNames('app-titlebar__brand', {
-          'app-titlebar__brand--centered': layout?.isMobile || !location.pathname.match(/^\/(conversation|team)\//),
+          'app-titlebar__brand--centered': layout?.isMobile || !location.pathname.match(/^\/conversation\//),
         })}
         aria-label={layout?.isMobile ? mobileCenterTitle : appTitle}
         title={layout?.isMobile ? mobileCenterTitle : appTitle}

@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{error, info, warn};
 
-use crate::agent_runtime::AgentRuntime;
 use crate::manager::openclaw::connection::{AuthConfig, OpenClawConnection};
 use crate::manager::openclaw::device_identity::DeviceIdentity;
 use crate::manager::openclaw::event_mapper::{TextFallbackState, map_openclaw_event};
@@ -18,6 +17,7 @@ use crate::manager::openclaw::protocol::{
     ChatAbortParams, ChatSendParams, SessionsResetParams, SessionsResetResponse, SessionsResolveParams,
     SessionsResolveResponse,
 };
+use crate::runtime_state::AgentRuntimeState;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -60,7 +60,7 @@ pub struct RemoteAgentConfig {
 /// remains supported locally through `hermes acp`; its separate remote
 /// JSON-RPC gateway needs its own adapter rather than being mislabeled as ACP.
 pub struct RemoteAgentManager {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     remote_config: RemoteAgentConfig,
     connection: Arc<OpenClawConnection>,
     state: Arc<RwLock<RemoteState>>,
@@ -126,7 +126,7 @@ impl RemoteAgentManager {
             })?;
 
         let manager = Arc::new(Self {
-            runtime: AgentRuntime::new(conversation_id, workspace, 256),
+            runtime: AgentRuntimeState::new(conversation_id, workspace, 256),
             connection,
             state: Arc::new(RwLock::new(RemoteState {
                 session_key: remote_config.resume_session_key.clone(),
@@ -345,10 +345,10 @@ impl RemoteAgentManager {
     }
 }
 
-use crate::shared_kernel::approval_key;
+use crate::session::approval_key;
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for RemoteAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for RemoteAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::Remote
     }
@@ -481,6 +481,7 @@ impl RemoteAgentManager {
         })
     }
 
+    /// Resolve a pending approval through the remote OpenClaw protocol.
     pub fn confirm(&self, _msg_id: &str, call_id: &str, data: Value, always_allow: bool) -> Result<(), AppError> {
         let request_id = match self.state.try_write() {
             Ok(mut state) => {

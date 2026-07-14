@@ -15,6 +15,7 @@ import {
 import HOC from '@renderer/utils/ui/HOC';
 import React, { useEffect } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
+import { useConversationResponseMessages } from '@renderer/pages/conversation/Messages/useConversationResponseMessages';
 import RemoteSendBox from './RemoteSendBox';
 
 const RemoteChat: React.FC<{
@@ -22,23 +23,25 @@ const RemoteChat: React.FC<{
   workspace: string;
   cron_job_id?: string;
   hideSendBox?: boolean;
+  readOnly?: boolean;
   emptySlot?: React.ReactNode;
   loadedSkills?: string[];
-}> = ({ conversation_id, workspace, cron_job_id, hideSendBox, emptySlot, loadedSkills }) => {
+}> = ({ conversation_id, workspace, cron_job_id, hideSendBox, readOnly, emptySlot, loadedSkills }) => {
   useMessageLstCache(conversation_id);
+  useConversationResponseMessages(conversation_id);
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
   }, [workspace]);
   return (
     <ConversationProvider
-      value={{ conversation_id: conversation_id, workspace, type: 'remote', cron_job_id, hideSendBox, loadedSkills }}
+      value={{ conversation_id: conversation_id, workspace, type: 'remote', cron_job_id, hideSendBox, readOnly, loadedSkills }}
     >
       <div className='flex-1 flex flex-col px-20px min-h-0'>
         <FlexFullContainer>
           <MessageList className='flex-1' emptySlot={emptySlot}></MessageList>
         </FlexFullContainer>
-        {!hideSendBox && <RemoteSendBox conversation_id={conversation_id} />}
+        {!readOnly && !hideSendBox && <RemoteSendBox conversation_id={conversation_id} />}
       </div>
     </ConversationProvider>
   );

@@ -15,7 +15,6 @@
     "unconfigured": "未配置定时任务",
     "unconfiguredHint": "当前会话暂无定时任务，可直接带入本会话创建。",
     "createNow": "立即创建",
-    "createForTerminal": "为此终端创建定时任务",
     "defaultPrompt": "每天早上10点，为我搜索AI最新的新闻动向，汇总并输出洞察报告。"
   },
   "actions": {

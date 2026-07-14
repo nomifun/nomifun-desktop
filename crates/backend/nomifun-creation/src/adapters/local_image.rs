@@ -406,7 +406,7 @@ impl SdCliZImageBackend {
         let output_path = job_dir.join("output.png");
         let args = build_sd_cli_args(&self.config, params, &output_path);
 
-        let mut command = nomifun_runtime::Builder::clean_cli(&self.config.executable);
+        let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli(&self.config.executable);
         command
             .args(args)
             .current_dir(&job_dir)
@@ -478,7 +478,7 @@ impl SdCliZImageBackend {
     }
 }
 
-fn configure_runtime_library_path(command: &mut nomifun_runtime::Builder, executable: &Path) {
+fn configure_runtime_library_path(command: &mut nomi_process_runtime::ChildProcessBuilder, executable: &Path) {
     let Some(directory) = executable.parent() else {
         return;
     };
@@ -521,7 +521,7 @@ impl ChildTreeGuard {
 
     async fn kill_tree(&mut self) {
         if let Some(mut child) = self.child.take()
-            && let Err(error) = nomifun_runtime::kill_process_tree(&mut child).await
+            && let Err(error) = nomi_process_runtime::kill_process_tree(&mut child).await
         {
             tracing::warn!(error = %error, "Could not terminate local Z-Image process tree");
         }
@@ -558,7 +558,7 @@ impl Drop for ChildTreeGuard {
             handle.spawn(async move {
                 let _permit = permit;
                 if let Some(mut child) = child
-                    && let Err(error) = nomifun_runtime::kill_process_tree(&mut child).await
+                    && let Err(error) = nomi_process_runtime::kill_process_tree(&mut child).await
                 {
                     tracing::warn!(error = %error, "Could not terminate cancelled Z-Image process tree");
                 }
@@ -854,13 +854,13 @@ mod tests {
 
         #[cfg(windows)]
         let mut command = {
-            let mut command = nomifun_runtime::Builder::clean_cli("cmd.exe");
+            let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli("cmd.exe");
             command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
             command
         };
         #[cfg(unix)]
         let mut command = {
-            let mut command = nomifun_runtime::Builder::clean_cli("sh");
+            let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli("sh");
             command.args(["-c", "sleep 30"]);
             command
         };
@@ -881,13 +881,13 @@ mod tests {
         let job_dir = create_job_dir(root.path()).await.unwrap();
         #[cfg(windows)]
         let mut command = {
-            let mut command = nomifun_runtime::Builder::clean_cli("cmd.exe");
+            let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli("cmd.exe");
             command.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
             command
         };
         #[cfg(unix)]
         let mut command = {
-            let mut command = nomifun_runtime::Builder::clean_cli("sh");
+            let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli("sh");
             command.args(["-c", "sleep 30"]);
             command
         };

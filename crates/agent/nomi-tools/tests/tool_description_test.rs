@@ -21,11 +21,11 @@ fn test_cwd() -> PathBuf {
 fn bash_tool() -> BashTool {
     let cwd = test_cwd();
     BashTool::new(
-        nomi_execution::ProcessSupervisor::new(
-            nomi_execution::SupervisorConfig::default(),
+        nomi_process_runtime::ProcessSupervisor::new(
+            nomi_process_runtime::SupervisorConfig::default(),
         ),
         cwd.clone(),
-        nomi_execution::CapabilityPolicy::local_owner(cwd),
+        nomi_process_runtime::CapabilityPolicy::local_owner(cwd),
     )
 }
 

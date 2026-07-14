@@ -1,6 +1,18 @@
 use nomifun_common::PreviewContentType;
 use serde::{Deserialize, Serialize};
 
+/// Preview capabilities carry 256 bits of OS entropy and are encoded as
+/// canonical lowercase hexadecimal for safe use as one URL path segment.
+pub const PREVIEW_CAPABILITY_BYTES: usize = 32;
+pub const PREVIEW_CAPABILITY_HEX_LEN: usize = PREVIEW_CAPABILITY_BYTES * 2;
+
+pub fn is_preview_capability(value: &str) -> bool {
+    value.len() == PREVIEW_CAPABILITY_HEX_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 // ---------------------------------------------------------------------------
 // A. Preview requests
 // ---------------------------------------------------------------------------
@@ -14,7 +26,7 @@ pub struct StartPreviewRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StopPreviewRequest {
-    pub file_path: String,
+    pub capability: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -24,6 +36,8 @@ pub struct StopPreviewRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PreviewUrlResponse {
     pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -234,6 +248,16 @@ mod tests {
     // -- A. StartPreviewRequest / StopPreviewRequest --------------------------
 
     #[test]
+    fn preview_capability_requires_canonical_256_bit_hex() {
+        assert!(is_preview_capability(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_preview_capability("43210"));
+        assert!(!is_preview_capability(&"A".repeat(PREVIEW_CAPABILITY_HEX_LEN)));
+        assert!(!is_preview_capability(&"0".repeat(PREVIEW_CAPABILITY_HEX_LEN - 1)));
+    }
+
+    #[test]
     fn start_preview_request_deserialize() {
         let raw = json!({"file_path": "/path/to/doc.docx", "workspace": "/tmp/ws"});
         let req: StartPreviewRequest = serde_json::from_value(raw).unwrap();
@@ -249,9 +273,17 @@ mod tests {
 
     #[test]
     fn stop_preview_request_deserialize() {
-        let raw = json!({"file_path": "/path/to/doc.docx"});
+        let raw = json!({
+            "capability": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        });
         let req: StopPreviewRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.file_path, "/path/to/doc.docx");
+        assert_eq!(req.capability.len(), 64);
+    }
+
+    #[test]
+    fn stop_preview_request_requires_capability() {
+        let raw = json!({});
+        assert!(serde_json::from_value::<StopPreviewRequest>(raw).is_err());
     }
 
     #[test]
@@ -266,11 +298,13 @@ mod tests {
     #[test]
     fn preview_url_response_success() {
         let resp = PreviewUrlResponse {
-            url: "http://localhost:3000/preview".into(),
+            url: "/api/office-watch-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/".into(),
+            capability: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
             error: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["url"], "http://localhost:3000/preview");
+        assert!(json["url"].as_str().unwrap().ends_with('/'));
+        assert_eq!(json["capability"].as_str().unwrap().len(), 64);
         assert!(json.get("error").is_none());
     }
 
@@ -278,6 +312,7 @@ mod tests {
     fn preview_url_response_error() {
         let resp = PreviewUrlResponse {
             url: String::new(),
+            capability: None,
             error: Some("officecli not found".into()),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -288,7 +323,8 @@ mod tests {
     #[test]
     fn preview_url_response_roundtrip() {
         let resp = PreviewUrlResponse {
-            url: "http://localhost:8080".into(),
+            url: "/api/ppt-proxy/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/".into(),
+            capability: Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
             error: None,
         };
         let json = serde_json::to_string(&resp).unwrap();

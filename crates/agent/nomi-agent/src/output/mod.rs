@@ -41,7 +41,7 @@ pub trait OutputSink: Send + Sync {
     /// turn/session still completes successfully (autocompact failure, session
     /// save/index hiccup, MCP-init failure, `/compact` failure). Unlike
     /// `emit_error`, a warning must NOT be treated as a turn-failing condition by
-    /// downstream consumers — the AutoWork / requirement orchestrator classifies
+    /// downstream consumers — the AutoWork runner classifies
     /// an `Error` stream event as a FAILED turn (re-pend / burn attempt / pause
     /// tag). The default routes to `emit_info` (non-fatal); sinks that carry a
     /// severity level on the wire (the backend stream bridge) override it.

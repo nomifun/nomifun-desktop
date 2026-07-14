@@ -60,7 +60,7 @@ export function getBuiltinSettingsNavItems(t: TranslateFn): NavItem[] {
     system: { id: 'system', label: t('settings.system'), icon: <System theme='outline' size='16' />, path: 'system' },
     'agent-runtime': {
       id: 'agent-runtime',
-      label: t('settings.agentRuntime'),
+      label: t('settings.agentLimits'),
       icon: <Speed theme='outline' size='16' />,
       path: 'agent-runtime',
     },

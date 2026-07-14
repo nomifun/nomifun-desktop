@@ -132,7 +132,7 @@ impl ToolApprovalManager {
         }
     }
 
-    /// **P3-X1: does the *current* session mode bypass orchestration approval entirely?**
+    /// **P3-X1: does the *current* session mode bypass tool-execution approval entirely?**
     ///
     /// This is the LIVE, runtime-flippable analogue of `config.tools.auto_approve`: it reads
     /// the current `session_mode` (mutated by [`Self::set_mode`], which takes effect
@@ -144,7 +144,7 @@ impl ToolApprovalManager {
     ///   irreversible — this is exactly when the browser facade's independent fail-closed
     ///   redline gate must arm);
     /// - [`SessionMode::AutoEdit`] → **`false`** — auto-edit auto-approves only `info`/`edit`,
-    ///   **never** `exec`/`mcp`/irreversible, so the orchestration approval gate still fires for
+    ///   **never** `exec`/`mcp`/irreversible, so the tool-execution approval gate still fires for
     ///   an irreversible web action; it does NOT bypass approval and must NOT arm the redline gate;
     /// - [`SessionMode::Default`] → `false`.
     ///

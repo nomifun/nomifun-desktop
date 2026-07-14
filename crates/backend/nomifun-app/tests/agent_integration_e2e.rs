@@ -1,7 +1,7 @@
-//! E2E integration tests with mock agent tasks.
+//! E2E integration tests with mock Agent runtimes.
 //!
 //! Tests the message flow, confirmation system, and auxiliary routes
-//! with a mock IWorkerTaskManager that provides in-memory agents.
+//! with a mock AgentRuntimeRegistry that provides in-memory agents.
 
 mod common;
 
@@ -14,10 +14,10 @@ use tokio::sync::broadcast;
 use tower::ServiceExt;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::agent_task::{AgentInstance, IAgentTask, IMockAgent};
+use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime};
 use nomifun_ai_agent::protocol::events::TextEventData;
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
-use nomifun_ai_agent::{AgentStreamEvent, IWorkerTaskManager};
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
+use nomifun_ai_agent::{AgentStreamEvent, AgentRuntimeRegistry};
 use nomifun_common::{AgentKillReason, AgentType, AppError, Confirmation, ConversationStatus, TimestampMs, now_ms};
 
 use common::{body_json, get_with_token, json_with_token, setup_and_login};
@@ -48,7 +48,7 @@ impl MockAgent {
 }
 
 #[async_trait]
-impl IAgentTask for MockAgent {
+impl AgentRuntimeControl for MockAgent {
     fn agent_type(&self) -> AgentType {
         AgentType::Acp
     }
@@ -95,7 +95,7 @@ impl IAgentTask for MockAgent {
 }
 
 #[async_trait]
-impl IMockAgent for MockAgent {
+impl MockAgentRuntime for MockAgent {
     fn get_confirmations(&self) -> Vec<Confirmation> {
         self.confirmations.lock().unwrap().clone()
     }
@@ -114,13 +114,13 @@ impl IMockAgent for MockAgent {
     }
 }
 
-// ── Mock Worker Task Manager ────────────────────────────────────
+// ── Mock Agent Runtime Registry ────────────────────────────────────
 
-struct MockTaskManager {
-    agents: Mutex<std::collections::HashMap<String, AgentInstance>>,
+struct MockAgentRuntimeRegistry {
+    agents: Mutex<std::collections::HashMap<String, AgentRuntimeHandle>>,
 }
 
-impl MockTaskManager {
+impl MockAgentRuntimeRegistry {
     fn new() -> Self {
         Self {
             agents: Mutex::new(std::collections::HashMap::new()),
@@ -132,71 +132,71 @@ impl MockTaskManager {
         self.agents
             .lock()
             .unwrap()
-            .insert(conv_id.to_owned(), AgentInstance::Mock(agent.clone()));
+            .insert(conv_id.to_owned(), AgentRuntimeHandle::Mock(agent.clone()));
         agent
     }
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for MockTaskManager {
-    fn get_task(&self, conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
+    fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
 
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
             return Ok(existing.clone());
         }
-        let instance = AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id, "/mock-workspace")));
+        let instance = AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(conversation_id, "/mock-workspace")));
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
 
-    fn kill(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         self.agents.lock().unwrap().remove(conversation_id);
         Ok(())
     }
 
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         conversation_id: &str,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.kill(conversation_id, reason);
+        let _ = self.terminate(conversation_id, reason);
         Box::pin(std::future::ready(()))
     }
 
-    fn clear(&self) {
+    fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
     }
 
-    fn active_count(&self) -> usize {
+    fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
 
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
 
 // ── Test App builder with mock agents ───────────────────────────
 
-async fn build_app_with_mock_tasks() -> (axum::Router, nomifun_app::AppServices, Arc<MockTaskManager>) {
+async fn build_app_with_mock_runtime_registry() -> (axum::Router, nomifun_app::AppServices, Arc<MockAgentRuntimeRegistry>) {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let services = nomifun_app::AppServices::from_config(db, &nomifun_app::AppConfig::default())
         .await
         .unwrap();
 
-    let mock_tm = Arc::new(MockTaskManager::new());
-    let services = services.with_worker_task_manager(mock_tm.clone());
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let services = services.with_agent_runtime_registry(runtime_registry.clone());
 
     let router = nomifun_app::create_router(&services).await;
-    (router, services, mock_tm)
+    (router, services, runtime_registry)
 }
 
 async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> String {
@@ -215,7 +215,7 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, na
 
 #[tokio::test]
 async fn send_message_with_mock_agent_returns_202() {
-    let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, _runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Mock Agent Test").await;
 
@@ -235,10 +235,10 @@ async fn send_message_with_mock_agent_returns_202() {
 
 #[tokio::test]
 async fn stop_stream_with_mock_agent() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Stop Test").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = json_with_token(
         "POST",
@@ -256,7 +256,7 @@ async fn stop_stream_with_mock_agent() {
 
 #[tokio::test]
 async fn warmup_with_mock_agent() {
-    let (mut app, services, _mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, _runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Warmup Test").await;
 
@@ -275,10 +275,10 @@ async fn warmup_with_mock_agent() {
 
 #[tokio::test]
 async fn list_confirmations_empty() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Confirm Test").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/confirmations"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -291,10 +291,10 @@ async fn list_confirmations_empty() {
 
 #[tokio::test]
 async fn confirm_and_check_approval() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Approval Test").await;
-    let agent = mock_tm.insert(&conv_id, "/mock-workspace");
+    let agent = runtime_registry.insert(&conv_id, "/mock-workspace");
 
     // Pre-populate a pending confirmation so the confirm endpoint can find it
     agent.confirmations.lock().unwrap().push(Confirmation {
@@ -334,10 +334,10 @@ async fn confirm_and_check_approval() {
 
 #[tokio::test]
 async fn check_approval_not_set() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Approval NotSet").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = get_with_token(
         &format!("/api/conversations/{conv_id}/approvals/check?action=unknown_action"),
@@ -354,10 +354,10 @@ async fn check_approval_not_set() {
 
 #[tokio::test]
 async fn slash_commands_with_mock_returns_empty() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Slash Mock Test").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/slash-commands"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -372,10 +372,10 @@ async fn slash_commands_with_mock_returns_empty() {
 
 #[tokio::test]
 async fn openclaw_runtime_wrong_agent_type() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "OpenClaw Wrong Type").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = get_with_token(&format!("/api/conversations/{conv_id}/openclaw/runtime"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -391,10 +391,10 @@ async fn openclaw_runtime_wrong_agent_type() {
 
 #[tokio::test]
 async fn side_question_with_mock_agent() {
-    let (mut app, services, mock_tm) = build_app_with_mock_tasks().await;
+    let (mut app, services, runtime_registry) = build_app_with_mock_runtime_registry().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "Pass123!").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Side Q Mock").await;
-    mock_tm.insert(&conv_id, "/mock-workspace");
+    runtime_registry.insert(&conv_id, "/mock-workspace");
 
     let req = json_with_token(
         "POST",

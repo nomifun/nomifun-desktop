@@ -58,8 +58,6 @@ pub unsafe fn enhance_process_path() -> String {
     merged
 }
 
-// Placeholder helpers — filled in by later tasks.
-
 fn merge_process_path(
     bun_dir: Option<&Path>,
     extras: &[PathBuf],
@@ -67,7 +65,7 @@ fn merge_process_path(
     login: Option<&str>,
 ) -> String {
     // Order: bun_dir, extras, current, login. First-occurrence wins.
-    // Runtime owns source discovery; nomi-execution owns the shared,
+    // This crate owns bundled-toolchain source discovery; nomi-process-runtime owns the shared,
     // platform-correct ordered de-duplication and join.
     let mut sources = Vec::new();
     if let Some(p) = bun_dir {
@@ -79,7 +77,7 @@ fn merge_process_path(
         sources.extend(std::env::split_paths(l));
     }
 
-    nomi_execution::merge_process_path(sources)
+    nomi_process_runtime::merge_process_path(sources)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default()
 }

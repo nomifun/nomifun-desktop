@@ -60,7 +60,7 @@ pub(super) async fn wait_for_gateway_ready(host: &str, port: u16) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared_kernel::approval_key;
+    use crate::session::approval_key;
 
     #[test]
     fn default_gateway_port_is_18789() {

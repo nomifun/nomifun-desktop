@@ -160,10 +160,11 @@ export type IMessageText = IMessage<
     /** Backend explicitly replaced the accumulated text for this msg_id. */
     replace?: boolean;
     cronMeta?: CronMessageMeta;
-    teammateMessage?: boolean;
+    /** True when this reply was sent by another Agent participating in the task. */
+    agentMessage?: boolean;
     senderName?: string;
     senderAgentType?: string;
-    /** Sender teammate's conversation id — lets the renderer resolve preset avatars via their conversation extras. */
+    /** Sender Agent's conversation id — lets the renderer resolve preset avatars via conversation extras. */
     senderConversationId?: number;
     /** Turn-final knowledge write-back state, rendered under the assistant message. */
     knowledge_writeback?: KnowledgeWritebackState;
@@ -337,6 +338,30 @@ type ResponseTextData = {
   sender_backend?: unknown;
   sender_conversation_id?: unknown;
 };
+
+type AgentMessageMetadata = Pick<
+  IMessageText['content'],
+  'agentMessage' | 'senderName' | 'senderAgentType' | 'senderConversationId'
+>;
+
+/** External ACP event name; normalized immediately at the message boundary. */
+export const ACP_AGENT_MESSAGE_EVENT = 'teammate_message' as const;
+
+/**
+ * Translate the external ACP collaboration wire fields into the renderer's
+ * single Agent message shape. The legacy protocol name must not propagate
+ * beyond message-ingress adapters.
+ */
+export const normalizeWireAgentMessageMetadata = (
+  data: Record<string, unknown>
+): Partial<AgentMessageMetadata> => ({
+  ...(data.teammate_message ? { agentMessage: true } : {}),
+  ...(typeof data.sender_name === 'string' ? { senderName: data.sender_name } : {}),
+  ...(typeof data.sender_backend === 'string' ? { senderAgentType: data.sender_backend } : {}),
+  ...(typeof data.sender_conversation_id === 'number'
+    ? { senderConversationId: data.sender_conversation_id }
+    : {}),
+});
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -938,12 +963,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
               cronMeta: data.cronMeta,
               ...(shouldReplace ? { replace: true } : {}),
               ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
-              ...(data.teammate_message ? { teammateMessage: true } : {}),
-              ...(typeof data.sender_name === 'string' ? { senderName: data.sender_name } : {}),
-              ...(typeof data.sender_backend === 'string' ? { senderAgentType: data.sender_backend } : {}),
-              ...(typeof data.sender_conversation_id === 'number'
-                ? { senderConversationId: data.sender_conversation_id }
-                : {}),
+              ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
             }
           : {
               content: toDisplayText(data),

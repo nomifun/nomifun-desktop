@@ -13,23 +13,27 @@ describe('providerInUse helpers', () => {
     expect(featureRoute('publicCompanion', 'pa_1')).toBe('/public-companions/pa_1');
     expect(featureRoute('publicCompanion')).toBe('/public-companions');
     expect(featureRoute('smartDecision')).toBe('/models?section=global');
-    expect(featureRoute('orchestrator')).toBe('/guid');
+    expect(featureRoute('conversation', '42')).toBe('/conversation/42');
+    expect(featureRoute('conversation')).toBe('/guid');
+    expect(featureRoute('agentExecution')).toBe('/guid');
   });
 
   test('groupUsagesByFeature groups labels', () => {
     const usages: ProviderUsage[] = [
       { feature: 'desktopCompanion', label: '甲', targetId: 'c1' },
       { feature: 'desktopCompanion', label: '乙', targetId: 'c2' },
-      { feature: 'orchestrator', label: '舰队', targetId: 'f1' },
+      { feature: 'conversation', label: '主会话', targetId: '42' },
+      { feature: 'agentExecution', label: '协作任务', targetId: 'exec-1' },
     ];
     const groups = groupUsagesByFeature(usages);
     expect(groups.find((g) => g.feature === 'desktopCompanion')?.labels).toEqual(['甲', '乙']);
-    expect(groups.find((g) => g.feature === 'orchestrator')?.targetId).toBe('f1');
+    expect(groups.find((g) => g.feature === 'conversation')?.targetId).toBe('42');
+    expect(groups.find((g) => g.feature === 'agentExecution')?.targetId).toBe('exec-1');
   });
 
   test('parseProviderInUseDetails extracts usages and tolerates junk', () => {
     expect(
-      parseProviderInUseDetails({ usages: [{ feature: 'orchestrator', label: '舰队', targetId: 'f1' }] })
+      parseProviderInUseDetails({ usages: [{ feature: 'agentExecution', label: '协作任务', targetId: 'exec-1' }] })
     ).toHaveLength(1);
     expect(parseProviderInUseDetails(undefined)).toEqual([]);
     expect(parseProviderInUseDetails({ nope: 1 })).toEqual([]);

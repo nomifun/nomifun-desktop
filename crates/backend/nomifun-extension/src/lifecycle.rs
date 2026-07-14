@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use nomifun_runtime::Builder as CmdBuilder;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use tracing::{info, warn};
 
 use crate::constants::{

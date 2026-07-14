@@ -16,3 +16,4 @@ tracing.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 tempfile = "3"
+ts-rs.workspace = true

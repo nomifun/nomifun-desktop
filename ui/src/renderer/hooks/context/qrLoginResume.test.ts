@@ -7,27 +7,37 @@
 import { describe, expect, test } from 'bun:test';
 import { QR_LOGIN_RESUME_KEY, consumeQrLoginResume } from './qrLoginResume';
 
-const originalWindow = globalThis.window;
-
 const installSessionStorage = () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const store = new Map<string, string>();
-  globalThis.window = {
-    sessionStorage: {
-      getItem: (key: string) => store.get(key) ?? null,
-      setItem: (key: string, value: string) => {
-        store.set(key, value);
-      },
-      removeItem: (key: string) => {
-        store.delete(key);
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    writable: true,
+    value: {
+      sessionStorage: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          store.set(key, value);
+        },
+        removeItem: (key: string) => {
+          store.delete(key);
+        },
       },
     },
-  } as unknown as Window & typeof globalThis;
-  return store;
+  });
+
+  return {
+    store,
+    restore: () => {
+      if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+      else Reflect.deleteProperty(globalThis, 'window');
+    },
+  };
 };
 
 describe('consumeQrLoginResume', () => {
   test('returns and removes a fresh QR login user', () => {
-    const store = installSessionStorage();
+    const { store, restore } = installSessionStorage();
     try {
       store.set(
         QR_LOGIN_RESUME_KEY,
@@ -40,12 +50,12 @@ describe('consumeQrLoginResume', () => {
       expect(consumeQrLoginResume(2_000)).toEqual({ id: 'user_1', username: 'admin' });
       expect(store.has(QR_LOGIN_RESUME_KEY)).toBe(false);
     } finally {
-      globalThis.window = originalWindow;
+      restore();
     }
   });
 
   test('ignores expired QR login resume data', () => {
-    const store = installSessionStorage();
+    const { store, restore } = installSessionStorage();
     try {
       store.set(
         QR_LOGIN_RESUME_KEY,
@@ -58,7 +68,7 @@ describe('consumeQrLoginResume', () => {
       expect(consumeQrLoginResume(40_000)).toBe(null);
       expect(store.has(QR_LOGIN_RESUME_KEY)).toBe(false);
     } finally {
-      globalThis.window = originalWindow;
+      restore();
     }
   });
 });

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use common::{MockLlmProvider, MockTool, auto_approve_confirmer, test_config};
 use nomi_agent::context::{SystemPromptCache, build_system_prompt};
 use nomi_agent::engine::AgentEngine;
-use nomi_agent::orchestration::execute_tool_calls;
+use nomi_agent::tool_execution::execute_tool_calls;
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_compact::CompactionLevel;
@@ -316,7 +316,7 @@ async fn case_6_compressed_content_reaches_llm() {
     );
 
     engine
-        .run("call test_tool", "")
+        .execute_turn("call test_tool", "")
         .await
         .expect("engine.run should succeed");
 

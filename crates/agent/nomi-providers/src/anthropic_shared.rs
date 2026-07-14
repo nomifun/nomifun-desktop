@@ -807,8 +807,8 @@ mod tests {
                 deferred: false,
             },
             ToolDef {
-                name: "SpawnTool".into(),
-                description: "Spawn sub-agents".into(),
+                name: "DelegateTool".into(),
+                description: "Delegate tasks to Agents".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
             },

@@ -1,0 +1,189 @@
+{
+  "panel": {
+    "title": "Collaborative tasks",
+    "resize": "Resize collaboration panel",
+    "open": "Open collaborative tasks",
+    "collapse": "Collapse collaborative tasks"
+  },
+  "status": {
+    "execution": {
+      "planning": "Planning",
+      "awaiting_approval": "Awaiting approval",
+      "running": "In progress",
+      "paused": "Paused",
+      "waiting_input": "Waiting for your decision",
+      "completed": "Completed",
+      "completed_with_failures": "Partially completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "step": {
+      "pending": "Pending",
+      "running": "In progress",
+      "waiting_input": "Waiting for a decision",
+      "completed": "Completed",
+      "failed": "Failed",
+      "skipped": "Skipped",
+      "cancelled": "Cancelled"
+    }
+  },
+  "controls": {
+    "replan": "Replan",
+    "replanOk": "Collaboration plan updated",
+    "replanError": "Failed to replan: {{error}}",
+    "approve": "Approve and start",
+    "approveOk": "Approved; collaboration started",
+    "approveError": "Approval failed: {{error}}",
+    "planning": "Planning…",
+    "pause": "Pause",
+    "pauseOk": "Collaborative task paused",
+    "pauseError": "Failed to pause: {{error}}",
+    "resume": "Resume",
+    "resumeOk": "Collaborative task resumed",
+    "resumeError": "Failed to resume: {{error}}",
+    "cancel": "Stop",
+    "cancelOk": "Collaborative task stopped",
+    "cancelError": "Failed to stop: {{error}}",
+    "cancelConfirm": "Stop this collaborative task? Work in progress will be cancelled.",
+    "confirm": "Stop",
+    "back": "Back",
+    "activeParticipants": "{{count}} collaborator(s) active"
+  },
+  "adjust": {
+    "label": "Adjust collaboration",
+    "placeholder": "Describe what should change while keeping useful completed work…",
+    "summary": "Plan adjusted · {{kept}} kept · {{added}} added · {{removed}} removed",
+    "error": "Failed to adjust the plan: {{error}}"
+  },
+  "approval": {
+    "eyebrow": "Awaiting approval",
+    "text": "The collaboration plan is ready. You can still adjust it before approving.",
+    "button": "Approve and start",
+    "ok": "Approved; collaboration started",
+    "error": "Approval failed: {{error}}"
+  },
+  "progress": {
+    "title": "Collaboration progress",
+    "summary": "{{done}} of {{total}} tasks completed",
+    "question": "Task “{{title}}” needs your decision"
+  },
+  "thinking": {
+    "title": "Preparing the collaboration plan",
+    "short": "Planning…"
+  },
+  "editor": {
+    "goalPlaceholder": "Describe the goal, scope, and acceptance criteria…",
+    "modelLabel": "Collaboration models",
+    "noModels": "No model is available. Configure and enable a model first.",
+    "model": {
+      "automatic": "Automatic",
+      "single": "Single model",
+      "range": "Model range",
+      "rangeCount": "{{count}} models",
+      "singlePlaceholder": "Select a model",
+      "rangePlaceholder": "Select models",
+      "automaticHint": "The system selects among {{count}} available models for each task.",
+      "required": "Select an available model"
+    },
+    "planGateLabel": "Start behavior",
+    "planGate": {
+      "automatic": "Start automatically",
+      "automaticHint": "Start collaboration as soon as the plan is ready; you can still intervene.",
+      "require_approval": "Wait for approval",
+      "require_approvalHint": "Pause after planning and wait for your approval."
+    }
+  },
+  "step": {
+    "untitled": "Untitled task",
+    "tokens": "tokens",
+    "waitingInput": "Awaiting answer"
+  },
+  "kind": {
+    "synthesis": "Synthesis",
+    "verify": "Verify",
+    "judge": "Review",
+    "loop": "Loop",
+    "parallelGroup": "Parallel collaboration · {{label}}"
+  },
+  "verdict": {
+    "pass": "Passed",
+    "fail": "Not passed",
+    "pending": "Verifying"
+  },
+  "judge": {
+    "winner": "Selected",
+    "none": "No result yet",
+    "pending": "Reviewing"
+  },
+  "loop": {
+    "done": "Completed",
+    "failed": "Failed",
+    "iterating": "Iterating"
+  },
+  "detail": {
+    "loadError": "Failed to load collaboration progress"
+  },
+  "configure": {
+    "model": "Choose model",
+    "followAutomatic": "Automatic",
+    "noModels": "No model is available. Configure a model first.",
+    "modelHint": "Choose a model for this task, or leave it automatic.",
+    "presetLabel": "Task requirements",
+    "presetPlaceholder": "Add requirements or preferences that this task must follow.",
+    "presetPill": "Task requirements",
+    "presetPillHint": "Applies when this task starts",
+    "pendingHint": "Choose a model and requirements before this task starts.",
+    "save": "Save configuration",
+    "saved": "Saved; applies when the task starts",
+    "saveError": "Failed to save: {{error}}"
+  },
+  "assignment": {
+    "change": "Change collaborator",
+    "updated": "Collaborator updated",
+    "error": "Failed to update collaborator: {{error}}"
+  },
+  "retry": {
+    "button": "Retry",
+    "ok": "Task retried",
+    "error": "Retry failed: {{error}}"
+  },
+  "adopt": {
+    "button": "Adopt current result",
+    "ok": "Current result adopted",
+    "error": "Failed to adopt result: {{error}}"
+  },
+  "projection": {
+    "viewing": "Current task",
+    "return": "Back to main conversation"
+  },
+  "question": {
+    "title": "Your decision is needed",
+    "hint": "Submit your choice directly so the collaborator can continue.",
+    "placeholder": "Enter your decision…",
+    "submit": "Submit decision",
+    "ok": "Decision submitted",
+    "error": "Failed to submit decision: {{error}}"
+  },
+  "steer": {
+    "placeholder": "Add guidance for the collaborator while it is working…",
+    "submit": "Send guidance",
+    "ok": "Guidance sent",
+    "error": "Failed to send guidance: {{error}}"
+  },
+  "transcript": {
+    "notStarted": "The task has not started yet"
+  },
+  "profile": {
+    "title": "Save as preset",
+    "subtitle": "{{count}} role(s) from this collaboration can be saved for reuse",
+    "modelsLabel": "Models",
+    "skillsLabel": "{{count}} skill(s)",
+    "saveAsPreset": "Save as preset",
+    "saved": "Saved",
+    "saveOk": "Saved “{{name}}” as a preset",
+    "saveError": "Failed to save preset: {{error}}",
+    "synthDesc": "The “{{role}}” role worked on: {{tasks}}",
+    "synthDescBare": "The “{{role}}” role captured from this collaboration",
+    "taskSep": ", "
+  }
+}

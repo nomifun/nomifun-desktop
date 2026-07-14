@@ -1,4 +1,4 @@
-//! Post-session memory distillation orchestration for the nomi engine.
+//! Post-session memory distillation workflow for the nomi engine.
 //!
 //! This is the async/LLM half of spec-G: the pure functions live in
 //! `nomi_memory::distill`. Here we gate on an opt-in flag, redact the
@@ -10,7 +10,7 @@
 //! failure path degrades silently (debug/warn log, never `emit_error`) —
 //! mirroring the MEMORY note "Cache FullMiss must not emit_error": a
 //! background side-task's failure must not look like a failed turn to the
-//! AutoWork orchestrator.
+//! persistent AutoWork runner.
 
 use std::path::PathBuf;
 use std::sync::Arc;

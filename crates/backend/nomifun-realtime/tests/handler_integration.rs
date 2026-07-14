@@ -36,7 +36,7 @@ fn default_state() -> (WsHandlerState, Arc<WebSocketManager>) {
     let state = WsHandlerState {
         manager: manager.clone(),
         router: Arc::new(NoopMessageRouter),
-        token_validator: Arc::new(|t| t == "valid-token"),
+        token_authenticator: Arc::new(|t| (t == "valid-token").then(|| "user".to_owned())),
         token_extractor: Arc::new(|headers| {
             headers
                 .get("authorization")
@@ -276,6 +276,46 @@ async fn broadcast_reaches_all_connected_clients() {
 }
 
 #[tokio::test]
+async fn authenticated_user_scope_is_enforced_end_to_end() {
+    let manager = Arc::new(WebSocketManager::new());
+    let state = WsHandlerState {
+        manager: manager.clone(),
+        router: Arc::new(NoopMessageRouter),
+        token_authenticator: Arc::new(|token| match token {
+            "alice-token" => Some("alice".to_owned()),
+            "bob-token" => Some("bob".to_owned()),
+            _ => None,
+        }),
+        token_extractor: Arc::new(|headers| {
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_owned)
+        }),
+    };
+    let addr = start_server(state).await;
+    let (_, mut alice_rx) = connect_with_token(addr, "alice-token").await;
+    let (_, mut bob_rx) = connect_with_token(addr, "bob-token").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    manager.broadcast_to_user(
+        "alice",
+        WebSocketMessage::new("agentExecution.leadThinking", json!({"delta": "secret"})),
+    );
+
+    let alice = read_text(&mut alice_rx).await;
+    assert_eq!(alice["name"], "agentExecution.leadThinking");
+    assert_eq!(alice["data"]["delta"], "secret");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), bob_rx.next())
+            .await
+            .is_err(),
+        "another authenticated user must receive no frame",
+    );
+}
+
+#[tokio::test]
 async fn unicast_reaches_only_target() {
     let (state, manager) = default_state();
     let addr = start_server(state).await;
@@ -352,7 +392,7 @@ async fn unknown_message_routed_to_message_router() {
     let state = WsHandlerState {
         manager: manager.clone(),
         router: router.clone(),
-        token_validator: Arc::new(|t| t == "valid-token"),
+        token_authenticator: Arc::new(|t| (t == "valid-token").then(|| "user".to_owned())),
         token_extractor: Arc::new(|headers| {
             headers
                 .get("authorization")

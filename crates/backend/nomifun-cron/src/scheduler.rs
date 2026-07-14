@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use cron::Schedule;
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 
@@ -110,10 +111,18 @@ pub fn validate_schedule(schedule: &CronSchedule) -> Result<(), CronError> {
 // CronScheduler — manages tokio timers for scheduled jobs
 // ---------------------------------------------------------------------------
 
-pub type TickCallback = Arc<dyn Fn(String) + Send + Sync>;
+/// Scheduler callbacks carry both the opaque job id and the owner captured
+/// when the timer was installed. `CronService::tick` re-verifies the pair
+/// against the current row before execution, closing delete/recreate races.
+pub type TickCallback = Arc<dyn Fn(String, String) + Send + Sync>;
+
+struct ScheduledHandle {
+    user_id: String,
+    task: JoinHandle<()>,
+}
 
 pub struct CronScheduler {
-    handles: DashMap<String, JoinHandle<()>>,
+    handles: DashMap<String, ScheduledHandle>,
     tick_callback: TickCallback,
 }
 
@@ -137,23 +146,53 @@ impl CronScheduler {
         };
 
         let job_id = job.id.clone();
+        let user_id = job.user_id.clone();
+        let handle_owner = user_id.clone();
         let schedule = job.schedule.clone();
         let callback = Arc::clone(&self.tick_callback);
 
         let handle = match &schedule {
-            CronSchedule::At { .. } => spawn_at_timer(job_id, next_run_at, callback),
-            CronSchedule::Every { every_ms, .. } => spawn_every_timer(job_id, next_run_at, *every_ms, callback),
+            CronSchedule::At { .. } => {
+                spawn_at_timer(job_id, user_id, next_run_at, callback)
+            }
+            CronSchedule::Every { every_ms, .. } => {
+                spawn_every_timer(job_id, user_id, next_run_at, *every_ms, callback)
+            }
             CronSchedule::Cron { expr, tz, .. } => {
-                spawn_cron_timer(job_id, next_run_at, expr.clone(), tz.clone(), callback)
+                spawn_cron_timer(
+                    job_id,
+                    user_id,
+                    next_run_at,
+                    expr.clone(),
+                    tz.clone(),
+                    callback,
+                )
             }
         };
 
-        self.handles.insert(job.id.clone(), handle);
+        self.handles.insert(
+            job.id.clone(),
+            ScheduledHandle {
+                user_id: handle_owner,
+                task: handle,
+            },
+        );
     }
 
     pub fn cancel_job(&self, job_id: &str) {
-        if let Some((_, handle)) = self.handles.remove(job_id) {
-            handle.abort();
+        if let Some((_, scheduled)) = self.handles.remove(job_id) {
+            scheduled.task.abort();
+        }
+    }
+
+    /// Cancel only the timer installed for this owner. A callback from an old
+    /// deleted job must never abort a newer same-id timer belonging to someone
+    /// else merely because its database verification failed.
+    pub fn cancel_job_for_owner(&self, job_id: &str, user_id: &str) {
+        if let Entry::Occupied(entry) = self.handles.entry(job_id.to_owned())
+            && entry.get().user_id == user_id
+        {
+            entry.remove().task.abort();
         }
     }
 
@@ -163,7 +202,7 @@ impl CronScheduler {
 
     pub fn cancel_all(&self) {
         for entry in self.handles.iter() {
-            entry.value().abort();
+            entry.value().task.abort();
         }
         self.handles.clear();
     }
@@ -187,18 +226,24 @@ impl Drop for CronScheduler {
 // Timer spawn helpers
 // ---------------------------------------------------------------------------
 
-fn spawn_at_timer(job_id: String, run_at: TimestampMs, callback: TickCallback) -> JoinHandle<()> {
+fn spawn_at_timer(
+    job_id: String,
+    user_id: String,
+    run_at: TimestampMs,
+    callback: TickCallback,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let delay = delay_until(run_at);
         if delay > 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
         }
-        callback(job_id);
+        callback(job_id, user_id);
     })
 }
 
 fn spawn_every_timer(
     job_id: String,
+    user_id: String,
     first_run_at: TimestampMs,
     every_ms: i64,
     callback: TickCallback,
@@ -208,20 +253,21 @@ fn spawn_every_timer(
         if initial_delay > 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(initial_delay as u64)).await;
         }
-        callback(job_id.clone());
+        callback(job_id.clone(), user_id.clone());
 
         let interval_duration = tokio::time::Duration::from_millis(every_ms as u64);
         let mut interval = tokio::time::interval(interval_duration);
         interval.tick().await; // first tick fires immediately, skip it
         loop {
             interval.tick().await;
-            callback(job_id.clone());
+            callback(job_id.clone(), user_id.clone());
         }
     })
 }
 
 fn spawn_cron_timer(
     job_id: String,
+    user_id: String,
     first_run_at: TimestampMs,
     expr: String,
     tz: Option<String>,
@@ -232,7 +278,7 @@ fn spawn_cron_timer(
         if initial_delay > 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(initial_delay as u64)).await;
         }
-        callback(job_id.clone());
+        callback(job_id.clone(), user_id.clone());
 
         loop {
             let now = now_ms();
@@ -244,7 +290,7 @@ fn spawn_cron_timer(
             if delay > 0 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
             }
-            callback(job_id.clone());
+            callback(job_id.clone(), user_id.clone());
         }
     })
 }
@@ -525,7 +571,7 @@ mod tests {
     async fn scheduler_schedule_and_cancel() {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called_clone = Arc::clone(&called);
-        let scheduler = CronScheduler::new(Arc::new(move |_id| {
+        let scheduler = CronScheduler::new(Arc::new(move |_id, _owner_id| {
             called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         }));
 
@@ -534,14 +580,20 @@ mod tests {
         assert!(scheduler.is_scheduled("cron_1"));
         assert_eq!(scheduler.active_count(), 1);
 
-        scheduler.cancel_job("cron_1");
+        scheduler.cancel_job_for_owner("cron_1", "foreign-user");
+        assert!(
+            scheduler.is_scheduled("cron_1"),
+            "a stale callback cannot cancel another owner's current timer"
+        );
+
+        scheduler.cancel_job_for_owner("cron_1", "user_1");
         assert!(!scheduler.is_scheduled("cron_1"));
         assert_eq!(scheduler.active_count(), 0);
     }
 
     #[tokio::test]
     async fn scheduler_disabled_job_not_scheduled() {
-        let scheduler = CronScheduler::new(Arc::new(|_| {}));
+        let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         let job = make_test_job("cron_1", false, Some(now_ms() + 100_000));
         scheduler.schedule_job(&job);
         assert!(!scheduler.is_scheduled("cron_1"));
@@ -549,7 +601,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_no_next_run_not_scheduled() {
-        let scheduler = CronScheduler::new(Arc::new(|_| {}));
+        let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         let job = make_test_job("cron_1", true, None);
         scheduler.schedule_job(&job);
         assert!(!scheduler.is_scheduled("cron_1"));
@@ -557,7 +609,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_cancel_all() {
-        let scheduler = CronScheduler::new(Arc::new(|_| {}));
+        let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         let future = now_ms() + 100_000;
         scheduler.schedule_job(&make_test_job("cron_1", true, Some(future)));
         scheduler.schedule_job(&make_test_job("cron_2", true, Some(future)));
@@ -570,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_reschedule_replaces_timer() {
-        let scheduler = CronScheduler::new(Arc::new(|_| {}));
+        let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         let job = make_test_job("cron_1", true, Some(now_ms() + 100_000));
         scheduler.schedule_job(&job);
         assert!(scheduler.is_scheduled("cron_1"));
@@ -586,17 +638,17 @@ mod tests {
 
     #[tokio::test]
     async fn scheduler_cancel_nonexistent_no_panic() {
-        let scheduler = CronScheduler::new(Arc::new(|_| {}));
+        let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         scheduler.cancel_job("nonexistent");
     }
 
     #[tokio::test]
     async fn scheduler_at_timer_fires_callback() {
-        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<(String, String)>();
         let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
-        let scheduler = CronScheduler::new(Arc::new(move |id| {
+        let scheduler = CronScheduler::new(Arc::new(move |id, owner_id| {
             if let Some(sender) = tx.lock().unwrap().take() {
-                let _ = sender.send(id);
+                let _ = sender.send((id, owner_id));
             }
         }));
 
@@ -612,14 +664,17 @@ mod tests {
 
         let result = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().unwrap(), "cron_at");
+        assert_eq!(
+            result.unwrap().unwrap(),
+            ("cron_at".to_owned(), "user_1".to_owned())
+        );
     }
 
     #[tokio::test]
     async fn scheduler_every_timer_fires_callback() {
         let counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counter_clone = Arc::clone(&counter);
-        let scheduler = CronScheduler::new(Arc::new(move |_id| {
+        let scheduler = CronScheduler::new(Arc::new(move |_id, _owner_id| {
             counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }));
 
@@ -643,9 +698,10 @@ mod tests {
     // -- Test helper ----------------------------------------------------------
 
     fn make_test_job(id: &str, enabled: bool, next_run_at: Option<TimestampMs>) -> CronJob {
-        use crate::types::{CreatedBy, ExecutionMode, TargetKind};
+        use crate::types::{CreatedBy, ExecutionMode};
         CronJob {
             id: id.to_owned(),
+            user_id: "user_1".into(),
             name: "Test".into(),
             enabled,
             schedule: CronSchedule::Every {
@@ -670,7 +726,6 @@ mod tests {
             run_count: 0,
             retry_count: 0,
             max_retries: 3,
-            target_kind: TargetKind::Agent,
         }
     }
 }

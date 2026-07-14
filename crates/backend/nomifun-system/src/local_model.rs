@@ -1798,7 +1798,7 @@ impl LocalModelService {
             }
         }
         if let Some(mut sidecar) = previous {
-            let _ = nomifun_runtime::kill_process_tree(&mut sidecar.child).await;
+            let _ = nomi_process_runtime::kill_process_tree(&mut sidecar.child).await;
             let _ = tokio::fs::remove_file(sidecar.api_key_file).await;
         }
 
@@ -1835,7 +1835,7 @@ impl LocalModelService {
         })?;
         write_private_key_file(api_key_file.clone(), api_key.clone()).await?;
         let api_key_guard = KeyFileGuard::new(api_key_file);
-        let mut command = nomifun_runtime::Builder::new(&executable);
+        let mut command = nomi_process_runtime::ChildProcessBuilder::new(&executable);
         let threads = std::thread::available_parallelism()
             .map(|count| count.get().saturating_sub(1).max(1))
             .unwrap_or(1);
@@ -1903,7 +1903,7 @@ impl LocalModelService {
                 Ok(None) => {}
             }
             if started.elapsed() >= START_TIMEOUT {
-                let _ = nomifun_runtime::kill_process_tree(&mut child).await;
+                let _ = nomi_process_runtime::kill_process_tree(&mut child).await;
                 return Err(LocalFailure::new(
                     LocalModelErrorKind::RuntimeUnavailable,
                     "本地模型加载超时，请尝试较小的模型。",
@@ -1954,7 +1954,7 @@ impl LocalModelService {
         let _start_guard = self.start_lock.lock().await;
         let mut sidecar = { self.state.lock().await.sidecar.take() };
         if let Some(sidecar) = sidecar.as_mut()
-            && let Err(error) = nomifun_runtime::kill_process_tree(&mut sidecar.child).await
+            && let Err(error) = nomi_process_runtime::kill_process_tree(&mut sidecar.child).await
         {
             warn!(error = %error, "Failed to stop local model sidecar cleanly");
         }

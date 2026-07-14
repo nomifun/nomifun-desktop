@@ -4,17 +4,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_ai_agent::{
-    AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, IWorkerTaskManager,
-    WorkerTaskManagerImpl, build_agent_factory,
+    AcpSessionSyncService, AcpSkillManager, AgentFactoryDeps, AgentRegistry, AgentRuntimeRegistry,
+    InMemoryAgentRuntimeRegistry, build_agent_factory,
 };
-use nomifun_api_types::{
-    GatewayMcpConfig, GuideMcpConfig, KnowledgeMcpConfig, RequirementMcpConfig,
-};
+use nomifun_api_types::{GatewayMcpConfig, RequirementMcpConfig};
 use nomifun_auth::{
     AuthPolicy, CompanionTokenValidator, CookieConfig, JwtService, QrTokenStore, resolve_jwt_secret,
 };
 use nomifun_common::OnConversationDelete;
 use nomifun_conversation::runtime_state::ConversationRuntimeStateService;
+use nomifun_conversation::{
+    ExecutionConversationBoundary, RepositoryExecutionConversationBoundary,
+};
 use nomifun_db::{
     Database, IAcpSessionRepository, IAgentMetadataRepository, ICompanionTokenRepository,
     IConversationRepository, IMcpServerRepository, IModelProfileRepository, IProviderRepository,
@@ -30,6 +31,10 @@ use crate::config::{AppConfig, load_or_create_data_encryption_key};
 
 pub struct AppServices {
     pub database: Database,
+    /// Canonical owner of every installation-scoped resource. Resolved once
+    /// from the seeded system-user row at boot; usernames are mutable display
+    /// data and must never be used as an authorization identity.
+    pub authoritative_user_id: Arc<str>,
     pub jwt_service: Arc<JwtService>,
     pub user_repo: Arc<dyn IUserRepository>,
     /// Per-companion Remote front-door token store (SHA-256 hashes).
@@ -54,21 +59,25 @@ pub struct AppServices {
     pub qr_token_store: Arc<QrTokenStore>,
     pub ws_manager: Arc<WebSocketManager>,
     pub event_bus: Arc<BroadcastEventBus>,
-    pub worker_task_manager: Arc<dyn IWorkerTaskManager>,
+    pub agent_runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     pub conversation_runtime_state: Arc<ConversationRuntimeStateService>,
-    /// Same instance as `worker_task_manager`, exposed through the
+    /// Same instance as `agent_runtime_registry`, exposed through the
     /// `OnConversationDelete` trait so `ConversationService::with_delete_hook`
     /// can wire it up. Optional because tests construct `AppServices` with a
-    /// mock `worker_task_manager` that does not implement the trait.
-    pub task_manager_delete_hook: Option<Arc<dyn OnConversationDelete>>,
+    /// mock `agent_runtime_registry` that does not implement the trait.
+    pub runtime_registry_delete_hook: Option<Arc<dyn OnConversationDelete>>,
     pub agent_registry: Arc<AgentRegistry>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
+    /// One mandatory Conversation↔Execution authority shared by every
+    /// production ConversationService instance. Keeping it in AppServices
+    /// makes incomplete module-specific assembly impossible.
+    pub execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
     /// Singleton requirement service (shares its repo + WS emitter with the
     /// nomi native-tool sink). The router state attaches a `ConversationService`
     /// to a clone of this for AutoWork config persistence.
     pub requirement_service: Arc<nomifun_requirement::RequirementService>,
     /// Singleton terminal service: owns the live PTYs (one in-memory map). Shared
-    /// so the AutoWork orchestrator drives the SAME PTYs the terminal routes
+    /// so the AutoWork runner drives the SAME PTYs the terminal routes
     /// created (a fresh instance would have an empty live map).
     pub terminal_service: Arc<TerminalService>,
     pub acp_session_sync: Arc<AcpSessionSyncService>,
@@ -87,31 +96,28 @@ pub struct AppServices {
     /// Resolved skill paths. Shared with the `ConversationService` for
     /// snapshot resolution at create time.
     pub skill_paths: Arc<nomifun_extension::SkillPaths>,
-    /// Guide MCP server config. Team Guide MCP is disabled while Team is not
-    /// surfaced in the product, so this stays `None` and the diagnostic endpoint
-    /// reports it as unavailable.
-    pub guide_mcp_config: Option<GuideMcpConfig>,
-    /// Requirement MCP server config (port, token, binary_path). `None` when the
-    /// server failed to start. Its presence drives
-    /// `OrchestratorDeps::requirement_mcp_enabled` so the ACP verdict gate stays
+    /// Process-private Requirement MCP issuer (port, root secret, binary path).
+    /// It is non-serializable; only per-session child capabilities leave the
+    /// main process. `None` when the server failed to start. Its presence drives
+    /// `AutoWorkRunnerDeps::requirement_mcp_enabled` so the ACP verdict gate stays
     /// in lock-step with whether the declaration tools are actually injected.
     pub requirement_mcp_config: Option<RequirementMcpConfig>,
     /// Requirement MCP server instance kept alive for the app lifetime.
     pub(crate) _requirement_mcp_server: Option<nomifun_requirement::RequirementMcpServer>,
-    /// Desktop Gateway MCP server config (port, token, binary_path). `None`
-    /// when the server failed to start — desktopGateway-flagged sessions then
-    /// simply lack the `nomi_*` tools (graceful degradation).
+    /// Process-private Platform Gateway issuer (port, root secret, binary path,
+    /// installation owner). It is non-serializable; only short-lived signed
+    /// child capabilities leave the main process. `None` when the server failed
+    /// to start, so Agent sessions simply lack the `nomi_*` tools.
     pub gateway_mcp_config: Option<GatewayMcpConfig>,
-    /// Desktop Gateway MCP server instance kept alive for the app lifetime.
+    /// Platform Gateway MCP server instance kept alive for the app lifetime.
     /// Its deps are late-wired from `create_router` via
     /// [`AppServices::inject_gateway_deps`] once the module services exist.
     pub(crate) _gateway_mcp_server: Option<nomifun_gateway::GatewayMcpServer>,
     /// Knowledge MCP server instance kept alive for the app lifetime. Its
     /// presence (surfaced to the agent factory as `knowledge_mcp_config`) gates
-    /// the scoped `knowledge_search` tool injection into ACP sessions that have
-    /// bound knowledge bases. Read-only; mints its own loopback port + token and
-    /// never grants the gateway reach. `None` when the server failed to start
-    /// (graceful degradation — sessions then lack `knowledge_search`).
+    /// scoped knowledge tool injection into ACP sessions that have bound bases.
+    /// Its root issuer stays in-process; child capabilities independently scope
+    /// search/read/write. `None` when startup fails (graceful degradation).
     pub(crate) _knowledge_mcp_server: Option<nomifun_knowledge::KnowledgeMcpServer>,
     /// Singleton companion service (nomi desktop companion). Built before the agent
     /// factory so the factory can register the companion memory tools for
@@ -135,15 +141,15 @@ pub struct AppServices {
 }
 
 impl AppServices {
-    /// Replace the worker task manager after construction.
+    /// Replace the process-local Agent runtime registry after construction.
     ///
     /// Primarily used by tests to inject mock implementations.
-    pub fn with_worker_task_manager(mut self, wtm: Arc<dyn IWorkerTaskManager>) -> Self {
-        self.worker_task_manager = wtm;
+    pub fn with_agent_runtime_registry(mut self, runtime_registry: Arc<dyn AgentRuntimeRegistry>) -> Self {
+        self.agent_runtime_registry = runtime_registry;
         self
     }
 
-    /// Wire the dependency bundle into the Desktop Gateway MCP server.
+    /// Wire the dependency bundle into the Platform Gateway MCP server.
     /// Called from `create_router` after `build_module_states` (the
     /// `ConversationService` / `CronService` instances live there).
     pub(crate) async fn inject_gateway_deps(&self, deps: Arc<nomifun_gateway::GatewayDeps>) {
@@ -163,6 +169,29 @@ impl AppServices {
 
         let data_dir = config.data_dir.clone();
         let work_dir = config.work_dir.clone();
+        // Security hard-cut: older builds persisted live loopback root tokens in
+        // this beacon. Scoped child capabilities make discovery without an
+        // authoritative session impossible, so remove both the final and
+        // interrupted-write files before any new loopback issuer starts.
+        for obsolete in ["mcp-endpoints.json", "mcp-endpoints.json.tmp"] {
+            let path = data_dir.join(obsolete);
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %path.display(), %error, "Could not remove obsolete MCP secret beacon");
+            }
+        }
+        // Terminal MCP launch files are ephemeral. Older versions embedded a
+        // process-wide token in these files; current versions keep even scoped
+        // child credentials in the inherited process environment. Reset the
+        // directory on every boot so neither historical nor stale session
+        // configuration survives a backend restart.
+        let terminal_mcp_dir = data_dir.join("terminal-mcp");
+        if let Err(error) = std::fs::remove_dir_all(&terminal_mcp_dir)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %terminal_mcp_dir.display(), %error, "Could not reset ephemeral terminal MCP config directory");
+        }
         let auth_policy = config.auth_policy;
         let local_trust_secret = config.local_trust_secret.clone();
         let app_version = config.app_version.clone();
@@ -186,19 +215,22 @@ impl AppServices {
         let system_user = user_repo
             .get_system_user()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get system user: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to get system user: {e}"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Database invariant violated: canonical system user is missing"
+                )
+            })?;
+        let authoritative_user_id: Arc<str> = Arc::from(system_user.id.as_str());
 
-        let db_secret = system_user
-            .as_ref()
-            .and_then(|u| u.jwt_secret.as_deref())
-            .filter(|s| !s.is_empty());
+        let db_secret = system_user.jwt_secret.as_deref().filter(|s| !s.is_empty());
 
         let (secret, is_new) = resolve_jwt_secret(env_secret.as_deref(), db_secret);
 
         // Persist newly generated secret to database
-        if is_new && let Some(user) = &system_user {
+        if is_new {
             user_repo
-                .update_jwt_secret(&user.id, &secret)
+                .update_jwt_secret(&system_user.id, &secret)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to persist JWT secret: {e}"))?;
             tracing::info!("Generated and persisted new JWT secret");
@@ -313,6 +345,11 @@ impl AppServices {
 
         let conversation_repo: Arc<dyn IConversationRepository> =
             Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+        let execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary> = Arc::new(
+            RepositoryExecutionConversationBoundary::new(Arc::new(
+                nomifun_db::SqliteAgentExecutionRepository::new(database.pool().clone()),
+            )),
+        );
 
         // Skill paths need app resource dir (for builtin rules) + data dir
         // (for user skills + materialized views). AcpSkillManager uses these
@@ -333,11 +370,6 @@ impl AppServices {
             std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("nomicore")),
         );
 
-        // Team Guide MCP is intentionally disabled: the product currently does
-        // not expose Team design/business flows, so no hidden `nomi_create_team`
-        // MCP server should be started or injected into agent sessions.
-        let guide_mcp_config: Option<GuideMcpConfig> = None;
-
         // Event bus is shared by every service that broadcasts WS events.
         // Constructed here (rather than inline in the returned struct) so the
         // requirement service + sink built below share the same bus.
@@ -348,11 +380,13 @@ impl AppServices {
         let requirement_repo: Arc<dyn nomifun_db::IRequirementRepository> = Arc::new(
             nomifun_db::SqliteRequirementRepository::new(database.pool().clone()),
         );
-        let requirement_emitter =
-            nomifun_requirement::RequirementEventEmitter::new(event_bus.clone());
+        let requirement_emitter = nomifun_requirement::RequirementEventEmitter::new(
+            event_bus.clone(),
+            authoritative_user_id.clone(),
+        );
         // Completion notifier: on a requirement reaching a terminal state, notify
         // its tag's bound webhook. Injected into the SINGLETON so it fires on BOTH
-        // completion paths — the agent self-report sink AND the orchestrator's
+        // completion paths — the Agent self-report sink AND the AutoWork runner's
         // `finalize_if_needed` (both clone from this instance, propagating the
         // notifier field). The repos share the same pool as `build_webhook_state`,
         // so they read the same `webhooks` / `tag_settings` tables.
@@ -388,17 +422,15 @@ impl AppServices {
         // over a stdio bridge (claude/codex/gemini are stdio-only for MCP).
         // Failure is non-fatal — ACP sessions then keep the tool-free contract
         // and `requirement_mcp_enabled` stays false. Wired to the SAME singleton
-        // the sink/orchestrator use (held as a Weak), mirroring the guide server.
+        // the sink/AutoWork runner use (held as a Weak).
         let (requirement_mcp_server, requirement_mcp_config) =
             match nomifun_requirement::RequirementMcpServer::start().await {
                 Ok(srv) => {
                     srv.set_service(Arc::downgrade(&requirement_service)).await;
-                    let config = RequirementMcpConfig {
-                        port: srv.http_port(),
-                        token: srv.auth_token().to_owned(),
-                        binary_path: backend_binary_path.to_string_lossy().to_string(),
-                    };
-                    tracing::info!(port = config.port, "Requirement MCP server started");
+                    let config = srv.issuer_config(
+                        backend_binary_path.to_string_lossy().to_string(),
+                    );
+                    tracing::info!(port = config.port(), "Requirement MCP server started");
                     (Some(srv), Some(config))
                 }
                 Err(e) => {
@@ -407,8 +439,8 @@ impl AppServices {
                 }
             };
 
-        // Desktop Gateway MCP server: gives desktopGateway-flagged sessions
-        // (channel master-agent, companion companion) the `nomi_*` desktop tools over
+        // Platform Gateway MCP server: gives owner Agent sessions (Channel
+        // Agent and companion conversations included) the `nomi_*` tools over
         // a stdio bridge. Started BEFORE the agent factory so the factory can
         // carry the connection config; the deps bundle is late-wired from
         // `create_router` (the conversation/cron services are built there).
@@ -416,16 +448,15 @@ impl AppServices {
         let (gateway_mcp_server, gateway_mcp_config) =
             match nomifun_gateway::GatewayMcpServer::start().await {
                 Ok(srv) => {
-                    let config = GatewayMcpConfig {
-                        port: srv.http_port(),
-                        token: srv.auth_token().to_owned(),
-                        binary_path: backend_binary_path.to_string_lossy().to_string(),
-                    };
-                    tracing::info!(port = config.port, "Gateway MCP server started");
+                    let config = srv.issuer_config(
+                        backend_binary_path.to_string_lossy().to_string(),
+                        authoritative_user_id.to_string(),
+                    );
+                    tracing::info!(port = config.port(), "Gateway MCP server started");
                     (Some(srv), Some(config))
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Gateway MCP server failed to start; desktop gateway tools disabled");
+                    tracing::warn!(error = %e, "Gateway MCP server failed to start; platform tools disabled");
                     (None, None)
                 }
             };
@@ -480,7 +511,10 @@ impl AppServices {
         let knowledge_service = Arc::new(nomifun_knowledge::KnowledgeService::new(
             knowledge_repo,
             &data_dir,
-            nomifun_knowledge::KnowledgeEventEmitter::new(event_bus.clone()),
+            nomifun_knowledge::KnowledgeEventEmitter::new(
+                event_bus.clone(),
+                authoritative_user_id.clone(),
+            ),
         ));
         // Late-wire the LLM seam for knowledge autogen / snapshot compression
         // (`LiveKnowledgeCompleter` resolves the first enabled provider/model
@@ -533,25 +567,30 @@ impl AppServices {
         tokio::spawn(Arc::clone(&knowledge_service).resume_pending_source_fetches());
 
         // Knowledge MCP server: gives ACP sessions with bound knowledge bases
-        // the `knowledge_search` tool over a stdio bridge (claude/codex/gemini
-        // are stdio-only for MCP). Read-only and tightly scoped — it mints its
-        // OWN loopback port + bearer token (disjoint from the gateway server),
-        // dispatches ONLY `knowledge_search`, and the bound `kb_ids` are baked
-        // into the bridge env at injection time so the model cannot widen the
-        // searchable base set. Wired to the SAME singleton KnowledgeService the
-        // routes use (held as a Weak), mirroring the requirement/guide servers.
+        // search/read and policy-gated write tools over a stdio bridge. It owns
+        // a domain-separated root issuer kept in this process; each managed
+        // child receives only short-lived signed user/session/workspace/base/tool
+        // claims. Wired to the SAME singleton KnowledgeService the routes use
+        // (held as a Weak), mirroring the requirement server.
         // Failure is non-fatal — sessions then lack `knowledge_search` (graceful
         // degradation identical to having no mounted bases).
         let (knowledge_mcp_server, knowledge_mcp_config) =
             match nomifun_knowledge::KnowledgeMcpServer::start().await {
-                Ok(srv) => {
+                Ok(mut srv) => {
                     srv.set_service(&knowledge_service).await;
-                    let config = KnowledgeMcpConfig {
-                        port: srv.http_port(),
-                        token: srv.auth_token().to_owned(),
-                        binary_path: backend_binary_path.to_string_lossy().to_string(),
-                    };
-                    tracing::info!(port = config.port, "Knowledge MCP server started");
+                    let config = srv.issuer_config(
+                        backend_binary_path.to_string_lossy().to_string(),
+                    );
+                    if let Err(error) = srv
+                        .start_external_broker(
+                            config.clone(),
+                            authoritative_user_id.to_string(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, "secure external knowledge MCP broker failed to start");
+                    }
+                    tracing::info!(port = config.port(), "Knowledge MCP server started");
                     (Some(srv), Some(config))
                 }
                 Err(e) => {
@@ -561,7 +600,7 @@ impl AppServices {
             };
 
         // Singleton terminal service (owns the live PTY map). Shared between the
-        // terminal routes and the AutoWork orchestrator's terminal driver.
+        // terminal routes and the AutoWork runner's terminal driver.
         let terminal_repo: Arc<dyn nomifun_db::ITerminalRepository> =
             Arc::new(SqliteTerminalRepository::new(database.pool().clone()));
         let terminal_service = Arc::new(TerminalService::new(
@@ -600,58 +639,18 @@ impl AppServices {
         // broadcasts them per terminal_id. Failure is non-fatal — terminals then
         // simply lack lifecycle events (graceful degradation). The backend binary
         // path is needed so injected hook commands invoke `<bin> terminal-hook`.
-        let lifecycle_endpoint = match TerminalLifecycleServer::start().await {
+        match TerminalLifecycleServer::start().await {
             Ok(srv) => {
                 tracing::info!(port = srv.http_port(), "Terminal lifecycle server started");
-                let ep = Some(crate::mcp_endpoints::Endpoint {
-                    port: srv.http_port(),
-                    token: srv.auth_token().to_owned(),
-                });
                 terminal_service.with_terminal_lifecycle(
                     std::sync::Arc::new(srv),
                     backend_binary_path.to_string_lossy().to_string(),
                 );
-                ep
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Terminal lifecycle server failed to start; terminal hooks disabled");
-                None
             }
         };
-        // Write the MCP endpoint beacon (`<data_dir>/mcp-endpoints.json`, 0600).
-        // stdio bridges (and externally-registered CLIs) read this at runtime to
-        // discover the current boot's port/token without baking stale values into
-        // their config. Failure is non-fatal — bridges fall back to legacy env vars.
-        {
-            let beacon = crate::mcp_endpoints::McpEndpoints {
-                knowledge: knowledge_mcp_config
-                    .as_ref()
-                    .map(|c| crate::mcp_endpoints::Endpoint {
-                        port: c.port,
-                        token: c.token.clone(),
-                    }),
-                requirement: requirement_mcp_config.as_ref().map(|c| {
-                    crate::mcp_endpoints::Endpoint {
-                        port: c.port,
-                        token: c.token.clone(),
-                    }
-                }),
-                lifecycle: lifecycle_endpoint,
-            };
-            if let Err(e) = crate::mcp_endpoints::write_beacon(&data_dir, &beacon) {
-                tracing::warn!(error = %e, "Failed to write MCP endpoint beacon; bridges will fall back to env vars");
-            } else {
-                tracing::info!(path = %crate::mcp_endpoints::beacon_path(&data_dir).display(), "MCP endpoint beacon written");
-            }
-            // Pass the beacon path to the terminal service so spawned PTYs receive
-            // `NOMI_MCP_ENDPOINTS_FILE` — the knowledge bridge reads it for endpoint
-            // discovery without needing to compute the data-dir path itself.
-            terminal_service.with_mcp_endpoints_path(
-                crate::mcp_endpoints::beacon_path(&data_dir)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
 
         // Boot reconciliation: flip ghost 'running' rows (PTYs that died with the
         // previous app run — `live` is empty here) to 'exited'. This makes the
@@ -679,6 +678,7 @@ impl AppServices {
         let companion_service = nomifun_companion::CompanionService::start(
             &data_dir,
             event_bus.clone(),
+            authoritative_user_id.as_ref(),
             companion_completer,
             skill_paths.clone(),
         )
@@ -764,6 +764,7 @@ impl AppServices {
         reconcile_model_profiles(&provider_repo_for_services, &model_profile_repo).await;
 
         let factory = build_agent_factory(AgentFactoryDeps {
+            authoritative_user_id: authoritative_user_id.clone(),
             skill_manager: AcpSkillManager::new(skill_paths.clone()),
             remote_agent_repo,
             provider_repo,
@@ -773,7 +774,6 @@ impl AppServices {
             data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
             backend_binary_path: backend_binary_path.clone(),
-            guide_mcp_config: guide_mcp_config.clone(),
             requirement_mcp_config: requirement_mcp_config.clone(),
             // Scoped knowledge-search MCP. Populated only when the server started
             // above; the assembler further gates injection on bound bases, so a
@@ -801,8 +801,11 @@ impl AppServices {
             // registered at startup in router/state.rs, after this factory is
             // built), so by the time a conversation runs the agent the service is
             // present. (Phase 4 platform synergy)
-            cron_sink_factory: Some(Arc::new(|conversation_id: &str| {
-                nomifun_cron::sink::cron_sink_for(conversation_id.to_string())
+            cron_sink_factory: Some(Arc::new(|user_id: &str, conversation_id: &str| {
+                nomifun_cron::sink::cron_sink_for(
+                    user_id.to_string(),
+                    conversation_id.to_string(),
+                )
             })),
             companion_sink: Some(companion_service.memory_sink()),
             // Companion self-evolved skill auto-use (`companion_skill` tool + per-turn
@@ -832,13 +835,14 @@ impl AppServices {
         // Agent factory is now wired. Future extension/custom agents
         // that get written to `agent_metadata` will show up after the
         // relevant service calls `AgentRegistry::hydrate`.
-        let task_manager_concrete = Arc::new(WorkerTaskManagerImpl::new(factory));
-        let worker_task_manager: Arc<dyn IWorkerTaskManager> = task_manager_concrete.clone();
-        let task_manager_delete_hook: Arc<dyn OnConversationDelete> = task_manager_concrete;
+        let runtime_registry_concrete = Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
+        let agent_runtime_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry_concrete.clone();
+        let runtime_registry_delete_hook: Arc<dyn OnConversationDelete> = runtime_registry_concrete;
         let conversation_runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
         Ok(Self {
             database,
+            authoritative_user_id,
             jwt_service: Arc::new(JwtService::new(secret.clone())),
             user_repo,
             companion_token_repo,
@@ -853,11 +857,12 @@ impl AppServices {
             qr_token_store: Arc::new(QrTokenStore::new()),
             ws_manager: Arc::new(WebSocketManager::new()),
             event_bus,
-            worker_task_manager,
+            agent_runtime_registry,
             conversation_runtime_state,
-            task_manager_delete_hook: Some(task_manager_delete_hook),
+            runtime_registry_delete_hook: Some(runtime_registry_delete_hook),
             agent_registry,
             conversation_repo,
+            execution_conversation_boundary,
             requirement_service,
             terminal_service,
             acp_session_sync: acp_agent_service,
@@ -869,7 +874,6 @@ impl AppServices {
             local_trust_secret,
             app_version,
             skill_paths,
-            guide_mcp_config: guide_mcp_config.clone(),
             requirement_mcp_config,
             _requirement_mcp_server: requirement_mcp_server,
             gateway_mcp_config,

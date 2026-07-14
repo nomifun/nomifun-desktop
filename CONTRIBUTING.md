@@ -51,8 +51,8 @@ review cost materially:
 
 - new app pages, routes, capability domains, or automation permissions;
 - new database tables, auth/session behavior, token handling, or public APIs;
-- new model/provider behavior, browser/computer-use permissions, or agent
-  orchestration semantics;
+- new model/provider behavior, browser/computer-use permissions, or Agent
+  collaboration/execution semantics;
 - large UI redesigns or cross-cutting style changes;
 - dependencies, bundled skills, vendored code, binary assets, or third-party
   media;

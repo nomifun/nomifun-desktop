@@ -209,7 +209,7 @@ pub struct CdpBackend {
     /// **引擎级 observe⊥act 串行门**（DESIGN §22「observe 与 act 互斥」+「per-target act 串行」）。
     /// 跨 `navigate`/`screenshot`/`observe`/`act` 整个方法体持有：快照（observe）绝不与改 DOM 的动作
     /// 在同一引擎上交错（否则给模型陈旧 ref / 半应用页）。此前该不变量仅靠调用方串行成立
-    /// （`is_concurrency_safe==false` → orchestrator partition + 网关 `CompanionBrowser::lock`）；现在
+    /// （`is_concurrency_safe==false` → tool executor partition + 网关 `CompanionBrowser::lock`）；现在
     /// **引擎自身**保证——并发调用方也无法交错 observe/act。公平 `tokio::sync::Mutex`，只在单次已被
     /// 截止时间界定的操作内持有（每 CDP 命令超时 + `Progress` 截止 / `ACT_TIMEOUT`），绝不跨无界等待 → 不死锁。
     /// **作用域 per-engine**（= per Chrome 进程）：DESIGN §22「per-BrowserContext 可并发」由上层实现——

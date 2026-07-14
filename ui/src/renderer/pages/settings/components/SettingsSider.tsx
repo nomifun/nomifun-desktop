@@ -82,7 +82,7 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
       'agent-runtime': {
         id: 'agent-runtime',
-        label: t('settings.agentRuntime'),
+        label: t('settings.agentLimits'),
         icon: <Speed />,
         path: 'agent-runtime',
       },

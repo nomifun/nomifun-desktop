@@ -17,7 +17,7 @@ use nomifun_common::{ErrorChain, normalize_keys_to_snake_case, now_ms};
 use crate::service::ConversationService;
 use nomifun_db::{IConversationRepository, MessageRowUpdate};
 use nomifun_db::models::MessageRow;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
@@ -206,23 +206,28 @@ async fn persist_turn_writeback_state(
 
 async fn emit_turn_writeback_state(
     repo: &Arc<dyn IConversationRepository>,
-    broadcaster: &Arc<dyn EventBroadcaster>,
+    user_events: &Arc<dyn UserEventSink>,
+    user_id: &str,
     conversation_id: &str,
     msg_id: &str,
     state: Value,
 ) {
     persist_turn_writeback_state(repo, conversation_id, msg_id, &state).await;
-    broadcaster.broadcast(WebSocketMessage::new(
-        "knowledge.writeback",
-        turn_writeback_event_payload(conversation_id, msg_id, &state),
-    ));
+    user_events.send_to_user(
+        user_id,
+        WebSocketMessage::new(
+            "knowledge.writeback",
+            turn_writeback_event_payload(conversation_id, msg_id, &state),
+        ),
+    );
 }
 
 pub(crate) async fn run_turn_writeback_report(
     service: Arc<nomifun_knowledge::KnowledgeService>,
     mut request: nomifun_knowledge::TurnWritebackRequest,
     repo: Arc<dyn IConversationRepository>,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
+    user_id: String,
     conversation_id: String,
     msg_id: String,
     final_text: String,
@@ -235,7 +240,8 @@ pub(crate) async fn run_turn_writeback_report(
     let attempt_id = format!("{msg_id}:{started_at}");
     emit_turn_writeback_state(
         &repo,
-        &broadcaster,
+        &user_events,
+        &user_id,
         &conversation_id,
         &msg_id,
         turn_writeback_running_state("started", &attempt_id, started_at, started_at),
@@ -243,14 +249,16 @@ pub(crate) async fn run_turn_writeback_report(
     .await;
 
     let progress_repo = Arc::clone(&repo);
-    let progress_broadcaster = Arc::clone(&broadcaster);
+    let progress_user_events = Arc::clone(&user_events);
+    let progress_user_id = user_id.clone();
     let progress_conversation_id = conversation_id.clone();
     let progress_msg_id = msg_id.clone();
     let progress_attempt_id = attempt_id.clone();
     let report = service
         .finalize_turn_writeback_with_progress(request, move |phase| {
             let repo = Arc::clone(&progress_repo);
-            let broadcaster = Arc::clone(&progress_broadcaster);
+            let user_events = Arc::clone(&progress_user_events);
+            let user_id = progress_user_id.clone();
             let conversation_id = progress_conversation_id.clone();
             let msg_id = progress_msg_id.clone();
             let attempt_id = progress_attempt_id.clone();
@@ -259,7 +267,8 @@ pub(crate) async fn run_turn_writeback_report(
                 let updated_at = now_ms();
                 emit_turn_writeback_state(
                     &repo,
-                    &broadcaster,
+                    &user_events,
+                    &user_id,
                     &conversation_id,
                     &msg_id,
                     turn_writeback_running_state(status, &attempt_id, started_at, updated_at),
@@ -302,7 +311,8 @@ pub(crate) async fn run_turn_writeback_report(
     let finished_at = now_ms();
     emit_turn_writeback_state(
         &repo,
-        &broadcaster,
+        &user_events,
+        &user_id,
         &conversation_id,
         &msg_id,
         turn_writeback_final_state(&report, status, &attempt_id, started_at, finished_at),
@@ -350,7 +360,7 @@ pub struct StreamRelay {
     msg_id: String,
     user_id: String,
     repo: Arc<dyn IConversationRepository>,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     cron_service: Option<Arc<dyn ICronService>>,
     complete_turn: bool,
     /// Companion-companion wire markers (from `conversation.extra.companionSession` /
@@ -364,7 +374,7 @@ pub struct StreamRelay {
     /// / `turn.completed` payload of the turn so downstream consumers (the
     /// companion collector) can tell agent-driven replies from owner-driven work.
     origin: Option<String>,
-    /// IM platform of a channel master-agent conversation (from
+    /// IM platform of a Channel Agent conversation (from
     /// `conversation.extra.channelPlatform`, e.g. `"telegram"`; `None` = not
     /// a channel conversation). Stamped onto every `message.stream` /
     /// `turn.completed` payload so the companion window can tell remote IM turns
@@ -380,17 +390,14 @@ pub struct StreamRelay {
     /// within-bound up front; pre-response + provider-fault are evaluated here).
     #[allow(clippy::type_complexity)]
     failover_suppressor: Option<Arc<dyn Fn(AgentErrorCode) -> bool + Send + Sync>>,
-    /// Process-wide runtime state, used here ONLY to accumulate this turn's
+    /// Process-wide runtime state, used here only to accumulate this turn's
     /// `TurnCompleted` token usage (`input + output`) into the conversation's
-    /// running total so the orchestrator worker can read it after the turn
-    /// settles (DAG/inspector per-node token display). `None` (the default) =
+    /// running total so the owning execution attempt can read it after the turn
+    /// settles. `None` (the default) =
     /// no token accumulation (the common chat/companion path is unaffected).
-    /// The GATE is NOT in this relay (nor per-`ConversationService`): a single
-    /// shared `ConversationService` serves both chat and orchestrator turns. It is
-    /// `ConversationService::send_message` that decides, PER TURN, whether to wire
-    /// this — it sets it ONLY when the conversation row's `extra` carries an
-    /// `orchestrator_run_id` (see its `token_runtime_state`). Once wired here, this
-    /// relay always accumulates (no further conditional below).
+    /// `ConversationService::send_message` wires it only when the authoritative
+    /// Conversation↔Execution relation identifies an active attempt. Once wired,
+    /// the relay always accumulates; it does not perform a second identity lookup.
     runtime_state: Option<Arc<ConversationRuntimeStateService>>,
 }
 
@@ -400,7 +407,7 @@ impl StreamRelay {
         msg_id: String,
         user_id: String,
         repo: Arc<dyn IConversationRepository>,
-        broadcaster: Arc<dyn EventBroadcaster>,
+        user_events: Arc<dyn UserEventSink>,
         cron_service: Option<Arc<dyn ICronService>>,
     ) -> Self {
         Self {
@@ -408,7 +415,7 @@ impl StreamRelay {
             msg_id,
             user_id,
             repo,
-            broadcaster,
+            user_events,
             cron_service,
             complete_turn: true,
             companion: false,
@@ -427,11 +434,9 @@ impl StreamRelay {
 
     /// Wire the process-wide runtime state so this relay accumulates each turn's
     /// `TurnCompleted` token usage into the conversation's running total (read
-    /// back by the orchestrator worker after the turn settles). Wired PER TURN by
-    /// `ConversationService::send_message` — and only for a conversation whose row
-    /// carries an `orchestrator_run_id` (the gate lives there, not in this relay or
-    /// in a dedicated service). The default chat/companion turn leaves it `None`
-    /// (no accumulation, no behaviour change).
+    /// back by the owning execution attempt after the turn settles). The
+    /// Conversation service wires it only for an active attempt relation. Default
+    /// chat and companion turns leave it unset.
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
         self.runtime_state = Some(runtime_state);
         self
@@ -505,7 +510,7 @@ impl StreamRelay {
     }
 
     /// Run the relay loop while also accepting a typed send failure from the
-    /// task that called `IAgentTask::send_message`.
+    /// task that called `AgentRuntimeControl::send_message`.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -737,7 +742,8 @@ impl StreamRelay {
                             if self.complete_turn {
                                 Self::complete_conversation_with_context(
                                     &self.repo,
-                                    &self.broadcaster,
+                                    &self.user_events,
+                                    &self.user_id,
                                     &self.conversation_id,
                                     None,
                                     self.companion,
@@ -872,15 +878,12 @@ impl StreamRelay {
                             self.persist_plan(data).await;
                         }
                         AgentStreamEvent::TurnCompleted(metrics) => {
-                            // Accumulate this turn's token usage into the
-                            // conversation's running total (only when this relay was
-                            // wired — `send_message` wires it solely for a turn whose
-                            // conversation carries an `orchestrator_run_id`; that is
-                            // where the gate lives). The worker reads it back after
-                            // the turn settles to fill `orch_run_tasks.tokens`.
+                            // Accumulate this turn's token usage into the owning
+                            // execution attempt's conversation total. The caller
+                            // already validated the explicit active relation.
                             // `context_tokens` is a gauge (last-request occupancy), so
                             // per-turn COST is the additive `input + output`. Recorded
-                            // BEFORE the turn claim releases, so the polling worker
+                            // BEFORE the turn handle releases, so the polling attempt
                             // never races it.
                             if let Some(runtime_state) = self.runtime_state.as_ref() {
                                 let turn_tokens =
@@ -938,7 +941,8 @@ impl StreamRelay {
                     if self.complete_turn {
                         Self::complete_conversation_with_context(
                             &self.repo,
-                            &self.broadcaster,
+                            &self.user_events,
+                            &self.user_id,
                             &self.conversation_id,
                             None,
                             self.companion,
@@ -1917,7 +1921,7 @@ impl StreamRelay {
             obj.insert("channel_platform".into(), json!(self.channel_platform));
         }
         let msg = WebSocketMessage::new("message.stream", payload);
-        self.broadcaster.broadcast(msg);
+        self.user_events.send_to_user(&self.user_id, msg);
     }
 
     /// Emit `turn.completed` for the conversation, with the companion-companion
@@ -1927,7 +1931,8 @@ impl StreamRelay {
     #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
     pub async fn complete_conversation_with_context(
         repo: &Arc<dyn IConversationRepository>,
-        broadcaster: &Arc<dyn EventBroadcaster>,
+        user_events: &Arc<dyn UserEventSink>,
+        user_id: &str,
         conversation_id: &str,
         runtime: Option<ConversationRuntimeSummary>,
         companion: bool,
@@ -1961,7 +1966,7 @@ impl StreamRelay {
             "channel_platform": channel_platform,
         });
         let msg = WebSocketMessage::new("turn.completed", payload);
-        broadcaster.broadcast(msg);
+        user_events.send_to_user(user_id, msg);
 
         debug!(conversation_id, status = "finished", "Turn completed");
     }
@@ -2007,12 +2012,33 @@ mod tests {
     use nomifun_db::DbError;
     use std::sync::Mutex;
 
+    struct TestUserEventBus {
+        sender: broadcast::Sender<WebSocketMessage<Value>>,
+    }
+
+    impl TestUserEventBus {
+        fn new(capacity: usize) -> Self {
+            let (sender, _) = broadcast::channel(capacity);
+            Self { sender }
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<WebSocketMessage<Value>> {
+            self.sender.subscribe()
+        }
+    }
+
+    impl UserEventSink for TestUserEventBus {
+        fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<Value>) {
+            let _ = self.sender.send(event);
+        }
+    }
+
     // ── run() async tests ─────────────────────────────────────────
 
     #[tokio::test]
     async fn run_text_then_finish_persists_message() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2058,13 +2084,13 @@ mod tests {
 
     // UC-2b: a relay wired with runtime state accumulates the TurnCompleted token
     // usage (input + output) into the conversation's running total — the seam the
-    // orchestrator worker reads after settle to fill `orch_run_tasks.tokens`.
+    // owning execution attempt reads the accumulated total after settle.
     #[tokio::test]
     async fn turn_completed_accumulates_tokens_into_wired_runtime_state() {
         use nomifun_ai_agent::protocol::events::TurnCompletedEventData;
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let runtime_state = Arc::new(ConversationRuntimeStateService::default());
 
@@ -2100,7 +2126,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::TurnCompletedEventData;
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let observer = Arc::new(ConversationRuntimeStateService::default());
 
@@ -2124,7 +2150,7 @@ mod tests {
     #[tokio::test]
     async fn run_plan_event_persists_message_for_history_reload() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2177,7 +2203,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -2229,7 +2255,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::AgentStatusEventData;
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -2267,7 +2293,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2324,7 +2350,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -2372,7 +2398,7 @@ mod tests {
     #[tokio::test]
     async fn run_error_with_no_text_stores_tips_message() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2424,7 +2450,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2469,7 +2495,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::TurnStopReason;
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2519,7 +2545,7 @@ mod tests {
 
         let repo = Arc::new(RecordingRepo::new());
         for turn_id in ["turn-a", "turn-b"] {
-            let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+            let bus = Arc::new(TestUserEventBus::new(64));
             let (tx, _) = broadcast::channel(64);
             let relay = StreamRelay::new(
                 "1".into(),
@@ -2564,7 +2590,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -2609,7 +2635,7 @@ mod tests {
 
         let repo = Arc::new(RecordingRepo::new());
         for status in [ToolCallStatus::Completed, ToolCallStatus::Running] {
-            let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+            let bus = Arc::new(TestUserEventBus::new(64));
             let (tx, _) = broadcast::channel(64);
             let relay = StreamRelay::new(
                 "1".into(),
@@ -2648,7 +2674,7 @@ mod tests {
         // event NOR persist an error `tips` row — the user only ever sees the
         // backup model's turn. The swallowed event is handed back for re-surface.
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2698,7 +2724,7 @@ mod tests {
         // The suppressor must NOT fire post-response: a Text then a fault keeps
         // the error visible (failover would duplicate the streamed text).
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2728,7 +2754,7 @@ mod tests {
     #[tokio::test]
     async fn run_send_error_injects_error_and_completes_turn() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2791,7 +2817,7 @@ mod tests {
     #[tokio::test]
     async fn run_send_error_keeps_existing_stream_error_when_it_arrives_first() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2833,7 +2859,7 @@ mod tests {
     #[tokio::test]
     async fn run_send_error_uses_send_error_when_it_arrives_first() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2886,7 +2912,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -2949,7 +2975,7 @@ mod tests {
     #[tokio::test]
     async fn run_thinking_then_text_uses_distinct_segment_ids() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3015,7 +3041,7 @@ mod tests {
     #[tokio::test]
     async fn run_channel_closed_finalizes() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3061,7 +3087,7 @@ mod tests {
     #[tokio::test]
     async fn run_broadcasts_turn_completed() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3101,7 +3127,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_companion_context_stamps_markers_on_stream_and_turn() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3142,7 +3168,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_channel_platform_stamps_platform_on_stream_and_turn() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3182,7 +3208,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_blank_channel_platform_normalizes_to_null() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3213,7 +3239,7 @@ mod tests {
     #[tokio::test]
     async fn run_without_companion_context_keeps_markers_off() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3249,7 +3275,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_origin_stamps_origin_on_stream_and_turn() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3290,7 +3316,7 @@ mod tests {
     #[tokio::test]
     async fn run_without_origin_keeps_origin_null_and_blank_normalizes() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         // Blank origin must normalize to None (owner speech).
@@ -3324,7 +3350,7 @@ mod tests {
     #[tokio::test]
     async fn run_finalizes_with_cleaned_replacement_event() {
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -3378,7 +3404,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3452,7 +3478,7 @@ mod tests {
         };
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3550,7 +3576,7 @@ mod tests {
         };
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -3599,7 +3625,7 @@ mod tests {
         }};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -3653,7 +3679,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallStatus, ToolGroupEntry};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
 
         let relay = StreamRelay::new(
@@ -3704,7 +3730,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallStatus, ToolGroupEntry};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),
@@ -3746,7 +3772,7 @@ mod tests {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallStatus, ToolGroupEntry};
 
         let repo = Arc::new(RecordingRepo::new());
-        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(64));
+        let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
         let relay = StreamRelay::new(
             "1".into(),

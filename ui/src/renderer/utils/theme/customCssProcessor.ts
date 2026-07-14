@@ -14,16 +14,124 @@
  * @param css - 原始 CSS 字符串
  * @returns 处理后的 CSS 字符串（所有属性都带 !important）
  */
+const CSS_PROPERTY_NAME = /^(?:--)?-?[a-zA-Z_][a-zA-Z0-9_-]*$/;
+const CSS_COMMENTS = /\/\*[\s\S]*?\*\//g;
+const TRAILING_CSS_TRIVIA = /(?:\s|\/\*[\s\S]*?\*\/)*$/;
+
+/**
+ * Add `!important` at declaration boundaries instead of splitting on every
+ * semicolon. CSS values may legally contain semicolons inside strings and
+ * functions (most visibly data URLs), so a regular expression cannot safely
+ * identify the end of a declaration.
+ */
 const addImportantToDeclarations = (css: string): string => {
-  return css.replace(/([a-zA-Z-]+)\s*:\s*([^;!}]+);/g, (match, property, value) => {
-    const trimmedValue = value.trim();
-    // 如果已经包含 !important，不再添加
-    if (trimmedValue.endsWith('!important')) {
-      return match;
+  let result = '';
+  let emittedUntil = 0;
+  let declarationValueStart: number | null = null;
+  let declarationBoundary = 0;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  let inComment = false;
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+
+  const addImportantBefore = (declarationEnd: number) => {
+    if (declarationValueStart === null) return;
+
+    const rawValue = css.slice(declarationValueStart, declarationEnd);
+    const trailingTrivia = rawValue.match(TRAILING_CSS_TRIVIA)?.[0] ?? '';
+    const valueWithoutTrailingTrivia = rawValue.slice(0, rawValue.length - trailingTrivia.length);
+    if (!valueWithoutTrailingTrivia.trim() || /!\s*important\s*$/i.test(valueWithoutTrailingTrivia)) {
+      return;
     }
-    // 添加 !important
-    return `${property}: ${trimmedValue} !important;`;
-  });
+
+    const insertionPoint = declarationEnd - trailingTrivia.length;
+    result += `${css.slice(emittedUntil, insertionPoint)} !important`;
+    emittedUntil = insertionPoint;
+  };
+
+  for (let index = 0; index < css.length; index += 1) {
+    const char = css[index];
+    const next = css[index + 1];
+
+    if (inComment) {
+      if (char === '*' && next === '/') {
+        inComment = false;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      inComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '(') {
+      parenthesisDepth += 1;
+      continue;
+    }
+    if (char === ')') {
+      parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      continue;
+    }
+    if (char === '[') {
+      bracketDepth += 1;
+      continue;
+    }
+    if (char === ']') {
+      bracketDepth = Math.max(0, bracketDepth - 1);
+      continue;
+    }
+    if (parenthesisDepth > 0 || bracketDepth > 0) continue;
+
+    if (char === ':' && declarationValueStart === null) {
+      const property = css.slice(declarationBoundary, index).replace(CSS_COMMENTS, '').trim();
+      if (CSS_PROPERTY_NAME.test(property)) declarationValueStart = index + 1;
+      continue;
+    }
+
+    if (char === ';') {
+      addImportantBefore(index);
+      declarationValueStart = null;
+      declarationBoundary = index + 1;
+      continue;
+    }
+
+    if (char === '{') {
+      // A colon followed by an opening brace belonged to a selector or at-rule,
+      // not a declaration. The new block starts a fresh declaration boundary.
+      declarationValueStart = null;
+      declarationBoundary = index + 1;
+      continue;
+    }
+
+    if (char === '}') {
+      // The final declaration in a block may omit its semicolon.
+      addImportantBefore(index);
+      declarationValueStart = null;
+      declarationBoundary = index + 1;
+    }
+  }
+
+  addImportantBefore(css.length);
+  result += css.slice(emittedUntil);
+  return result;
 };
 
 export const addImportantToAll = (css: string): string => {

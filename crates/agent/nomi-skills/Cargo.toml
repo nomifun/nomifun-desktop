@@ -1,6 +1,6 @@
 [package]
 name = "nomi-skills"
-description = "Skills system for Nomi: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
+description = "Skills system for Nomi: named prompt snippets with tool execution, permissions, hooks, and MCP integration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

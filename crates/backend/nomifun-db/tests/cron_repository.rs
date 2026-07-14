@@ -12,23 +12,22 @@
 use std::sync::Arc;
 
 use nomifun_common::now_ms;
-use nomifun_db::models::CronJobRow;
+use nomifun_db::models::{CronJobRow, CronJobRunRow};
 use nomifun_db::{DbError, ICronRepository, SqliteCronRepository, UpdateCronJobParams, init_database_memory};
+
+const INSTALLATION_OWNER: &str = "system_default_user";
 
 async fn repo() -> (Arc<dyn ICronRepository>, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
 
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-         VALUES ('user_1', 'tester', 'hash', 0, 0)",
-    )
-    .execute(db.pool())
-    .await
-    .unwrap();
+    // This target exercises the complete Cron aggregate, including host-agent
+    // and skill fields. Its fixture therefore belongs to the installation
+    // owner; secondary model-only acceptance is covered by the authority tests.
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-         VALUES (1, 'user_1', 'Conv 1', 'normal', 0, 0)",
+         VALUES (1, ?1, 'Conv 1', 'normal', 0, 0)",
     )
+    .bind(INSTALLATION_OWNER)
     .execute(db.pool())
     .await
     .unwrap();
@@ -41,6 +40,7 @@ fn make_job(id: &str) -> CronJobRow {
     let now = now_ms();
     CronJobRow {
         id: id.into(),
+        user_id: INSTALLATION_OWNER.into(),
         name: "Test Job".into(),
         enabled: true,
         schedule_kind: "every".into(),
@@ -68,12 +68,6 @@ fn make_job(id: &str) -> CronJobRow {
         run_count: 0,
         retry_count: 0,
         max_retries: 3,
-        target_kind: "agent".into(),
-        terminal_mode: None,
-        terminal_session_id: None,
-        terminal_command: None,
-        terminal_args: None,
-        terminal_script: None,
     }
 }
 
@@ -85,7 +79,11 @@ async fn cj1_insert_returns_all_fields() {
     let job = make_job("cron_cj1");
     r.insert(&job).await.unwrap();
 
-    let found = r.get_by_id("cron_cj1").await.unwrap().expect("found");
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_cj1")
+        .await
+        .unwrap()
+        .expect("found");
     assert_eq!(found.id, "cron_cj1");
     assert_eq!(found.name, "Test Job");
     assert!(found.enabled);
@@ -99,6 +97,81 @@ async fn cj1_insert_returns_all_fields() {
     assert_eq!(found.run_count, 0);
     assert_eq!(found.retry_count, 0);
     assert_eq!(found.max_retries, 3);
+}
+
+#[tokio::test]
+async fn repository_hides_crud_and_run_history_from_foreign_owners() {
+    let (r, _db) = repo().await;
+    let job = make_job("cron_owned");
+    r.insert(&job).await.unwrap();
+    let run = CronJobRunRow {
+        id: "cron_run_owned".into(),
+        job_id: job.id.clone(),
+        executed_at_ms: 10,
+        status: "ok".into(),
+        created_at_ms: 10,
+    };
+    r.insert_run_pruned(INSTALLATION_OWNER, &run).await.unwrap();
+
+    assert!(r.get_by_id("user_2", &job.id).await.unwrap().is_none());
+    assert!(r.list_all("user_2").await.unwrap().is_empty());
+    assert!(
+        r.list_by_conversation("user_2", 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        r.update(
+            "user_2",
+            &job.id,
+            &UpdateCronJobParams {
+                name: Some("forged".into()),
+                ..Default::default()
+            },
+        )
+        .await,
+        Err(DbError::NotFound(_))
+    ));
+    assert!(matches!(
+        r.update("user_2", &job.id, &UpdateCronJobParams::default())
+            .await,
+        Err(DbError::NotFound(_))
+    ));
+    assert!(matches!(
+        r.delete("user_2", &job.id).await,
+        Err(DbError::NotFound(_))
+    ));
+    assert_eq!(r.delete_by_conversation("user_2", 1).await.unwrap(), 0);
+    assert!(r.get_by_id(INSTALLATION_OWNER, &job.id).await.unwrap().is_some());
+    assert!(
+        r.list_runs_by_job("user_2", &job.id, 7)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let forged_run = CronJobRunRow {
+        id: "cron_run_forged".into(),
+        ..run
+    };
+    assert!(matches!(
+        r.insert_run_pruned("user_2", &forged_run).await,
+        Err(DbError::NotFound(_))
+    ));
+
+    let scheduler_row = r
+        .get_by_id_for_scheduler(&job.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(scheduler_row.user_id, INSTALLATION_OWNER);
+    assert_eq!(
+        r.list_runs_by_job(INSTALLATION_OWNER, &job.id, 7)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -121,13 +194,21 @@ async fn cj2_three_schedule_kinds() {
     cron_job.schedule_tz = Some("Asia/Shanghai".into());
     r.insert(&cron_job).await.unwrap();
 
-    let at = r.get_by_id("cron_at").await.unwrap().unwrap();
+    let at = r.get_by_id(INSTALLATION_OWNER, "cron_at").await.unwrap().unwrap();
     assert_eq!(at.schedule_kind, "at");
 
-    let every = r.get_by_id("cron_every").await.unwrap().unwrap();
+    let every = r
+        .get_by_id(INSTALLATION_OWNER, "cron_every")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(every.schedule_kind, "every");
 
-    let cron = r.get_by_id("cron_cron").await.unwrap().unwrap();
+    let cron = r
+        .get_by_id(INSTALLATION_OWNER, "cron_cron")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(cron.schedule_kind, "cron");
     assert_eq!(cron.schedule_tz.as_deref(), Some("Asia/Shanghai"));
 }
@@ -136,14 +217,17 @@ async fn cj2_three_schedule_kinds() {
 async fn cj4_get_by_id_existing() {
     let (r, _db) = repo().await;
     r.insert(&make_job("cron_g1")).await.unwrap();
-    let found = r.get_by_id("cron_g1").await.unwrap();
+    let found = r.get_by_id(INSTALLATION_OWNER, "cron_g1").await.unwrap();
     assert!(found.is_some());
 }
 
 #[tokio::test]
 async fn cj5_get_by_id_nonexistent() {
     let (r, _db) = repo().await;
-    let found = r.get_by_id("cron_nonexistent").await.unwrap();
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_nonexistent")
+        .await
+        .unwrap();
     assert!(found.is_none());
 }
 
@@ -154,7 +238,7 @@ async fn cj6_list_all() {
     r.insert(&make_job("cron_l2")).await.unwrap();
     r.insert(&make_job("cron_l3")).await.unwrap();
 
-    let all = r.list_all().await.unwrap();
+    let all = r.list_all(INSTALLATION_OWNER).await.unwrap();
     assert!(all.len() >= 3);
 }
 
@@ -164,8 +248,9 @@ async fn cj7_list_by_conversation() {
 
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-         VALUES (2, 'user_1', 'Conv 2', 'normal', 0, 0)",
+         VALUES (2, ?1, 'Conv 2', 'normal', 0, 0)",
     )
+    .bind(INSTALLATION_OWNER)
     .execute(db.pool())
     .await
     .unwrap();
@@ -177,10 +262,10 @@ async fn cj7_list_by_conversation() {
     other.conversation_id = Some(2);
     r.insert(&other).await.unwrap();
 
-    let conv1 = r.list_by_conversation(1).await.unwrap();
+    let conv1 = r.list_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
     assert_eq!(conv1.len(), 2);
 
-    let conv2 = r.list_by_conversation(2).await.unwrap();
+    let conv2 = r.list_by_conversation(INSTALLATION_OWNER, 2).await.unwrap();
     assert_eq!(conv2.len(), 1);
 }
 
@@ -194,9 +279,13 @@ async fn cj8_update_name_and_enabled() {
         enabled: Some(false),
         ..Default::default()
     };
-    r.update("cron_u1", &params).await.unwrap();
+    r.update(INSTALLATION_OWNER, "cron_u1", &params).await.unwrap();
 
-    let updated = r.get_by_id("cron_u1").await.unwrap().unwrap();
+    let updated = r
+        .get_by_id(INSTALLATION_OWNER, "cron_u1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.name, "Renamed");
     assert!(!updated.enabled);
     assert!(updated.updated_at >= updated.created_at);
@@ -214,9 +303,13 @@ async fn cj9_update_schedule_type() {
         next_run_at: Some(Some(9999999)),
         ..Default::default()
     };
-    r.update("cron_s1", &params).await.unwrap();
+    r.update(INSTALLATION_OWNER, "cron_s1", &params).await.unwrap();
 
-    let updated = r.get_by_id("cron_s1").await.unwrap().unwrap();
+    let updated = r
+        .get_by_id(INSTALLATION_OWNER, "cron_s1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.schedule_kind, "cron");
     assert_eq!(updated.schedule_value, "0 0 9 * * *");
     assert_eq!(updated.schedule_tz.as_deref(), Some("UTC"));
@@ -230,7 +323,10 @@ async fn cj10_update_nonexistent() {
         name: Some("x".into()),
         ..Default::default()
     };
-    let err = r.update("cron_nope", &params).await.unwrap_err();
+    let err = r
+        .update(INSTALLATION_OWNER, "cron_nope", &params)
+        .await
+        .unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -238,16 +334,16 @@ async fn cj10_update_nonexistent() {
 async fn cj11_delete() {
     let (r, _db) = repo().await;
     r.insert(&make_job("cron_d1")).await.unwrap();
-    r.delete("cron_d1").await.unwrap();
+    r.delete(INSTALLATION_OWNER, "cron_d1").await.unwrap();
 
-    let found = r.get_by_id("cron_d1").await.unwrap();
+    let found = r.get_by_id(INSTALLATION_OWNER, "cron_d1").await.unwrap();
     assert!(found.is_none());
 }
 
 #[tokio::test]
 async fn cj12_delete_nonexistent() {
     let (r, _db) = repo().await;
-    let err = r.delete("cron_nope").await.unwrap_err();
+    let err = r.delete(INSTALLATION_OWNER, "cron_nope").await.unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -262,7 +358,7 @@ async fn list_enabled_filters_disabled_jobs() {
     disabled.enabled = false;
     r.insert(&disabled).await.unwrap();
 
-    let enabled = r.list_enabled().await.unwrap();
+    let enabled = r.list_enabled_for_scheduler().await.unwrap();
     assert_eq!(enabled.len(), 1);
     assert_eq!(enabled[0].id, "cron_en1");
 }
@@ -278,9 +374,13 @@ async fn sk1_save_skill_content() {
         skill_content: Some(Some("---\nname: test\n---\nDo something".into())),
         ..Default::default()
     };
-    r.update("cron_sk1", &params).await.unwrap();
+    r.update(INSTALLATION_OWNER, "cron_sk1", &params).await.unwrap();
 
-    let updated = r.get_by_id("cron_sk1").await.unwrap().unwrap();
+    let updated = r
+        .get_by_id(INSTALLATION_OWNER, "cron_sk1")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(updated.skill_content.is_some());
     assert!(updated.skill_content.unwrap().contains("Do something"));
 }
@@ -292,7 +392,11 @@ async fn sk2_has_skill_after_save() {
     job.skill_content = Some("---\nname: s\n---\ncontent".into());
     r.insert(&job).await.unwrap();
 
-    let found = r.get_by_id("cron_sk2").await.unwrap().unwrap();
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_sk2")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(found.skill_content.is_some());
 }
 
@@ -301,7 +405,11 @@ async fn sk3_no_skill_by_default() {
     let (r, _db) = repo().await;
     r.insert(&make_job("cron_sk3")).await.unwrap();
 
-    let found = r.get_by_id("cron_sk3").await.unwrap().unwrap();
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_sk3")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(found.skill_content.is_none());
 }
 
@@ -312,8 +420,8 @@ async fn sk7_delete_clears_skill() {
     job.skill_content = Some("content".into());
     r.insert(&job).await.unwrap();
 
-    r.delete("cron_sk7").await.unwrap();
-    let found = r.get_by_id("cron_sk7").await.unwrap();
+    r.delete(INSTALLATION_OWNER, "cron_sk7").await.unwrap();
+    let found = r.get_by_id(INSTALLATION_OWNER, "cron_sk7").await.unwrap();
     assert!(found.is_none());
 }
 
@@ -325,17 +433,20 @@ async fn cd1_delete_by_conversation_removes_all() {
     r.insert(&make_job("cron_cd1")).await.unwrap();
     r.insert(&make_job("cron_cd2")).await.unwrap();
 
-    let deleted = r.delete_by_conversation(1).await.unwrap();
+    let deleted = r.delete_by_conversation(INSTALLATION_OWNER, 1).await.unwrap();
     assert_eq!(deleted, 2);
 
-    let remaining = r.list_all().await.unwrap();
+    let remaining = r.list_all(INSTALLATION_OWNER).await.unwrap();
     assert!(remaining.is_empty());
 }
 
 #[tokio::test]
 async fn delete_by_conversation_no_match_returns_zero() {
     let (r, _db) = repo().await;
-    let deleted = r.delete_by_conversation(999).await.unwrap();
+    let deleted = r
+        .delete_by_conversation(INSTALLATION_OWNER, 999)
+        .await
+        .unwrap();
     assert_eq!(deleted, 0);
 }
 
@@ -355,9 +466,13 @@ async fn update_execution_state() {
         next_run_at: Some(Some(now + 60_000)),
         ..Default::default()
     };
-    r.update("cron_ex1", &params).await.unwrap();
+    r.update(INSTALLATION_OWNER, "cron_ex1", &params).await.unwrap();
 
-    let updated = r.get_by_id("cron_ex1").await.unwrap().unwrap();
+    let updated = r
+        .get_by_id(INSTALLATION_OWNER, "cron_ex1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.last_run_at, Some(now));
     assert_eq!(updated.last_status.as_deref(), Some("ok"));
     assert_eq!(updated.run_count, 1);
@@ -375,9 +490,13 @@ async fn update_error_state() {
         retry_count: Some(1),
         ..Default::default()
     };
-    r.update("cron_err1", &params).await.unwrap();
+    r.update(INSTALLATION_OWNER, "cron_err1", &params).await.unwrap();
 
-    let updated = r.get_by_id("cron_err1").await.unwrap().unwrap();
+    let updated = r
+        .get_by_id(INSTALLATION_OWNER, "cron_err1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.last_status.as_deref(), Some("error"));
     assert_eq!(updated.last_error.as_deref(), Some("timeout after 30s"));
     assert_eq!(updated.retry_count, 1);
@@ -392,7 +511,11 @@ async fn insert_and_retrieve_agent_config() {
     job.agent_config = Some(r#"{"backend":"openai","name":"GPT-4","modelId":"gpt-4","workspace":"/home/user"}"#.into());
     r.insert(&job).await.unwrap();
 
-    let found = r.get_by_id("cron_ag1").await.unwrap().unwrap();
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_ag1")
+        .await
+        .unwrap()
+        .unwrap();
     let config = found.agent_config.unwrap();
     assert!(config.contains("openai"));
     assert!(config.contains("gpt-4"));
@@ -407,6 +530,10 @@ async fn insert_new_conversation_mode() {
     job.execution_mode = "new_conversation".into();
     r.insert(&job).await.unwrap();
 
-    let found = r.get_by_id("cron_nc1").await.unwrap().unwrap();
+    let found = r
+        .get_by_id(INSTALLATION_OWNER, "cron_nc1")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(found.execution_mode, "new_conversation");
 }

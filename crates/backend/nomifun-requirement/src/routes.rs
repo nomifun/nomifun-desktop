@@ -136,7 +136,7 @@ async fn resume_tag(
 
 /// AutoWork tag→session bindings for the calling user, grouped by tag. The
 /// service returns persisted bindings (every enabled one as `Idle`); here we
-/// upgrade `run_state` to `Active` for targets the orchestrator is currently
+/// upgrade `run_state` to `Active` for targets the AutoWork runner is currently
 /// driving (it owns the live progress map). Used by the AutoWork admin.
 async fn list_tag_bindings(
     State(state): State<RequirementRouterState>,
@@ -145,7 +145,7 @@ async fn list_tag_bindings(
     let mut groups = state.requirement_service.tag_bindings(&user.id).await?;
     for group in &mut groups {
         for binding in &mut group.bindings {
-            if matches!(state.orchestrator.live_progress(binding.kind, &binding.target_id), Some((Some(_), _))) {
+            if matches!(state.auto_work_runner.live_progress(binding.kind, &binding.target_id), Some((Some(_), _))) {
                 binding.run_state = AutoWorkRunState::Active;
             }
         }
@@ -225,7 +225,7 @@ async fn set_autowork(
     // Session-page toggles leave `from_admin` false and may always disable.
     if !req.enabled
         && req.from_admin
-        && matches!(state.orchestrator.live_progress(req.kind, &req.target_id), Some((Some(_), _)))
+        && matches!(state.auto_work_runner.live_progress(req.kind, &req.target_id), Some((Some(_), _)))
     {
         return Err(AppError::BadRequest(
             "session is actively executing a requirement; stop it from the session page first".into(),
@@ -281,11 +281,11 @@ async fn set_autowork(
                 tracing::warn!(tag, error = %e, "auto-resume on autowork enable failed (non-fatal)");
             }
             state
-                .orchestrator
+                .auto_work_runner
                 .start(req.kind, req.target_id.clone(), tag, req.max_requirements);
         }
     } else {
-        state.orchestrator.stop(req.kind, &req.target_id);
+        state.auto_work_runner.stop(req.kind, &req.target_id);
     }
     let st = build_autowork_state(&state, req.kind, &req.target_id).await?;
     state.requirement_service.emit_autowork_state(&st);
@@ -326,10 +326,10 @@ async fn build_autowork_state(
     target_id: &str,
 ) -> Result<AutoWorkState, AppError> {
     let (enabled, tag, _max) = state.requirement_service.read_autowork_config(kind, target_id).await?;
-    let running = state.orchestrator.is_running(kind, target_id);
-    let live_tag = state.orchestrator.running_tag(kind, target_id).or(tag);
+    let running = state.auto_work_runner.is_running(kind, target_id);
+    let live_tag = state.auto_work_runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) =
-        state.orchestrator.live_progress(kind, target_id).unwrap_or((None, 0));
+        state.auto_work_runner.live_progress(kind, target_id).unwrap_or((None, 0));
     let run_state = AutoWorkState::run_state(enabled, current_requirement_id.as_deref());
     Ok(AutoWorkState {
         kind,

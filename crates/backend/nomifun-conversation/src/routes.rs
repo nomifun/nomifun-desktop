@@ -11,7 +11,7 @@ use nomifun_api_types::{
     ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
     SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
-use nomifun_auth::{CurrentUser, LocalTrusted};
+use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 
 use crate::state::ConversationRouterState;
@@ -40,7 +40,7 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
         .route("/api/conversations/{id}/confirmations", get(list_confirmations))
         .route("/api/conversations/{id}/confirmations/{callId}/confirm", post(confirm))
         .route("/api/conversations/{id}/approvals/check", get(check_approval))
-        .route("/api/conversations/active-count", get(active_count))
+        .route("/api/conversations/active-count", get(active_runtime_count))
         .route("/api/conversations/clone", post(clone))
         .route("/api/messages/search", get(search_messages))
         .with_state(state)
@@ -48,15 +48,47 @@ pub fn conversation_routes(state: ConversationRouterState) -> Router {
 
 // ── Handlers ───────────────────────────────────────────────────────
 
-/// `extra.desktopGateway` entitles a session to the Desktop Gateway MCP (full
-/// desktop control: conversations, cron, memory, requirements). Only backend
-/// code paths (channel master-agent sessions, companion companion threads) may set
-/// it — strip both spellings from any extra JSON arriving over HTTP so a
-/// client cannot self-authorize a session.
-fn strip_desktop_gateway_flag(extra: &mut serde_json::Value) {
+/// Remove every runtime-authority field from open JSON at the one untrusted
+/// HTTP boundary.  The service/factory derive owner authority and inject
+/// scoped configs from backend state; create/update/clone cannot persist a
+/// second authorization source.
+fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
     if let Some(map) = extra.as_object_mut() {
-        map.remove("desktopGateway");
-        map.remove("desktop_gateway");
+        for key in [
+            "desktopGateway",
+            "desktop_gateway",
+            "gateway_mcp_config",
+            "gateway_excluded_tools",
+            "requirement_mcp_config",
+            "knowledge_mcp_config",
+            "open_mcp_config",
+            "computer_mcp_config",
+            "browser_mcp_config",
+            "user_id",
+            "allowed_tools",
+            "knowledge_mounts",
+            "knowledge_writeback",
+            "knowledge_channel_write_enabled",
+            "companionSession",
+            "companion",
+            "companionId",
+            "companion_id",
+            "channelPlatform",
+            "channel_platform",
+            "publicAgentId",
+            "public_agent_id",
+            "exposure",
+            "cron_job_id",
+            "cronJobId",
+            "mcp_server_ids",
+            "mcp_servers",
+            "mcp_statuses",
+            "session_mcp_servers",
+            "skills",
+            "temp_workspace_id",
+        ] {
+            map.remove(key);
+        }
     }
 }
 
@@ -74,40 +106,14 @@ fn strip_server_owned_preset_fields(extra: &mut serde_json::Value) {
     }
 }
 
-/// Grant the Desktop Gateway to a session the BACKEND has decided is entitled.
-/// Called after [`strip_desktop_gateway_flag`] (clients cannot self-authorize;
-/// the backend re-grants). Ensures `extra` is an object first.
-fn grant_desktop_gateway(extra: &mut serde_json::Value) {
-    if !extra.is_object() {
-        *extra = serde_json::json!({});
-    }
-    if let Some(map) = extra.as_object_mut() {
-        map.insert("desktopGateway".to_owned(), serde_json::Value::Bool(true));
-    }
-}
-
 async fn create(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    // Present only for locally-trusted requests (the desktop webview / NoAuth),
-    // NOT for remote LAN browser sessions. See `grant` rationale below.
-    local: Option<Extension<LocalTrusted>>,
     body: Result<Json<CreateConversationRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<ConversationResponse>>), AppError> {
     let Json(mut req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    strip_desktop_gateway_flag(&mut req.extra);
+    strip_server_owned_runtime_fields(&mut req.extra);
     strip_server_owned_preset_fields(&mut req.extra);
-    // The desktop is the owner's own machine, so EVERY locally-trusted session is
-    // entitled to the Desktop Gateway by default — any conversation becomes a
-    // semantic super-gateway over the whole platform (the product's "0-code, any
-    // session does everything" goal). Granted by the backend AFTER the strip, so a
-    // client still cannot self-authorize. Remote LAN browser sessions get no
-    // `LocalTrusted` marker and are NOT granted here; companion/channel sessions
-    // are granted on their own (service-direct) paths. What a granted session may
-    // actually DO is still governed by the gateway's danger-tier × surface gate.
-    if local.is_some() {
-        grant_desktop_gateway(&mut req.extra);
-    }
     let conversation = state.service.create(&user.id, req).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(conversation))))
 }
@@ -127,7 +133,9 @@ async fn clone(
     Extension(user): Extension<CurrentUser>,
     body: Result<Json<CloneConversationRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<ConversationResponse>>), AppError> {
-    let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let Json(mut req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
+    strip_server_owned_runtime_fields(&mut req.conversation.extra);
+    strip_server_owned_preset_fields(&mut req.conversation.extra);
     let conversation = state.service.clone_create(&user.id, req).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(conversation))))
 }
@@ -151,10 +159,10 @@ async fn update(
     if let Some(extra) = req.extra.as_mut() {
         // `update` merges extra keys, so a client could otherwise smuggle the
         // gateway flag into an existing conversation.
-        strip_desktop_gateway_flag(extra);
+        strip_server_owned_runtime_fields(extra);
         strip_server_owned_preset_fields(extra);
     }
-    let conversation = state.service.update(&user.id, &id, req, &state.task_manager).await?;
+    let conversation = state.service.update(&user.id, &id, req, &state.runtime_registry).await?;
     Ok(Json(ApiResponse::ok(conversation)))
 }
 
@@ -223,7 +231,7 @@ async fn edit_resubmit(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .edit_and_resubmit(&user.id, &params.id, &params.message_id, req, &state.task_manager)
+        .edit_and_resubmit(&user.id, &params.id, &params.message_id, req, &state.runtime_registry)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -240,7 +248,7 @@ async fn send_msg(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .send_message(&user.id, &id, req, &state.task_manager)
+        .send_message(&user.id, &id, req, &state.runtime_registry)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -257,7 +265,7 @@ async fn steer(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .steer_message(&user.id, &id, req, &state.task_manager)
+        .steer_message(&user.id, &id, req, &state.runtime_registry)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -304,7 +312,7 @@ async fn cancel(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.cancel(&user.id, &id, &state.task_manager).await?;
+    state.service.cancel(&user.id, &id, &state.runtime_registry).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -313,7 +321,7 @@ async fn warmup(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.warmup(&user.id, &id, &state.task_manager).await?;
+    state.service.warmup(&user.id, &id, &state.runtime_registry).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -335,7 +343,7 @@ async fn list_confirmations(
 ) -> Result<Json<ApiResponse<ConfirmationListResponse>>, AppError> {
     let items = state
         .service
-        .list_confirmations(&user.id, &id, &state.task_manager)
+        .list_confirmations(&user.id, &id, &state.runtime_registry)
         .await?;
     Ok(Json(ApiResponse::ok(items)))
 }
@@ -356,7 +364,7 @@ async fn confirm(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .service
-        .confirm(&user.id, &params.id, &params.call_id, req, &state.task_manager)
+        .confirm(&user.id, &params.id, &params.call_id, req, &state.runtime_registry)
         .await?;
     Ok(Json(ApiResponse::success()))
 }
@@ -378,45 +386,61 @@ async fn check_approval(
             &id,
             &query.action,
             query.command_type.as_deref(),
-            &state.task_manager,
+            &state.runtime_registry,
         )
         .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
-async fn active_count(
+async fn active_runtime_count(
     State(state): State<ConversationRouterState>,
     Extension(_user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<ActiveCountResponse>>, AppError> {
-    let count = state.task_manager.active_count();
+    let count = state.runtime_registry.active_runtime_count();
     Ok(Json(ApiResponse::ok(ActiveCountResponse { count })))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_desktop_gateway_flag;
+    use super::strip_server_owned_runtime_fields;
+    use nomifun_api_types::SendMessageRequest;
     use serde_json::json;
 
     #[test]
-    fn strips_both_spellings_of_the_gateway_flag() {
+    fn public_send_body_cannot_forge_engine_delivery_authority() {
+        let request: SendMessageRequest = serde_json::from_value(json!({
+            "content": "ordinary user turn",
+            "durable_operation_id": "forged-operation",
+            "execution_id": "forged-execution"
+        }))
+        .unwrap();
+
+        assert_eq!(request.content, "ordinary user turn");
+        // Durable operation identity is deliberately absent from the public
+        // DTO. Serde discards forged unknown keys and the route always calls
+        // the ordinary guarded send boundary.
+    }
+
+    #[test]
+    fn strips_runtime_authority_fields_but_keeps_agent_configuration() {
         let mut extra = json!({
             "desktopGateway": true,
             "desktop_gateway": true,
             "companionSession": true,
             "backend": "claude",
         });
-        strip_desktop_gateway_flag(&mut extra);
+        strip_server_owned_runtime_fields(&mut extra);
         assert!(extra.get("desktopGateway").is_none());
         assert!(extra.get("desktop_gateway").is_none());
-        // Unrelated keys survive.
-        assert_eq!(extra["companionSession"], json!(true));
+        assert!(extra.get("companionSession").is_none());
+        // Non-authority agent configuration survives.
         assert_eq!(extra["backend"], json!("claude"));
     }
 
     #[test]
     fn strip_is_a_noop_on_non_objects() {
         let mut extra = json!("not an object");
-        strip_desktop_gateway_flag(&mut extra);
+        strip_server_owned_runtime_fields(&mut extra);
         assert_eq!(extra, json!("not an object"));
     }
 }

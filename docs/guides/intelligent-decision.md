@@ -26,8 +26,8 @@ interesting ones:
 - the turn simply goes quiet and would eventually hit a hard timeout.
 
 For an interactive session you would just nudge it yourself. For an *unattended*
-session — an AutoWork queue running overnight, a scheduled job, a multi-agent
-teammate — there is nobody watching. IDMM is that watcher.
+session — an AutoWork queue running overnight, a scheduled job, or a task
+delegated to another Agent — there is nobody watching. IDMM is that watcher.
 
 ## The two tiers
 

@@ -36,7 +36,7 @@ export function dispatchWorkspacePanelMetaEvent(detail: WorkspacePanelMetaDetail
   window.dispatchEvent(new CustomEvent<WorkspacePanelMetaDetail>(WORKSPACE_PANEL_META_EVENT, { detail }));
 }
 
-export type WorkspaceToolRailOrchestration = {
+export type WorkspaceToolRailCollaboration = {
   active: boolean;
   available: boolean;
   statusColor?: string;
@@ -50,7 +50,7 @@ type WorkspaceToolRailProps = {
   onSelect: (tab: WorkspaceTab) => void;
   changeCount?: number;
   extraTabs?: WorkspaceExtraTab[];
-  orchestration?: WorkspaceToolRailOrchestration;
+  collaboration?: WorkspaceToolRailCollaboration;
   footer?: React.ReactNode;
 };
 
@@ -88,7 +88,7 @@ const WorkspaceToolRail: React.FC<WorkspaceToolRailProps> = ({
   onSelect,
   changeCount = 0,
   extraTabs,
-  orchestration,
+  collaboration,
   footer,
 }) => (
   <aside
@@ -117,15 +117,15 @@ const WorkspaceToolRail: React.FC<WorkspaceToolRailProps> = ({
         onClick={() => onSelect(tab.key)}
       />
     ))}
-    {orchestration?.available && (
+    {collaboration?.available && (
       <>
         <span className='workspace-tool-rail__divider' />
         <ToolRailItem
-          active={orchestration.active}
-          label={t('conversation.orchestration.panelTitle', { defaultValue: '编排画布' })}
+          active={collaboration.active}
+          label={t('agentExecution.panel.title', { defaultValue: '协作任务' })}
           icon={<Branch size={18} />}
-          statusColor={orchestration.statusColor}
-          onClick={orchestration.onClick}
+          statusColor={collaboration.statusColor}
+          onClick={collaboration.onClick}
         />
       </>
     )}

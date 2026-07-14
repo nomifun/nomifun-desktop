@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 describe('WorkpathDrawer structure', () => {
-  test('keeps copy path in the hover action cluster instead of a standalone resting icon', () => {
+  test('keeps copy path in the hover action group instead of a standalone resting icon', () => {
     const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'WorkpathDrawer.tsx'), 'utf8');
     const hoverOpsIndex = source.indexOf('{/* Hover ops:');
     const copyButtonIndex = source.indexOf('<CopyIconButton');

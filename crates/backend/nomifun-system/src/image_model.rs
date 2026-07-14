@@ -1743,7 +1743,7 @@ async fn smoke_test_runtime(root: &Path) -> Result<(), ImageFailure> {
             error.to_string(),
         )
     })?;
-    let mut command = nomifun_runtime::Builder::clean_cli(&executable);
+    let mut command = nomi_process_runtime::ChildProcessBuilder::clean_cli(&executable);
     command
         .arg("--help")
         .stdin(Stdio::null())
@@ -1776,7 +1776,7 @@ async fn smoke_test_runtime(root: &Path) -> Result<(), ImageFailure> {
             error.to_string(),
         )),
         Err(_) => {
-            let _ = nomifun_runtime::kill_process_tree(&mut child).await;
+            let _ = nomi_process_runtime::kill_process_tree(&mut child).await;
             Err(ImageFailure::new(
                 LocalModelErrorKind::RuntimeUnavailable,
                 "The local image runtime compatibility check timed out.",

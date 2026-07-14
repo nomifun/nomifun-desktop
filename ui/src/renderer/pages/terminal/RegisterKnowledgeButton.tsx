@@ -12,24 +12,20 @@ import { ipcBridge } from '@/common';
 import { detectFamily, type AgentFamily } from './detectFamily';
 
 interface RegisterKnowledgeButtonProps {
-  /** Working directory for the terminal session. */
   cwd: string;
-  /** The launch command string (used for auto-detecting the agent family). */
   command: string;
-  /** Compact mode for inline header usage (icon-only button). */
   compact?: boolean;
 }
 
-const FAMILY_OPTIONS: { value: AgentFamily; label: string; note: string }[] = [
-  { value: 'claude', label: 'Claude', note: 'claude' },
-  { value: 'codex', label: 'Codex', note: 'codex' },
-  { value: 'gemini', label: 'Gemini', note: 'gemini' },
+const FAMILY_OPTIONS: Array<{ value: AgentFamily; label: string }> = [
+  { value: 'claude', label: 'Claude' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'gemini', label: 'Gemini' },
 ];
 
 /**
- * One-click button that registers the platform knowledge MCP into the working
- * path's CLI auto-discovery config. Clicking opens a modal where the user picks
- * the CLI family, then confirms to register.
+ * Registers only the stable command. No port, token, capability, or broker
+ * endpoint is written to the target config.
  */
 const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, command, compact }) => {
   const { t } = useTranslation();
@@ -38,7 +34,6 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
   const [loading, setLoading] = useState(false);
   const [visible, setVisible] = useState(false);
 
-  // Sync the family selection when command changes and detection succeeds.
   React.useEffect(() => {
     if (autoDetected) setFamily(autoDetected);
   }, [autoDetected]);
@@ -48,18 +43,15 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
     setLoading(true);
     try {
       const outcome = await ipcBridge.terminal.registerKnowledge.invoke({ cwd, family });
-      const msg = outcome.note
-        ? `${outcome.written_path}\n${outcome.note}`
-        : outcome.written_path;
       Message.success({
-        content: msg,
+        content: outcome.note ? `${outcome.written_path}\n${outcome.note}` : outcome.written_path,
         duration: 5000,
       });
       setVisible(false);
-    } catch (err) {
+    } catch (error) {
       Message.error({
-        content: err instanceof Error ? err.message : String(err),
-        duration: 4000,
+        content: error instanceof Error ? error.message : String(error),
+        duration: 5000,
       });
     } finally {
       setLoading(false);
@@ -67,16 +59,10 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
   }, [cwd, family]);
 
   const cwdEmpty = !cwd;
-  const disabledTooltip = cwdEmpty
-    ? t('terminal.registerKnowledge.cwdRequired', { defaultValue: '请先选择工作目录' })
-    : undefined;
-
   const openModal = () => {
-    // Reset family to auto-detected on each open
     setFamily(autoDetected ?? 'claude');
     setVisible(true);
   };
-
   const modal = (
     <Modal
       title={t('terminal.registerKnowledge.modalTitle', { defaultValue: '接入平台知识库' })}
@@ -89,23 +75,26 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
       focusLock
       unmountOnExit
     >
-      <p className='mb-16px text-13px text-t-secondary'>
+      <p className='mb-8px text-13px text-t-secondary'>
         {t('terminal.registerKnowledge.modalDesc', {
-          defaultValue: '选择 CLI 类型，一键将知识检索 MCP 写入工作路径配置文件。',
+          defaultValue: '选择 CLI 类型，一键把知识库 MCP 命令合并到配置；现有配置不会被覆盖。',
         })}
       </p>
-      <Radio.Group value={family} onChange={(v) => setFamily(v as AgentFamily)} direction='vertical'>
-        {FAMILY_OPTIONS.map((opt) => (
-          <Radio key={opt.value} value={opt.value}>
+      <p className='mb-16px text-12px leading-18px text-t-tertiary'>
+        {t('terminal.registerKnowledge.securityDesc', {
+          defaultValue:
+            '配置中不会保存端口或凭据。CLI 启动时通过当前系统用户专属的本地安全通道获取工作区权限；NomiFun 需要保持运行。',
+        })}
+      </p>
+      <Radio.Group value={family} onChange={(value) => setFamily(value as AgentFamily)} direction='vertical'>
+        {FAMILY_OPTIONS.map((option) => (
+          <Radio key={option.value} value={option.value}>
             <span className='text-13px'>
-              {opt.label}
+              {option.label}
               <span className='ml-8px text-12px text-t-tertiary'>
-                {t(`terminal.registerKnowledge.familyNote.${opt.note}` as 'terminal.registerKnowledge.cwdRequired', {
-                  defaultValue:
-                    opt.value === 'codex'
-                      ? '写全局 ~/.codex/config.toml'
-                      : '写项目配置文件',
-                })}
+                {option.value === 'codex'
+                  ? t('terminal.registerKnowledge.codexScope', { defaultValue: '写入用户级配置' })
+                  : t('terminal.registerKnowledge.projectScope', { defaultValue: '写入项目配置' })}
               </span>
             </span>
           </Radio>
@@ -114,37 +103,22 @@ const RegisterKnowledgeButton: React.FC<RegisterKnowledgeButtonProps> = ({ cwd, 
     </Modal>
   );
 
-  if (compact) {
-    return (
-      <>
-        <Tooltip content={disabledTooltip || t('terminal.registerKnowledge.buttonCompact', { defaultValue: '接入知识库' })}>
-          <Button
-            size='small'
-            type='secondary'
-            icon={<LinkCloud size='14' />}
-            disabled={cwdEmpty}
-            loading={loading}
-            onClick={openModal}
-          />
-        </Tooltip>
-        {modal}
-      </>
-    );
-  }
+  const tooltip = cwdEmpty
+    ? t('terminal.registerKnowledge.cwdRequired', { defaultValue: '请先选择工作目录' })
+    : t('terminal.registerKnowledge.buttonCompact', { defaultValue: '接入知识库' });
 
   return (
     <>
-      <Tooltip content={disabledTooltip} disabled={!cwdEmpty}>
+      <Tooltip content={tooltip}>
         <Button
           size='small'
-          type='primary'
-          status='default'
+          type={compact ? 'secondary' : 'primary'}
           icon={<LinkCloud size='14' />}
           disabled={cwdEmpty}
           loading={loading}
           onClick={openModal}
         >
-          {t('terminal.registerKnowledge.button', { defaultValue: '一键接入平台知识库' })}
+          {!compact && t('terminal.registerKnowledge.button', { defaultValue: '一键接入平台知识库' })}
         </Button>
       </Tooltip>
       {modal}

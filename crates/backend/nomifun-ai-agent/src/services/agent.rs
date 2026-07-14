@@ -8,7 +8,7 @@
 //! Session-scoped operations (mode/model/config/usage/capabilities/
 //! slash-commands/side-question/workspace/openclaw-runtime) now live in
 //! `nomifun-conversation::ConversationService`, which dispatches through
-//! `AgentInstance`. This service retains only agent-catalog and
+//! `AgentRuntimeHandle`. This service retains only agent-catalog and
 //! ACP health-check responsibilities, plus support for the custom-agent
 //! CRUD endpoints (see `services::custom`).
 

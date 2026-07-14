@@ -44,7 +44,7 @@ cargo run -p nomifun-web      # picks up the default --dist=../../ui/dist
 
 ## CLI flags and environment variables
 
-All flags below are read by `apps/web/src/main.rs`. Each has an environment-variable counterpart for systemd / Docker / orchestrators.
+All flags below are read by `apps/web/src/main.rs`. Each has an environment-variable counterpart for systemd, Docker, and other deployment platforms.
 
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|

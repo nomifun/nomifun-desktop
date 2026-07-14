@@ -1,0 +1,33 @@
+{
+  "policy": {
+    "title": "Collaboration policy",
+    "description": "Choose whether to delegate tasks and whether parallel work should be preferred.",
+    "delegation": {
+      "disabled": "Off",
+      "automatic": "Automatic",
+      "prefer_parallel": "Prefer parallel"
+    },
+    "askUser": "Ask me for key decisions",
+    "askUserDescription": "Pause and ask when collaborators cannot safely make a decision.",
+    "open": "Collaboration policy",
+    "button": "Collaboration"
+  },
+  "template": {
+    "title": "Collaboration plans",
+    "empty": "No saved plans",
+    "namePlaceholder": "Save the current setup as a plan",
+    "save": "Save",
+    "clear": "Stop using",
+    "activeHint": "All {{count}} collaborators in the plan will be used; the plan is not truncated to the manual model selection.",
+    "delete": "Delete plan",
+    "deleteConfirm": "Delete this collaboration plan?",
+    "saved": "Collaboration plan saved",
+    "applied": "Applied collaboration plan: {{name}}",
+    "deleted": "Collaboration plan deleted",
+    "loadError": "Could not load collaboration plans",
+    "saveError": "Could not save the collaboration plan",
+    "leadMismatch": "This plan does not include the current lead model {{model}}. Switch the lead model or choose another plan.",
+    "applyError": "Could not apply the collaboration plan",
+    "deleteError": "Could not delete the collaboration plan"
+  }
+}

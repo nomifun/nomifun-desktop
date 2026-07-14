@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
-import { transformMessage } from '@/common/chat/chatLib';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
@@ -148,22 +147,14 @@ const NanobotSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id
           setAiProcessing(false);
           break;
         }
-        case 'content':
         case 'error':
-        case 'user_content':
-        default: {
-          const transformedMessage = transformMessage(message);
-          if (transformedMessage) {
-            addOrUpdateMessage(transformedMessage);
-          }
-          if (message.type === 'error') {
-            setAiProcessing(false);
-          }
+          setAiProcessing(false);
           break;
-        }
+        default:
+          break;
       }
     });
-  }, [conversation_id, addOrUpdateMessage]);
+  }, [conversation_id]);
 
   const handleFilesAdded = useCallback(
     (pastedFiles: FileMetadata[]) => {

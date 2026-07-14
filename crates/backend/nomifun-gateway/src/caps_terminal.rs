@@ -4,9 +4,9 @@
 //! in the `terminal_sessions` table, not `conversations`) — which is why the
 //! conversation tools refuse `agent_type = "terminal"` and point here.
 //!
-//! Migration of `tools_terminal.rs` onto the capability registry: the typed
+//! Typed terminal capabilities use the shared
 //! `*Params` structs are now the single source (schema + runtime
-//! deserialization). The `preset_launch` helper lives in `tools_terminal.rs`
+//! deserialization). The `preset_launch` helper lives in `terminal_support.rs`
 //! and is reused directly (pub(crate)).
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::deps::{CallerCtx, GatewayDeps};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
-use crate::tools_terminal::preset_launch;
+use crate::terminal_support::preset_launch;
 
 /// Default PTY size for gateway-created terminals (no real viewport exists;
 /// wide enough that agent CLIs render sanely when the user attaches later).
@@ -69,7 +69,7 @@ struct ListTerminalsParams {
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let user_id = ctx.user_id;
 
@@ -152,7 +152,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateTerminalParams)
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListTerminalsParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let user_id = &ctx.user_id;
 

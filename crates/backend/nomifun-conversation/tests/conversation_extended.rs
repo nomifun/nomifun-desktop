@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_ai_agent::IWorkerTaskManager;
+use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::{
     CloneConversationRequest, CreateConversationRequest, ListMessagesQuery, SearchMessagesQuery, WebSocketMessage,
 };
@@ -9,7 +9,7 @@ use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
 use nomifun_db::models::MessageRow;
 use nomifun_db::{IConversationRepository, SqliteConversationRepository, init_database_memory};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -27,41 +27,41 @@ impl TestBroadcaster {
     }
 }
 
-impl EventBroadcaster for TestBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for TestBroadcaster {
+    fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
     }
 }
 
-struct NoopTaskManager;
+struct NoopAgentRuntimeRegistry;
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for NoopTaskManager {
-    fn get_task(&self, _: &str) -> Option<nomifun_ai_agent::AgentInstance> {
+impl AgentRuntimeRegistry for NoopAgentRuntimeRegistry {
+    fn get_runtime(&self, _: &str) -> Option<nomifun_ai_agent::AgentRuntimeHandle> {
         None
     }
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         _: &str,
-        _: nomifun_ai_agent::types::BuildTaskOptions,
-    ) -> Result<nomifun_ai_agent::AgentInstance, AppError> {
+        _: nomifun_ai_agent::types::AgentRuntimeBuildOptions,
+    ) -> Result<nomifun_ai_agent::AgentRuntimeHandle, AppError> {
         Err(AppError::Internal("noop".into()))
     }
-    fn kill(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, _: &str, _: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         _: &str,
         _: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         Box::pin(std::future::ready(()))
     }
-    fn clear(&self) {}
-    fn active_count(&self) -> usize {
+    fn terminate_all(&self) {}
+    fn active_runtime_count(&self) -> usize {
         0
     }
-    fn collect_idle(&self, _: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
@@ -100,15 +100,17 @@ async fn setup() -> (
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
     let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
         Arc::new(nomifun_db::SqliteAcpSessionRepository::new(db.pool().clone()));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(NoopTaskManager);
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(NoopAgentRuntimeRegistry);
     let svc = ConversationService::new(
+        Arc::<str>::from(USER_ID),
         std::env::temp_dir(),
         broadcaster.clone(),
         Arc::new(EmptySkillResolver),
-        task_mgr,
+        runtime_registry,
         repo.clone(),
         agent_metadata_repo,
         acp_session_repo,
+        Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
     );
     (svc, repo, broadcaster)
 }

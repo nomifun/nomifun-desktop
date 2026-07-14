@@ -4,18 +4,46 @@ use std::sync::Arc;
 use nomi_agent::session::{Session, SessionManager};
 use nomi_config::config::{McpServerConfig, TransportType};
 use nomifun_api_types::{GatewayMcpConfig, NomiBuildExtra, SessionMcpServer, SessionMcpTransport};
-use nomifun_common::AppError;
+use nomifun_common::{
+    AppError, DelegationPolicy, ExecutionAuthority, LoopbackCapabilityLease,
+    LoopbackCapabilityLeaseSet,
+};
 use nomifun_db::IMcpServerRepository;
 use nomifun_db::ISettingsRepository;
 use nomifun_db::models::McpServerRow;
 use nomifun_runtime::resolve_command_path;
 use tracing::{debug, info, warn};
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::nomi::{NomiAgentManager, sanitize_session_messages};
-use crate::types::{BuildTaskOptions, NomiCompatOverrides, NomiResolvedConfig};
+use crate::types::{AgentRuntimeBuildOptions, NomiCompatOverrides, NomiResolvedConfig};
+
+/// Apply the complete ceiling for an authenticated principal that does not own
+/// this installation.  This is model-only execution: no OS tools, configured
+/// MCP, platform domains, knowledge mounts, autonomous goal loop or Agent
+/// delegation.  The non-empty allowlist is intentional because an empty
+/// `retain_named` list means "keep everything".
+fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
+    overrides.computer_use = Some(false);
+    overrides.browser_use = Some(false);
+    overrides.gateway_mcp_config = None;
+    overrides.mcp_server_ids = None;
+    overrides.session_mcp_servers.clear();
+    overrides.companion = false;
+    overrides.companion_id = None;
+    overrides.channel_platform = None;
+    overrides.public_agent_id = None;
+    overrides.knowledge_mounts.clear();
+    overrides.knowledge_writeback = false;
+    overrides.knowledge_channel_write_enabled = false;
+    overrides.allowed_tools = vec!["update_plan".to_owned()];
+    overrides.session_mode = Some("default".to_owned());
+    overrides.max_turns = Some(1);
+    overrides.goal = None;
+    overrides.delegation_policy = DelegationPolicy::Disabled;
+}
 
 fn retarget_resumed_session(session: &mut Session, provider: &str, model: &str) -> bool {
     let changed = session.provider != provider || session.model != model;
@@ -34,15 +62,33 @@ fn persist_repaired_session(manager: &SessionManager, session: &Session) -> Resu
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
+    options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
-) -> Result<AgentInstance, AppError> {
+    authority: ExecutionAuthority,
+) -> Result<AgentRuntimeHandle, AppError> {
     let mut overrides: NomiBuildExtra = serde_json::from_value(options.extra).unwrap_or_default();
+    overrides.user_id = Some(options.user_id.clone());
+    // The first-class conversation field is authoritative. Never let an
+    // open-ended extra payload override execution policy.
+    overrides.delegation_policy = options.delegation_policy;
+    let is_instance_owner = authority.controls_host();
+
+    // Gateway entitlement is derived from the immutable principal, never from
+    // persisted/open JSON. Process-owned config is injected only after all
+    // exposure ceilings have been applied.
+    overrides.gateway_mcp_config = None;
+
+    // A non-owner runtime is deliberately model-only.  Hiding a few tools is
+    // insufficient because every native shell/ACP process shares the backend's
+    // OS uid; the single ceiling below is the enforceable boundary.
+    if !is_instance_owner {
+        apply_model_only_ceiling(&mut overrides);
+    }
 
     // 对外服务钳制（execution-time 后端权威闸）：exposure 的权威来源是入口显式盖章
     // （`extra.exposure`，Remote/渠道公开令牌用）与下面的对外伙伴 id。取更严者；
     // `PublicService` 会话在任何其它处理之前被硬性收窄——关网关 / computer / browser /
-    // spawn，工具收敛到安全白名单。覆盖任何 client/host 传入值。
+    // delegation，工具收敛到安全白名单。覆盖任何 client/host 传入值。
     // 对外伙伴（public agent）会话：`extra.public_agent_id` 置位即标记为对外服务。
     // 安全边界不依赖运行时解析——只要 id 存在就把档位升到 `PublicService`（fail-safe：
     // 即便伙伴已删/解析失败，会话仍被硬钳）。随后 best-effort 解析运行时供人格/知识库。
@@ -57,7 +103,7 @@ pub(super) async fn build(
             .exposure
             .stricter(nomifun_api_types::ExposureMode::PublicService);
     }
-    let public_agent_runtime = match (public_agent_id.as_deref(), deps.public_agent_provider.as_ref())
+    let public_runtime_state = match (public_agent_id.as_deref(), deps.public_agent_provider.as_ref())
     {
         (Some(id), Some(provider)) => provider.resolve_public_agent(id).await,
         _ => None,
@@ -74,7 +120,7 @@ pub(super) async fn build(
     }
 
     // Companion-companion sessions without a persisted persona prompt (channel
-    // master-agent sessions) get one built fresh per agent build, so the
+    // Channel Agent sessions) get one built fresh per Agent build, so the
     // embedded memory snapshot stays current across restarts. `extra.companionId`
     // picks the persona (per-bot binding > legacy platform binding); when no
     // companion is bound (None / dead id) there is no persona — an unbound channel
@@ -96,7 +142,7 @@ pub(super) async fn build(
     // grounded（严禁编造）指令，作为系统提示的开头。人格领衔，任何既有 preset/client
     // 提示保留在其后（对外会话正常不带 client 提示，但保守拼接）。运行时解析失败
     // （伙伴已删）则跳过——会话仍被上面的 PublicService 钳制保护，只是没有人设。
-    if let Some(runtime) = public_agent_runtime.as_ref() {
+    if let Some(runtime) = public_runtime_state.as_ref() {
         let persona = build_public_agent_prompt(runtime);
         overrides.system_prompt = Some(match overrides.system_prompt.take() {
             Some(existing) if !existing.trim().is_empty() => format!("{persona}\n\n{existing}"),
@@ -104,23 +150,31 @@ pub(super) async fn build(
         });
     }
 
-    // Inject the Desktop Gateway MCP config for sessions that carry the
-    // backend-set `desktopGateway` extra flag (channel master-agent sessions,
-    // companion companion threads), mirroring acp.rs. Grants the `nomi_*` desktop
-    // tools — never injected without the flag.
-    if overrides.desktop_gateway && overrides.gateway_mcp_config.is_none() {
-        overrides
-            .gateway_mcp_config
-            .clone_from(&deps.gateway_mcp_config);
+    // A process-owned configuration object is the capability. There is no
+    // serializable boolean grant that persisted or client JSON can forge.
+    let platform_gateway_entitled = is_instance_owner
+        && overrides.allowed_tools.is_empty()
+        && !matches!(
+            overrides.exposure,
+            nomifun_api_types::ExposureMode::PublicService
+        );
+    overrides.gateway_mcp_config = if platform_gateway_entitled {
+        deps.gateway_mcp_config.clone()
+    } else {
+        None
+    };
+    if overrides.gateway_mcp_config.is_some() {
         info!(
             conversation_id = %ctx.conversation_id,
-            gateway_mcp_port = deps.gateway_mcp_config.as_ref().map(|c| c.port),
-            "gateway_mcp: injected into desktopGateway nomi session"
+            gateway_mcp_port = deps.gateway_mcp_config.as_ref().map(|c| c.port()),
+            "gateway_mcp: injected into owner nomi session"
         );
     }
+    let has_platform_gateway = overrides.gateway_mcp_config.is_some();
 
-    let mut extra_mcp_servers = resolve_mcp_servers(&overrides, &ctx.conversation_id);
-    if let Some(repo) = deps.mcp_server_repo.as_ref() {
+    let (mut extra_mcp_servers, loopback_capability_leases) =
+        resolve_mcp_servers(&overrides, &ctx.conversation_id);
+    if is_instance_owner && let Some(repo) = deps.mcp_server_repo.as_ref() {
         for (name, config) in load_user_mcp_servers(
             repo.as_ref(),
             overrides.mcp_server_ids.as_deref(),
@@ -131,11 +185,13 @@ pub(super) async fn build(
             extra_mcp_servers.entry(name).or_insert(config);
         }
     }
-    merge_session_snapshot_mcp_servers(
-        &mut extra_mcp_servers,
-        &overrides.session_mcp_servers,
-        &ctx.conversation_id,
-    );
+    if is_instance_owner {
+        merge_session_snapshot_mcp_servers(
+            &mut extra_mcp_servers,
+            &overrides.session_mcp_servers,
+            &ctx.conversation_id,
+        );
+    }
 
     // Per-surface write policy (spec §3.2 unit 5): companion → direct, external
     // IM channel → disabled (P1; opt-in re-enable is P2), regular chat → the
@@ -188,12 +244,11 @@ pub(super) async fn build(
         knowledge_write_enabled,
     );
 
-    // 常驻 subagent 提示：让普通桌面会话默认懂得在合适场景用 nomi_spawn / nomi_run_create
-    // 把活拆给子 agent 并在画布可视化。工具本就随桌面网关标配，这里只塑形提示（不授予能力、
-    // 不改审批模式）。伙伴走各自 smart_orchestration；渠道/远程会话不注入（网关拒 Remote）；
-    // 对外服务（PublicService）不注入（网关被钳制关闭，spawn 工具不可达，且不得让陌生人扇出）。
-    let inject_subagent_hint = should_inject_subagent_hint(
-        overrides.desktop_gateway,
+    // 持久委派提示：对普通桌面会话按 typed delegation policy 塑形，指导 Agent 在
+    // 合适场景使用统一 `nomi_delegate` 并在执行画布呈现。该策略只影响提示，不授予
+    // 工具能力或改变审批模式。伙伴、渠道/远程和对外服务走各自受限能力面。
+    let delegation_hint_available = should_inject_delegation_hint(
+        has_platform_gateway,
         overrides.companion,
         overrides.channel_platform.is_some(),
         matches!(
@@ -201,14 +256,14 @@ pub(super) async fn build(
             nomifun_api_types::ExposureMode::PublicService
         ),
     );
-    overrides.system_prompt = compose_subagent_hint(
+    overrides.system_prompt = compose_delegation_hint(
         overrides.system_prompt.take(),
-        inject_subagent_hint,
-        overrides.agent_cluster_mode,
+        delegation_hint_available,
+        overrides.delegation_policy,
     );
 
     // Every nomi (local-model) session — regular desktop chat, companion, IM
-    // channel master, and 对外伙伴 (public agent) — must think AND reply in the
+    // Channel Agent, and 对外伙伴 (public agent) — must think AND reply in the
     // app's UI language, not a hardcoded one. The persona prompt no longer forces
     // a language, so it is decided HERE from the live system setting and appended
     // LAST (so it wins over the English base prompt / any earlier persisted
@@ -476,7 +531,7 @@ pub(super) async fn build(
         // 默认授权模式 = 全自动（yolo）。产品决策：所有 nomi 会话默认自动批准
         // 标准工具类别（info/edit/exec/mcp —— 文件编辑 / Shell / 标准工具 & MCP），
         // 不再反复弹授权框。理由：
-        //  - companion / IM channel master 本就无审批 UI（其首个 gateway/file/bash
+        //  - companion / IM Channel Agent 本就无审批 UI（其首个 gateway/file/bash
         //    工具调用会 park 在 rx.await，turn 永不 finish → 聊天永久「思考中」），
         //    所以它们历来必须 yolo；现在把这一默认推广到普通桌面会话。
         //  - **显式 `extra.session_mode` 仍胜出**：用户在权限选择器里手动降级为
@@ -491,6 +546,7 @@ pub(super) async fn build(
             .clone()
             .or_else(|| Some("yolo".to_owned())),
         extra_mcp_servers,
+        loopback_capability_leases,
         bedrock_config: fields.bedrock_config,
         computer_use: overrides.computer_use.unwrap_or(computer_use_default),
         browser_use: browser_use_enabled,
@@ -520,25 +576,28 @@ pub(super) async fn build(
         // Owning conversation instance identity — the nomi manager stamps it
         // onto the session after build so a future reused id is rejected.
         owner_token: owner_token.clone(),
-        // 进程内 Spawn 门控：本地桌面网关会话关闭（改走 nomi_spawn 可视化扇出）。
-        // 对外服务（PublicService）恒关：陌生人不得触发任何子 agent 扇出。
-        in_process_spawn: if matches!(
+        // Host composition is backend-authoritative, never user config. A
+        // Platform Gateway owns persistent AgentExecution; secondary users and
+        // PublicService callers cannot install host execution. Only trusted
+        // no-gateway standalone sessions receive the embedded adapter.
+        install_embedded_agent_execution: should_install_embedded_agent_execution(
+            has_platform_gateway,
+            is_instance_owner,
             overrides.exposure,
-            nomifun_api_types::ExposureMode::PublicService
-        ) {
-            false
-        } else {
-            engine_spawn_enabled(overrides.desktop_gateway, overrides.channel_platform.as_deref())
-        },
-        // Per-session 工具白名单（受限角色的编排 worker；普通会话恒空）。
+        ),
+        // Per-session 工具白名单（受限角色的 Agent attempt；普通会话恒空）。
         allowed_tools: overrides.allowed_tools.clone(),
         // 原生文件工具写根：本地桌面全权（None），渠道/远程/对外收窄到工作区。
         // 与 gateway file-service 的 PathAuthority 同一信任模型（file-access spec）。
-        write_root: resolve_native_write_root(
-            overrides.exposure,
-            overrides.channel_platform.as_deref(),
-            &ctx.workspace,
-        ),
+        write_root: if is_instance_owner {
+            resolve_native_write_root(
+                overrides.exposure,
+                overrides.channel_platform.as_deref(),
+                &ctx.workspace,
+            )
+        } else {
+            Some(ctx.workspace.clone())
+        },
     };
 
     // Scope of the native knowledge_search / knowledge_read tools. Public-agent
@@ -549,7 +608,7 @@ pub(super) async fn build(
     // set stays empty → no KB access (safe). Full file-mount/TOC resolution for
     // public agents is deferred (P1): the scoped kb_ids + the grounded directive
     // enforce the boundary without the prompt-side base TOC the companion path renders.
-    let knowledge_kb_ids: Vec<String> = match public_agent_runtime.as_ref() {
+    let knowledge_kb_ids: Vec<String> = match public_runtime_state.as_ref() {
         Some(runtime) => runtime.knowledge_base_ids.clone(),
         None => overrides
             .knowledge_mounts
@@ -591,36 +650,49 @@ pub(super) async fn build(
     };
 
     let conv_id_for_cron = ctx.conversation_id.clone();
+    let owner_id_for_cron = overrides
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|owner| !owner.is_empty())
+        .map(ToOwned::to_owned);
     let agent = NomiAgentManager::new(
         ctx.conversation_id,
         ctx.workspace,
         config,
         resume_session,
-        deps.requirement_sink.clone(),
-        if overrides.companion {
+        is_instance_owner.then(|| deps.requirement_sink.clone()).flatten(),
+        if is_instance_owner && overrides.companion {
             deps.companion_sink.clone()
         } else {
             None
         },
-        deps.knowledge_retrieval.clone(),
+        is_instance_owner.then(|| deps.knowledge_retrieval.clone()).flatten(),
         knowledge_kb_ids,
         knowledge_prelude,
         knowledge_writeback_sink,
         knowledge_write_bases,
         knowledge_writeback_staged,
-        if overrides.companion {
+        if is_instance_owner && overrides.companion {
             deps.companion_skill_sink.clone()
         } else {
             None
         },
     )
     .await?;
-    // Native cron tools: schedule/list/delete recurring prompts in this
-    // conversation. Registered only when the app wired a cron sink factory.
-    if let Some(make_sink) = deps.cron_sink_factory.as_ref() {
-        agent.register_cron_sink(make_sink(&conv_id_for_cron)).await;
+    // Native cron tools persist background work and can recursively create
+    // model traffic. They are host-control capabilities, not part of the
+    // secondary principal's model-only ceiling. Register them only for the
+    // installation owner, after the manager has been assembled.
+    if is_instance_owner
+        && let (Some(make_sink), Some(owner_id)) =
+        (deps.cron_sink_factory.as_ref(), owner_id_for_cron.as_deref())
+    {
+        agent
+            .register_cron_sink(make_sink(owner_id, &conv_id_for_cron))
+            .await;
     }
-    Ok(AgentInstance::Nomi(Arc::new(agent)))
+    Ok(AgentRuntimeHandle::Nomi(Arc::new(agent)))
 }
 
 /// Host-level default for opt-in tool capabilities ("1"/"true" enables).
@@ -809,24 +881,18 @@ fn append_knowledge_context(
     }
 }
 
-/// 常驻轻量 subagent 使用提示。追加到每个普通桌面 nomi 会话的附加系统提示末尾，
-/// 让模型在合适场景自发用编排工具把活拆给子 agent 并在画布可视化。伙伴走各自的
-/// smart_orchestration 人格提示、渠道/远程会话网关拒 Remote，故不注入。取代原
-/// 「智能编排」lead 提示（不再需要 autoOrchestration 开关或 orchestrator_role 角色）。
-pub(crate) const SUBAGENT_STANDARD_HINT: &str = "遇到可并行的独立子任务，或需要成体系拆解的复杂多步任务时，可用 `nomi_spawn(tasks)` 立即并行派发子 agent（每个子任务在右侧编排画布实时可见状态与转录），或用 `nomi_run_create(goal)` 让规划器把目标拆成有依赖关系的任务 DAG（可用模型范围与工作目录自动取用、随即开跑）。派发后拿到 run_id，直接告诉用户已在后台执行、进度可在右侧编排画布查看，然后结束本轮——不要自己轮询等待，也不要重复创建：子任务全部完成或失败时系统会自动把结果回执给你，届时再向用户汇总。简单或单步问题直接作答，无需派发。";
+/// Standard persistent-delegation guidance for an ordinary desktop session.
+pub(crate) const DELEGATION_STANDARD_HINT: &str = "遇到可并行的独立工作，或需要成体系拆解的复杂多步目标时，统一使用 `nomi_delegate`：独立工作传 `strategy=parallel` 和 tasks，复杂目标传 `strategy=planned` 和 goal，让规划器生成依赖 DAG。每个受委派的 Agent 都在右侧画布实时显示状态与转录。顶层会话委派会创建一个 Agent Execution；执行中的 Attempt 再委派只会向同一个 Execution 追加 Step，不会创建子执行。拿到 execution_id（以及追加时的 added_step_ids）后立即结束本轮，不要轮询等待或重复创建。全部结束时系统会把持久化最终结果直接作为 assistant 回执写入顶层会话，不会再启动一轮模型汇总；用户主动询问进度时才用 `nomi_execution_get` 读取一次。简单或单步问题直接作答，无需委派。";
 
-/// 「agent 集群」模式增强提示（需求1）。仅当会话 extra.agent_cluster_mode=true 且
-/// 常驻 subagent 提示已注入（同一网关前提——工具可达才不是空头支票）时，追加在
-/// `SUBAGENT_STANDARD_HINT` 之后：把「简单任务直接作答」升级为「必须刻意评估、倾向
-/// 开集群；确实太简单则先向用户说明使用简单模式的原因」。
-pub(crate) const CLUSTER_MODE_HINT: &str = "用户已为本会话显式开启「agent 集群」模式：对每一个任务（无论难度），你都必须先刻意评估是否应当用 nomi_spawn / nomi_run_create 开启多 agent 集群协作，并倾向于开启——多个独立 agent 各自拥有更充足的上下文，交付质量更高。只有当任务确实过于简单（单步可答、无可拆分的子任务）时才可不开启；此时必须在回复的开头先用一两句话向用户说明「本次使用简单模式」的原因，然后再直接作答。";
+/// Additional guidance for [`DelegationPolicy::PreferParallel`].
+pub(crate) const DELEGATION_PREFER_PARALLEL_HINT: &str = "本会话偏好并行委派：面对每个请求都先明确评估能否拆成多个互相独立的 Agent 工作，并在确有并行收益时优先使用 `nomi_delegate`。只有任务确实单步可答或无法安全拆分时才直接处理；不要为了形式并行制造重复工作。";
 
-/// 是否给本会话追加常驻 subagent 提示（纯策略，可单测）。提示点名的 `nomi_spawn` /
-/// `nomi_run_create` 工具只随桌面网关标配（`desktop_gateway`=true 的本地可信会话），
+/// 是否给本会话追加常驻 delegation 提示（纯策略，可单测）。提示点名的
+/// `nomi_delegate` 工具只随进程签发的桌面网关能力提供给本地可信会话，
 /// 故必须 `has_gateway` 才注入——否则会话拿不到这些工具，提示就成了空头支票（远程
-/// WebUI 未授信、对外服务被钳制关网关等）。伙伴走各自 smart_orchestration、渠道/远程
-/// 网关拒 Remote、对外服务恒不注入，故一并排除。
-pub(crate) fn should_inject_subagent_hint(
+/// WebUI 未授信、对外服务被钳制关网关等）。伙伴、渠道/远程和对外服务
+/// 都走各自的受限能力面，故一并排除。
+pub(crate) fn should_inject_delegation_hint(
     has_gateway: bool,
     is_companion: bool,
     is_channel: bool,
@@ -835,22 +901,23 @@ pub(crate) fn should_inject_subagent_hint(
     has_gateway && !is_companion && !is_channel && !is_public
 }
 
-/// 把 subagent 提示组合到已有的附加系统提示之后（组合而非替换，保留 preset/人格/知识
-/// 内容）。`inject` 为假时原样返回 `base`（`cluster` 随之失效——工具不可达时集群提示
-/// 同样是空头支票）。`cluster` 为真时在标准提示后再追加「agent 集群」模式增强段。
-/// 纯函数，便于隔离测试。
-pub(crate) fn compose_subagent_hint(
+/// Append typed persistent-delegation guidance without replacing preset,
+/// persona, or knowledge context. Unavailable surfaces and
+/// [`DelegationPolicy::Disabled`] preserve `base` unchanged.
+pub(crate) fn compose_delegation_hint(
     base: Option<String>,
-    inject: bool,
-    cluster: bool,
+    available: bool,
+    policy: DelegationPolicy,
 ) -> Option<String> {
-    if !inject {
+    if !available || policy == DelegationPolicy::Disabled {
         return base;
     }
-    let hint = if cluster {
-        format!("{SUBAGENT_STANDARD_HINT}\n\n{CLUSTER_MODE_HINT}")
-    } else {
-        SUBAGENT_STANDARD_HINT.to_owned()
+    let hint = match policy {
+        DelegationPolicy::Automatic => DELEGATION_STANDARD_HINT.to_owned(),
+        DelegationPolicy::PreferParallel => {
+            format!("{DELEGATION_STANDARD_HINT}\n\n{DELEGATION_PREFER_PARALLEL_HINT}")
+        }
+        DelegationPolicy::Disabled => unreachable!("disabled policy returned above"),
     };
     Some(match base {
         Some(existing) if !existing.is_empty() => format!("{existing}\n\n{hint}"),
@@ -858,12 +925,19 @@ pub(crate) fn compose_subagent_hint(
     })
 }
 
-/// 进程内 Spawn 门控（纯函数，可单测）：本地桌面网关会话（desktop_gateway 且非
-/// IM 渠道）禁用进程内 Spawn —— 子 agent 改走 nomi_spawn 编排扇出（每个子任务
-/// 在 DAG 画布上有状态与转录，不再静默）；IM 渠道 master（nomi_spawn 对 Remote
-/// 面拒绝，禁了就没有扇出手段）与其余会话保留进程内 Spawn。
-pub(crate) fn engine_spawn_enabled(desktop_gateway: bool, channel_platform: Option<&str>) -> bool {
-    !(desktop_gateway && channel_platform.is_none())
+/// Backend-authoritative host composition gate. It is intentionally derived
+/// from resolved runtime authority rather than user configuration: Platform
+/// Gateway owns persistent AgentExecution, and untrusted identities/exposures
+/// never receive an embedded host execution surface.
+pub(crate) fn should_install_embedded_agent_execution(
+    has_platform_gateway: bool,
+    is_instance_owner: bool,
+    exposure: nomifun_api_types::ExposureMode,
+) -> bool {
+    !has_platform_gateway
+        && is_instance_owner
+        && nomifun_api_types::exposure_clamp(exposure)
+            .is_none_or(|clamp| clamp.install_embedded_agent_execution)
 }
 
 /// 原生文件工具（Write/Edit/ApplyPatch）的写根钳制解析（纯函数，可单测）。与
@@ -888,16 +962,15 @@ pub(crate) fn resolve_native_write_root(
 
 /// 对外服务钳制（execution-time 后端权威闸，纯函数除类型外无副作用，可单测）。
 /// `ExposureMode::PublicService` 是不可信陌生人档：把会话的能力授予**硬性收窄**到
-/// 安全白名单，并关闭桌面网关 / computer / browser —— 覆盖任何 client/host 传入值。
-/// `NomiBuildExtra` 上没有 `in_process_spawn` 字段（它是工厂派生值），故本函数只钳制
-/// 字段，spawn 在其派生点按 `overrides.exposure` 单独收口。返回是否发生了钳制。
+/// 安全白名单，并关闭网关 / computer / browser —— 覆盖任何 client/host 传入值。
+/// `NomiBuildExtra` 上没有 host-composition 字段；embedded AgentExecution
+/// 由工厂在解析 owner/exposure/gateway 后单独派生。返回是否发生了钳制。
 ///
 /// 缺省 `Private`（及 `TrustedRemote`）不钳制 → 今日行为，零回归。
 pub(crate) fn apply_exposure_clamp(overrides: &mut NomiBuildExtra) -> bool {
     match nomifun_api_types::exposure_clamp(overrides.exposure) {
         None => false,
         Some(clamp) => {
-            overrides.desktop_gateway = clamp.desktop_gateway; // false
             overrides.gateway_mcp_config = None; // 绝不注入网关 MCP（即便上游预置）
             overrides.computer_use = Some(clamp.computer_use); // Some(false)
             overrides.browser_use = Some(clamp.browser_use); // Some(false)
@@ -1336,16 +1409,19 @@ fn resolve_stdio_command(command: &str) -> String {
 fn resolve_mcp_servers(
     overrides: &NomiBuildExtra,
     conversation_id: &str,
-) -> HashMap<String, McpServerConfig> {
+) -> (HashMap<String, McpServerConfig>, LoopbackCapabilityLeaseSet) {
     let mut servers = HashMap::new();
-    // The desktop gateway remains an explicit per-session capability for
-    // master-agent style sessions.
-    if overrides.desktop_gateway
-        && let Some(gw_cfg) = &overrides.gateway_mcp_config
-    {
-        servers.extend(gateway_mcp_to_config(gw_cfg, overrides, conversation_id));
+    let mut leases = LoopbackCapabilityLeaseSet::new();
+    // Presence of the process-owned config is the capability grant.
+    if let Some(gw_cfg) = &overrides.gateway_mcp_config {
+        if let Some((name, server, lease)) =
+            gateway_mcp_to_config(gw_cfg, overrides, conversation_id)
+        {
+            servers.insert(name, server);
+            leases.push(lease);
+        }
     }
-    servers
+    (servers, leases)
 }
 
 fn resolved_session_mode(overrides: &NomiBuildExtra) -> String {
@@ -1358,7 +1434,7 @@ fn resolved_session_mode(overrides: &NomiBuildExtra) -> String {
         .to_owned()
 }
 
-/// Desktop Gateway MCP stdio bridge config for the nomi engine, mirroring the
+/// Platform Gateway MCP stdio bridge config for the Nomi engine, mirroring the
 /// ACP assembler's `gateway_mcp_server`. Caller conversation + user ids ride
 /// along for self-protection and data scoping; the companion binding (when present)
 /// rides along for attribution.
@@ -1366,52 +1442,33 @@ fn gateway_mcp_to_config(
     cfg: &GatewayMcpConfig,
     overrides: &NomiBuildExtra,
     conversation_id: &str,
-) -> HashMap<String, McpServerConfig> {
+) -> Option<(String, McpServerConfig, LoopbackCapabilityLease)> {
+    let session_mode = resolved_session_mode(overrides);
+    let child = match cfg.issue_for_conversation(
+        overrides.user_id.as_deref().unwrap_or_default(),
+        conversation_id,
+        overrides.companion_id.as_deref(),
+        overrides.channel_platform.as_deref(),
+        Some(&session_mode),
+        &overrides.gateway_excluded_tools,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            warn!(%error, conversation_id, "gateway MCP capability issuance failed closed");
+            return None;
+        }
+    };
     let mut env = HashMap::new();
-    env.insert(GatewayMcpConfig::ENV_PORT.into(), cfg.port.to_string());
-    env.insert(GatewayMcpConfig::ENV_TOKEN.into(), cfg.token.clone());
     env.insert(
-        GatewayMcpConfig::ENV_CONVERSATION_ID.into(),
-        conversation_id.to_owned(),
-    );
-    env.insert(
-        GatewayMcpConfig::ENV_USER_ID.into(),
-        overrides.user_id.clone().unwrap_or_default(),
-    );
-    env.insert(
-        GatewayMcpConfig::ENV_SESSION_MODE.into(),
-        resolved_session_mode(overrides),
-    );
-    if let Some(companion_id) = overrides
-        .companion_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        env.insert(
-            GatewayMcpConfig::ENV_COMPANION_ID.into(),
-            companion_id.to_owned(),
-        );
-    }
-    if let Some(platform) = overrides
-        .channel_platform
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        env.insert(
-            GatewayMcpConfig::ENV_CHANNEL_PLATFORM.into(),
-            platform.to_owned(),
-        );
-    }
-    env.insert(
-        GatewayMcpConfig::ENV_PROFILE.into(),
-        GatewayMcpConfig::default_profile_for_session(overrides.channel_platform.as_deref()).into(),
+        GatewayMcpConfig::ENV_CAPABILITY.into(),
+        child
+            .bootstrap_json()
+            .expect("validated gateway bootstrap serializes"),
     );
 
     let server = McpServerConfig {
         transport: TransportType::Stdio,
-        command: Some(cfg.binary_path.clone()),
+        command: Some(child.binary_path),
         args: Some(vec!["mcp-gateway-stdio".into()]),
         env: Some(env),
         url: None,
@@ -1419,13 +1476,67 @@ fn gateway_mcp_to_config(
         deferred: Some(true),
     };
 
-    HashMap::from([(GatewayMcpConfig::SERVER_NAME.to_owned(), server)])
+    Some((
+        GatewayMcpConfig::SERVER_NAME.to_owned(),
+        server,
+        child.lease,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::GuideMcpConfig;
+
+    fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {
+        GatewayMcpConfig::from_issuer(
+            port,
+            Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap()),
+            binary.into(),
+            Arc::<str>::from(owner),
+        )
+    }
+
+    #[test]
+    fn secondary_nomi_session_is_model_only() {
+        let mut overrides = NomiBuildExtra {
+            computer_use: Some(true),
+            browser_use: Some(true),
+            mcp_server_ids: Some(vec!["7".into()]),
+            session_mcp_servers: vec![SessionMcpServer {
+                id: "session-mcp".into(),
+                name: "session-mcp".into(),
+                transport: SessionMcpTransport::Stdio {
+                    command: "server".into(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+            }],
+            companion: true,
+            companion_id: Some("companion-a".into()),
+            public_agent_id: Some("public-a".into()),
+            knowledge_mounts: vec![Default::default()],
+            knowledge_writeback: true,
+            knowledge_channel_write_enabled: true,
+            ..Default::default()
+        };
+
+        apply_model_only_ceiling(&mut overrides);
+
+        assert!(overrides.gateway_mcp_config.is_none());
+        assert_eq!(overrides.computer_use, Some(false));
+        assert_eq!(overrides.browser_use, Some(false));
+        assert!(overrides.mcp_server_ids.is_none());
+        assert!(overrides.session_mcp_servers.is_empty());
+        assert!(!overrides.companion && overrides.companion_id.is_none());
+        assert!(overrides.public_agent_id.is_none());
+        assert!(overrides.knowledge_mounts.is_empty());
+        assert!(!overrides.knowledge_writeback);
+        assert!(!overrides.knowledge_channel_write_enabled);
+        assert_eq!(overrides.allowed_tools, vec!["update_plan"]);
+        assert_eq!(overrides.session_mode.as_deref(), Some("default"));
+        assert_eq!(overrides.max_turns, Some(1));
+        assert_eq!(overrides.delegation_policy, DelegationPolicy::Disabled);
+    }
 
     #[test]
     fn resumed_session_metadata_tracks_each_provider_switch() {
@@ -1586,19 +1697,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_adds_gateway_when_flag_set() {
+    fn resolve_mcp_servers_adds_gateway_when_process_config_present() {
         let overrides = NomiBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41237,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
             user_id: Some("u1".into()),
             companion_id: Some("companion_9".into()),
+            gateway_excluded_tools: vec!["nomi_delegate".into()],
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, leases) = resolve_mcp_servers(&overrides, "conv-1");
+        assert_eq!(leases.len(), 1);
         let gw = servers
             .get(GatewayMcpConfig::SERVER_NAME)
             .expect("gateway server registered");
@@ -1607,94 +1715,68 @@ mod tests {
             Some(&["mcp-gateway-stdio".to_owned()][..])
         );
         let env = gw.env.as_ref().expect("env set");
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_PORT).map(String::as_str),
-            Some("41237")
-        );
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_TOKEN).map(String::as_str),
-            Some("gw-tok")
-        );
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_CONVERSATION_ID)
-                .map(String::as_str),
-            Some("conv-1")
-        );
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_USER_ID).map(String::as_str),
-            Some("u1")
-        );
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_COMPANION_ID)
-                .map(String::as_str),
-            Some("companion_9")
-        );
+        assert_eq!(env.len(), 1);
+        let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
+            nomifun_api_types::GatewayCapabilityClaims,
+        > = serde_json::from_str(
+            env.get(GatewayMcpConfig::ENV_CAPABILITY)
+                .expect("capability bootstrap env"),
+        )
+        .unwrap();
+        assert_eq!(bootstrap.port, 41237);
+        let claims = bootstrap.access.claims;
+        assert_eq!(claims.user_id, "u1");
+        assert_eq!(claims.session.session_id, "conv-1");
+        assert_eq!(claims.session.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(claims.scope.companion_id.as_deref(), Some("companion_9"));
+        assert_eq!(claims.scope.profile, GatewayMcpConfig::PROFILE_WORK);
+        assert_eq!(claims.scope.session_mode.as_deref(), Some("yolo"));
+        assert_eq!(claims.scope.excluded_tools, vec!["nomi_delegate"]);
+        assert!(!claims.scope.instance_owner);
+        assert!(!env[GatewayMcpConfig::ENV_CAPABILITY].contains("gw-root-secret"));
         assert_eq!(gw.deferred, Some(true));
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_PROFILE).map(String::as_str),
-            Some(GatewayMcpConfig::PROFILE_WORK)
-        );
-        assert_eq!(
-            env.get("NOMI_GW_MCP_SESSION_MODE").map(String::as_str),
-            Some("yolo"),
-            "gateway bridge must receive the resolved default full-auto session mode"
-        );
     }
 
     #[test]
     fn gateway_env_omits_companion_id_when_unbound() {
         let overrides = NomiBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41237,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
             user_id: Some("u1".into()),
             companion_id: None,
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv-1");
         let env = servers[GatewayMcpConfig::SERVER_NAME].env.as_ref().unwrap();
-        assert!(
-            !env.contains_key(GatewayMcpConfig::ENV_COMPANION_ID),
-            "no binding → no env key (the stdio bridge treats absent and empty the same)"
-        );
+        let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
+            nomifun_api_types::GatewayCapabilityClaims,
+        > = serde_json::from_str(env.get(GatewayMcpConfig::ENV_CAPABILITY).unwrap()).unwrap();
+        let claims = bootstrap.access.claims;
+        assert!(claims.scope.companion_id.is_none());
     }
 
     #[test]
     fn gateway_env_uses_lite_profile_for_channel_sessions() {
         let overrides = NomiBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41237,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
+            user_id: Some("u1".into()),
             channel_platform: Some("lark".into()),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv-1");
         let env = servers[GatewayMcpConfig::SERVER_NAME].env.as_ref().unwrap();
-        assert_eq!(
-            env.get(GatewayMcpConfig::ENV_PROFILE).map(String::as_str),
-            Some(GatewayMcpConfig::PROFILE_LITE)
-        );
+        let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
+            nomifun_api_types::GatewayCapabilityClaims,
+        > = serde_json::from_str(env.get(GatewayMcpConfig::ENV_CAPABILITY).unwrap()).unwrap();
+        let claims = bootstrap.access.claims;
+        assert_eq!(claims.scope.profile, GatewayMcpConfig::PROFILE_LITE);
     }
 
     #[test]
-    fn resolve_mcp_servers_skips_gateway_without_flag() {
-        let overrides = NomiBuildExtra {
-            desktop_gateway: false,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41237,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
-            ..Default::default()
-        };
-        let servers = resolve_mcp_servers(&overrides, "conv-1");
+    fn resolve_mcp_servers_skips_gateway_without_process_config() {
+        let overrides = NomiBuildExtra::default();
+        let (servers, leases) = resolve_mcp_servers(&overrides, "conv-1");
         assert!(!servers.contains_key(GatewayMcpConfig::SERVER_NAME));
+        assert!(leases.is_empty());
     }
 
     #[test]
@@ -1924,75 +2006,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_mcp_servers_ignores_guide_configs() {
-        let overrides = NomiBuildExtra {
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8000,
-                token: "guide-tok".into(),
-                binary_path: "/usr/bin/backend".into(),
-            }),
-            backend: Some("nomi".into()),
-            ..Default::default()
-        };
-
-        let result = resolve_mcp_servers(&overrides, "conv-1");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn resolve_mcp_servers_ignores_guide_for_solo_sessions() {
-        let overrides = NomiBuildExtra {
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8000,
-                token: "guide-tok".into(),
-                binary_path: "/usr/bin/backend".into(),
-            }),
-            backend: Some("nomi".into()),
-            user_id: Some("user-1".into()),
-            ..Default::default()
-        };
-
-        let result = resolve_mcp_servers(&overrides, "conv-2");
-        assert!(result.is_empty());
-    }
-
-    #[test]
     fn resolve_mcp_servers_empty_when_no_config() {
         let overrides = NomiBuildExtra::default();
-        let result = resolve_mcp_servers(&overrides, "conv-3");
+        let (result, leases) = resolve_mcp_servers(&overrides, "conv-3");
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn resolve_mcp_servers_guide_skipped_for_unknown_backend() {
-        let overrides = NomiBuildExtra {
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8000,
-                token: "tok".into(),
-                binary_path: "/bin/x".into(),
-            }),
-            backend: Some("unknown-vendor".into()),
-            ..Default::default()
-        };
-
-        let result = resolve_mcp_servers(&overrides, "conv-4");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn resolve_mcp_servers_guide_skipped_when_backend_none() {
-        let overrides = NomiBuildExtra {
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8000,
-                token: "tok".into(),
-                binary_path: "/bin/x".into(),
-            }),
-            backend: None,
-            ..Default::default()
-        };
-
-        let result = resolve_mcp_servers(&overrides, "conv-5");
-        assert!(result.is_empty());
+        assert!(leases.is_empty());
     }
 
     #[test]
@@ -2133,71 +2151,95 @@ mod tests {
     }
 
     #[test]
-    fn engine_spawn_enabled_policy() {
-        // 本地桌面网关会话（普通/伙伴）→ 禁进程内 Spawn（改走 nomi_spawn 可视化扇出）。
-        assert!(!engine_spawn_enabled(true, None));
-        // IM 渠道 master 会话：nomi_spawn 对 Remote 面拒绝，保留进程内 Spawn。
-        assert!(engine_spawn_enabled(true, Some("telegram")));
-        // 无网关会话 → 保留。
-        assert!(engine_spawn_enabled(false, None));
+    fn embedded_agent_execution_requires_trusted_no_gateway_host() {
+        use nomifun_api_types::ExposureMode;
+
+        assert!(should_install_embedded_agent_execution(
+            false,
+            true,
+            ExposureMode::Private
+        ));
+        assert!(!should_install_embedded_agent_execution(
+            true,
+            true,
+            ExposureMode::Private
+        ));
+        assert!(!should_install_embedded_agent_execution(
+            false,
+            false,
+            ExposureMode::Private
+        ));
+        assert!(!should_install_embedded_agent_execution(
+            false,
+            true,
+            ExposureMode::PublicService
+        ));
     }
 
     #[test]
-    fn subagent_hint_injects_for_plain_desktop_session() {
-        // 普通桌面会话（有网关、非伙伴、非渠道、非对外）→ 追加 subagent 提示
-        assert!(super::should_inject_subagent_hint(true, false, false, false));
-        let out = super::compose_subagent_hint(Some("基础提示".to_string()), true, false);
+    fn automatic_delegation_hint_injects_for_plain_desktop_session() {
+        assert!(super::should_inject_delegation_hint(true, false, false, false));
+        let out = super::compose_delegation_hint(
+            Some("基础提示".to_string()),
+            true,
+            DelegationPolicy::Automatic,
+        );
         let s = out.unwrap();
         assert!(s.starts_with("基础提示"));
-        assert!(s.contains("nomi_spawn"));
-        assert!(s.contains("nomi_run_create"));
-        // 未开集群模式 → 不含集群增强段
-        assert!(!s.contains("agent 集群"));
+        assert!(s.contains("nomi_delegate"));
+        assert!(s.contains("strategy=parallel"));
+        assert!(s.contains("strategy=planned"));
+        assert!(s.contains("nomi_execution_get"));
+        assert!(!s.contains(super::DELEGATION_PREFER_PARALLEL_HINT));
     }
 
     #[test]
-    fn subagent_hint_skips_when_gateway_absent() {
-        // 无桌面网关（如远程 WebUI 未授信）→ 不注入：提示点名的 nomi_spawn /
-        // nomi_run_create 工具此时不可达，注入只会成为空头支票。
-        assert!(!super::should_inject_subagent_hint(false, false, false, false));
+    fn delegation_hint_skips_when_gateway_absent() {
+        assert!(!super::should_inject_delegation_hint(false, false, false, false));
     }
 
     #[test]
-    fn subagent_hint_skips_companion_and_channel() {
-        // 伙伴有自己的 smart_orchestration；渠道/远程网关拒 Remote，注入是死路；对外服务恒不注入
-        // （下述三例均带网关 true，隔离出各排除维度）
-        assert!(!super::should_inject_subagent_hint(true, true, false, false)); // companion
-        assert!(!super::should_inject_subagent_hint(true, false, true, false)); // channel/remote
-        assert!(!super::should_inject_subagent_hint(true, false, false, true)); // public service
-        // inject=false 时原样返回，不追加
+    fn delegation_hint_skips_restricted_surfaces() {
+        assert!(!super::should_inject_delegation_hint(true, true, false, false));
+        assert!(!super::should_inject_delegation_hint(true, false, true, false));
+        assert!(!super::should_inject_delegation_hint(true, false, false, true));
         let base = Some("仅基础".to_string());
-        assert_eq!(super::compose_subagent_hint(base.clone(), false, false), base);
+        assert_eq!(
+            super::compose_delegation_hint(base.clone(), false, DelegationPolicy::Automatic),
+            base
+        );
     }
 
     #[test]
-    fn subagent_hint_handles_empty_base() {
-        let out = super::compose_subagent_hint(None, true, false);
-        assert_eq!(out, Some(super::SUBAGENT_STANDARD_HINT.to_string()));
+    fn automatic_delegation_hint_handles_empty_base() {
+        let out = super::compose_delegation_hint(None, true, DelegationPolicy::Automatic);
+        assert_eq!(out, Some(super::DELEGATION_STANDARD_HINT.to_string()));
     }
 
     #[test]
-    fn cluster_hint_appends_after_standard_hint() {
-        // 集群模式（需求1）：标准提示 + 集群增强段按序追加，基础提示保留在最前。
-        let out = super::compose_subagent_hint(Some("基础提示".to_string()), true, true).unwrap();
+    fn prefer_parallel_hint_appends_after_standard_hint() {
+        let out = super::compose_delegation_hint(
+            Some("基础提示".to_string()),
+            true,
+            DelegationPolicy::PreferParallel,
+        )
+        .unwrap();
         assert!(out.starts_with("基础提示"));
-        let std_pos = out.find(super::SUBAGENT_STANDARD_HINT).expect("标准提示在场");
-        let cluster_pos = out.find(super::CLUSTER_MODE_HINT).expect("集群提示在场");
-        assert!(std_pos < cluster_pos, "集群段必须位于标准段之后");
-        // 集群段核心指令在场：刻意评估 + 简单模式须说明原因。
-        assert!(out.contains("刻意评估"));
-        assert!(out.contains("简单模式"));
+        let standard_pos = out.find(super::DELEGATION_STANDARD_HINT).expect("标准提示在场");
+        let preference_pos = out
+            .find(super::DELEGATION_PREFER_PARALLEL_HINT)
+            .expect("并行偏好提示在场");
+        assert!(standard_pos < preference_pos);
+        assert!(out.contains("优先使用"));
     }
 
     #[test]
-    fn cluster_hint_requires_inject() {
-        // 网关不可达（inject=false）时集群标记同样无效——工具是空头支票。
+    fn disabled_delegation_policy_preserves_base() {
         let base = Some("仅基础".to_string());
-        assert_eq!(super::compose_subagent_hint(base.clone(), false, true), base);
+        assert_eq!(
+            super::compose_delegation_hint(base.clone(), true, DelegationPolicy::Disabled),
+            base
+        );
     }
 
     #[test]
@@ -2229,7 +2271,7 @@ mod tests {
         // 上游即便要网关 + computer + browser + 危险工具…
         let mut o = NomiBuildExtra {
             exposure: nomifun_api_types::ExposureMode::PublicService,
-            desktop_gateway: true,
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
             computer_use: Some(true),
             browser_use: Some(true),
             allowed_tools: vec!["Bash".to_owned(), "Write".to_owned()],
@@ -2238,7 +2280,6 @@ mod tests {
         let clamped = apply_exposure_clamp(&mut o);
         // …全部被硬性收窄。
         assert!(clamped, "PublicService must clamp");
-        assert!(!o.desktop_gateway, "no gateway for strangers");
         assert!(o.gateway_mcp_config.is_none(), "gateway MCP must be cleared");
         assert_eq!(o.computer_use, Some(false));
         assert_eq!(o.browser_use, Some(false));
@@ -2253,12 +2294,15 @@ mod tests {
     fn private_and_default_sessions_are_not_clamped() {
         // 缺省 = Private = 今日行为，零回归。
         let mut o = NomiBuildExtra {
-            desktop_gateway: true,
+            gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
             allowed_tools: vec!["Bash".to_owned()],
             ..Default::default()
         };
         assert!(!apply_exposure_clamp(&mut o), "Private must not clamp");
-        assert!(o.desktop_gateway, "private session keeps its grants");
+        assert!(
+            o.gateway_mcp_config.is_some(),
+            "private session keeps its process-owned grant"
+        );
         assert_eq!(o.allowed_tools, vec!["Bash".to_owned()]);
     }
 

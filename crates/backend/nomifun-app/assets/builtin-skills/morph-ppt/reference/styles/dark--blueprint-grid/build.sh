@@ -151,7 +151,7 @@ officecli add "$OUTPUT" '/slide[1]' --type shape \
 
 officecli add "$OUTPUT" '/slide[1]' --type shape \
   --prop 'name=#s1-tag' \
-  --prop text="构建 · 编排 · 部署 · 监控" \
+  --prop text="构建 · 集成 · 部署 · 监控" \
   --prop font="Inter" \
   --prop size=18 \
   --prop color=$LIGHT_BLUE \

@@ -5,7 +5,11 @@
  */
 
 import { ipcBridge } from '@/common';
-import { transformMessage } from '@/common/chat/chatLib';
+import {
+  ACP_AGENT_MESSAGE_EVENT,
+  normalizeWireAgentMessageMetadata,
+  transformMessage,
+} from '@/common/chat/chatLib';
 import type { AvailableCommand } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
@@ -213,7 +217,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
           'slash_commands_updated',
           'agent_status',
           'user_content',
-          'teammate_message',
+          ACP_AGENT_MESSAGE_EVENT,
         ].includes(message.type);
 
       if (shouldCompleteThinking) {
@@ -324,7 +328,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
         case 'user_content':
           addOrUpdateMessage(transformedMessage);
           break;
-        case 'teammate_message': {
+        case ACP_AGENT_MESSAGE_EVENT: {
           const tmMsg = message.data as import('@/common/chat/chatLib').TMessage;
           if (tmMsg && tmMsg.conversation_id === conversation_id) {
             if (tmMsg.type === 'text') {
@@ -335,12 +339,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
                   if (typeof parsed.content === 'string') {
                     tmMsg.content = {
                       content: parsed.content,
-                      ...(parsed.teammate_message ? { teammateMessage: true } : {}),
-                      ...(parsed.sender_name ? { senderName: parsed.sender_name as string } : {}),
-                      ...(parsed.sender_backend ? { senderAgentType: parsed.sender_backend as string } : {}),
-                      ...(parsed.sender_conversation_id != null
-                        ? { senderConversationId: parsed.sender_conversation_id as number }
-                        : {}),
+                      ...normalizeWireAgentMessageMetadata(parsed),
                     };
                   }
                 } catch {
@@ -348,15 +347,11 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
                 }
               } else if (typeof raw === 'object' && raw !== null) {
                 const obj = raw as Record<string, unknown>;
-                if (obj.teammate_message && !obj.teammateMessage) {
+                const agentMetadata = normalizeWireAgentMessageMetadata(obj);
+                if (agentMetadata.agentMessage && !obj.agentMessage) {
                   tmMsg.content = {
                     content: obj.content != null ? toDisplayText(obj.content) : '',
-                    teammateMessage: true,
-                    ...(typeof obj.sender_name === 'string' ? { senderName: obj.sender_name } : {}),
-                    ...(typeof obj.sender_backend === 'string' ? { senderAgentType: obj.sender_backend } : {}),
-                    ...(typeof obj.sender_conversation_id === 'number'
-                      ? { senderConversationId: obj.sender_conversation_id }
-                      : {}),
+                    ...agentMetadata,
                   };
                 }
               }
@@ -549,7 +544,7 @@ export const useAcpMessage = (conversation_id: number, options?: { skipWarmup?: 
   // WebSocket push of available_commands arrives during warmup when no
   // StreamRelay is listening, so the initial load must come from HTTP.
   // Mirrors the nomi pattern: warmup first, then fetch.
-  // In team mode, warmup is deferred to first user input — skip here.
+  // Some collaboration hosts defer warmup to first user input.
   useEffect(() => {
     if (options?.skipWarmup) return;
     let cancelled = false;

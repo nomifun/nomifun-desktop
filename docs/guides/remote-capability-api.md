@@ -13,8 +13,8 @@ For copy-ready integrations, see
 
 ## Security Model
 
-A companion access token is high privilege. It can drive agents, read and
-write files through exposed tools, and in desktop builds may operate browser or
+A companion access token is high privilege. It can call exposed platform
+capabilities, read and write files, and in desktop builds may operate browser or
 computer-use capabilities. Treat it like remote code execution authority:
 
 - Give tokens only to clients and agents you trust.
@@ -122,8 +122,8 @@ Example Streamable-HTTP MCP configuration:
 ```
 
 Use `/mcp-agent` when an external agent mostly needs work tools
-(agent/browser/computer/knowledge/files). Use `/mcp` when you intentionally
-want the broader platform control surface.
+(browser/computer/knowledge/files/conversations). Use `/mcp` when you
+intentionally want the broader platform control surface.
 
 ## REST Tool Calls
 
@@ -134,22 +134,13 @@ curl -s "http://127.0.0.1:25808/v1/tools?profile=agent" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Run a delegated NomiFun agent task:
+Call a tool returned by discovery, using that tool's JSON Schema:
 
 ```bash
-curl -s -X POST "http://127.0.0.1:25808/v1/tools/nomi_agent_run" \
+curl -s -X POST "http://127.0.0.1:25808/v1/tools/<tool-name>" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"goal":"Research competitors and write notes.md","timeout_secs":600}'
-```
-
-Poll a long-running task:
-
-```bash
-curl -s -X POST "http://127.0.0.1:25808/v1/tools/nomi_agent_result" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"conversation_id":123}'
+  -d '{"argument":"value"}'
 ```
 
 Successful REST calls return `200 {"result": ...}`. Tool validation failures
@@ -161,21 +152,39 @@ confirmation-required calls return `409`.
 SSE streaming is available for tools that report progress:
 
 ```bash
-curl -N -X POST "http://127.0.0.1:25808/v1/tools/nomi_agent_run/stream" \
+curl -N -X POST "http://127.0.0.1:25808/v1/tools/<tool-name>/stream" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"goal":"Summarize the current repository"}'
+  -d '{"argument":"value"}'
 ```
 
 Each event is a `data: <json>` line. The final event uses
 `{"type":"__result__","data":{"result":...}}`.
 
+## Agent Collaboration Boundary
+
+Persistent single- and multi-Agent work uses one execution contract:
+
+- `nomi_delegate` creates an Agent execution from a goal or explicit steps.
+- `nomi_execution_get` reads its plan, attempts, results, and current state.
+- `nomi_execution_update` applies all lifecycle and plan mutations.
+
+Availability is authority-bound, not transport-bound. Desktop and Channel
+callers derive authority from their calling Conversation and execution link.
+An owner-bound companion token may also use the three tools through Remote
+MCP/REST: `nomi_delegate` records that companion as the immutable creator, and
+subsequent reads or updates are limited to that exact companion's executions.
+Secondary users see none of the three tools on any surface. Because minting a
+companion token delegates installation-owner authority, it is restricted to a
+trusted local owner context; discover the effective Remote catalog through
+`/v1/tools` and protect the token as a high-privilege credential.
+
 ## Companion Context
 
-Because the caller runs as the bound companion, `nomi_agent_run` can use that
-companion's configured model when no `model` argument is supplied. Configure a
-usable provider/model for the companion before relying on model-backed tools;
-token creation may warn if the companion has no usable model.
+Every Remote call runs as the companion bound to the token. Model-backed tools
+can therefore use that companion's configured provider/model where their
+schema supports it. Configure a usable model before relying on such tools;
+token creation may warn when the companion has none.
 
 ## Related Docs
 

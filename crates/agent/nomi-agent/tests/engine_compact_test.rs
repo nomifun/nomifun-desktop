@@ -1,6 +1,6 @@
 //! Black-box integration tests for engine compaction integration (TC-2.6-*).
 //!
-//! These tests exercise the full `AgentEngine::run()` loop and verify
+//! These tests exercise the full `AgentEngine::execute_turn()` loop and verify
 //! that the compaction pipeline (microcompact → autocompact → emergency)
 //! is correctly wired into the agentic loop.
 
@@ -124,7 +124,7 @@ async fn tc_2_6_01_first_turn_no_compaction() {
         output,
         std::env::temp_dir(),
     );
-    let result = engine.run("Hi", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Hi", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "Hello");
     assert_eq!(result.turns, 1);
@@ -182,7 +182,7 @@ async fn tc_2_6_03_emergency_returns_error() {
         output,
         std::env::temp_dir(),
     );
-    let err = engine.run("Do something", "msg-1").await.unwrap_err();
+    let err = engine.execute_turn("Do something", "msg-1").await.unwrap_err();
 
     match err {
         AgentError::ContextTooLong {
@@ -250,7 +250,7 @@ async fn tc_2_6_04_autocompact_then_continue() {
         std::env::temp_dir(),
     );
     let result = engine
-        .run("Start work", "msg-1")
+        .execute_turn("Start work", "msg-1")
         .await
         .expect("should succeed after compact");
 
@@ -310,7 +310,7 @@ async fn tc_2_6_05_session_save_after_compact() {
         .init_session("test", "/tmp", None)
         .expect("init session");
 
-    engine.run("Start", "msg-1").await.expect("should succeed");
+    engine.execute_turn("Start", "msg-1").await.expect("should succeed");
 
     // Load the saved session
     let mgr = SessionManager::new(dir.path().to_path_buf(), 10);
@@ -362,7 +362,7 @@ async fn tc_2_6_06_disabled_skips_micro_auto() {
         output,
         std::env::temp_dir(),
     );
-    let result = engine.run("Hi", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Hi", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "Normal response");
     // Only 1 call — no compact summary call
@@ -408,7 +408,7 @@ async fn tc_2_6_06b_disabled_still_fires_emergency() {
 
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
-    let err = engine.run("Go", "msg-1").await.unwrap_err();
+    let err = engine.execute_turn("Go", "msg-1").await.unwrap_err();
 
     assert!(
         matches!(err, AgentError::ContextTooLong { .. }),
@@ -453,7 +453,7 @@ async fn tc_2_6_07_input_tokens_tracked() {
 
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
-    let result = engine.run("Work", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Work", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.turns, 2);
     // Total usage should accumulate: 50k + 60k = 110k input tokens
@@ -593,7 +593,7 @@ async fn tc_2_6_02_micro_before_auto_execution_order() {
 
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
-    let result = engine.run("Start", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Start", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "Done after compact");
 
@@ -749,7 +749,7 @@ async fn tc_2_6_e2e_02_micro_and_auto_cooperative() {
 
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
-    let result = engine.run("Work", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Work", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "After cooperative compact");
 
@@ -872,7 +872,7 @@ async fn tc_2_6_e2e_03_circuit_breaker_stops_retries() {
 
     let mut engine =
         AgentEngine::new_with_provider(provider, config, registry, output, std::env::temp_dir());
-    let result = engine.run("Work", "msg-1").await.expect("should succeed");
+    let result = engine.execute_turn("Work", "msg-1").await.expect("should succeed");
 
     assert_eq!(result.text, "Final");
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::{AcpPermissionEventData, AcpPermissionOptionKind, AcpToolCallKind, AgentStreamEvent, TurnStopReason};
-use nomifun_ai_agent::task_manager::IWorkerTaskManager;
+use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{ConfirmRequest, IdmmTargetKind, SendMessageRequest};
 use nomifun_common::{AppError, Confirmation};
 use nomifun_conversation::ConversationService;
@@ -240,38 +240,31 @@ fn push_turn_text(buf: &mut String, chunk: &str) {
     }
 }
 
-/// Whether `conversation.extra` marks this as a conversation whose
-/// numbered-option menus are routed to a REMOTE human (channel master /
-/// companion). IDMM must NOT auto-answer chat decisions for these — the menu is
-/// the deliberate human-in-the-loop wire contract (channel `PendingDecisionStore`
-/// / companion master reply). Mirrors the conversation layer's own canonical
-/// routing definition (`companion_context_from_extra`): `channelPlatform`,
-/// `companionId`, `companionSession`.
+/// Whether canonical companion/public-service markers identify a conversation
+/// whose numbered-option menus are routed to a remote human. IDMM must not
+/// auto-answer those menus: they are the human-in-the-loop wire contract for the
+/// channel relay or companion session.
 ///
-/// `desktopGateway`/`desktop_gateway` is deliberately NOT consulted: the
-/// capability-bus super-gateway grants it to EVERY locally-trusted desktop
-/// conversation, so it is a capability ENTITLEMENT, not a routing signal.
-/// Treating it as routing made the decision watch silently inert on every
-/// desktop conversation. ACP channel sessions carry only `desktopGateway` in
-/// extra and so are caught instead by the row-level `channel_chat_id`
-/// (see [`conversation_is_routed`]). Pure + unit-tested.
+/// Transport is determined separately from the row-level `channel_chat_id` in
+/// [`conversation_is_routed`]. Presentation metadata such as `channelPlatform`
+/// is intentionally not routing state. Pure + unit-tested.
 fn extra_marks_routed_conversation(extra: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(extra) else {
         return false;
     };
     let truthy_str = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
     let truthy_bool = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
-    truthy_str("channelPlatform")
+    truthy_bool("companionSession")
         || truthy_str("companionId")
-        || truthy_bool("companionSession")
+        || truthy_str("public_agent_id")
 }
 
 /// Whether a conversation routes its decisions to a REMOTE human, so IDMM must
 /// NOT auto-answer them. Combines the extra-marker check
 /// ([`extra_marks_routed_conversation`]) with the row-level `channel_chat_id`,
-/// which is set for EVERY channel session — including ACP channel sessions
-/// (e.g. claude/codex bound to an IM channel) that carry no companion extra
-/// marker and would otherwise be indistinguishable from a plain desktop chat.
+/// which is set for every channel session — including non-Nomi channel sessions
+/// that carry no companion/public-service marker and would otherwise be
+/// indistinguishable from a plain desktop chat.
 /// A blank `channel_chat_id` does not count.
 fn conversation_is_routed(extra: &str, channel_chat_id: Option<&str>) -> bool {
     extra_marks_routed_conversation(extra)
@@ -333,20 +326,20 @@ const PENDING_SCAN_PAGE_SIZE: u32 = 20;
 /// recovered. Result: arming 智能决策 while a tool-confirmation 选择项 is already on
 /// screen left the agent blocked forever and IDMM silent ("完全不可用").
 ///
-/// Recover it from the live task's pending-confirmation list directly — the same
+/// Recover it from the live runtime's pending-confirmation list directly — the same
 /// `get_confirmations()` source `ConversationService::confirm`/`list_confirmations`
 /// read — and map the first to a `Decision` exactly as [`map_agent_event`] maps a
-/// live `AcpPermission`. Queried via the task manager (mirroring `observe()`'s
-/// own `get_task`), NOT via `conversation_service`, so on-arm READ detection
+/// live `AcpPermission`. Queried via the runtime registry (mirroring `observe()`'s
+/// own `get_runtime`), NOT via `conversation_service`, so on-arm READ detection
 /// never couples to the row-owner check. Returns `None` when there is no live
-/// task or no pending confirmation. Pure given the task manager; the mapping is
+/// runtime or no pending confirmation. Pure given the runtime registry; the mapping is
 /// the unit-tested [`permission_decision_from_confirmation`].
 fn pending_confirmation_signal(
-    task_manager: &Arc<dyn IWorkerTaskManager>,
+    runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     conversation_id: &str,
 ) -> Option<SessionSignal> {
-    let conf = task_manager
-        .get_task(conversation_id)?
+    let conf = runtime_registry
+        .get_runtime(conversation_id)?
         .get_confirmations()
         .into_iter()
         .next()?;
@@ -364,8 +357,8 @@ fn pending_confirmation_signal(
 /// idle/finish path uses (don't revive a turn the user just stopped).
 ///
 /// Ordering mirrors `finish_signal` (decision then open-question), and gates on
-/// PLAIN DESKTOP the same way `observe` does (routed channel/companion/desktop-
-/// gateway conversations route menus to a remote human → never auto-answered).
+/// PLAIN DESKTOP the same way `observe` does (routed channel/companion/public
+/// conversations route menus to a remote human → never auto-answered).
 ///
 /// IDEMPOTENCY: if the most-recent text message is NOT an assistant turn
 /// (position != "left" — i.e. a user/idmm reply at "right" is the last speaker),
@@ -414,14 +407,35 @@ fn pending_signal_from_page(extra: &str, messages: &[nomifun_db::models::Message
     None
 }
 
-/// Supervises a chat conversation's agent task.
+/// Supervises a chat conversation's Agent runtime.
 #[derive(Clone)]
 pub struct ConversationProbe {
-    pub task_manager: Arc<dyn IWorkerTaskManager>,
+    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     pub conversation_service: ConversationService,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub conversation_id: String,
-    pub user_id: String,
+}
+
+impl ConversationProbe {
+    async fn owner_id(&self) -> Result<String, AppError> {
+        let conversation_id = self
+            .conversation_id
+            .parse::<i64>()
+            .map_err(|_| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
+        let row = self
+            .conversation_repo
+            .get(conversation_id)
+            .await
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
+        if row.user_id.trim().is_empty() {
+            return Err(AppError::Internal(format!(
+                "conversation {} has no owner",
+                self.conversation_id
+            )));
+        }
+        Ok(row.user_id)
+    }
 }
 
 #[async_trait]
@@ -434,11 +448,11 @@ impl SessionProbe for ConversationProbe {
         let (tx, rx) = mpsc::channel(64);
         // Attach lazily: if no agent exists yet there is nothing to observe; the
         // supervisor re-arms on the next loop tick / status fetch.
-        let Some(instance) = self.task_manager.get_task(&self.conversation_id) else {
+        let Some(instance) = self.runtime_registry.get_runtime(&self.conversation_id) else {
             // Closed receiver-with-no-sender-task: drop tx so observe yields nothing.
             return rx;
         };
-        let mut sub = instance.as_task().subscribe();
+        let mut sub = instance.subscribe();
         // Cloned into the observe task for the idle-tick user-cancel cross-check
         // and the plain-desktop gating lookup.
         let conversation_service = self.conversation_service.clone();
@@ -446,8 +460,8 @@ impl SessionProbe for ConversationProbe {
         let conversation_id = self.conversation_id.clone();
         tokio::spawn(async move {
             // Gate end-of-turn chat-decision detection to PLAIN DESKTOP
-            // conversations: channel-master / companion / desktop-gateway
-            // conversations route numbered-option menus to a remote human and
+            // conversations: channel / companion / public-service conversations
+            // route numbered-option menus to a remote human and
             // must NOT be auto-answered (the menu is their human-in-the-loop
             // wire contract). Default false (no text-scan) when the row/extra
             // can't be read — conservative: never hijack when unsure.
@@ -532,6 +546,7 @@ impl SessionProbe for ConversationProbe {
     }
 
     async fn inject(&self, action: &WakeAction) -> Result<(), AppError> {
+        let owner_id = self.owner_id().await?;
         // Structured tool-permission approval: resolve the agent's pending
         // confirmation oneshot via `confirm` (a hidden chat message would never
         // clear it). `data` carries the submit-value under BOTH keys so either
@@ -549,7 +564,7 @@ impl SessionProbe for ConversationProbe {
             };
             return self
                 .conversation_service
-                .confirm(&self.user_id, &self.conversation_id, call_id, req, &self.task_manager)
+                .confirm(&owner_id, &self.conversation_id, call_id, req, &self.runtime_registry)
                 .await;
         }
         // Model failover (D6): switch to the next queue candidate and re-drive
@@ -567,7 +582,7 @@ impl SessionProbe for ConversationProbe {
         if matches!(action, WakeAction::Failover) {
             let switched = self
                 .conversation_service
-                .idmm_failover_conversation(&self.user_id, &self.conversation_id, &self.task_manager)
+                .idmm_failover_conversation(&owner_id, &self.conversation_id, &self.runtime_registry)
                 .await?;
             if switched {
                 return Ok(());
@@ -588,7 +603,7 @@ impl SessionProbe for ConversationProbe {
             channel_platform: None,
         };
         self.conversation_service
-            .send_message(&self.user_id, &self.conversation_id, req, &self.task_manager)
+            .send_message(&owner_id, &self.conversation_id, req, &self.runtime_registry)
             .await
             .map(|_| ())
     }
@@ -626,7 +641,7 @@ impl SessionProbe for ConversationProbe {
     }
 
     fn is_alive(&self) -> bool {
-        self.task_manager.get_task(&self.conversation_id).is_some()
+        self.runtime_registry.get_runtime(&self.conversation_id).is_some()
     }
 
     async fn describe(&self) -> Result<SessionDescription, AppError> {
@@ -639,14 +654,13 @@ impl SessionProbe for ConversationProbe {
             .get(conv_id)
             .await
             .map_err(AppError::from)?;
-        let (user_id, backend) = match row {
-            Some(c) => (c.user_id, Some(c.r#type)),
-            None => (self.user_id.clone(), None),
-        };
+        let row = row.ok_or_else(|| {
+            AppError::NotFound(format!("conversation {} not found", self.conversation_id))
+        })?;
         Ok(SessionDescription {
             kind: IdmmTargetKind::Conversation,
-            backend,
-            user_id,
+            backend: Some(row.r#type),
+            user_id: row.user_id,
             alive: self.is_alive(),
         })
     }
@@ -654,7 +668,7 @@ impl SessionProbe for ConversationProbe {
     async fn fallback_model(&self) -> Option<(String, String)> {
         let conv_id = self.conversation_id.parse::<i64>().ok()?;
         let row = self.conversation_repo.get(conv_id).await.ok()??;
-        let pm = nomifun_conversation::task_options::provider_model_from_conversation_row(&row);
+        let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
         if pm.provider_id.trim().is_empty() {
             return None;
         }
@@ -676,7 +690,7 @@ impl SessionProbe for ConversationProbe {
         // text scan below never sees a structured confirmation, so this is the
         // ONLY lane that can recover it on arm — check it first (the block is the
         // most urgent pending decision). See [`pending_confirmation_signal`].
-        if let Some(sig) = pending_confirmation_signal(&self.task_manager, &self.conversation_id) {
+        if let Some(sig) = pending_confirmation_signal(&self.runtime_registry, &self.conversation_id) {
             return Some(sig);
         }
         let page = self
@@ -1293,44 +1307,39 @@ mod tests {
 
     #[test]
     fn plain_desktop_gating_excludes_routed_conversations() {
-        // Channel master / companion conversations route numbered menus to a
-        // REMOTE human — IDMM must not auto-answer them.
-        assert!(extra_marks_routed_conversation(r#"{"channelPlatform":"telegram"}"#));
+        // Companion and public-service conversations route numbered menus to a
+        // remote human — IDMM must not auto-answer them.
         assert!(extra_marks_routed_conversation(
             r#"{"companionSession":true,"companionId":"companion_42"}"#
         ));
+        assert!(extra_marks_routed_conversation(
+            r#"{"public_agent_id":"public_42"}"#
+        ));
         // A plain desktop conversation is NOT routed.
         assert!(!extra_marks_routed_conversation(r#"{"workspace":"/project"}"#));
-        // Blank companionId / empty / invalid extra do not count as routed.
+        // Presentation-only metadata, blank ids, empty, and invalid extra do
+        // not count as routed.
+        assert!(!extra_marks_routed_conversation(
+            r#"{"channelPlatform":"telegram"}"#
+        ));
         assert!(!extra_marks_routed_conversation(r#"{"companionId":""}"#));
+        assert!(!extra_marks_routed_conversation(r#"{"public_agent_id":" "}"#));
         assert!(!extra_marks_routed_conversation(""));
         assert!(!extra_marks_routed_conversation("{}"));
     }
 
     #[test]
-    fn desktop_gateway_is_not_a_routing_marker() {
-        // REGRESSION GUARD: the capability-bus super-gateway grants
-        // `desktopGateway:true` to EVERY locally-trusted desktop conversation, so
-        // it is a capability entitlement — NOT a routing signal. Treating it as
-        // routing made 智能决策 inert on every desktop conversation. A conversation
-        // carrying only desktopGateway (no channel/companion marker, no
-        // channel_chat_id) must NOT be considered routed.
-        assert!(!extra_marks_routed_conversation(r#"{"desktopGateway":true}"#));
-        assert!(!extra_marks_routed_conversation(r#"{"desktop_gateway":true}"#));
-        assert!(!conversation_is_routed(r#"{"desktopGateway":true}"#, None));
-        assert!(!conversation_is_routed(r#"{"desktopGateway":true,"workspace":"/p"}"#, None));
-    }
-
-    #[test]
     fn conversation_is_routed_combines_extra_and_channel_chat_id() {
-        // Genuine routing comes from the channel/companion extra markers…
-        assert!(conversation_is_routed(r#"{"channelPlatform":"telegram"}"#, None));
+        // Shared companion/public sessions carry canonical business markers.
         assert!(conversation_is_routed(r#"{"companionSession":true}"#, None));
-        // …OR, for an ACP channel session that carries only desktopGateway in
-        // extra, from the row-level channel_chat_id (set for EVERY channel
-        // session, including ACP/Discord ones with no companion extra marker).
         assert!(conversation_is_routed(
-            r#"{"desktopGateway":true,"backend":"claude"}"#,
+            r#"{"public_agent_id":"public_42"}"#,
+            None
+        ));
+        // Every dedicated channel session is routed by its first-class row field,
+        // independent of agent backend or presentation metadata.
+        assert!(conversation_is_routed(
+            r#"{"backend":"claude"}"#,
             Some("im_chat_42")
         ));
         // A blank channel_chat_id does not count.
@@ -2023,38 +2032,20 @@ mod tests {
         // some with bullet sub-options, closing on "请告诉我你的偏好…。". It is not a
         // pick-one menu (no 回复编号/选择 intent), so it must surface as an on-arm
         // OpenQuestion (the model tier answers it) — NOT fall through to `None`,
-        // which left IDMM silent. `desktopGateway:true` mirrors the real conv-27
-        // extra (a plain desktop conversation, not routed).
+        // which left IDMM silent. This is a plain desktop conversation with no
+        // remote-routing marker.
         let multi_q = "好的！先问你几个基础设计问题：\n\n\
                        1. **技术栈偏好**：你想用什么来写？\n   - 推荐：HTML5 + JS\n   - 或 Python\n\n\
                        2. **界面风格**：\n   - 复古像素风\n   - 现代简约风\n\n\
                        3. **核心规则**：撞墙死，还是穿墙继续？\n\n\
                        请告诉我你的偏好，我们一个一个敲定，然后我再开始写代码。";
         let msgs = vec![msg_row("left", false, "text", multi_q)];
-        match pending_signal_from_page(r#"{"desktopGateway":true,"workspace":"/p"}"#, &msgs) {
+        match pending_signal_from_page(r#"{"workspace":"/p"}"#, &msgs) {
             Some((SessionSignal::Decision(dp), _at)) => {
                 assert_eq!(dp.kind, DecisionKind::OpenQuestion, "a multi-question prompt is an open question");
                 assert!(dp.options.is_empty(), "an open question carries no enumerable options");
             }
             other => panic!("expected an OpenQuestion Decision, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pending_signal_plain_desktop_with_gateway_flag_is_decision() {
-        // REGRESSION (智能决策完全不可用): the capability-bus super-gateway grants
-        // `desktopGateway:true` to EVERY locally-trusted desktop conversation, so
-        // it can no longer mark a conversation as "routed to a remote human". A
-        // plain desktop chat that ends on a numbered menu — and now always carries
-        // `desktopGateway` — MUST still surface its on-arm pending decision, or the
-        // decision watch never intervenes on any desktop conversation.
-        let msgs = vec![msg_row("left", false, "text", pending_decision_text())];
-        match pending_signal_from_page(r#"{"desktopGateway":true,"workspace":"/p"}"#, &msgs) {
-            Some((SessionSignal::Decision(dp), _at)) => {
-                assert_eq!(dp.source, DecisionSource::TextScan);
-                assert_eq!(dp.options.len(), 2);
-            }
-            other => panic!("expected an options Decision for a plain desktop conversation, got {other:?}"),
         }
     }
 
@@ -2072,10 +2063,17 @@ mod tests {
 
     #[test]
     fn pending_signal_routed_conversation_is_none() {
-        // A routed (channel/companion/desktop-gateway) conversation must NOT be
+        // A routed companion conversation must NOT be
         // auto-answered — the menu is its human-in-the-loop wire contract.
         let msgs = vec![msg_row("left", false, "text", pending_decision_text())];
-        assert_eq!(pending_signal_from_page(r#"{"channelPlatform":"telegram"}"#, &msgs), None);
+        assert_eq!(
+            pending_signal_from_page(r#"{"companionSession":true}"#, &msgs),
+            None
+        );
+        assert_eq!(
+            pending_signal_from_page(r#"{"public_agent_id":"public_42"}"#, &msgs),
+            None
+        );
     }
 
     #[test]
@@ -2261,6 +2259,10 @@ mod tests {
             name: "c".into(),
             r#type: "nomi".into(),
             extra: extra.into(),
+            delegation_policy: "automatic".into(),
+            execution_model_pool: None,
+            decision_policy: "automatic".into(),
+            execution_template_id: None,
             model: None,
             status: Some("running".into()),
             source: None,
@@ -2335,30 +2337,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_signal_through_repo_plain_desktop_with_gateway_is_decision() {
-        // The real production state of every desktop conversation: extra carries
-        // the super-gateway's `desktopGateway:true` and the row has NO
-        // channel_chat_id. The on-arm pending decision must still be detected.
-        let repo = Arc::new(StubConvRepo {
-            row: Some(conv_row(r#"{"desktopGateway":true,"workspace":"/p"}"#)),
-            messages: vec![msg_row("left", false, "text", pending_decision_text())],
-        });
-        match pending_signal_with_repo("1", repo).await {
-            Some(SessionSignal::Decision(dp)) => assert_eq!(dp.options.len(), 2),
-            other => panic!("expected an options Decision for a plain desktop conversation, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn pending_signal_acp_channel_session_is_none() {
-        // An ACP channel session (e.g. claude bound to an IM channel) carries
-        // only desktopGateway in extra but has a row-level channel_chat_id. Its
+    async fn pending_signal_channel_session_is_none() {
+        // A non-Nomi channel session has a row-level channel_chat_id. Its
         // decisions route to the remote IM human via the channel relay, so IDMM
-        // must NOT auto-answer them — closing the gap left by dropping
-        // desktopGateway as a routing marker.
+        // must not auto-answer them.
         let row = nomifun_db::models::ConversationRow {
             channel_chat_id: Some("im_chat_42".into()),
-            ..conv_row(r#"{"desktopGateway":true,"backend":"claude"}"#)
+            ..conv_row(r#"{"backend":"claude"}"#)
         };
         let repo = Arc::new(StubConvRepo {
             row: Some(row),

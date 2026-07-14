@@ -12,11 +12,11 @@ use tempfile::tempdir;
 
 fn bash_tool(cwd: std::path::PathBuf) -> BashTool {
     BashTool::new(
-        nomi_execution::ProcessSupervisor::new(
-            nomi_execution::SupervisorConfig::default(),
+        nomi_process_runtime::ProcessSupervisor::new(
+            nomi_process_runtime::SupervisorConfig::default(),
         ),
         cwd.clone(),
-        nomi_execution::CapabilityPolicy::local_owner(cwd),
+        nomi_process_runtime::CapabilityPolicy::local_owner(cwd),
     )
 }
 

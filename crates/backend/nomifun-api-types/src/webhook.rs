@@ -6,7 +6,7 @@ use crate::requirement::{AutoWorkRunState, AutoWorkTargetKind};
 /// absent field is `None` (keep) while `null` is `Some(None)` (clear). Without
 /// this, serde collapses `null` to the outer `None`, making "clear" impossible.
 ///
-/// Shared with [`crate::orchestrator`] for its fleet/workspace patch DTOs; keep
+/// Shared with [`crate::agent_execution`] for its step-configuration DTOs; keep
 /// this the single source of truth so the patch semantics never drift.
 pub(crate) fn double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where

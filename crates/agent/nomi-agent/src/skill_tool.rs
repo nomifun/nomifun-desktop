@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::spawner::Spawner;
 use nomi_config::hooks::HooksConfig;
 use nomi_protocol::events::ToolCategory;
 use nomi_skills::context_modifier::ContextModifier;
@@ -11,6 +10,7 @@ use nomi_skills::executor::{execute_fork, prepare_inline_content};
 use nomi_skills::hooks::{parse_skill_hooks, to_hook_defs};
 use nomi_skills::permissions::{SkillPermission, SkillPermissionChecker};
 use nomi_skills::types::{ExecutionContext, SkillMetadata};
+use nomi_types::agent::AgentInvocationRunner;
 use nomi_types::tool::{JsonSchema, ToolResult};
 
 use nomi_tools::Tool;
@@ -30,8 +30,8 @@ pub struct SkillTool {
     /// Session ID passed to prepare_inline_content for ${NOMI_SESSION_ID} substitution.
     /// None if sessions are disabled or not yet initialised.
     session_id: Option<String>,
-    /// Spawner for fork-mode skills. None when SkillTool is built without fork support.
-    spawner: Option<Arc<dyn Spawner>>,
+    /// Shared one-Agent invocation primitive for fork-mode skills.
+    invocation_runner: Option<Arc<dyn AgentInvocationRunner>>,
 }
 
 impl SkillTool {
@@ -45,7 +45,7 @@ impl SkillTool {
             cwd,
             checker,
             session_id: None,
-            spawner: None,
+            invocation_runner: None,
         }
     }
 
@@ -61,24 +61,24 @@ impl SkillTool {
             cwd,
             checker,
             session_id,
-            spawner: None,
+            invocation_runner: None,
         }
     }
 
     /// Create a SkillTool with full fork-mode support.
-    pub fn with_spawner(
+    pub fn with_invocation_runner(
         skills: Arc<Vec<SkillMetadata>>,
         cwd: String,
         checker: SkillPermissionChecker,
         session_id: Option<String>,
-        spawner: Option<Arc<dyn Spawner>>,
+        invocation_runner: Option<Arc<dyn AgentInvocationRunner>>,
     ) -> Self {
         Self {
             skills,
             cwd,
             checker,
             session_id,
-            spawner,
+            invocation_runner,
         }
     }
 
@@ -200,14 +200,14 @@ impl Tool for SkillTool {
                 }
             }
             ExecutionContext::Fork => {
-                let spawner = match self.spawner.as_ref() {
+                let invocation_runner = match self.invocation_runner.as_ref() {
                     Some(s) => s.as_ref(),
                     None => {
                         return ToolResult {
                             content: format!(
                                 "Skill '{}' requires fork execution context, \
-                                 but no AgentSpawner is available. \
-                                 Fork support is enabled via SkillTool::with_spawner().",
+                                 but no Agent invocation runner is available. \
+                                 Fork support is enabled via SkillTool::with_invocation_runner().",
                                 skill.name
                             ),
                             is_error: true,
@@ -215,7 +215,7 @@ impl Tool for SkillTool {
                         };
                     }
                 };
-                match execute_fork(skill, args, self.session_id.as_deref(), &self.cwd, spawner)
+                match execute_fork(skill, args, self.session_id.as_deref(), &self.cwd, invocation_runner)
                     .await
                 {
                     Ok(content) => ToolResult {
@@ -236,7 +236,7 @@ impl Tool for SkillTool {
     fn context_modifier_for(&self, input: &serde_json::Value) -> Option<ContextModifier> {
         let skill_name = input["skill"].as_str()?;
         let skill = self.find_skill(skill_name)?;
-        // Fork skills run in their own sub-agent context; modifiers must not
+        // Fork skills run in their own delegated Agent context; modifiers must not
         // propagate back to the parent conversation.
         if skill.execution_context == ExecutionContext::Fork {
             return None;
@@ -903,7 +903,9 @@ mod phase7_tests {
     use async_trait::async_trait;
     use serde_json::json;
 
-    use crate::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+    use nomi_types::agent::{
+        AgentInvocationInput, AgentInvocationOutput, AgentInvocationRunner,
+    };
     use nomi_skills::permissions::SkillPermissionChecker;
     use nomi_skills::types::{
         EffortLevel, ExecutionContext, LoadedFrom, SkillMetadata, SkillSource,
@@ -914,23 +916,21 @@ mod phase7_tests {
     use super::SkillTool;
 
     // ---------------------------------------------------------------------------
-    // MockSpawner — returns preset result, captures args
+    // Mock runner — returns a preset result and captures the one-call input.
     // ---------------------------------------------------------------------------
 
-    struct MockSpawner {
+    struct MockInvocationRunner {
         is_error: bool,
         text: String,
-        captured_config: Mutex<Option<SubAgentConfig>>,
-        captured_overrides: Mutex<Option<ForkOverrides>>,
+        captured_input: Mutex<Option<AgentInvocationInput>>,
     }
 
-    impl MockSpawner {
+    impl MockInvocationRunner {
         fn success(text: &str) -> Arc<Self> {
             Arc::new(Self {
                 is_error: false,
                 text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
+                captured_input: Mutex::new(None),
             })
         }
 
@@ -939,41 +939,26 @@ mod phase7_tests {
             Arc::new(Self {
                 is_error: true,
                 text: text.to_string(),
-                captured_config: Mutex::new(None),
-                captured_overrides: Mutex::new(None),
+                captured_input: Mutex::new(None),
             })
         }
 
         #[allow(dead_code)]
-        fn take_config(&self) -> SubAgentConfig {
-            self.captured_config
+        fn take_input(&self) -> AgentInvocationInput {
+            self.captured_input
                 .lock()
                 .unwrap()
                 .take()
-                .expect("spawn_fork was not called")
-        }
-
-        #[allow(dead_code)]
-        fn take_overrides(&self) -> ForkOverrides {
-            self.captured_overrides
-                .lock()
-                .unwrap()
-                .take()
-                .expect("spawn_fork was not called")
+                .expect("invoke was not called")
         }
     }
 
     #[async_trait]
-    impl Spawner for MockSpawner {
-        async fn spawn_fork(
-            &self,
-            config: SubAgentConfig,
-            overrides: ForkOverrides,
-        ) -> SubAgentResult {
-            *self.captured_config.lock().unwrap() = Some(config.clone());
-            *self.captured_overrides.lock().unwrap() = Some(overrides.clone());
-            SubAgentResult {
-                name: config.name.clone(),
+    impl AgentInvocationRunner for MockInvocationRunner {
+        async fn invoke(&self, input: AgentInvocationInput) -> AgentInvocationOutput {
+            *self.captured_input.lock().unwrap() = Some(input.clone());
+            AgentInvocationOutput {
+                name: input.name.clone(),
                 text: self.text.clone(),
                 usage: TokenUsage::default(),
                 turns: 1,
@@ -1042,32 +1027,32 @@ mod phase7_tests {
         }
     }
 
-    fn tool_with_spawner(
+    fn tool_with_invocation_runner(
         skills: Vec<SkillMetadata>,
-        spawner: Option<Arc<dyn Spawner>>,
+        invocation_runner: Option<Arc<dyn AgentInvocationRunner>>,
     ) -> SkillTool {
-        SkillTool::with_spawner(
+        SkillTool::with_invocation_runner(
             Arc::new(skills),
             "/tmp".to_string(),
             SkillPermissionChecker::new(vec![], vec![], false),
             None,
-            spawner,
+            invocation_runner,
         )
     }
 
-    fn tool_no_spawner(skills: Vec<SkillMetadata>) -> SkillTool {
-        tool_with_spawner(skills, None)
+    fn tool_no_backend(skills: Vec<SkillMetadata>) -> SkillTool {
+        tool_with_invocation_runner(skills, None)
     }
 
     // ---------------------------------------------------------------------------
-    // TC-7.20: inline skill takes inline path — spawner NOT called
+    // TC-7.20: inline skill takes inline path — invocation runner NOT called
     // ---------------------------------------------------------------------------
     #[tokio::test]
     async fn tc_7_20_inline_skill_takes_inline_path() {
-        let spawner = MockSpawner::success("should not be called");
-        let tool = tool_with_spawner(
+        let invocation_runner = MockInvocationRunner::success("should not be called");
+        let tool = tool_with_invocation_runner(
             vec![make_inline_skill("inline-skill", "inline content")],
-            Some(spawner.clone() as Arc<dyn Spawner>),
+            Some(invocation_runner.clone() as Arc<dyn AgentInvocationRunner>),
         );
         let result = tool.execute(json!({"skill": "inline-skill"})).await;
         assert!(
@@ -1076,20 +1061,20 @@ mod phase7_tests {
             result.content
         );
         assert_eq!(result.content, "inline content");
-        // spawn_fork should NOT have been called
+        // execute_fork should NOT have been called
         assert!(
-            spawner.captured_config.lock().unwrap().is_none(),
-            "spawner should not have been called for inline skill"
+            invocation_runner.captured_input.lock().unwrap().is_none(),
+            "invocation runner should not have been called for inline skill"
         );
     }
 
-    // TC-7.21: fork skill takes fork path — spawner IS called
+    // TC-7.21: fork skill takes fork path — invocation runner IS called
     #[tokio::test]
     async fn tc_7_21_fork_skill_takes_fork_path() {
-        let spawner = MockSpawner::success("fork result");
-        let tool = tool_with_spawner(
+        let invocation_runner = MockInvocationRunner::success("fork result");
+        let tool = tool_with_invocation_runner(
             vec![make_fork_skill("fork-skill", "fork content")],
-            Some(spawner.clone() as Arc<dyn Spawner>),
+            Some(invocation_runner.clone() as Arc<dyn AgentInvocationRunner>),
         );
         let result = tool.execute(json!({"skill": "fork-skill"})).await;
         assert!(
@@ -1098,19 +1083,19 @@ mod phase7_tests {
             result.content
         );
         assert_eq!(result.content, "fork result");
-        // spawn_fork should have been called exactly once
+        // execute_fork should have been called exactly once
         assert!(
-            spawner.captured_config.lock().unwrap().is_some(),
-            "spawner should have been called for fork skill"
+            invocation_runner.captured_input.lock().unwrap().is_some(),
+            "invocation runner should have been called for fork skill"
         );
     }
 
-    // TC-7.12: no spawner — fork skill returns clear error message
+    // TC-7.12: no delegation backend — fork skill returns clear error message
     #[tokio::test]
-    async fn tc_7_12_fork_skill_no_spawner_returns_error() {
-        let tool = tool_no_spawner(vec![make_fork_skill("needs-spawner", "content")]);
-        let result = tool.execute(json!({"skill": "needs-spawner"})).await;
-        assert!(result.is_error, "should be error without spawner");
+    async fn tc_7_12_fork_skill_no_backend_returns_error() {
+        let tool = tool_no_backend(vec![make_fork_skill("needs-delegation-backend", "content")]);
+        let result = tool.execute(json!({"skill": "needs-delegation-backend"})).await;
+        assert!(result.is_error, "should be error without delegation backend");
         assert!(
             result.content.contains("fork execution context"),
             "error message should mention 'fork execution context': {}",
@@ -1126,7 +1111,7 @@ mod phase7_tests {
         skill.model = Some("claude-opus-4-6".to_string());
         skill.effort = Some(EffortLevel::High);
         skill.allowed_tools = vec!["Bash".to_string()];
-        let tool = tool_no_spawner(vec![skill]);
+        let tool = tool_no_backend(vec![skill]);
         let modifier = tool.context_modifier_for(&json!({"skill": "fork-with-model"}));
         assert!(
             modifier.is_none(),
@@ -1139,7 +1124,7 @@ mod phase7_tests {
     fn tc_7_22_context_modifier_for_inline_returns_some() {
         let mut skill = make_inline_skill("inline-with-model", "content");
         skill.model = Some("my-model".to_string());
-        let tool = tool_no_spawner(vec![skill]);
+        let tool = tool_no_backend(vec![skill]);
         let modifier = tool.context_modifier_for(&json!({"skill": "inline-with-model"}));
         assert!(
             modifier.is_some(),
@@ -1148,12 +1133,12 @@ mod phase7_tests {
         assert_eq!(modifier.unwrap().model.as_deref(), Some("my-model"));
     }
 
-    // TC-7.24: fork skill no spawner — returns error without panic
+    // TC-7.24: fork skill without a delegation backend returns an error without panic
     #[tokio::test]
-    async fn tc_7_24_fork_no_spawner_no_panic() {
-        let tool = tool_no_spawner(vec![make_fork_skill("no-spawn", "content")]);
+    async fn tc_7_24_fork_no_backend_no_panic() {
+        let tool = tool_no_backend(vec![make_fork_skill("no-delegation", "content")]);
         // Should not panic, must return Err
-        let result = tool.execute(json!({"skill": "no-spawn"})).await;
+        let result = tool.execute(json!({"skill": "no-delegation"})).await;
         assert!(result.is_error);
         assert!(!result.content.is_empty());
     }
@@ -1161,14 +1146,14 @@ mod phase7_tests {
     // TC-7.30: fork skill — permission allow — proceeds to fork execution
     #[tokio::test]
     async fn tc_7_30_fork_skill_permission_allow_proceeds() {
-        let spawner = MockSpawner::success("fork ok");
-        let tool = SkillTool::with_spawner(
+        let invocation_runner = MockInvocationRunner::success("fork ok");
+        let tool = SkillTool::with_invocation_runner(
             Arc::new(vec![make_fork_skill("fork-allowed", "content")]),
             "/tmp".to_string(),
             // deny_list empty, allow_list empty = allow all
             SkillPermissionChecker::new(vec![], vec![], false),
             None,
-            Some(spawner as Arc<dyn Spawner>),
+            Some(invocation_runner as Arc<dyn AgentInvocationRunner>),
         );
         let result = tool.execute(json!({"skill": "fork-allowed"})).await;
         assert!(
@@ -1182,14 +1167,14 @@ mod phase7_tests {
     // TC-7.31: fork skill — permission deny — blocked before fork execution
     #[tokio::test]
     async fn tc_7_31_fork_skill_permission_deny_blocked() {
-        let spawner = MockSpawner::success("should not reach here");
-        let tool = SkillTool::with_spawner(
+        let invocation_runner = MockInvocationRunner::success("should not reach here");
+        let tool = SkillTool::with_invocation_runner(
             Arc::new(vec![make_fork_skill("fork-denied", "content")]),
             "/tmp".to_string(),
             // deny "fork-denied"
             SkillPermissionChecker::new(vec!["fork-denied".to_string()], vec![], false),
             None,
-            Some(spawner.clone() as Arc<dyn Spawner>),
+            Some(invocation_runner.clone() as Arc<dyn AgentInvocationRunner>),
         );
         let result = tool.execute(json!({"skill": "fork-denied"})).await;
         assert!(result.is_error, "denied fork skill should return error");
@@ -1198,39 +1183,39 @@ mod phase7_tests {
             "error should mention 'denied': {}",
             result.content
         );
-        // spawner should NOT have been called since permission check happens first
+        // The runner must not be called since permission checks happen first.
         assert!(
-            spawner.captured_config.lock().unwrap().is_none(),
-            "spawner should not be called when skill is denied"
+            invocation_runner.captured_input.lock().unwrap().is_none(),
+            "invocation runner should not be called when skill is denied"
         );
     }
 
-    // with_spawner() constructor stores spawner correctly
+    // with_invocation_runner() stores the shared primitive correctly.
     #[test]
-    fn tc_7_with_spawner_constructor() {
-        let spawner: Arc<dyn Spawner> = MockSpawner::success("ok");
-        let tool = SkillTool::with_spawner(
+    fn tc_7_with_invocation_runner_constructor() {
+        let invocation_runner: Arc<dyn AgentInvocationRunner> =
+            MockInvocationRunner::success("ok");
+        let tool = SkillTool::with_invocation_runner(
             Arc::new(vec![]),
             "/tmp".to_string(),
             SkillPermissionChecker::new(vec![], vec![], false),
             Some("sess-1".to_string()),
-            Some(spawner),
+            Some(invocation_runner),
         );
         // Verify session_id was also stored
         assert_eq!(tool.session_id.as_deref(), Some("sess-1"));
-        // Verify spawner is Some
-        assert!(tool.spawner.is_some());
+        assert!(tool.invocation_runner.is_some());
     }
 
-    // new() constructor leaves spawner as None
+    // new() constructor leaves the runner absent.
     #[test]
-    fn tc_7_new_constructor_spawner_is_none() {
+    fn tc_7_new_constructor_invocation_runner_is_none() {
         let tool = SkillTool::new(
             Arc::new(vec![]),
             "/tmp".to_string(),
             SkillPermissionChecker::new(vec![], vec![], false),
         );
-        assert!(tool.spawner.is_none());
+        assert!(tool.invocation_runner.is_none());
     }
 }
 

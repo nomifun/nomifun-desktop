@@ -6,6 +6,11 @@
 
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import type { ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  TDecisionPolicy,
+  TDelegationPolicy,
+  TExecutionModelPool,
+} from '@/common/types/agentExecution/agentExecutionTypes';
 import { storage } from '@/platform';
 
 // 系统配置存储
@@ -71,9 +76,8 @@ export interface IConfigStorageRefer {
     preferredMode?: string;
   };
   'nomi.defaultModel'?: { id: string; use_model: string };
-  // 智能编排「协作模型」默认偏好（多选）。主模型见 nomi.defaultModel；这里是供主模型
-  // 按任务难度挑选的额外 worker 模型池。空 = 全程用主模型。
-  'nomi.orchestrationCollaborators'?: { provider_id: string; model: string }[];
+  /** 新会话的协作模型偏好。空数组表示只使用主模型。 */
+  'nomi.collaborationModels'?: { provider_id: string; model: string }[];
   'tools.imageGenerationModel': TProviderWithModel & {
     /** @deprecated Image generation is now controlled via built-in MCP server toggle */
     switch?: boolean;
@@ -155,8 +159,8 @@ export type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running' | 'w
 export type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
-  has_task: boolean;
-  task_status?: TChatConversationStatus;
+  has_runtime: boolean;
+  runtime_status?: TChatConversationStatus;
   is_processing: boolean;
   pending_confirmations: number;
   /** Epoch ms when the currently-running turn started, present while
@@ -190,6 +194,18 @@ interface IChatConversation<T, Extra> {
   preset_id?: string;
   preset_revision?: number;
   preset_snapshot?: ResolvedPresetSnapshot;
+  /** Nomi-only collaboration policy persisted as first-class conversation fields. */
+  delegation_policy?: TDelegationPolicy;
+  execution_model_pool?: TExecutionModelPool;
+  decision_policy?: TDecisionPolicy;
+  /** Optional collaboration authoring template. Runtime executions copy its
+   * resolved snapshot and never retain this mutable reference. `null` is the
+   * PATCH wire value for explicitly clearing the selection. */
+  execution_template_id?: string | null;
+  /** Collaboration aggregate linked to this lead or retained Attempt transcript. */
+  linked_execution_id?: string;
+  execution_step_id?: string;
+  execution_attempt_id?: string;
 }
 
 // Token 使用统计数据类型
@@ -441,32 +457,6 @@ export type TChatConversation =
         last_token_usage?: TokenUsageData;
         /** Cron job ID that spawned this conversation */
         cron_job_id?: string;
-        /** Orchestration run linked to this conversation (会话原生编排 v2).
-         * Written by the backend (Tasks B1–B3) onto the originating conversation
-         * and refreshed via `conversation.listChanged`; the single source of truth
-         * for "does this conversation have a run". `useConversationRun` derives its
-         * `runId` from here. Absent for conversations with no orchestration run. */
-        orchestrator_run_id?: string;
-        /** The specific run task this conversation backs, when the conversation was
-         * created as a worker for an orchestration run task (vs. the run's lead
-         * conversation). Absent for the lead conversation and non-orchestration ones. */
-        orchestrator_task_id?: string;
-        /** Legacy field kept for backward-compat only (`#[serde(default)]`). Once
-         * marked the homepage 智能编排 LEAD on-ramp, but that entry was removed: it
-         * no longer drives any lead prompt. The model range (主/协作) is now chosen
-         * per-conversation via the composer's collaborator selector, persisted into
-         * `extra.orchestrator_model_range`. Retained so old rows keep deserializing. */
-        orchestrator_role?: string;
-        /** Curated model range for the orchestration run this lead conversation
-         * spawns (homepage「主模型 + 协作模型」picker). `models[0]` is the 主模型
-         * (also the lead/planner); the rest are 协作模型 the planner may assign
-         * per node by difficulty. Written by the homepage entry into `extra`; the
-         * `nomi_run_create` gateway handler reads it back to build the run's fleet
-         * (deterministic — not relayed through the LLM). Absent ⇒ Auto (all enabled). */
-        orchestrator_model_range?:
-          | { mode: 'single'; model: { provider_id: string; model: string } }
-          | { mode: 'auto' }
-          | { mode: 'range'; models: { provider_id: string; model: string }[] };
         /** Marks this nomi conversation as a desktop-companion's single per-companion
          * session (单会话契约). Written by the backend at companion-session creation.
          * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
@@ -568,9 +558,9 @@ export interface IProvider {
   model_protocols?: Record<string, string>;
   /**
    * 每个模型的用户撰写描述。映射模型名称到描述文本。
-   * 供编排器按描述自动择优模型。
+   * 供智能协作按描述自动选择模型。
    * Per-model user-authored descriptions. Maps model name to description text.
-   * Consumed by the orchestrator to auto-pick models by description.
+   * Used by collaboration planning to select models by description.
    * e.g. { "gpt-4o": "擅长前端与多模态", "claude-sonnet-4": "长上下文推理" }
    */
   model_descriptions?: Record<string, string>;

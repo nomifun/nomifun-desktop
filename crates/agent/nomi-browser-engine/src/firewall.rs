@@ -22,7 +22,7 @@
 //!    origin 不同 eTLD+1）→ 升 **Exec 审批**。审批预览经 [`build_post_preview`] 构造，**只**含
 //!    目标 host + body 大小 + 字段名（form field names）——**绝不**含字段值（值可能携带
 //!    secret / 敏感数据；安全红线）。**E5 只提供拦截 + 门控判定 + 预览构造**；实际审批路由（接
-//!    Exec tier orchestration）由 **F1** 接线——见 `decide` 里的 `TODO(E5->F1-egress-approval)`。
+//!    Exec tier approval pipeline）由 **F1** 接线——见 `decide` 里的 `TODO(E5->F1-egress-approval)`。
 //!
 //! **跨域判定**用 eTLD+1（[`is_cross_origin`]）：复用 `nomifun-secret` 的 PSL 机器
 //! （`same_etld_plus_one`），对 IP / `localhost` 等无 eTLD+1 的 host 退化为裸 host 比较——故
@@ -462,7 +462,7 @@ fn domain_policy(config: &FirewallConfig, req: &RequestInfo<'_>) -> Option<Firew
 /// 此时**不**做 IP 封禁判定，靠接线层对 IP 字面量同步判；域名解析的异步路径留 `TODO`）。
 ///
 /// `TODO(E5->F1-egress-approval)`：[`FirewallDecision::GatePost`] 当前由接线层**放行 + 构造预览
-/// 留痕**（E5 范围：检测 + 预览）；F1 把它接到 Exec tier orchestration 的人在回路审批（批准才
+/// 留痕**（E5 范围：检测 + 预览）；F1 把它接到 Exec tier approval pipeline 的人在回路审批（批准才
 /// `continueRequest`，否则 `failRequest`）。
 pub fn decide(config: &FirewallConfig, req: &RequestInfo<'_>) -> FirewallDecision {
     // 1) IP 封禁（最高优先，硬 SSRF 防护）。

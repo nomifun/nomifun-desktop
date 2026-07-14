@@ -26,7 +26,7 @@ pub struct CollectConfig {
     /// primary mining signal for skill self-evolution (design §5.1).
     pub tool_calls: bool,
     /// Companion-dialogue capture: owner messages + companion replies inside companion
-    /// (companion / channel-master) conversations. The field-level serde
+    /// (companion / Channel Agent) conversations. The field-level serde
     /// default keeps it ON for legacy `config.json` files written before the
     /// field existed.
     #[serde(default = "default_true")]

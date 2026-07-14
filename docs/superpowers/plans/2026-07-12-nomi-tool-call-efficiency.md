@@ -4,9 +4,9 @@
 
 **Goal:** Reduce avoidable Nomi tool calls with supervised script batching, cache-aware multi-file reads, milestone-level plan updates, and structured per-run efficiency telemetry.
 
-**Architecture:** Extend the existing `exec_command` and `Read` schemas so the long-term single-command-tool design remains intact. Keep all execution, including Python interpreter validation and runtime deadlines, on `ProcessSupervisor`; keep all file observations in `FileStateCache`; and make optimization choices model-visible through the existing system-prompt guidance. Legacy `cmd` keeps its numeric `ProcessStore`/`write_stdin` adapter; script mode is a bounded one-shot path that always reaches a terminal result and never retains or returns a session.
+**Architecture:** Extend the existing `exec_command` and `Read` schemas so the long-term single-command-tool design remains intact. Keep all execution, including Python interpreter validation and runtime deadlines, on `ProcessSupervisor`; keep all file observations in `FileStateCache`; and make optimization choices model-visible through the existing system-prompt guidance. Existing `cmd` keeps its numeric `ProcessStore`/`write_stdin` adapter; script mode is a bounded one-shot path that always reaches a terminal result and never retains or returns a session.
 
-**Tech Stack:** Rust 2024, Tokio, serde_json, nomi-execution, tracing, Cargo test/clippy/fmt.
+**Tech Stack:** Rust 2024, Tokio, serde_json, nomi-process-runtime, tracing, Cargo test/clippy/fmt.
 
 ## Global Constraints
 
@@ -29,14 +29,14 @@
 This is a prerequisite discovered by the first script-mode execution tests: short-lived supervised commands could stall on macOS before script batching itself could be verified.
 
 **Files:**
-- Modify: `crates/shared/nomi-execution/src/platform/unix.rs`
-- Modify: `crates/shared/nomi-execution/src/platform/macos_watchdog.rs`
-- Modify: `crates/shared/nomi-execution/src/platform/unix_pty.rs`
-- Test: `crates/shared/nomi-execution/tests/process_contract.rs`
-- Verify: `crates/shared/nomi-execution/tests/pty_contract.rs`
+- Modify: `crates/shared/nomi-process-runtime/src/platform/unix.rs`
+- Modify: `crates/shared/nomi-process-runtime/src/platform/macos_watchdog.rs`
+- Modify: `crates/shared/nomi-process-runtime/src/platform/unix_pty.rs`
+- Test: `crates/shared/nomi-process-runtime/tests/process_contract.rs`
+- Verify: `crates/shared/nomi-process-runtime/tests/pty_contract.rs`
 
 **Interfaces:**
-- Produces: host-side `seal_process_group_anchored_by(pgid, anchor_pid) -> io::Result<bool>` handling for the narrowly proven Darwin zombie-only state, including a legacy watchdog anchor after leader reap
+- Produces: host-side `seal_process_group_anchored_by(pgid, anchor_pid) -> io::Result<bool>` handling for the narrowly proven Darwin zombie-only state, including a child-process watchdog anchor after leader reap
 - Produces: watchdog-side final group sealing guarded by kqueue leader-exit evidence
 - Preserves: exact child reap, post-reap process-group absence proof, and ordinary `EPERM` failure behavior
 
@@ -46,7 +46,7 @@ Run short-lived zero/non-zero pipe and PTY commands through `ProcessSupervisor`.
 
 - [x] **Step 2: Add the narrow process-group proof**
 
-Add a macOS-only fixed-stack proof that takes two complete `proc_listpgrppids` snapshots, rejects PID 0/1, duplicates, capacity saturation, membership changes, or a missing anchor, and queries `PROC_PIDTBSDINFO` with zombie lookup enabled for every member. On the host path, accept `EPERM` only when `waitid(..., WNOWAIT | WNOHANG)` proves the selected exact direct-child anchor exited both before and after the stable all-`SZOMB` proof. Propagate that same proved PID into the seal call so a legacy cleanup relay may safely use its joined watchdog after the group leader was already reaped. Carry watchdog group membership explicitly through spawn/lifecycle/cleanup state: set it only after the protocol proves a non-external join (validated host registration in the modern path, child ACK ordering in the legacy path), and never let an external-session PTY watchdog authorize a negative-PGID signal.
+Add a macOS-only fixed-stack proof that takes two complete `proc_listpgrppids` snapshots, rejects PID 0/1, duplicates, capacity saturation, membership changes, or a missing anchor, and queries `PROC_PIDTBSDINFO` with zombie lookup enabled for every member. On the host path, accept `EPERM` only when `waitid(..., WNOWAIT | WNOHANG)` proves the selected exact direct-child anchor exited both before and after the stable all-`SZOMB` proof. Propagate that same proved PID into the seal call so a child-process cleanup relay may safely use its joined watchdog after the group leader was already reaped. Carry watchdog group membership explicitly through spawn/lifecycle/cleanup state: set it only after the protocol proves a non-external join (validated host registration in the modern path, child ACK ordering in the legacy path), and never let an external-session PTY watchdog authorize a negative-PGID signal.
 
 - [x] **Step 3: Apply the same rule to the watchdog**
 
@@ -117,13 +117,13 @@ Expected: all Read unit tests pass, including existing single-file behavior.
 
 **Interfaces:**
 - Consumes: legacy `{ cmd, workdir?, tty?, yield_time_ms? }` or strict script `{ script, language: shell|python, timeout, workdir? }`
-- Produces: `requested_invocation(input) -> Result<PreparedInvocation, String>` with `InvocationMode::Legacy` or `InvocationMode::Script`
+- Produces: `requested_invocation(input) -> Result<PreparedInvocation, String>` with `InvocationMode::Command` or `InvocationMode::Script`
 - Produces: completed and timed-out script results prefixed with mode, language, interpreter, workdir, and elapsed time
-- Preserves: existing legacy workdir/TTY/yield/numeric-session behavior only for `cmd`
+- Preserves: existing workdir/TTY/yield/numeric-session behavior only for `cmd`
 
 - [x] **Step 1: Write failing parser and execution tests**
 
-Cover legacy `cmd`, schema compatibility, shell script mapping, direct Python program mapping, both/neither input rejection, blank source, missing/unknown language, missing/out-of-range timeout, any `tty` or `yield_time_ms` in script mode, one real multiline shell script, Unicode/literal Python source, bounded `describe` output, and a timeout that cancels without retaining a live session.
+Cover existing `cmd`, schema compatibility, shell script mapping, direct Python program mapping, both/neither input rejection, blank source, missing/unknown language, missing/out-of-range timeout, any `tty` or `yield_time_ms` in script mode, one real multiline shell script, Unicode/literal Python source, bounded `describe` output, and a timeout that cancels without retaining a live session.
 
 - [x] **Step 2: Run tests and verify RED**
 
@@ -156,28 +156,28 @@ Require exactly one of `cmd` or `script`. Script mode requires non-blank source,
 
 - [x] **Step 4: Add one-shot hard-deadline execution**
 
-Put the absolute script deadline into `ExecutionPolicy` and enforce it inside `ProcessSupervisor`, with `TimedOut` distinct from user cancellation. Preserve a natural exit observed before the deadline even if final output draining completes slightly later; classify an exit observed at or after the boundary as timed out. Retain output in `TimedOut` and `Lost`, cap script output at 48,000 bytes, report that dependent effects must be inspected, and never insert the script process into `ProcessStore` or return a `session_id`. The tool-side deadline branch calls the supervisor's timeout path as a defensive adapter. Legacy `cmd` retains its current yield/session branches unchanged.
+Put the absolute script deadline into `ProcessPolicy` and enforce it inside `ProcessSupervisor`, with `TimedOut` distinct from user cancellation. Preserve a natural exit observed before the deadline even if final output draining completes slightly later; classify an exit observed at or after the boundary as timed out. Retain output in `TimedOut` and `Lost`, cap script output at 48,000 bytes, report that dependent effects must be inspected, and never insert the script process into `ProcessStore` or return a `session_id`. The tool-side deadline branch calls the supervisor's timeout path as a defensive adapter. Existing `cmd` retains its current yield/session branches unchanged.
 
 - [x] **Step 5: Update schema, description, and `describe`**
 
-Use a strict schema `oneOf` for legacy command versus script mode. Document deterministic batching, hard timeout, one-shot non-interactive behavior, Python host dependency, direct execution, failure checking, bounded summaries, and the prohibition on using scripts to bypass dedicated tools. Include script language and an 80-character UTF-8-safe source preview in `describe`.
+Use a strict schema `oneOf` for existing command versus script mode. Document deterministic batching, hard timeout, one-shot non-interactive behavior, Python host dependency, direct execution, failure checking, bounded summaries, and the prohibition on using scripts to bypass dedicated tools. Include script language and an 80-character UTF-8-safe source preview in `describe`.
 
 - [x] **Step 6: Verify GREEN**
 
 Run: `cargo test -p nomi-tools exec_command --lib`
 
-Expected: new and legacy exec tests pass.
+Expected: new and existing exec tests pass.
 
 ### Task 3: Preserve Native `exec_command`/`write_stdin` Precedence over MCP Tools
 
 **Files:**
 - Modify: `crates/agent/nomi-agent/src/bootstrap.rs`
 - Modify: `crates/agent/nomi-agent/tests/bootstrap_test.rs`
-- Modify: `crates/shared/nomi-execution/tests/architecture_contract.rs`
+- Modify: `crates/shared/nomi-process-runtime/tests/architecture_contract.rs`
 
 **Interfaces:**
 - Produces: native `exec_command` and `write_stdin` registrations before the MCP built-in-name snapshot
-- Preserves: one shared `ProcessSupervisor` and one numeric `ProcessStore` adapter for the native legacy pair
+- Preserves: one shared `ProcessSupervisor` and one numeric `ProcessStore` adapter for the native numeric-session pair
 
 - [x] **Step 1: Write registration-order tests**
 
@@ -193,7 +193,7 @@ Run:
 
 ```bash
 cargo test -p nomi-agent --test bootstrap_test
-cargo test -p nomi-execution --test architecture_contract native_exec_tools_are_registered_before_mcp_collision_snapshot
+cargo test -p nomi-process-runtime --test architecture_contract native_exec_tools_are_registered_before_mcp_collision_snapshot
 ```
 
 Expected: native tool visibility, allowlist behavior, and registration-order contracts pass.
@@ -299,10 +299,10 @@ Run: `cargo fmt --all -- --check`
 Run:
 
 ```bash
-cargo test -p nomi-execution -- --test-threads=1
+cargo test -p nomi-process-runtime -- --test-threads=1
 cargo test -p nomi-tools -- --test-threads=1
 cargo test -p nomi-agent -- --test-threads=1
-cargo check -p nomi-execution --target x86_64-apple-darwin --all-targets --locked
+cargo check -p nomi-process-runtime --target x86_64-apple-darwin --all-targets --locked
 ```
 
 - [x] **Step 3: Lint touched crates**
@@ -311,7 +311,7 @@ Run:
 
 ```bash
 bun run check:process-runtime-boundary
-cargo clippy -p nomi-execution -p nomi-tools -p nomi-agent --all-targets --locked -- -D warnings
+cargo clippy -p nomi-process-runtime -p nomi-tools -p nomi-agent --all-targets --locked -- -D warnings
 ```
 
 - [x] **Step 4: Audit the diff**

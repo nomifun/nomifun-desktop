@@ -13,6 +13,19 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, delete_with_token, get_with_token, json_with_token, setup_and_login};
 
+async fn seed_test_provider(services: &nomifun_app::AppServices) {
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers (\
+            id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES ('prov_test', 'openai', 'test', 'https://example.invalid', \
+                   'encrypted', '[\"test-model\"]', 1, '[]', 1, 1)",
+    )
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+}
+
 /// POST /api/companion/companions and return the created profile JSON (asserts 201).
 async fn create_companion(
     app: &axum::Router,
@@ -176,6 +189,7 @@ async fn companions_unknown_id_is_404_and_bad_name_is_400() {
 #[tokio::test]
 async fn companion_single_session_happy_path() {
     let (mut app, services) = build_app().await;
+    seed_test_provider(&services).await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let companion = create_companion(&app, &token, &csrf, "甲", "ink").await;
@@ -214,8 +228,9 @@ async fn companion_single_session_happy_path() {
         &csrf,
     );
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let thread = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "ensure companion session failed: {thread}");
     let conv = thread["data"]["conversation_id"].as_str().unwrap().to_owned();
     assert!(!conv.is_empty());
     assert_eq!(thread["data"]["companion_id"], id.as_str());

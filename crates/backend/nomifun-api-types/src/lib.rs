@@ -4,6 +4,8 @@ mod acp_prompt_hook;
 mod agent_build_extra;
 mod agent_discovery;
 mod agent_error;
+mod agent_execution;
+mod agent_execution_template;
 mod auth;
 mod channel;
 mod confirmation;
@@ -26,7 +28,6 @@ pub mod model_capability;
 pub mod model_catalog;
 pub mod model_task;
 mod office;
-mod orchestrator;
 mod provider;
 mod preset;
 mod remote_agent;
@@ -37,7 +38,7 @@ mod serde_util;
 mod shell;
 mod skill;
 mod system;
-mod team_mcp;
+mod mcp_bridge;
 mod terminal;
 mod webhook;
 mod websocket;
@@ -61,6 +62,24 @@ pub use agent_discovery::{
 pub use agent_error::{
     AgentErrorCode, AgentErrorOwnership, AgentErrorResolution, AgentErrorResolutionKind,
     AgentErrorResolutionTarget, AgentStreamErrorData,
+};
+pub use agent_execution::{
+    AddExecutionStepsRequest, AdoptExecutionStepOutputRequest, AdjustAgentExecutionRequest, AgentExecution,
+    AgentExecutionChangedEvent, AgentExecutionDetail, AgentExecutionEvent,
+    AgentExecutionEventsQuery, AnswerExecutionDecisionRequest, ConfigureExecutionStepRequest,
+    CreateAgentExecutionRequest, ExecutionAttempt,
+    ExecutionModelPool, ExecutionModelRef, ExecutionParticipant, ExecutionStep,
+    ExecutionStepDependency, ExecutionStepProfile, JudgeAggregation, LoopStopPolicy,
+    ParticipantCapability, ParticipantConstraints, PlannedExecution, PlannedExecutionStep,
+    ReassignExecutionStepRequest, RenameAgentExecutionRequest, ReplanAgentExecutionRequest,
+    RetryExecutionStepRequest, SteerExecutionStepRequest, StepControlPolicy,
+    UpdateExecutionStepRequest, VerificationPolicy, VersionedAgentExecutionCommand,
+};
+pub use agent_execution_template::{
+    AgentExecutionTemplate, AgentExecutionTemplateDetail,
+    AgentExecutionTemplateParticipant, AgentExecutionTemplateParticipantInput,
+    CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest,
+    UpdateAgentExecutionTemplateRequest,
 };
 pub use exposure::{ExposureClamp, ExposureMode, SAFE_PUBLIC_SERVICE_TOOLS, exposure_clamp};
 pub use preset::{
@@ -99,8 +118,8 @@ pub use conversation::{
 };
 pub use cron::{
     CreateCronJobRequest, CronAgentConfigDto, CronJobExecutedEvent, CronJobMetadataDto,
-    CronJobPayloadDto, CronJobRemovedPayload, CronJobResponse, CronJobRunResponse, CronJobStateDto,
-    CronJobTargetDto, CronScheduleDto, HasSkillResponse, ListCronJobsQuery, RunNowResponse,
+    CronJobRemovedPayload, CronJobResponse, CronJobRunResponse, CronJobStateDto, CronScheduleDto,
+    HasSkillResponse, ListCronJobsQuery, RunNowResponse,
     SaveCronSkillRequest, UpdateCronJobRequest,
 };
 pub use custom_agent::{
@@ -172,21 +191,13 @@ pub use model_task::{
     ModelTask, ModelTrait, ProfileSource,
 };
 pub use office::{
-    CellCoord, CellRange, ConversionResultDto, ConversionTarget, DetectStarOfficeRequest,
+    is_preview_capability, CellCoord, CellRange, ConversionResultDto, ConversionTarget, DetectStarOfficeRequest,
     DocumentConversionRequest, DocumentConversionResponse, ExcelSheetData, ExcelSheetImage,
     ExcelWorkbookData, GetSnapshotContentRequest, ListSnapshotsRequest, PptJsonData, PptSlideData,
     PreviewHistoryTargetDto, PreviewSnapshotInfoDto, PreviewState, PreviewStatusEvent,
     PreviewUrlResponse, SaveSnapshotRequest, SnapshotContentResponse, StarOfficeDetectResponse,
-    StartPreviewRequest, StopPreviewRequest,
+    StartPreviewRequest, StopPreviewRequest, PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN,
 };
-pub use orchestrator::{
-    Assignment, CapabilityProfile, CreateAdhocRunRequest, CreateFleetRequest, CreateRunRequest,
-    CreateWorkspaceRequest, Fleet, FleetMember, FleetMemberInput, MemberConstraints, ModelRange,
-    ModelRef, OrchWorkspace, PlannedDag, PlannedTask, ReassignRequest, ReplanRequest, Run,
-    RunDetail, RunRenameRequest, RunTask, RunTaskDep, SteerRequest, TaskConfigUpdateRequest,
-    TaskProfile, TaskSpecUpdateRequest, UpdateFleetRequest, UpdateWorkspaceRequest, derive_capability,
-};
-pub use orchestrator::AdjustRunRequest;
 pub use provider::{
     BedrockAuthMethod, BedrockConfig, CreateProviderRequest, DetectProtocolRequest,
     DetectedProtocol, DetectionSuggestion, FetchModelsAnonymousRequest, FetchModelsRequest,
@@ -227,9 +238,19 @@ pub use system::{
     ClientPreferencesResponse, SystemSettingsResponse, UpdateClientPreferencesRequest,
     UpdateSettingsRequest,
 };
-pub use team_mcp::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, GuideMcpConfig, KnowledgeMcpConfig,
-    OpenMcpConfig, RequirementMcpConfig,
+pub use mcp_bridge::{
+    BrowserMcpConfig, ComputerMcpConfig, GATEWAY_CALL_TOOL_OPERATION,
+    GATEWAY_CAPABILITY_DOMAIN, GATEWAY_CREATE_CONVERSATION_TOOL,
+    GATEWAY_LIST_TOOLS_OPERATION,
+    GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpChildConfig,
+    GatewayMcpConfig,
+    KNOWLEDGE_CAPABILITY_DOMAIN, KNOWLEDGE_READ_TOOL, KNOWLEDGE_SEARCH_TOOL,
+    KNOWLEDGE_WRITE_TOOL, KnowledgeCapabilityClaims, KnowledgeCapabilityScope,
+    KnowledgeMcpChildConfig, KnowledgeMcpConfig, OpenMcpConfig,
+    REQUIREMENT_CAPABILITY_DOMAIN, REQUIREMENT_COMPLETE_TOOL,
+    REQUIREMENT_UPDATE_STATUS_TOOL, RequirementCapabilityClaims,
+    RequirementCapabilityScope, RequirementMcpChildConfig, RequirementMcpConfig,
+    ScopedMcpChildBootstrap, ScopedMcpChildConfig,
 };
 pub use terminal::{
     CreateTerminalRequest, TerminalExitEvent, TerminalInputRequest, TerminalOutputEvent,

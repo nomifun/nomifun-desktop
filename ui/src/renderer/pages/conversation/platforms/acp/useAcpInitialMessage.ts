@@ -18,6 +18,7 @@ type UseAcpInitialMessageParams = {
   conversation_id: number;
   backend: string;
   workspacePath?: string;
+  enabled?: boolean;
   setAiProcessing: (value: boolean) => void;
   checkAndUpdateTitle: (conversation_id: number, input: string) => void;
   addOrUpdateMessage: (message: TMessage, prepend?: boolean) => void;
@@ -31,6 +32,7 @@ export const useAcpInitialMessage = ({
   conversation_id,
   backend,
   workspacePath,
+  enabled = true,
   setAiProcessing,
   checkAndUpdateTitle,
   addOrUpdateMessage,
@@ -38,6 +40,8 @@ export const useAcpInitialMessage = ({
   const { t } = useTranslation();
 
   useEffect(() => {
+    if (!enabled) return;
+
     const storageKey = `acp_initial_message_${conversation_id}`;
     const storedMessage = sessionStorage.getItem(storageKey);
 
@@ -114,5 +118,5 @@ export const useAcpInitialMessage = ({
     sendInitialMessage().catch((error) => {
       console.error('Failed to send initial message:', error);
     });
-  }, [addOrUpdateMessage, backend, checkAndUpdateTitle, conversation_id, setAiProcessing, t, workspacePath]);
+  }, [addOrUpdateMessage, backend, checkAndUpdateTitle, conversation_id, enabled, setAiProcessing, t, workspacePath]);
 };

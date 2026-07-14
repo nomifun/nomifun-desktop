@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_ai_agent::task_manager::IWorkerTaskManager;
+use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{IdmmConfig, IdmmSettings, IdmmState, IdmmTargetKind, InterventionRecord};
 use nomifun_common::AppError;
 use nomifun_conversation::ConversationService;
@@ -22,7 +22,10 @@ use crate::probe::{ConversationProbe, SessionProbe, TerminalProbe};
 use crate::sidecar::{PREF_BACKUP_MODEL, PREF_BACKUP_PROVIDER, PREF_DEFAULT_STEERING, SidecarClient};
 use crate::supervisor::{ConfigReader, IdmmManager, ProbeFactory, build_state};
 
-const SYSTEM_DEFAULT_USER_ID: &str = "system_default_user";
+/// Public log/activity reads are deliberately bounded even if an internal
+/// caller forgets to clamp an HTTP/tool parameter.  The durable feed itself is
+/// capped independently by the repository janitor.
+const MAX_ACTIVITY_READ_LIMIT: i64 = 500;
 
 /// Parse an IDMM string `target_id` (the kind-agnostic target handle on the
 /// IDMM DTO) into the integer key the conversation repo / terminal driver now
@@ -59,7 +62,7 @@ pub struct ProbeDeps {
     pub conversation_service: ConversationService,
     pub conversation_repo: Arc<dyn IConversationRepository>,
     pub terminal_driver: Arc<dyn TerminalDriver>,
-    pub task_manager: Arc<dyn IWorkerTaskManager>,
+    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 }
 
 impl ProbeDeps {
@@ -86,14 +89,50 @@ impl ProbeDeps {
         Ok(raw.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default())
     }
 
+    /// Resolve the target's authoritative persisted owner. This is shared by
+    /// API authorization and the background supervisor so they cannot drift.
+    async fn target_owner(&self, kind: IdmmTargetKind, target_id: &str) -> Result<String, AppError> {
+        let owner_id = match kind {
+            IdmmTargetKind::Conversation => self
+                .conversation_repo
+                .get(parse_target_id(target_id)?)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("conversation {target_id} not found")))?
+                .user_id,
+            IdmmTargetKind::Terminal => self
+                .terminal_driver
+                .describe(parse_target_id(target_id)?)
+                .await
+                .map_err(|e| AppError::Internal(format!("describe failed: {e}")))?
+                .ok_or_else(|| AppError::NotFound(format!("terminal {target_id} not found")))?
+                .user_id,
+        };
+        if owner_id.trim().is_empty() {
+            return Err(AppError::Forbidden("IDMM target has no owner".into()));
+        }
+        Ok(owner_id)
+    }
+
+    async fn verify_target_owner(
+        &self,
+        kind: IdmmTargetKind,
+        target_id: &str,
+        user_id: &str,
+    ) -> Result<(), AppError> {
+        require_user_id(user_id)?;
+        if self.target_owner(kind, target_id).await? != user_id {
+            return Err(AppError::Forbidden("not your IDMM target".into()));
+        }
+        Ok(())
+    }
+
     fn build_probe(&self, kind: IdmmTargetKind, target_id: &str) -> Option<Arc<dyn SessionProbe>> {
         match kind {
             IdmmTargetKind::Conversation => Some(Arc::new(ConversationProbe {
-                task_manager: self.task_manager.clone(),
+                runtime_registry: self.runtime_registry.clone(),
                 conversation_service: self.conversation_service.clone(),
                 conversation_repo: self.conversation_repo.clone(),
                 conversation_id: target_id.to_string(),
-                user_id: SYSTEM_DEFAULT_USER_ID.to_string(),
             })),
             IdmmTargetKind::Terminal => {
                 // A non-numeric terminal target cannot map to a PTY → no probe.
@@ -112,8 +151,14 @@ impl ProbeFactory for ProbeDeps {
 
 #[async_trait]
 impl ConfigReader for ProbeDeps {
-    async fn read(&self, kind: IdmmTargetKind, target_id: &str) -> IdmmConfig {
-        self.read_config(kind, target_id).await.unwrap_or_default()
+    async fn read(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<IdmmConfig, AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
+        self.read_config(kind, target_id).await
     }
 }
 
@@ -169,7 +214,7 @@ impl IdmmService {
             && let Ok(id) = parse_target_id(target_id)
             && let Ok(Some(row)) = self.probe_deps.conversation_repo.get(id).await
         {
-            let pm = nomifun_conversation::task_options::provider_model_from_conversation_row(&row);
+            let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
             return !pm.provider_id.trim().is_empty();
         }
         false
@@ -178,7 +223,14 @@ impl IdmmService {
     // ── Config persistence ──
 
     /// Validate + persist a per-session config, then arm/stop supervision.
-    pub async fn save_config(&self, kind: IdmmTargetKind, target_id: &str, cfg: &IdmmConfig) -> Result<(), AppError> {
+    pub async fn save_config(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+        cfg: &IdmmConfig,
+    ) -> Result<(), AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
         let backup_resolvable = self.sidecar_backup_resolvable(kind, target_id, cfg).await;
         crate::config::validate(cfg, backup_resolvable).map_err(AppError::BadRequest)?;
 
@@ -214,6 +266,18 @@ impl IdmmService {
     /// blank `IdmmConfig::default()`).
     pub async fn read_config_persisted(
         &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<Option<IdmmConfig>, AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
+        self.read_config_persisted_unchecked(kind, target_id).await
+    }
+
+    /// Read after the caller has crossed the owner boundary.  Kept private so
+    /// every API/capability path must carry an authenticated `user_id`.
+    async fn read_config_persisted_unchecked(
+        &self,
         kind: IdmmTargetKind,
         target_id: &str,
     ) -> Result<Option<IdmmConfig>, AppError> {
@@ -239,15 +303,17 @@ impl IdmmService {
         Ok(raw.and_then(|v| serde_json::from_value(v).ok()))
     }
 
-    pub async fn read_config(&self, kind: IdmmTargetKind, target_id: &str) -> Result<IdmmConfig, AppError> {
-        self.probe_deps.read_config(kind, target_id).await
-    }
-
     /// Assemble the live state (config + manager runtime + backup resolvability).
     /// Includes the persisted config (when one exists) so the frontend can
     /// rehydrate its form without losing user input on remount (Req4).
-    pub async fn build_state(&self, kind: IdmmTargetKind, target_id: &str) -> Result<IdmmState, AppError> {
-        let persisted = self.read_config_persisted(kind, target_id).await?;
+    pub async fn build_state(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<IdmmState, AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
+        let persisted = self.read_config_persisted_unchecked(kind, target_id).await?;
         let cfg = persisted.clone().unwrap_or_default();
         let shared = self.manager.shared_for(kind, target_id);
         let resolved = self.sidecar_backup_resolvable(kind, target_id, &cfg).await;
@@ -264,39 +330,66 @@ impl IdmmService {
     /// Recent intervention log for a target (most-recent-first), read from the
     /// persisted audit table — the DB is the sole source of truth (the supervisor
     /// itself keeps only live counters, not a record ring). `limit` caps the rows.
-    pub async fn log(&self, kind: IdmmTargetKind, target_id: &str, limit: i64) -> Result<Vec<InterventionRecord>, AppError> {
+    pub async fn log(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+        limit: i64,
+    ) -> Result<Vec<InterventionRecord>, AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
+        let limit = limit.clamp(1, MAX_ACTIVITY_READ_LIMIT);
         let rows = self
             .records
-            .list_for_target(kind.as_str(), target_id, limit)
+            .list_for_target(user_id, kind.as_str(), target_id, limit)
             .await?;
         Ok(rows.into_iter().map(row_to_record).collect())
     }
 
     /// Clear all persisted intervention records for a target. Returns the count
     /// removed. (Manual "清空记录" + the session-delete cascade both route here.)
-    pub async fn clear_log(&self, kind: IdmmTargetKind, target_id: &str) -> Result<u64, AppError> {
+    pub async fn clear_log(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<u64, AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
         Ok(self
             .records
-            .delete_for_target(kind.as_str(), target_id)
+            .delete_for_target(user_id, kind.as_str(), target_id)
             .await?)
     }
 
-    /// Cross-session recent intervention feed (most-recent-first across ALL
-    /// targets), read from the persisted audit table. `limit` caps the rows.
-    pub async fn recent_activity(&self, limit: i64) -> Result<Vec<InterventionRecord>, AppError> {
-        let rows = self.records.list_recent(limit).await?;
+    /// Cross-session feed for one authenticated owner (most-recent-first).
+    pub async fn recent_activity(
+        &self,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<InterventionRecord>, AppError> {
+        require_user_id(user_id)?;
+        let rows = self
+            .records
+            .list_recent(user_id, limit.clamp(1, MAX_ACTIVITY_READ_LIMIT))
+            .await?;
         Ok(rows.into_iter().map(row_to_record).collect())
     }
 
-    /// Clear EVERY persisted intervention record across all targets. Returns the
-    /// count removed (manual "清空全部记录").
-    pub async fn clear_all_activity(&self) -> Result<u64, AppError> {
-        Ok(self.records.clear_all().await?)
+    /// Clear one owner's activity across all of their targets.
+    pub async fn clear_activity(&self, user_id: &str) -> Result<u64, AppError> {
+        require_user_id(user_id)?;
+        Ok(self.records.clear_all(user_id).await?)
     }
 
     /// Force one ladder pass now (manual "act now"): ensures supervision is
     /// running; the actual pass happens on the next observed signal.
-    pub async fn intervene_now(&self, kind: IdmmTargetKind, target_id: &str) -> Result<(), AppError> {
+    pub async fn intervene_now(
+        &self,
+        user_id: &str,
+        kind: IdmmTargetKind,
+        target_id: &str,
+    ) -> Result<(), AppError> {
+        self.verify_target_owner(kind, target_id, user_id).await?;
         self.manager.ensure(kind, target_id).await;
         Ok(())
     }
@@ -355,20 +448,28 @@ impl IdmmService {
         Ok(())
     }
 
-    /// Verify a terminal target belongs to `user_id` (data isolation).
-    pub async fn verify_terminal_owner(&self, terminal_id: &str, user_id: &str) -> Result<(), AppError> {
-        let desc = self
-            .probe_deps
-            .terminal_driver
-            .describe(parse_target_id(terminal_id)?)
+    /// Verify an IDMM target against its authoritative persisted owner before
+    /// reading config/log state or mutating supervision. Both target kinds go
+    /// through this one boundary so a newly added route cannot accidentally
+    /// protect terminals while exposing conversations.
+    pub async fn verify_target_owner(
+        &self,
+        kind: IdmmTargetKind,
+        target_id: &str,
+        user_id: &str,
+    ) -> Result<(), AppError> {
+        require_user_id(user_id)?;
+        self.probe_deps
+            .verify_target_owner(kind, target_id, user_id)
             .await
-            .map_err(|e| AppError::Internal(format!("describe failed: {e}")))?
-            .ok_or_else(|| AppError::NotFound(format!("terminal {terminal_id} not found")))?;
-        if desc.user_id != user_id {
-            return Err(AppError::Forbidden("not your terminal".into()));
-        }
-        Ok(())
     }
+}
+
+fn require_user_id(user_id: &str) -> Result<(), AppError> {
+    if user_id.trim().is_empty() {
+        return Err(AppError::Forbidden("missing IDMM owner identity".into()));
+    }
+    Ok(())
 }
 
 // Service-level persistence + validation + settings are covered end-to-end by

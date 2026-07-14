@@ -12,7 +12,7 @@
 //!   value *only* when the current origin's eTLD+1 is among the secret's allowed
 //!   eTLD+1s. Any failure to prove authorization (unknown name, unbound origin,
 //!   unparseable host) yields [`None`]. This holds regardless of session mode:
-//!   the gate is a property of the store, not of an orchestration approval that
+//!   the gate is a property of the store, not of an tool-execution approval that
 //!   yolo/companion could bypass.
 //!
 //! The returned [`SecretValue`] redacts itself in `Debug`/`Display`; plaintext

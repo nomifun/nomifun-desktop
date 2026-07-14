@@ -1,6 +1,6 @@
-//! AI agent lifecycle, worker task dispatch, and skill management.
-pub(crate) mod agent_runtime;
-pub mod agent_task;
+//! Agent runtime lifecycle, per-conversation runtime registration, and skill management.
+pub(crate) mod runtime_state;
+pub mod runtime_handle;
 // P3-K2: rendering page-fetch backend for knowledge URL sources. Gated behind
 // `browser-use` — the ONE bridge from the (agent-layer) browser engine into the
 // knowledge `PageFetcher` trait, keeping the knowledge crate engine-free (②).
@@ -19,8 +19,8 @@ pub mod protocol;
 pub mod registry;
 pub mod routes;
 pub(crate) mod services;
-pub mod shared_kernel;
-pub mod task_manager;
+pub mod session;
+pub mod runtime_registry;
 pub mod terminal_title_completer;
 pub mod types;
 
@@ -35,10 +35,10 @@ pub use nomi_agent::requirement_tools::RequirementSink;
 pub use nomi_config;
 pub use nomi_types;
 
-pub use agent_runtime::AgentRuntime;
+pub use runtime_state::AgentRuntimeState;
 #[cfg(any(test, feature = "test-support"))]
-pub use agent_task::IMockAgent;
-pub use agent_task::{AgentInstance, IAgentTask};
+pub use runtime_handle::MockAgentRuntime;
+pub use runtime_handle::{AgentRuntimeControl, AgentRuntimeHandle};
 pub use capability::skill_manager::{
     AcpSkillManager, SkillDefinition, SkillIndex, build_skills_index_text, build_system_instructions,
     build_system_instructions_with_skills_index, detect_skill_load_request, prepare_first_message,
@@ -73,4 +73,4 @@ pub use registry::{AgentRegistry, UnavailableReason};
 pub use routes::{AgentRouterState, RemoteAgentRouterState, agent_routes, remote_agent_routes};
 pub use services::AgentService;
 pub use services::RemoteAgentService;
-pub use task_manager::{IWorkerTaskManager, WorkerTaskManagerImpl};
+pub use runtime_registry::{AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry};

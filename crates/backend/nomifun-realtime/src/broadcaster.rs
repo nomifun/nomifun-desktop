@@ -2,16 +2,37 @@ use nomifun_api_types::WebSocketMessage;
 use tokio::sync::broadcast;
 use tracing::warn;
 
-/// Trait for broadcasting WebSocket events to all connected clients.
+/// Sink for events whose owning resource is the whole application instance.
 ///
-/// Business modules depend on this trait (via `Arc<dyn EventBroadcaster>`)
-/// to push events without coupling to WebSocket internals.
+/// This is intentionally a narrow boundary, not the default event API. Only
+/// domains whose DB/API model is explicitly instance-owned may depend on it.
+/// Any event derived from a user-owned row, request, session, or credential
+/// must use [`UserEventSink`] so the audience cannot be dropped in transit.
 ///
 /// Note: `send_to` (unicast) is intentionally NOT part of this trait.
 /// Unicast is a connection-management concern handled by `WebSocketManager`.
 pub trait EventBroadcaster: Send + Sync {
-    /// Broadcast an event to all connected WebSocket clients.
+    /// Publish an instance-owned event to all connected clients.
     fn broadcast(&self, event: WebSocketMessage<serde_json::Value>);
+}
+
+/// Delivers an event only to connections authenticated as one application user.
+///
+/// User-owned runtime state must use this boundary instead of the process-wide
+/// [`EventBroadcaster`]. Keeping the audience in the method signature makes it
+/// impossible for a producer to accidentally publish private content without
+/// naming its owner.
+pub trait UserEventSink: Send + Sync {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>);
+}
+
+/// Internal envelope for a user-scoped event. The owner travels with the event
+/// through server-side observers and the WebSocket bridge, so audience
+/// information is never reconstructed from payload fields.
+#[derive(Debug, Clone)]
+pub struct UserEventEnvelope {
+    pub user_id: String,
+    pub event: WebSocketMessage<serde_json::Value>,
 }
 
 /// Default implementation of [`EventBroadcaster`] backed by
@@ -22,13 +43,15 @@ pub trait EventBroadcaster: Send + Sync {
 /// forwards received events to its per-connection `mpsc` sender.
 pub struct BroadcastEventBus {
     tx: broadcast::Sender<WebSocketMessage<serde_json::Value>>,
+    user_tx: broadcast::Sender<UserEventEnvelope>,
 }
 
 impl BroadcastEventBus {
     /// Create a new event bus with the given channel capacity.
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        let (user_tx, _user_rx) = broadcast::channel(capacity);
+        Self { tx, user_tx }
     }
 
     /// Subscribe to receive broadcast events.
@@ -38,9 +61,19 @@ impl BroadcastEventBus {
         self.tx.subscribe()
     }
 
+    /// Subscribe to owner-scoped events for internal observers or the
+    /// WebSocket user-delivery bridge.
+    pub fn subscribe_user(&self) -> broadcast::Receiver<UserEventEnvelope> {
+        self.user_tx.subscribe()
+    }
+
     /// Returns the number of active subscribers.
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
+    }
+
+    pub fn user_receiver_count(&self) -> usize {
+        self.user_tx.receiver_count()
     }
 }
 
@@ -50,6 +83,22 @@ impl EventBroadcaster for BroadcastEventBus {
             warn!(
                 event_name = %e.0.name,
                 "broadcast failed: no active receivers"
+            );
+        }
+    }
+}
+
+impl UserEventSink for BroadcastEventBus {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        let envelope = UserEventEnvelope {
+            user_id: user_id.to_owned(),
+            event,
+        };
+        if let Err(error) = self.user_tx.send(envelope) {
+            warn!(
+                user_id,
+                event_name = %error.0.event.name,
+                "user event delivery failed: no active receivers"
             );
         }
     }
@@ -135,6 +184,22 @@ mod tests {
             assert_eq!(msg.name, format!("event-{i}"));
             assert_eq!(msg.data["seq"], i);
         }
+    }
+
+    #[tokio::test]
+    async fn user_events_preserve_owner_for_internal_subscribers() {
+        let bus = BroadcastEventBus::new(16);
+        let mut rx = bus.subscribe_user();
+
+        bus.send_to_user(
+            "owner-a",
+            WebSocketMessage::new("message.stream", json!({"conversation_id": 1})),
+        );
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.user_id, "owner-a");
+        assert_eq!(received.event.name, "message.stream");
+        assert_eq!(received.event.data["conversation_id"], 1);
     }
 
     #[test]

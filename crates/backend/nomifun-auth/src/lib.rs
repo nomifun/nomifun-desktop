@@ -53,7 +53,10 @@ pub use security::security_headers_middleware;
 pub use csrf::csrf_middleware;
 
 // Auth middleware
-pub use middleware::{AuthState, CurrentUser, auth_middleware};
+pub use middleware::{
+    AuthState, CurrentUser, InstanceOwnerState, auth_middleware,
+    require_instance_owner_middleware,
+};
 
 // Trust resolution (local-trust secret, auth policy)
 pub use trust::{

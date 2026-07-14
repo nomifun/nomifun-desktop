@@ -76,7 +76,7 @@ async fn fixture_embedded() -> Fixture {
     states.skill = SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
-        assistant_dispatcher: states.skill.assistant_dispatcher.clone(),
+        preset_dispatcher: states.skill.preset_dispatcher.clone(),
         skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
             services.database.pool().clone(),
         )),
@@ -84,7 +84,9 @@ async fn fixture_embedded() -> Fixture {
     };
 
     let mut app = create_router_with_states(&services, states);
-    let (token, csrf) = setup_and_login(&mut app, &services, "builtin-e2e", "StrongP@ss1").await;
+    // Built-in skills are host-control resources, so exercise these routes as
+    // the canonical installation owner rather than a secondary account.
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     Fixture {
         app,
@@ -429,7 +431,8 @@ async fn materialize_for_agent_does_not_touch_data_dir() {
     // materialize-for-agent — it only reads the source tree.
     let fx = fixture_embedded().await;
 
-    fx.app
+    let resp = fx
+        .app
         .clone()
         .oneshot(json_with_token(
             "POST",
@@ -440,6 +443,7 @@ async fn materialize_for_agent_does_not_touch_data_dir() {
         ))
         .await
         .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 
     assert!(!fx.data_dir.join("agent-skills").exists());
     assert!(!fx.data_dir.join("conversations").join("1").exists());

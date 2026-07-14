@@ -1,7 +1,7 @@
 //! Bridges `nomifun-channel`'s [`AssetResolver`] to the workshop asset store,
 //! so channel replies can upload AI-generated images. Kept in `nomifun-app`
 //! (not `nomifun-channel`) so the channel crate has no workshop dependency —
-//! same layering as `CompanionMasterAgentProfile`.
+//! same layering as `CompanionChannelAgentProfile`.
 
 use std::sync::Arc;
 

@@ -6,19 +6,17 @@
 //! - The `mcp-gateway-stdio` bridge answers `tools/list` from
 //!   [`Registry::tool_specs`] (schema only, no deps).
 //!
-//! During migration the registry coexists with the legacy `tools_*.rs` dispatch
-//! match: `dispatch_opt` returns `None` for any tool not yet registered, letting
-//! the legacy match handle it. Once every tool is migrated the legacy match is
-//! deleted and the bridge flips to listing `tool_specs()` dynamically.
+//! Unknown names return `None`; transports turn that into their native unknown-
+//! tool response. There is no secondary dispatch table.
 
 mod capability;
 
 pub use capability::{
-    Capability, CapabilityMeta, DangerTier, Decision, ProgressSink, StreamingHandler, Surface,
-    decide, default_decision,
+    AccessScope, Capability, CapabilityMeta, DangerTier, Decision, ProgressSink,
+    StreamingHandler, Surface, decide, default_decision,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value, json};
@@ -39,6 +37,77 @@ pub struct Registry {
     by_name: BTreeMap<&'static str, Capability>,
 }
 
+/// Collaboration tool names retired by the AgentExecution hard cut. Prefixes
+/// are limited to the old collaboration namespaces; ordinary process spawning
+/// and domain-scoped verbs such as `nomi_cron_run` remain legal.
+const RETIRED_COLLABORATION_TOOL_PREFIXES: &[&str] = &[
+    "nomi_team_",
+    "nomi_orchestrator_", // vocabulary-guard: retired-name-deny
+    "nomi_cluster_",
+    "nomi_taskboard_", // vocabulary-guard: retired-name-deny
+    "nomi_run_",
+    "nomi_task_",
+    "nomi_agent_run_",
+    "nomi_agent_result_",
+];
+
+/// Exact legacy names that do not live under one of the retired namespaces.
+/// Keep `spawn` exact: domain-qualified process spawning remains legal.
+const RETIRED_COLLABORATION_TOOL_NAMES: &[&str] = &[
+    "nomi_team",
+    "nomi_orchestrator", // vocabulary-guard: retired-name-deny
+    "nomi_cluster",
+    "nomi_taskboard", // vocabulary-guard: retired-name-deny
+    "nomi_spawn",
+    "nomi_agent_run",
+    "nomi_agent_result",
+];
+
+fn retired_collaboration_name_rule(name: &str) -> Option<&'static str> {
+    if RETIRED_COLLABORATION_TOOL_NAMES.contains(&name) {
+        return Some("exact retired name");
+    }
+    RETIRED_COLLABORATION_TOOL_PREFIXES
+        .iter()
+        .copied()
+        .find(|prefix| name.starts_with(prefix))
+}
+
+/// Validate the complete registration batch before it becomes dispatchable.
+/// A retired collaboration name or duplicate is a boot-time programmer error:
+/// fail closed instead of silently advertising an old or shadowed capability.
+fn validate_registered_tool_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        if let Some(rule) = retired_collaboration_name_rule(name) {
+            return Err(format!(
+                "retired collaboration capability name '{name}' matched {rule}"
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(format!("duplicate gateway capability name: {name}"));
+        }
+    }
+    Ok(())
+}
+
+/// Register one installation-scoped capability domain and stamp every tool in
+/// that domain with the same owner boundary. Keeping the classification next
+/// to the registry composition prevents individual tools from accidentally
+/// omitting the gate as the domain grows.
+fn register_instance_owner_domain(
+    out: &mut Vec<Capability>,
+    register: fn(&mut Vec<Capability>),
+) {
+    let first = out.len();
+    register(out);
+    for capability in &mut out[first..] {
+        capability.meta.access_scope = AccessScope::InstanceOwner;
+    }
+}
+
 impl Registry {
     /// The process-wide registry, built once. Construction allocates only the
     /// capability closures + their generated schemas — no services — so this is
@@ -56,45 +125,42 @@ impl Registry {
         // test fails CI if you miss 1–2; the compiler fails if you miss 4):
         //   1. create `caps_<domain>.rs` with `pub(crate) fn register(out: &mut Vec<Capability>)`
         //   2. add `mod caps_<domain>;` to lib.rs
-        //   3. add `crate::caps_<domain>::register(&mut caps);` HERE
+        //   3. add the domain HERE through the direct or instance-owner path
         //   4. if it needs a NEW service: add a field to deps.rs::GatewayDeps and
         //      wire it in nomifun-app/src/router/routes.rs::inject_gateway_deps.
         // Adding a tool to an EXISTING domain is just one more `out.push(...)` — no wiring.
-        crate::caps_memory::register(&mut caps);
-        crate::caps_orchestrator::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_memory::register);
+        register_instance_owner_domain(&mut caps, crate::caps_agent_execution::register);
         crate::caps_confirmation::register(&mut caps);
         crate::caps_conversation::register(&mut caps);
-        crate::caps_provider::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_provider::register);
         crate::caps_cron::register(&mut caps);
-        crate::caps_requirement::register(&mut caps);
-        crate::caps_autowork::register(&mut caps);
-        crate::caps_idmm::register(&mut caps);
-        crate::caps_terminal::register(&mut caps);
-        crate::caps_knowledge::register(&mut caps);
-        crate::caps_knowledge_ext::register(&mut caps);
-        crate::caps_system::register(&mut caps);
-        crate::caps_companion::register(&mut caps);
-        crate::caps_channel::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_requirement::register);
+        register_instance_owner_domain(&mut caps, crate::caps_autowork::register);
+        register_instance_owner_domain(&mut caps, crate::caps_idmm::register);
+        register_instance_owner_domain(&mut caps, crate::caps_terminal::register);
+        register_instance_owner_domain(&mut caps, crate::caps_knowledge::register);
+        register_instance_owner_domain(&mut caps, crate::caps_knowledge_ext::register);
+        register_instance_owner_domain(&mut caps, crate::caps_system::register);
+        register_instance_owner_domain(&mut caps, crate::caps_companion::register);
+        register_instance_owner_domain(&mut caps, crate::caps_channel::register);
         crate::caps_scheduling_ext::register(&mut caps);
-        crate::caps_terminal_ext::register(&mut caps);
-        crate::caps_files::register(&mut caps);
-        crate::caps_mcp::register(&mut caps);
-        crate::caps_agent::register(&mut caps);
-        crate::caps_workshop::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_terminal_ext::register);
+        register_instance_owner_domain(&mut caps, crate::caps_files::register);
+        register_instance_owner_domain(&mut caps, crate::caps_mcp::register);
+        register_instance_owner_domain(&mut caps, crate::caps_agent::register);
+        register_instance_owner_domain(&mut caps, crate::caps_workshop::register);
         #[cfg(feature = "browser-use")]
-        crate::caps_browser::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_browser::register);
         #[cfg(feature = "computer-use")]
-        crate::caps_computer::register(&mut caps);
+        register_instance_owner_domain(&mut caps, crate::caps_computer::register);
 
-        // De-duplicate by name; a collision is a programmer error worth failing
-        // fast on at first use (boot), not a silent last-writer-wins.
-        let mut by_name = BTreeMap::new();
-        for c in caps {
-            let name = c.meta.name;
-            if by_name.insert(name, c).is_some() {
-                panic!("duplicate gateway capability name: {name}");
-            }
-        }
+        validate_registered_tool_names(caps.iter().map(|capability| capability.meta.name))
+            .unwrap_or_else(|error| panic!("gateway capability registration rejected: {error}"));
+        let by_name = caps
+            .into_iter()
+            .map(|capability| (capability.meta.name, capability))
+            .collect();
         Registry { by_name }
     }
 
@@ -117,8 +183,25 @@ impl Registry {
     /// passing `confirmed = true` to [`decide`] collapses `Confirm → Allow`, so
     /// only `Deny` outcomes are filtered out.
     pub fn tool_specs(&self, surface: Surface) -> Vec<ToolSpec> {
+        self.tool_specs_for_caller(surface, None, true)
+    }
+
+    /// Project the catalog for one authenticated caller. `domains` is an
+    /// optional capability-domain allow-list; owner-only declarations are
+    /// omitted unless the caller is the canonical installation owner. Runtime
+    /// dispatch independently enforces the same scope.
+    pub fn tool_specs_for_caller(
+        &self,
+        surface: Surface,
+        domains: Option<&[&str]>,
+        is_instance_owner: bool,
+    ) -> Vec<ToolSpec> {
         self.by_name
             .values()
+            .filter(|c| domains.is_none_or(|domains| domains.contains(&c.meta.domain)))
+            .filter(|c| {
+                c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner
+            })
             .filter(|c| decide(&c.meta, surface, true) != Decision::Deny)
             .map(|c| ToolSpec {
                 name: c.meta.name,
@@ -136,33 +219,33 @@ impl Registry {
     /// An empty `domains` slice yields an empty result (callers pass the full
     /// set or use [`tool_specs`](Self::tool_specs) for "everything").
     pub fn tool_specs_for(&self, surface: Surface, domains: &[&str]) -> Vec<ToolSpec> {
-        self.by_name
-            .values()
-            .filter(|c| domains.contains(&c.meta.domain))
-            .filter(|c| decide(&c.meta, surface, true) != Decision::Deny)
-            .map(|c| ToolSpec {
-                name: c.meta.name,
-                domain: c.meta.domain,
-                description: c.meta.summary,
-                input_schema: c.input_schema.clone(),
-            })
-            .collect()
+        self.tool_specs_for_caller(surface, Some(domains), true)
     }
 
     pub fn tool_visible(&self, surface: Surface, name: &str) -> bool {
-        self.by_name
-            .get(name)
-            .is_some_and(|c| decide(&c.meta, surface, true) != Decision::Deny)
+        self.tool_visible_for_caller(surface, None, true, name)
     }
 
     pub fn tool_visible_for(&self, surface: Surface, domains: &[&str], name: &str) -> bool {
+        self.tool_visible_for_caller(surface, Some(domains), true, name)
+    }
+
+    pub fn tool_visible_for_caller(
+        &self,
+        surface: Surface,
+        domains: Option<&[&str]>,
+        is_instance_owner: bool,
+        name: &str,
+    ) -> bool {
         self.by_name.get(name).is_some_and(|c| {
-            domains.contains(&c.meta.domain) && decide(&c.meta, surface, true) != Decision::Deny
+            domains.is_none_or(|domains| domains.contains(&c.meta.domain))
+                && (c.meta.access_scope != AccessScope::InstanceOwner || is_instance_owner)
+                && decide(&c.meta, surface, true) != Decision::Deny
         })
     }
 
     /// Dispatch a tool call if the registry owns the tool; `None` means "not a
-    /// registry tool — let the legacy match handle it".
+    /// registered tool.
     pub async fn dispatch_opt(
         &self,
         deps: Arc<GatewayDeps>,
@@ -171,6 +254,14 @@ impl Registry {
         args: &Value,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
+        if cap.meta.access_scope == AccessScope::InstanceOwner
+            && ctx.user_id != deps.authoritative_user_id.as_ref()
+        {
+            return Some(json!({
+                "error": "installation_owner_required",
+                "tool": name,
+            }));
+        }
         let surface = ctx.surface();
         let args = coerce_args_to_schema(&Value::Object(cap.input_schema.clone()), args.clone());
         let confirmed = args
@@ -207,6 +298,14 @@ impl Registry {
         progress: ProgressSink,
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
+        if cap.meta.access_scope == AccessScope::InstanceOwner
+            && ctx.user_id != deps.authoritative_user_id.as_ref()
+        {
+            return Some(json!({
+                "error": "installation_owner_required",
+                "tool": name,
+            }));
+        }
         let surface = ctx.surface();
         let args = coerce_args_to_schema(&Value::Object(cap.input_schema.clone()), args.clone());
         let confirmed = args
@@ -313,10 +412,147 @@ mod tests {
     }
 
     #[test]
+    fn retired_collaboration_name_guard_covers_every_legacy_family() {
+        for name in [
+            "nomi_team_send_message",
+            "nomi_orchestrator_plan", // vocabulary-guard: retired-name-deny-fixture
+            "nomi_cluster_create",
+            "nomi_taskboard_update", // vocabulary-guard: retired-name-deny-fixture
+            "nomi_team",
+            "nomi_orchestrator", // vocabulary-guard: retired-name-deny-fixture
+            "nomi_cluster",
+            "nomi_taskboard", // vocabulary-guard: retired-name-deny-fixture
+            "nomi_spawn",
+            "nomi_agent_run",
+            "nomi_agent_result",
+            "nomi_agent_run_v2",
+            "nomi_agent_result_status",
+            "nomi_run_create",
+            "nomi_run_status",
+            "nomi_run_result",
+            "nomi_run_adjust",
+            "nomi_run_add_tasks",
+            "nomi_run_cancel",
+            "nomi_run_resume",
+            "nomi_task_rerun",
+            "nomi_task_config",
+            "nomi_task_question",
+            "nomi_task_create",
+        ] {
+            let error = validate_registered_tool_names([name])
+                .expect_err("retired collaboration name must fail closed");
+            assert!(
+                error.contains(name),
+                "registration error must identify rejected name: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn collaboration_name_guard_does_not_reject_similar_legal_tools() {
+        validate_registered_tool_names([
+            "nomi_delegate",
+            "nomi_process_spawn",
+            "nomi_spawn_process",
+            "nomi_cron_run",
+            "nomi_requirement_list",
+            "nomi_teamwork_summarize",
+            "nomi_clustered_search",
+        ])
+        .expect("precise retired-name rules must not reject unrelated capabilities");
+    }
+
+    #[test]
+    fn registration_rejects_duplicate_capability_names() {
+        let error = validate_registered_tool_names(["nomi_example_read", "nomi_example_read"])
+            .expect_err("duplicate registration must fail closed");
+        assert_eq!(
+            error,
+            "duplicate gateway capability name: nomi_example_read"
+        );
+    }
+
+    #[test]
+    fn ownership_scope_matrix_is_explicit_and_stable() {
+        let reg = Registry::global();
+        let scope = |name: &str| {
+            reg.by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("missing capability {name}"))
+                .meta
+                .access_scope
+        };
+
+        // User-owned aggregates keep their own repository/service owner checks.
+        assert_eq!(scope("nomi_list_conversations"), AccessScope::User);
+        assert_eq!(scope("nomi_cron_list"), AccessScope::User);
+
+        // Installation-wide control planes are rejected centrally before their
+        // handlers can observe or mutate shared state.
+        assert_eq!(
+            scope("nomi_system_get_settings"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(
+            scope("nomi_requirement_list"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(
+            scope("nomi_knowledge_list_bases"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(
+            scope("nomi_companion_list"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(
+            scope("nomi_channel_list_plugins"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(
+            scope("nomi_idmm_get_settings"),
+            AccessScope::InstanceOwner
+        );
+        assert_eq!(scope("nomi_delegate"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_get"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_execution_update"), AccessScope::InstanceOwner);
+        // Target-scoped IDMM data is user-owned and every handler verifies the
+        // target owner; only its global settings remain installation-owned.
+        assert_eq!(scope("nomi_idmm_get_log"), AccessScope::User);
+        assert_eq!(scope("nomi_create_terminal"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_terminal_get"), AccessScope::InstanceOwner);
+        assert_eq!(scope("nomi_fs_read_file"), AccessScope::InstanceOwner);
+    }
+
+    #[test]
+    fn secondary_caller_catalog_hides_owner_scope_without_hiding_user_scope() {
+        let reg = Registry::global();
+        let names: Vec<&str> = reg
+            .tool_specs_for_caller(Surface::Desktop, None, false)
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(names.contains(&"nomi_list_conversations"));
+        assert!(names.contains(&"nomi_cron_list"));
+        assert!(!names.contains(&"nomi_delegate"));
+        assert!(!names.contains(&"nomi_system_get_settings"));
+        assert!(!names.contains(&"nomi_requirement_list"));
+        assert!(!names.contains(&"nomi_knowledge_list_bases"));
+        assert!(!reg.tool_visible_for_caller(
+            Surface::Desktop,
+            None,
+            false,
+            "nomi_system_get_settings"
+        ));
+    }
+
+    #[test]
     fn tool_specs_for_filters_to_domains() {
         let reg = Registry::global();
-        let agentish =
-            reg.tool_specs_for(Surface::Remote, &["agent", "remote", "conversation"]);
+        let agentish = reg.tool_specs_for(
+            Surface::Remote,
+            &["agent_execution", "agent", "remote", "conversation"],
+        );
         assert!(
             !agentish.is_empty(),
             "agent/conversation domains must expose tools"
@@ -334,7 +570,7 @@ mod tests {
         );
         // contains the agent-delegation cap, excludes a system-management cap
         let names: Vec<&str> = agentish.iter().map(|s| s.name).collect();
-        assert!(names.contains(&"nomi_agent_run"));
+        assert!(names.contains(&"nomi_delegate"));
         assert!(names.contains(&"nomi_remote_agent_list"));
         assert!(
             !names.contains(&"nomi_remote_agent_handshake"),
@@ -397,17 +633,20 @@ mod tests {
             })
             .collect();
 
-        // 3. `crate::caps_*::register(&mut caps);` call sites in build().
+        // 3. Capability register call sites in build(). Domains may register
+        // directly or through `register_instance_owner_domain`; both are
+        // first-class composition paths and must be recognized by this guard.
         let reg_rs =
             fs::read_to_string(src_dir.join("registry/mod.rs")).expect("read registry/mod.rs");
         let registered: Vec<String> = reg_rs
             .lines()
             .filter_map(|l| {
-                l.trim()
-                    .strip_prefix("crate::")
-                    .and_then(|r| r.strip_suffix("::register(&mut caps);"))
-                    .filter(|n| n.starts_with("caps_"))
-                    .map(str::to_owned)
+                let line = l.trim();
+                let start = line.find("crate::caps_")? + "crate::".len();
+                let remainder = &line[start..];
+                let end = remainder.find("::register")?;
+                let module = &remainder[..end];
+                module.starts_with("caps_").then(|| module.to_owned())
             })
             .collect();
 
@@ -420,7 +659,7 @@ mod tests {
             on_disk.iter().filter(|f| !registered.contains(f)).collect();
         assert!(
             not_registered.is_empty(),
-            "caps_*.rs NOT registered in Registry::build(): {not_registered:?} — add `crate::<name>::register(&mut caps);` (silently contributes ZERO tools otherwise)"
+            "caps_*.rs NOT registered in Registry::build(): {not_registered:?} — add it through the direct or instance-owner registration path (silently contributes ZERO tools otherwise)"
         );
     }
 }

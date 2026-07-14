@@ -1,4 +1,4 @@
-//! The capability the AutoWork orchestrator (in `nomifun-requirement`) uses to
+//! The capability the persistent AutoWork runner (in `nomifun-requirement`) uses to
 //! drive a terminal's PTY as an execution substrate — write input, observe the
 //! live output stream, check liveness, and read/write the terminal's AutoWork
 //! config — without depending on this crate's internals. `TerminalService`

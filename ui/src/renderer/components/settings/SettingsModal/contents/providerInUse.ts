@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type ProviderUsageFeature = 'desktopCompanion' | 'publicCompanion' | 'smartDecision' | 'orchestrator';
+export type ProviderUsageFeature =
+  | 'desktopCompanion'
+  | 'publicCompanion'
+  | 'smartDecision'
+  | 'conversation'
+  | 'agentExecution';
 
 export interface ProviderUsage {
   feature: ProviderUsageFeature;
@@ -25,7 +30,9 @@ export function featureRoute(feature: ProviderUsageFeature, targetId?: string): 
       // IDMM global backup model lives in Global Model Config → IDMM tab,
       // where backup_provider_id / backup_model can be cleared to unbind.
       return '/models?section=global';
-    case 'orchestrator':
+    case 'conversation':
+      return targetId ? `/conversation/${targetId}` : '/guid';
+    case 'agentExecution':
       return '/guid';
   }
 }

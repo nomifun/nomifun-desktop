@@ -24,9 +24,8 @@ function buildCronJobSearchText(job: ICronJob): string {
   pushSearchValue(parts, job.description);
   pushSearchValue(parts, job.schedule.description);
   if (job.schedule.kind === 'cron') pushSearchValue(parts, job.schedule.expr);
-  pushSearchValue(parts, job.target.payload.text);
-  pushSearchValue(parts, job.target.execution_mode);
-  pushSearchValue(parts, job.target.target_kind);
+  pushSearchValue(parts, job.message);
+  pushSearchValue(parts, job.execution_mode);
   pushSearchValue(parts, job.metadata.conversation_id);
   pushSearchValue(parts, `#${job.metadata.conversation_id}`);
   pushSearchValue(parts, job.metadata.conversation_title);

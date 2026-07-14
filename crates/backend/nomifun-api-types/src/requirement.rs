@@ -209,7 +209,7 @@ pub struct TagSummary {
     pub needs_review: i64,
     pub total: i64,
     /// AutoWork is paused for this tag (a requirement exhausted its retries).
-    /// While true, the orchestrator does not claim the tag's requirements until
+    /// While true, the AutoWork runner does not claim the tag's requirements until
     /// it is resumed. `#[serde(default)]` keeps older payloads parseable.
     #[serde(default)]
     pub paused: bool,

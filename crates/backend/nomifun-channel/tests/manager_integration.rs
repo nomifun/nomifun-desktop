@@ -1,6 +1,6 @@
 //! Black-box integration tests for `ChannelManager`.
 //!
-//! Uses real SQLite (in-memory) and mock EventBroadcaster + MockPlugin.
+//! Uses real SQLite (in-memory), an owner-scoped event sink, and MockPlugin.
 //! Covers test-plan items: PS-1..PS-3, EP-1..EP-5, DP-1..DP-4,
 //! TP-1..TP-5, CS-1..CS-2, WS-2.
 
@@ -16,7 +16,7 @@ use nomifun_channel::types::{
 };
 use nomifun_common::decrypt_string;
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::sync::mpsc;
 
 // ── Test infrastructure ─────────────────────────────────────────────
@@ -38,8 +38,8 @@ impl MockBroadcaster {
     }
 }
 
-impl EventBroadcaster for MockBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for MockBroadcaster {
+    fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
     }
 }
@@ -149,7 +149,14 @@ async fn setup() -> (ChannelManager, Arc<dyn IChannelRepository>, Arc<MockBroadc
     let bc = Arc::new(MockBroadcaster::new());
     let (msg_tx, _msg_rx) = mpsc::channel(16);
     let (confirm_tx, _confirm_rx) = mpsc::channel(16);
-    let mgr = ChannelManager::new(repo.clone(), bc.clone(), test_key(), msg_tx, confirm_tx);
+    let mgr = ChannelManager::new(
+        repo.clone(),
+        bc.clone(),
+        "owner-a",
+        test_key(),
+        msg_tx,
+        confirm_tx,
+    );
     // Keep db alive by leaking — test process exits anyway
     std::mem::forget(db);
     (mgr, repo, bc)

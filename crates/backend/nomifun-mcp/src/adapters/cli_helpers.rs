@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use nomifun_runtime::Builder as CmdBuilder;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use nomifun_runtime::resolve_command_path;
 
 use crate::adapter::DetectedServer;

@@ -246,21 +246,21 @@ pub struct BrowserTool {
     /// `engine()` → falls back to `FirewallConfig::default()` (unrestricted egress,
     /// current behavior) when no secret source / no registered origins.
     firewall_override: Mutex<Option<nomi_browser_engine::FirewallConfig>>,
-    /// **F1-sec: 本会话的 orchestration 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
+    /// **F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
     /// auto_approve`，裁决⑧）。这是 redline 门 [`redline::enforce_redline`] 的关键入参——决定
     /// 「审批旁路会话里的不可逆动作」是否 hard-deny。
     ///
     /// **怎么拿到的（架构）**：`Tool::execute(&self, input: Value)` 的签名不携带 `session_mode`
     /// （ComputerTool 同样如此），故在执行点拿不到会话模式。但**构造期**拿得到：bootstrap
     /// （`AgentBootstrap::build`）持有完整 `Config`，而 `config.tools.auto_approve` **恰好**当且仅当
-    /// orchestration 审批被旁路时为 `true`——
+    /// tool-execution 审批被旁路时为 `true`——
     /// - yolo 会话：`session_mode == "yolo"` → `CliArgs.auto_approve = true`（manager/nomi/agent.rs）
     ///   → `Config::resolve` 置 `config.tools.auto_approve = true`（config.rs §7）；
-    /// - companion-forced-yolo / desktopGateway 会话：工厂（factory/nomi.rs）把 `session_mode` pin
+    /// - companion-forced-yolo / process-issued Gateway 会话：工厂（factory/nomi.rs）把 `session_mode` pin
     ///   成 `"yolo"`，同样落到上面这条链；
     /// - `--auto-approve` CLI：直接置 `config.tools.auto_approve = true`。
     /// - 而 `AutoEdit` 模式**不**置它（只自动批 info/edit 类别，从不批 Irreversible），故 AutoEdit
-    ///   会话的不可逆动作仍交 orchestration（门不拦），符合红线方向。
+    ///   会话的不可逆动作仍交 approval pipeline（门不拦），符合红线方向。
     ///
     /// bootstrap 据此在构造 `BrowserTool` 时把 `config.tools.auto_approve` 灌进这里（构造期快照）。
     ///
@@ -282,10 +282,10 @@ pub struct BrowserTool {
     /// （`nomi-cli` json-stream）创建并经 `engine.set_approval_manager` 安到引擎；`set_mode`（前端/网关切
     /// yolo 的入口）改的就是这同一个 manager 的 `session_mode`。bootstrap 在构造 `BrowserTool` **之前**
     /// 拿到这个 Arc（经 `AgentBootstrap::approval_manager` builder 注入），把它经 [`Self::with_policy`]
-    /// 的 `runtime_mode` 参穿透进本字段——facade 与 orchestration 看的是**同一个**运行时模式 cell，零漂移。
+    /// 的 `runtime_mode` 参穿透进本字段——facade 与 approval pipeline 看的是**同一个**运行时模式 cell，零漂移。
     ///
     /// **F1-sec bypass 映射方向保持不变**：只有 `Yolo` 算 bypass；`AutoEdit`（只自动批 info/edit，从不批
-    /// Irreversible）**不**算 bypass → 不武装红线门（不可逆动作仍交 orchestration）。该映射的唯一权威是
+    /// Irreversible）**不**算 bypass → 不武装红线门（不可逆动作仍交 approval pipeline）。该映射的唯一权威是
     /// [`ToolApprovalManager::session_bypasses_approval`]，facade 不复制它。`nomi-browser` 本就依赖
     /// `nomi-protocol`，故此句柄零新增跨 crate 依赖。
     runtime_mode: Option<Arc<ToolApprovalManager>>,
@@ -407,7 +407,7 @@ impl BrowserTool {
     /// `Config` and knows `tools.auto_approve`, so it must use [`Self::with_policy`]
     /// to wire the redline gate. `new` defaults the policy to `false` (a normal
     /// session) for callers that only have a `BrowserConfig` (the redline gate then
-    /// never hard-denies — equivalent to leaving approval to orchestration).
+    /// never hard-denies — equivalent to leaving approval to approval pipeline).
     pub fn new(config: &BrowserConfig) -> Self {
         let data_dir = nomi_config::config::app_config_dir()
             .map(|d| d.join("browser-data"))
@@ -424,7 +424,7 @@ impl BrowserTool {
     /// the evaluate full-power LIVE value.**
     ///
     /// - `session_bypasses_approval` MUST be `config.tools.auto_approve` (the
-    ///   construction-time snapshot that is `true` iff orchestration approval is
+    ///   construction-time snapshot that is `true` iff tool-execution approval is
     ///   bypassed — yolo / companion-forced-yolo / `--auto-approve`; see the field
     ///   doc). This is the wiring point the bootstrap uses so the facade redline gate
     ///   (裁决⑧) actually fires in auto-approving sessions instead of failing open.
@@ -1272,7 +1272,7 @@ impl BrowserTool {
             }
             // Fail-closed: unknown name, unbound origin, or no store. Never type the
             // literal `secret:NAME`, never leak. This holds in yolo/companion too —
-            // the gate is a property of the vault, not an orchestration approval.
+            // the gate is a property of the vault, not an tool-execution approval.
             None => Err(ToolResult::error(format!(
                 "Secret {name:?} is not available for the current origin {origin:?} \
                  (fail-closed: unknown name, or the secret is bound to a different domain). \
@@ -1709,7 +1709,7 @@ impl BrowserTool {
         nomi_browser_engine::firewall::is_cross_origin(&current_origin, target_url)
     }
 
-    /// **E2/F1-sec: 本会话的 orchestration 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
+    /// **E2/F1-sec: 本会话的 tool-execution 审批闸是否被旁路**（`yolo || companion-forced-yolo ||
     /// auto_approve`）——[`redline::enforce_redline`] 的关键入参。
     ///
     /// **接线（P3-X1：LIVE 读运行时模式，非构造期快照）**：
@@ -1721,7 +1721,7 @@ impl BrowserTool {
     ///   现行 fail-closed 行为不变）。
     ///
     /// 返 `true` 时 [`redline::enforce_redline`] 对不可逆动作 hard-deny；返 `false`（普通会话）时门
-    /// 不拦，交 orchestration 正常审批。**bypass 映射方向（F1-sec）勿改**：只有 yolo 算 bypass，AutoEdit
+    /// 不拦，交 approval pipeline 正常审批。**bypass 映射方向（F1-sec）勿改**：只有 yolo 算 bypass，AutoEdit
     /// 不算（其只自动批 info/edit，从不批 Irreversible）——该方向的权威是
     /// [`ToolApprovalManager::session_bypasses_approval`]，本方法不复制它。
     fn session_bypasses_approval(&self) -> bool {
@@ -1765,13 +1765,13 @@ impl BrowserTool {
         redline::classify_action(action, &ctx)
     }
 
-    /// **E2: facade 独立 fail-closed 强制门**（设计裁决⑧关键，**不经 orchestration**）。
+    /// **E2: facade 独立 fail-closed 强制门**（设计裁决⑧关键，**不经 approval pipeline**）。
     ///
     /// 在 dispatch 到 engine **之前**调用：分类本次动作的审批级（[`redline::classify_action`]）→
     /// 据会话是否旁路审批 + 是否带外确认，由 [`redline::enforce_redline`] 决定放行 / hard-deny。
     ///
     /// 方向（勿搞反）：**只**拦审批旁路会话（yolo/companion）里的不可逆动作；普通会话的不可逆动作
-    /// 放行（交 orchestration 正常审批，由 [`Self::category_for`] 返 [`ToolCategory::Irreversible`] 触发）。
+    /// 放行（交 approval pipeline 正常审批，由 [`Self::category_for`] 返 [`ToolCategory::Irreversible`] 触发）。
     ///
     /// 返 `Some(ToolResult::error)` = 被拦（调用方直接返该错误，不 dispatch）；`None` = 放行。
     #[cfg_attr(not(test), allow(dead_code))]
@@ -2476,7 +2476,7 @@ impl Tool for BrowserTool {
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         // DESIGN §22：per-target act 串行 + observe⊥act。引擎已用 op_mutex 在内部强制互斥,但 Browser
-        // 工具仍永不可被 orchestrator 并发批处理——同引擎两调用在 op_mutex 上也会串行,且调度器不得假设
+        // 工具仍永不可被 tool executor 并发批处理——同引擎两调用在 op_mutex 上也会串行,且调度器不得假设
         // 其副作用相互独立。恒 false（正确性地基=引擎 op_mutex；调度天花板=此处恒 false,两者都须成立）。
         false
     }
@@ -2491,9 +2491,9 @@ impl Tool for BrowserTool {
 
         tracing::debug!(action = %action, "BrowserTool executing");
 
-        // E2: facade 独立 fail-closed 强制门（**不经 orchestration**，设计裁决⑧）。在 dispatch 前拦
+        // E2: facade 独立 fail-closed 强制门（**不经 approval pipeline**，设计裁决⑧）。在 dispatch 前拦
         // 审批旁路会话（yolo/companion）里的不可逆动作（submit/付款/删除/发送/跨域 POST/Enter 落 form/
-        // POST reload）→ hard-deny。普通会话不拦（交 orchestration 经 category_for 的 Irreversible 审批）。
+        // POST reload）→ hard-deny。普通会话不拦（交 approval pipeline 经 category_for 的 Irreversible 审批）。
         //
         // **P7D takeover integration**: when the gate would block AND takeover is enabled,
         // attempt a human takeover first. The takeover resolution's `to_confirmed()` feeds
@@ -2523,7 +2523,7 @@ impl Tool for BrowserTool {
     }
 
     fn category_for(&self, input: &Value) -> ToolCategory {
-        // E2: 据 classify_action 分级（含不可逆 → ToolCategory::Irreversible，让 orchestration 在
+        // E2: 据 classify_action 分级（含不可逆 → ToolCategory::Irreversible，让 approval pipeline 在
         // **普通会话**能正常弹审批）。run-time 危险信号经 build_action_context best-effort 采集
         // （accname 按 ref 查；submit/跨域POST/Enter-form/POST-reload 等 F1 接线后填实）。
         // 缺 action 或未知动作 → classify_action 走 Exec 兜底分支（与旧行为一致）。
@@ -2696,7 +2696,7 @@ mod tests {
     #[test]
     fn concurrency_unsafe_for_read_and_write_actions() {
         let t = tool();
-        // DESIGN §22：per-target act 串行 + observe⊥act → Browser 工具永不被 orchestrator 并发批处理,
+        // DESIGN §22：per-target act 串行 + observe⊥act → Browser 工具永不被 tool executor 并发批处理,
         // 无论读/写动作。引擎 op_mutex 是正确性地基;此处恒 false 是调度天花板,两者都须成立。
         for action in [
             json!({"action": "observe"}),
@@ -2713,7 +2713,7 @@ mod tests {
     }
 
     /// **F1-sec test seam**: a tool whose construction-time policy says the session
-    /// bypasses orchestration approval (yolo / companion-forced-yolo / auto_approve).
+    /// bypasses tool-execution approval (yolo / companion-forced-yolo / auto_approve).
     /// Mirrors what bootstrap does via `with_policy(config, config.tools.auto_approve, …)`.
     fn bypassing_tool() -> BrowserTool {
         BrowserTool::with_policy(&BrowserConfig::default(), true, false, false, None, None, None)
@@ -3003,7 +3003,7 @@ mod tests {
     #[test]
     fn category_for_click_dangerous_accname_is_irreversible() {
         // observe 后 click 一个 accname="Pay now" 的元素 → category_for 据 last_snapshot 按 ref 查到
-        // 危险 accname → ToolCategory::Irreversible（让普通会话的 orchestration 能正常弹审批）。
+        // 危险 accname → ToolCategory::Irreversible（让普通会话的 approval pipeline 能正常弹审批）。
         let t = tool();
         seed_snapshot(&t, "f0e3", "button", "Pay now");
         assert_eq!(
@@ -3108,7 +3108,7 @@ mod tests {
 
     #[test]
     fn redline_gate_allows_irreversible_in_normal_session() {
-        // 普通会话（审批未旁路）：facade 门**不拦**不可逆动作（交 orchestration 经 Irreversible 审批）。
+        // 普通会话（审批未旁路）：facade 门**不拦**不可逆动作（交 approval pipeline 经 Irreversible 审批）。
         let t = tool();
         seed_snapshot(&t, "f0e3", "button", "Pay now");
         // session_bypasses_approval() 默认 false（普通会话）→ 门放行。
@@ -3226,7 +3226,7 @@ mod tests {
         seed_snapshot(&normal, "f0e3", "button", "Pay now");
         assert!(
             normal.redline_gate("click", &json!({"action": "click", "ref": "f0e3"})).is_none(),
-            "normal session must NOT hard-deny (orchestration approves)"
+            "normal session must NOT hard-deny (approval pipeline approves)"
         );
     }
 
@@ -3302,7 +3302,7 @@ mod tests {
     #[test]
     fn redline_gate_arms_on_runtime_yolo_and_disarms_on_flip_back() {
         // 端到端门行为：构造普通会话 + 运行时句柄。中途翻 yolo → 不可逆 click 被门武装（hard-deny）；
-        // 翻回 default → 门解除（放行，交 orchestration）。AutoEdit → 不武装（不误判 bypass）。
+        // 翻回 default → 门解除（放行，交 approval pipeline）。AutoEdit → 不武装（不误判 bypass）。
         let mgr = Arc::new(ToolApprovalManager::new());
         let t = tool_with_runtime_mode(false, mgr.clone());
         seed_snapshot(&t, "f0e3", "button", "Pay now"); // accname → Irreversible
@@ -3311,7 +3311,7 @@ mod tests {
         // default：门不拦。
         assert!(t.redline_gate("click", &click).is_none(), "default → gate not armed");
 
-        // AutoEdit：仍不拦（不可逆交 orchestration）。
+        // AutoEdit：仍不拦（不可逆交 approval pipeline）。
         mgr.set_mode(SessionMode::AutoEdit);
         assert!(
             t.redline_gate("click", &click).is_none(),
@@ -4329,7 +4329,7 @@ mod tests {
     }
 
     /// **F1-sec 对照**：普通会话（审批未旁路）里点击同一个不可逆按钮 → facade 门**不拦**（交
-    /// orchestration 经 Irreversible 审批；本测在 facade 层只验「门未 hard-deny」，故点击会真去
+    /// approval pipeline 经 Irreversible 审批；本测在 facade 层只验「门未 hard-deny」，故点击会真去
     /// dispatch——它可能成功/良性失败，但**绝不是** facade 门的 Blocked 错误）。证「普通会话不误拦」。
     #[tokio::test]
     #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 -- --run-ignored"]
@@ -4342,7 +4342,7 @@ mod tests {
             .await;
         // 关键断言：即便 click 真去 dispatch（可能成功/良性失败），它**不应**是 facade redline 门的
         // hard-deny（那条错误含 "blocked in an auto-approving session"）。普通会话的不可逆动作交
-        // orchestration，不被 facade 门拦。
+        // approval pipeline，不被 facade 门拦。
         let lower = clicked.content.to_lowercase();
         assert!(
             !lower.contains("auto-approving session"),

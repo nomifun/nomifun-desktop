@@ -30,20 +30,22 @@ pub fn conversation_ops_routes(state: ConversationRouterState) -> Router {
 
 async fn get_mode(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<AgentModeResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_mode(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.get_mode(&user.id, &id).await?,
+    )))
 }
 
 async fn set_mode(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Result<Json<SetModeRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.set_mode(&id, req).await?;
+    state.service.set_mode(&user.id, &id, req).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -56,7 +58,7 @@ async fn clear_context(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .clear_context(&user.id, &id, &state.task_manager)
+        .clear_context(&user.id, &id, &state.runtime_registry)
         .await?;
     Ok(Json(ApiResponse::success()))
 }
@@ -72,70 +74,89 @@ async fn clear_messages(
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state
         .service
-        .clear_messages(&user.id, &id, &state.task_manager)
+        .clear_messages(&user.id, &id, &state.runtime_registry)
         .await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn get_model(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<GetModelInfoResponse>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_model(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.get_model(&user.id, &id).await?,
+    )))
 }
 
 async fn set_model(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Result<Json<SetModelRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.set_model(&id, req).await?;
+    state.service.set_model(&user.id, &id, req).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn get_usage(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Option<serde_json::Value>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_usage(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.get_usage(&user.id, &id).await?,
+    )))
 }
 
 async fn side_question(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     Json(req): Json<SideQuestionRequest>,
 ) -> Result<Json<ApiResponse<SideQuestionResponse>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        state.service.handle_side_question(&id, req).await?,
+        state
+            .service
+            .handle_side_question(&user.id, &id, req)
+            .await?,
     )))
 }
 
 async fn get_slash_commands(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<SlashCommandItem>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_slash_commands(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state.service.get_slash_commands(&user.id, &id).await?,
+    )))
 }
 
 async fn get_openclaw_runtime(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_openclaw_runtime(&id).await?)))
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .get_openclaw_runtime(&user.id, &id)
+            .await?,
+    )))
 }
 
 async fn browse_workspace(
     State(state): State<ConversationRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     Query(query): Query<WorkspaceBrowseQuery>,
 ) -> Result<Json<ApiResponse<Vec<WorkspaceEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.browse_workspace(&id, query).await?)))
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .browse_workspace(&user.id, &id, query)
+            .await?,
+    )))
 }

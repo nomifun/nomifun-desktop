@@ -1,5 +1,5 @@
 use nomifun_common::{AppError, CommandSpec, ErrorChain};
-use nomifun_runtime::Builder as CmdBuilder;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};

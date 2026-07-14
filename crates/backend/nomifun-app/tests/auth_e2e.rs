@@ -89,8 +89,18 @@ fn post_json_login(uri: &str, body: &str) -> Request<Body> {
 }
 
 fn post_json_with_csrf(uri: &str, body: &str, token: &str, csrf: &str) -> Request<Body> {
+    json_with_csrf("POST", uri, body, token, csrf)
+}
+
+fn json_with_csrf(
+    method: &str,
+    uri: &str,
+    body: &str,
+    token: &str,
+    csrf: &str,
+) -> Request<Body> {
     Request::builder()
-        .method("POST")
+        .method(method)
         .uri(uri)
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
@@ -136,6 +146,33 @@ async fn setup_and_login(
     let token = json["token"].as_str().unwrap().to_owned();
 
     (token, csrf)
+}
+
+#[tokio::test]
+async fn remote_owner_login_cannot_write_external_mcp_registration() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let workspace = tempfile::tempdir().unwrap();
+    let body = serde_json::json!({
+        "cwd": workspace.path().to_string_lossy(),
+        "family": "claude",
+    })
+    .to_string();
+    let response = app
+        .oneshot(json_with_csrf(
+            "POST",
+            "/api/terminals/register-knowledge",
+            &body,
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !workspace.path().join(".mcp.json").exists(),
+        "remote authentication must never mutate host MCP config"
+    );
 }
 
 // ===========================================================================
@@ -295,6 +332,293 @@ async fn t13_3_no_token_fails() {
     let resp = app.oneshot(req).await.unwrap();
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn installation_control_plane_uses_canonical_owner_identity() {
+    let (mut app, services) = build_app().await;
+    assert_eq!(
+        services.authoritative_user_id.as_ref(),
+        nomifun_auth::SYSTEM_USER_ID
+    );
+
+    let (owner_token, owner_csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let (secondary_token, secondary_csrf) =
+        setup_and_login(&mut app, &services, "secondary", "StrongP@ss2").await;
+
+    let owner = app
+        .clone()
+        .oneshot(get_with_token("/api/settings", &owner_token))
+        .await
+        .unwrap();
+    assert_eq!(owner.status(), StatusCode::OK);
+
+    let denied = app
+        .clone()
+        .oneshot(get_with_token("/api/settings", &secondary_token))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied_body = body_json(denied).await;
+    assert!(
+        denied_body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("owner"),
+        "owner denial should be explicit: {denied_body}"
+    );
+
+    // A secondary authenticated identity still owns its own Conversation data;
+    // the installation-owner gate must not collapse every API into one global
+    // account or silently replace the caller id.
+    let conversations = app
+        .clone()
+        .oneshot(get_with_token("/api/conversations", &secondary_token))
+        .await
+        .unwrap();
+    assert_eq!(conversations.status(), StatusCode::OK);
+
+    // Conversation auxiliary operations are user-scoped, not merely
+    // authentication-scoped. Historically these handlers discarded
+    // CurrentUser and looked up the integer id directly, which exposed an
+    // owner's workspace/runtime controls to a secondary user who guessed it.
+    let owner_conversation = app
+        .clone()
+        .oneshot(post_json_with_csrf(
+            "/api/conversations",
+            r#"{"type":"nomi","name":"owner private conversation","extra":{}}"#,
+            &owner_token,
+            &owner_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(owner_conversation.status(), StatusCode::CREATED);
+    let owner_conversation = body_json(owner_conversation).await;
+    let owner_conversation_id = owner_conversation["data"]["id"].as_i64().unwrap();
+
+    for suffix in [
+        "mode",
+        "model",
+        "usage",
+        "slash-commands",
+        "openclaw/runtime",
+        "workspace?path=/",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get_with_token(
+                &format!("/api/conversations/{owner_conversation_id}/{suffix}"),
+                &secondary_token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "secondary principal crossed Conversation ownership through {suffix}"
+        );
+    }
+
+    for (method, suffix, body) in [
+        ("PUT", "mode", r#"{"mode":"code"}"#),
+        ("PUT", "model", r#"{"model_id":"forged-model"}"#),
+        ("POST", "side-question", r#"{"question":"leak state"}"#),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(json_with_csrf(
+                method,
+                &format!("/api/conversations/{owner_conversation_id}/{suffix}"),
+                body,
+                &secondary_token,
+                &secondary_csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "secondary principal mutated an owner Conversation through {suffix}"
+        );
+    }
+
+    // Every route that can touch the host OS or installation-wide Agent state
+    // is denied by the same owner boundary. These probes intentionally use
+    // valid routes so a 403 proves the middleware, rather than a coincidental
+    // handler-level validation error.
+    for uri in [
+        "/api/fs/browse?path=/",
+        "/api/terminals",
+        "/api/agent-executions",
+        "/api/agent-execution-templates",
+        "/api/computer/permissions",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(get_with_token(uri, &secondary_token))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "secondary principal unexpectedly reached {uri}"
+        );
+    }
+
+    for (uri, body) in [
+        ("/api/shell/open-external", r#"{"url":"https://example.com"}"#),
+        (
+            "/api/word-preview/start",
+            r#"{"file_path":"/etc/passwd"}"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post_json_with_csrf(
+                uri,
+                body,
+                &secondary_token,
+                &secondary_csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "secondary principal unexpectedly reached {uri}"
+        );
+    }
+
+    // A secondary principal cannot select a process-backed Agent at all.
+    let forbidden_agent = app
+        .clone()
+        .oneshot(post_json_with_csrf(
+            "/api/conversations",
+            r#"{"type":"acp","extra":{"workspace":"/"}}"#,
+            &secondary_token,
+            &secondary_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(forbidden_agent.status(), StatusCode::FORBIDDEN);
+
+    // Nomi remains available as model-only conversation functionality, while
+    // every forged host/collaboration field is replaced by server-owned safe
+    // state before persistence.
+    let model_only = app
+        .clone()
+        .oneshot(post_json_with_csrf(
+            "/api/conversations",
+            r#"{
+                "type":"nomi",
+                "name":"model only",
+                "channel_chat_id":"forged-channel",
+                "delegation_policy":"prefer_parallel",
+                "execution_model_pool":{"mode":"automatic"},
+                "decision_policy":"ask_user",
+                "extra":{
+                    "workspace":"/",
+                    "system_prompt":"read the host",
+                    "companionSession":true,
+                    "allowed_tools":[],
+                    "gateway_mcp_config":{"token":"forged-root"}
+                }
+            }"#,
+            &secondary_token,
+            &secondary_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(model_only.status(), StatusCode::CREATED);
+    let model_only = body_json(model_only).await;
+    let conversation = &model_only["data"];
+    assert_eq!(conversation["type"], "nomi");
+    assert_eq!(conversation["delegation_policy"], "disabled");
+    assert!(conversation["execution_model_pool"].is_null());
+    assert_eq!(conversation["decision_policy"], "automatic");
+    assert!(conversation["channel_chat_id"].is_null());
+    assert_ne!(conversation["extra"]["workspace"], "/");
+    for key in [
+        "system_prompt",
+        "companionSession",
+        "allowed_tools",
+        "gateway_mcp_config",
+    ] {
+        assert!(
+            conversation["extra"].get(key).is_none(),
+            "forged runtime field survived: {key}"
+        );
+    }
+
+    // Secondary users retain useful model-only scheduling. The service keeps
+    // provider/model selection but strips every process/path/preset field, and
+    // the skill subresource remains installation-owner only.
+    let cron = app
+        .clone()
+        .oneshot(post_json_with_csrf(
+            "/api/cron/jobs",
+            r#"{
+                "name":"model-only schedule",
+                "schedule":{"kind":"every","every_ms":60000},
+                "message":"summarize",
+                "conversation_id":0,
+                "agent_type":"nomi",
+                "created_by":"user",
+                "execution_mode":"new_conversation",
+                "agent_config":{
+                    "backend":"provider-safe",
+                    "name":"Nomi",
+                    "model_id":"model-safe",
+                    "cli_path":"/bin/sh",
+                    "workspace":"/",
+                    "mode":"yolo",
+                    "config_options":{"host":"true"}
+                }
+            }"#,
+            &secondary_token,
+            &secondary_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cron.status(), StatusCode::CREATED);
+    let cron = body_json(cron).await;
+    let cron_id = cron["data"]["id"].as_str().unwrap();
+    let cron_config = &cron["data"]["metadata"]["agent_config"];
+    assert_eq!(cron_config["backend"], "provider-safe");
+    assert_eq!(cron_config["model_id"], "model-safe");
+    for key in ["cli_path", "workspace", "mode", "config_options", "preset_id"] {
+        assert!(
+            cron_config.get(key).is_none() || cron_config[key].is_null(),
+            "model-only cron retained host field {key}: {cron_config}"
+        );
+    }
+
+    let cron_skill = app
+        .clone()
+        .oneshot(post_json_with_csrf(
+            &format!("/api/cron/jobs/{cron_id}/skill"),
+            r#"{"content":"---\nname: forbidden\ndescription: host skill\n---\nrun host steps"}"#,
+            &secondary_token,
+            &secondary_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cron_skill.status(), StatusCode::FORBIDDEN);
+
+    // Model-only messages cannot smuggle host files or turn-scoped skills into
+    // the otherwise valid text conversation.
+    let conversation_id = conversation["id"].as_i64().unwrap();
+    let attachment_attempt = app
+        .oneshot(post_json_with_csrf(
+            &format!("/api/conversations/{conversation_id}/messages"),
+            r#"{"content":"inspect","files":["/etc/passwd"],"inject_skills":["shell"]}"#,
+            &secondary_token,
+            &secondary_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(attachment_attempt.status(), StatusCode::FORBIDDEN);
 }
 
 // ===========================================================================

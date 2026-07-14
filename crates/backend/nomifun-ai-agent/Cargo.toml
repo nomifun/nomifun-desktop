@@ -10,6 +10,7 @@ nomifun-common.workspace = true
 nomifun-db.workspace = true
 nomifun-mcp.workspace = true
 nomifun-runtime.workspace = true
+nomi-process-runtime.workspace = true
 nomifun-extension.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-terminal.workspace = true
@@ -67,13 +68,13 @@ agent-client-protocol = { version = "0.11.1", features = ["unstable_session_mode
 tokio-util = { version = "0.7", features = ["compat"] }
 rusqlite.workspace = true
 libc.workspace = true
-ts-rs = "12.0.1"
+ts-rs.workspace = true
 
 [features]
-# Enables the `AgentInstance::Mock` variant used by downstream test harnesses
+# Enables the `AgentRuntimeHandle::Mock` variant used by downstream test harnesses
 # (conversation/cron/team/app) to inject trait-object stubs without having to
 # spawn a real agent process. Production builds must NOT turn this on — it
-# introduces a `dyn IAgentTask` branch that defeats the enum's zero-dispatch
+# introduces a `dyn AgentRuntimeControl` branch that defeats the enum's zero-dispatch
 # guarantee.
 test-support = []
 # Desktop control tools for the nomi engine (desktop host only).
@@ -99,7 +100,7 @@ wiremock.workspace = true
 # directly on the in-memory pool (mirrors nomifun-db's own acp_session tests).
 sqlx = { workspace = true }
 
-# Integration tests under `tests/` need the `AgentInstance::Mock` variant.
+# Integration tests under `tests/` need the `AgentRuntimeHandle::Mock` variant.
 # Unlike unit tests (which see `cfg(test)` on the library), integration
 # tests compile as separate binaries and must opt in via a feature.
 [[test]]

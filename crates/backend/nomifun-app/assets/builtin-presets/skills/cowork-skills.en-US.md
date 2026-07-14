@@ -563,9 +563,9 @@ doc.save()
 
 ---
 
-id: task-orchestrator
+id: multi-step-planning
 name: Multi-Step Task Planning
-triggers: complex task, multi-step, plan, organize, breakdown, orchestrate, project plan, workflow, 任务规划, 多步骤
+triggers: complex task, multi-step, plan, organize, breakdown, project plan, workflow, 任务规划, 多步骤
 
 ---
 
@@ -754,7 +754,7 @@ Skills can be combined for complex workflows:
 | Presentation from Data | xlsx + pptx             | Analyze Excel data, generate charts in PowerPoint     |
 | Document Archive       | pdf + docx              | Convert Word documents to PDF, merge into archive     |
 | Bulk Processing        | parallel-ops + any      | Process multiple documents simultaneously             |
-| Complex Project        | task-orchestrator + all | Plan and execute multi-format document workflow       |
+| Complex Project        | multi-step-planning + all | Plan and execute multi-format document workflow     |
 
 ## Performance Guidelines
 

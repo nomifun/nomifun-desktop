@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use nomifun_common::now_ms;
 use nomifun_db::IConversationRepository;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::fs;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use crate::artifacts::{broadcast_artifact, build_skill_suggest_artifact};
+use crate::artifacts::{build_skill_suggest_artifact, emit_artifact};
 use crate::error::CronError;
 use crate::prompt::SKILL_SUGGEST_FILENAME;
 use crate::skill_file::{content_hash, has_skill_file, validate_skill_content};
@@ -19,7 +19,7 @@ const RETRY_DELAYS_MS: [u64; 3] = [1000, 2000, 3000];
 
 #[derive(Clone)]
 pub struct SkillSuggestDetector {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     conversation_repo: Arc<dyn IConversationRepository>,
     data_dir: PathBuf,
     last_hash_by_job: Arc<Mutex<HashMap<String, String>>>,
@@ -27,29 +27,46 @@ pub struct SkillSuggestDetector {
 
 impl SkillSuggestDetector {
     pub fn new(
-        broadcaster: Arc<dyn EventBroadcaster>,
+        user_events: Arc<dyn UserEventSink>,
         conversation_repo: Arc<dyn IConversationRepository>,
         data_dir: PathBuf,
     ) -> Self {
         Self {
-            broadcaster,
+            user_events,
             conversation_repo,
             data_dir,
             last_hash_by_job: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn schedule_check(&self, conversation_id: String, job_id: String, workspace: String) {
+    pub fn schedule_check(
+        &self,
+        owner_id: String,
+        conversation_id: String,
+        job_id: String,
+        workspace: String,
+    ) {
         let detector = self.clone();
         tokio::spawn(async move {
-            detector.check_with_retry(&conversation_id, &job_id, &workspace).await;
+            detector
+                .check_with_retry(&owner_id, &conversation_id, &job_id, &workspace)
+                .await;
         });
     }
 
-    async fn check_with_retry(&self, conversation_id: &str, job_id: &str, workspace: &str) {
+    async fn check_with_retry(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        job_id: &str,
+        workspace: &str,
+    ) {
         for delay_ms in RETRY_DELAYS_MS {
             sleep(Duration::from_millis(delay_ms)).await;
-            match self.check_and_emit(conversation_id, job_id, workspace).await {
+            match self
+                .check_and_emit(owner_id, conversation_id, job_id, workspace)
+                .await
+            {
                 Ok(true) => return,
                 Ok(false) => continue,
                 Err(err) => {
@@ -64,7 +81,13 @@ impl SkillSuggestDetector {
         }
     }
 
-    async fn check_and_emit(&self, conversation_id: &str, job_id: &str, workspace: &str) -> Result<bool, CronError> {
+    async fn check_and_emit(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        job_id: &str,
+        workspace: &str,
+    ) -> Result<bool, CronError> {
         if workspace.trim().is_empty() {
             return Ok(false);
         }
@@ -99,6 +122,7 @@ impl SkillSuggestDetector {
 
         self.set_last_hash(job_id, hash);
         self.emit(
+            owner_id,
             conversation_id,
             job_id,
             &validated.name,
@@ -109,13 +133,29 @@ impl SkillSuggestDetector {
         Ok(true)
     }
 
-    async fn emit(&self, conversation_id: &str, job_id: &str, name: &str, description: &str, skill_content: &str) {
-        self.persist_and_broadcast(conversation_id, job_id, name, description, skill_content)
+    async fn emit(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        job_id: &str,
+        name: &str,
+        description: &str,
+        skill_content: &str,
+    ) {
+        self.persist_and_emit(
+            owner_id,
+            conversation_id,
+            job_id,
+            name,
+            description,
+            skill_content,
+        )
             .await;
     }
 
-    async fn persist_and_broadcast(
+    async fn persist_and_emit(
         &self,
+        owner_id: &str,
         conversation_id: &str,
         job_id: &str,
         name: &str,
@@ -137,16 +177,16 @@ impl SkillSuggestDetector {
             }
         };
 
-        if let Err(err) = broadcast_artifact(&self.broadcaster, &row) {
+        if let Err(err) = emit_artifact(self.user_events.as_ref(), owner_id, &row) {
             warn!(
                 conversation_id,
                 job_id,
                 error = %err,
-                "Failed broadcasting cron skill suggestion artifact"
+                "Failed emitting cron skill suggestion artifact"
             );
             return;
         }
-        debug!(conversation_id, job_id, "Broadcasted cron skill suggestion artifact");
+        debug!(conversation_id, job_id, owner_id, "Emitted cron skill suggestion artifact");
     }
 
     fn last_hash(&self, job_id: &str) -> Option<String> {
@@ -176,8 +216,35 @@ mod tests {
     use nomifun_db::{
         ICronRepository, SqliteConversationRepository, SqliteCronRepository, SqlitePool, init_database_memory,
     };
-    use nomifun_realtime::BroadcastEventBus;
     use tempfile::tempdir;
+    use tokio::sync::broadcast;
+
+    struct TestUserEventBus {
+        sender: broadcast::Sender<nomifun_api_types::WebSocketMessage<serde_json::Value>>,
+    }
+
+    impl TestUserEventBus {
+        fn new(capacity: usize) -> Self {
+            let (sender, _) = broadcast::channel(capacity);
+            Self { sender }
+        }
+
+        fn subscribe(
+            &self,
+        ) -> broadcast::Receiver<nomifun_api_types::WebSocketMessage<serde_json::Value>> {
+            self.sender.subscribe()
+        }
+    }
+
+    impl UserEventSink for TestUserEventBus {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+            let _ = self.sender.send(event);
+        }
+    }
 
     fn make_conversation(id: &str) -> ConversationRow {
         ConversationRow {
@@ -188,6 +255,10 @@ mod tests {
             name: "Cron Conversation".into(),
             r#type: "acp".into(),
             extra: "{}".into(),
+            delegation_policy: "automatic".into(),
+            execution_model_pool: None,
+            decision_policy: "automatic".into(),
+            execution_template_id: None,
             model: None,
             status: Some("finished".into()),
             source: Some("nomifun".into()),
@@ -210,6 +281,7 @@ mod tests {
         let repo = SqliteCronRepository::new(pool.clone());
         repo.insert(&CronJobRow {
             id: id.into(),
+            user_id: "system_default_user".into(),
             name: "Test Cron".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -237,12 +309,6 @@ mod tests {
             run_count: 0,
             retry_count: 0,
             max_retries: 3,
-            target_kind: "agent".into(),
-            terminal_mode: None,
-            terminal_session_id: None,
-            terminal_command: None,
-            terminal_args: None,
-            terminal_script: None,
         })
         .await
         .unwrap();
@@ -265,12 +331,17 @@ mod tests {
         seed_cron_job(db.pool(), "cron-1").await;
         repo.create(&make_conversation("1")).await.unwrap();
 
-        let bus = Arc::new(BroadcastEventBus::new(16));
+        let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo.clone(), temp.path().to_path_buf());
         let mut rx = bus.subscribe();
 
         let emitted = detector
-            .check_and_emit("1", "cron-1", &workspace.to_string_lossy())
+            .check_and_emit(
+                "system_default_user",
+                "1",
+                "cron-1",
+                &workspace.to_string_lossy(),
+            )
             .await
             .unwrap();
 
@@ -307,13 +378,18 @@ mod tests {
         repo.create(&make_conversation("1")).await.unwrap();
         repo.create(&make_conversation("conv-2")).await.unwrap();
 
-        let bus = Arc::new(BroadcastEventBus::new(16));
+        let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
         let mut rx = bus.subscribe();
 
         assert!(
             detector
-                .check_and_emit("1", "cron-1", &workspace.to_string_lossy())
+                .check_and_emit(
+                    "system_default_user",
+                    "1",
+                    "cron-1",
+                    &workspace.to_string_lossy(),
+                )
                 .await
                 .unwrap()
         );
@@ -321,7 +397,12 @@ mod tests {
 
         assert!(
             detector
-                .check_and_emit("conv-2", "cron-1", &workspace.to_string_lossy())
+                .check_and_emit(
+                    "system_default_user",
+                    "conv-2",
+                    "cron-1",
+                    &workspace.to_string_lossy(),
+                )
                 .await
                 .unwrap()
         );
@@ -352,12 +433,17 @@ mod tests {
         let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
         repo.create(&make_conversation("1")).await.unwrap();
 
-        let bus = Arc::new(BroadcastEventBus::new(16));
+        let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo, temp.path().to_path_buf());
         let mut rx = bus.subscribe();
 
         let emitted = detector
-            .check_and_emit("1", "cron-1", &workspace.to_string_lossy())
+            .check_and_emit(
+                "system_default_user",
+                "1",
+                "cron-1",
+                &workspace.to_string_lossy(),
+            )
             .await
             .unwrap();
 

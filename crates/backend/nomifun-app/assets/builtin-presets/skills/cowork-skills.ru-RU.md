@@ -581,9 +581,9 @@ doc.save()
 
 ---
 
-id: task-orchestrator
+id: multi-step-planning
 name: Multi-Step Task Planning
-triggers: complex task, multi-step, plan, organize, breakdown, orchestrate, project plan, workflow, 任务规划, 多步骤
+triggers: complex task, multi-step, plan, organize, breakdown, project plan, workflow, 任务规划, 多步骤
 
 ---
 
@@ -772,7 +772,7 @@ Write main.js → run build → Write output.min.js
 | Презентация из данных | xlsx + pptx             | Анализ данных Excel, генерация диаграмм в PowerPoint              |
 | Архив документов      | pdf + docx              | Конвертация документов Word в PDF, объединение в архив            |
 | Пакетная обработка    | parallel-ops + any      | Одновременная обработка нескольких документов                     |
-| Сложный проект        | task-orchestrator + all | Планирование и выполнение многоформатного рабочего процесса       |
+| Сложный проект        | multi-step-planning + all | Планирование и выполнение многоформатного рабочего процесса     |
 
 ## Рекомендации по производительности
 

@@ -1,5 +1,5 @@
 //! Provider-domain capability (registry form): the read-only model-provider
-//! catalog. The shared nomi model-resolution chain stays in `tools_provider`
+//! catalog. The shared nomi model-resolution chain stays in `provider_support`
 //! (used by the cron + conversation capabilities), this only exposes listing.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::deps::GatewayDeps;
 use crate::registry::{Capability, CapabilityMeta, DangerTier};
 use crate::server::ok;
-use crate::tools_provider::load_provider_summaries;
+use crate::provider_support::load_provider_summaries;
 
 /// Cap on models listed per provider (keeps the tool result inside the calling
 /// agent's context budget; the full list lives in desktop Settings).

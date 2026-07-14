@@ -58,7 +58,7 @@ pub(super) async fn load_image_blocks(
         )));
     }
 
-    // Restricted sessions (channels, remote access, public-service workers)
+    // Restricted sessions (channels, remote access, public-service Agent runtimes)
     // may only read attachments from their configured write/workspace root.
     // Resolve both sides before comparing so a symlink or Windows junction in
     // a parent component cannot escape the boundary. Local desktop sessions

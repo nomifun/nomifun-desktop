@@ -1,4 +1,4 @@
-//! Terminal session orchestration: persists metadata, owns live PTYs, and
+//! Terminal session management: persists metadata, owns live PTYs, and
 //! bridges PTY output/exit to the realtime event bus.
 
 use std::collections::HashMap;
@@ -9,7 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use dashmap::DashMap;
 use nomifun_api_types::{CreateTerminalRequest, TerminalSessionResponse};
-use nomifun_common::OnTerminalDelete;
+use nomifun_common::{
+    LoopbackCapabilityLeaseSet, OnTerminalDelete,
+};
 use nomifun_db::{CreateTerminalParams, ITerminalRepository};
 use tracing::{info, warn};
 
@@ -18,6 +20,12 @@ use crate::error::TerminalError;
 use crate::events::TerminalEventEmitter;
 use crate::pty::{PtyHandle, SpawnParams};
 use crate::types::{resolve_command, row_to_response};
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TerminalKnowledgeScope {
+    kb_ids: Vec<String>,
+    allow_write: bool,
+}
 
 /// Locale keys whose presence in a create request means the caller explicitly
 /// owns the session's character encoding. We preserve those values verbatim.
@@ -169,6 +177,10 @@ pub struct TerminalService {
     /// from it (constructor-injected like `ConversationService`'s work_dir).
     work_dir: std::path::PathBuf,
     live: Arc<DashMap<i64, Arc<PtyHandle>>>,
+    /// Renewable loopback capability guards bound to the exact live PTY
+    /// generation. The exit callback, kill/delete/relaunch, and final service
+    /// drop all revoke deterministically.
+    live_capability_leases: Arc<DashMap<i64, (u64, LoopbackCapabilityLeaseSet)>>,
     /// Sessions created with `defer_spawn` that have not spawned their PTY yet.
     /// The first `resize` (carrying the real fitted size) consumes the marker and
     /// spawns the PTY at that size, so a full-screen TUI never draws at the 80×24
@@ -208,12 +220,6 @@ pub struct TerminalService {
     /// Platform-private dir for per-terminal CLI config (e.g. claude mcp.json).
     /// NEVER the user's cwd. Defaults to a temp subdir until wired.
     mcp_config_dir: Arc<std::sync::RwLock<std::path::PathBuf>>,
-    /// Absolute path to the MCP endpoint beacon file written by the backend on
-    /// boot. Passed to spawned PTYs as `NOMI_MCP_ENDPOINTS_FILE` so the knowledge
-    /// stdio bridge can discover the endpoint precisely (no data-dir resolution
-    /// needed). Wired by `with_mcp_endpoints_path`. `None` → env not set (bridge
-    /// falls back to its own data-dir resolution or legacy env vars).
-    mcp_endpoints_path: Arc<std::sync::RwLock<Option<String>>>,
     /// Late-wired terminal lifecycle server (Plan 2). Hooks call back here.
     terminal_lifecycle:
         Arc<std::sync::RwLock<Option<Arc<crate::lifecycle::TerminalLifecycleServer>>>>,
@@ -243,6 +249,7 @@ impl TerminalService {
             emitter,
             work_dir,
             live: Arc::new(DashMap::new()),
+            live_capability_leases: Arc::new(DashMap::new()),
             pending_spawn: Arc::new(DashMap::new()),
             knowledge: Arc::new(std::sync::RwLock::new(None)),
             delete_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
@@ -253,7 +260,6 @@ impl TerminalService {
             mcp_config_dir: Arc::new(std::sync::RwLock::new(
                 std::env::temp_dir().join("nomi-terminal-mcp"),
             )),
-            mcp_endpoints_path: Arc::new(std::sync::RwLock::new(None)),
             terminal_lifecycle: Arc::new(std::sync::RwLock::new(None)),
             lifecycle_binary_path: Arc::new(std::sync::RwLock::new(None)),
             title_completer: Arc::new(std::sync::RwLock::new(None)),
@@ -313,15 +319,6 @@ impl TerminalService {
         }
         if let Ok(mut g) = self.mcp_config_dir.write() {
             *g = config_dir;
-        }
-    }
-
-    /// Wire the absolute path to the MCP endpoint beacon so spawned PTYs receive
-    /// `NOMI_MCP_ENDPOINTS_FILE` in their env. This lets the knowledge stdio bridge
-    /// discover the endpoint precisely without computing the data-dir path itself.
-    pub fn with_mcp_endpoints_path(&self, path: String) {
-        if let Ok(mut g) = self.mcp_endpoints_path.write() {
-            *g = Some(path);
         }
     }
 
@@ -393,28 +390,44 @@ impl TerminalService {
     /// no-op).
     fn build_enhancement(
         &self,
-        kb_ids: &[String],
+        knowledge_scope: &TerminalKnowledgeScope,
+        user_id: &str,
         terminal_id: i64,
-    ) -> crate::enhance::TerminalLaunchEnhancement {
+        workspace_path: &str,
+    ) -> (
+        crate::enhance::TerminalLaunchEnhancement,
+        LoopbackCapabilityLeaseSet,
+    ) {
         let mut enh = crate::enhance::TerminalLaunchEnhancement::default();
-        if !kb_ids.is_empty()
+        let mut leases = LoopbackCapabilityLeaseSet::new();
+        if !knowledge_scope.kb_ids.is_empty()
             && let Some(cfg) = self.knowledge_mcp_config()
         {
             use nomifun_api_types::KnowledgeMcpConfig as K;
-            // Only PORT and TOKEN are baked — kb_ids is NO LONGER injected into the
-            // bridge env. The bridge discovers scope at runtime by reporting its cwd
-            // to the in-process server. PORT/TOKEN are kept as an env fallback for
-            // when the beacon file is absent (safety net).
-            let env = std::collections::HashMap::from([
-                (K::ENV_PORT.to_owned(), cfg.port.to_string()),
-                (K::ENV_TOKEN.to_owned(), cfg.token.clone()),
-            ]);
-            enh.mcp_servers.push(crate::enhance::McpServerSpec {
-                name: K::SERVER_NAME.to_owned(),
-                command: cfg.binary_path.clone(),
-                args: vec!["mcp-knowledge-stdio".to_owned()],
-                env,
-            });
+            match cfg.issue_for_terminal(
+                user_id,
+                terminal_id,
+                workspace_path,
+                &knowledge_scope.kb_ids,
+                knowledge_scope.allow_write,
+            ) {
+                Ok(child) => {
+                    let env = std::collections::HashMap::from([(
+                        K::ENV_CAPABILITY.to_owned(),
+                        child
+                            .bootstrap_json()
+                            .expect("validated knowledge bootstrap serializes"),
+                    )]);
+                    enh.mcp_servers.push(crate::enhance::McpServerSpec {
+                        name: K::SERVER_NAME.to_owned(),
+                        command: child.binary_path,
+                        args: vec!["mcp-knowledge-stdio".to_owned()],
+                        env,
+                    });
+                    leases.push(child.lease);
+                }
+                Err(error) => warn!(%error, terminal_id, "knowledge MCP capability issuance failed closed"),
+            }
         }
         // Requirement MCP injection: always inject when the requirement server is
         // wired (D2 verdict: always-inject for agent CLIs, NOT gated on AutoWork).
@@ -423,18 +436,24 @@ impl TerminalService {
         // terminal_id + owner_kind so verify_scope confines mutations to this terminal.
         if let Some(cfg) = self.requirement_mcp_config() {
             use nomifun_api_types::RequirementMcpConfig as R;
-            let env = std::collections::HashMap::from([
-                (R::ENV_PORT.to_owned(), cfg.port.to_string()),
-                (R::ENV_TOKEN.to_owned(), cfg.token.clone()),
-                (R::ENV_CONVERSATION_ID.to_owned(), terminal_id.to_string()),
-                (R::ENV_OWNER_KIND.to_owned(), "terminal".to_owned()),
-            ]);
-            enh.mcp_servers.push(crate::enhance::McpServerSpec {
-                name: R::SERVER_NAME.to_owned(),
-                command: cfg.binary_path.clone(),
-                args: vec!["mcp-requirement-stdio".to_owned()],
-                env,
-            });
+            match cfg.issue_for_terminal(user_id, terminal_id) {
+                Ok(child) => {
+                    let env = std::collections::HashMap::from([(
+                        R::ENV_CAPABILITY.to_owned(),
+                        child
+                            .bootstrap_json()
+                            .expect("validated requirement bootstrap serializes"),
+                    )]);
+                    enh.mcp_servers.push(crate::enhance::McpServerSpec {
+                        name: R::SERVER_NAME.to_owned(),
+                        command: child.binary_path,
+                        args: vec!["mcp-requirement-stdio".to_owned()],
+                        env,
+                    });
+                    leases.push(child.lease);
+                }
+                Err(error) => warn!(%error, terminal_id, "requirement MCP capability issuance failed closed"),
+            }
         }
         // Lifecycle hook wiring (Plan 2): if the server is running, inject
         // the hook config + env so the CLI calls back on turn boundaries.
@@ -459,7 +478,7 @@ impl TerminalService {
                 }
             }
         }
-        enh
+        (enh, leases)
     }
 
     /// Platform-private per-terminal config dir (NEVER the user cwd).
@@ -527,7 +546,7 @@ impl TerminalService {
             // it is healed by `reconcile_on_boot`.
             self.pending_spawn.insert(id, ());
             let resp = row_to_response(&row, None, &self.work_dir);
-            self.emitter.emit_created(&resp);
+            self.emitter.emit_created(user_id, &resp);
             info!(
                 terminal_id = id,
                 "terminal session created (spawn deferred to first resize)"
@@ -540,6 +559,7 @@ impl TerminalService {
             .await;
 
         self.spawn_pty(
+            user_id,
             id,
             &req.command,
             &req.args,
@@ -552,7 +572,7 @@ impl TerminalService {
         )?;
 
         let resp = row_to_response(&row, None, &self.work_dir);
-        self.emitter.emit_created(&resp);
+        self.emitter.emit_created(user_id, &resp);
         info!(terminal_id = id, "terminal session created");
         // Arm IDMM supervision for the fresh PTY (no-op if disabled / already on).
         self.arm_supervision(id);
@@ -563,6 +583,7 @@ impl TerminalService {
     #[allow(clippy::too_many_arguments)]
     fn spawn_pty(
         &self,
+        owner_id: &str,
         id: i64,
         command: &str,
         args: &[String],
@@ -570,29 +591,44 @@ impl TerminalService {
         env: Option<HashMap<String, String>>,
         cols: u16,
         rows: u16,
-        kb_ids: Vec<String>,
+        knowledge_scope: TerminalKnowledgeScope,
         backend: Option<&str>,
     ) -> Result<(), TerminalError> {
         let (program, resolved_args) = resolve_command(command, args);
         #[cfg(all(test, windows))]
         let program = resolve_windows_test_program(&program);
+        // Mint the PTY generation before issuing child capabilities so their
+        // lifecycle guard is keyed to exactly the handle about to spawn.
+        let epoch = self
+            .next_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Inject platform capabilities (MCP + lifecycle hooks) into the
         // native CLI launch. Unknown CLIs are returned unchanged (honest).
-        let (resolved_args, hook_env) = {
-            let enh = self.build_enhancement(&kb_ids, id);
+        let (resolved_args, hook_env, capability_leases) = {
+            let (enh, leases) =
+                self.build_enhancement(&knowledge_scope, owner_id, id, cwd);
             if enh.is_empty() {
-                (resolved_args, Vec::new())
+                (resolved_args, Vec::new(), leases)
             } else {
                 let session_dir = self.session_mcp_dir(id);
-                crate::enhance::apply_enhancement(
+                let (args, env) = crate::enhance::apply_enhancement(
                     &program,
                     resolved_args,
                     &enh,
                     &session_dir,
                     backend,
-                )
+                );
+                (args, env, leases)
             }
         };
+        let capability_rendered = hook_env.iter().any(|(name, _)| {
+            name == nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY
+                || name == nomifun_api_types::RequirementMcpConfig::ENV_CAPABILITY
+        });
+        if capability_rendered && !capability_leases.is_empty() {
+            self.live_capability_leases
+                .insert(id, (epoch, capability_leases));
+        }
         let mut env: HashMap<String, String> = env.unwrap_or_default();
         // Describe the xterm.js emulator the PTY talks to (TERM/COLORTERM), so a
         // Finder/launchd-launched macOS app — which inherits no TERM — still gets
@@ -601,33 +637,26 @@ impl TerminalService {
         for (k, v) in hook_env {
             env.insert(k, v);
         }
-        // Pass the beacon file path so the knowledge stdio bridge discovers the
-        // endpoint precisely (no data-dir guessing). The bridge reads this env var
-        // as priority-1 in `read_beacon_for_bridge`.
-        if let Ok(guard) = self.mcp_endpoints_path.read() {
-            if let Some(path) = guard.as_ref() {
-                env.insert("NOMI_MCP_ENDPOINTS_FILE".to_owned(), path.clone());
-            }
-        }
 
         let emitter_out = self.emitter.clone();
+        let output_owner_id = owner_id.to_owned();
         let on_output = move |chunk: Vec<u8>| {
-            emitter_out.emit_output(id, BASE64.encode(&chunk));
+            emitter_out.emit_output(&output_owner_id, id, BASE64.encode(&chunk));
         };
 
         let emitter_exit = self.emitter.clone();
+        let exit_owner_id = owner_id.to_owned();
         let repo_exit = self.repo.clone();
         let live_exit = self.live.clone();
-        // Mint this PTY's spawn generation; the handle stores it and the exit
-        // callback below compares against it.
-        let epoch = self
-            .next_epoch
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let capability_leases_exit = self.live_capability_leases.clone();
         // Capture the runtime handle now (we're on the async create path); the
         // exit callback runs on the PTY reader's OS thread, which has no
         // ambient Tokio runtime, so `tokio::spawn` there would panic.
         let rt = tokio::runtime::Handle::current();
         let on_exit = move |code: Option<i32>, scrollback: Vec<u8>| {
+            capability_leases_exit.remove_if(&id, |_, (lease_epoch, _)| {
+                *lease_epoch == epoch
+            });
             // Tear down ONLY if this PTY is still the live one for the id. A
             // relaunch removes the old handle, kills it, then immediately
             // inserts a fresh higher-epoch handle under the same id; the killed
@@ -642,7 +671,7 @@ impl TerminalService {
             {
                 return;
             }
-            emitter_exit.emit_exit(id, code);
+            emitter_exit.emit_exit(&exit_owner_id, id, code);
             // Persist the terminal status off the reader thread, onto the runtime.
             let repo = repo_exit.clone();
             rt.spawn(async move {
@@ -670,7 +699,12 @@ impl TerminalService {
             epoch,
             on_output,
             on_exit,
-        )?;
+        );
+        if handle.is_err() {
+            self.live_capability_leases
+                .remove_if(&id, |_, (lease_epoch, _)| *lease_epoch == epoch);
+        }
+        let handle = handle?;
         self.live.insert(id, handle);
 
         // Plan-2 lifecycle consumer: subscribe to this terminal's lifecycle
@@ -766,12 +800,11 @@ impl TerminalService {
 
     /// Sync this terminal's bound knowledge bases into `{cwd}/.nomi/knowledge/`
     /// and materialize the standalone README contract next to the mounts.
-    /// Returns the mounted base ids (empty = nothing mounted), which are baked
-    /// into the injected knowledge_search MCP env so the model cannot widen the
-    /// searchable set. The README's `has_search_tool` claim is honest: it only
+    /// Returns the mounted base ids + write permission that are signed into the
+    /// per-child capability. The README's `has_search_tool` claim is honest: it only
     /// asserts the tool exists when the MCP is launch-injected — true for
-    /// Claude/Codex (including wrappers like `stepcode claude`). Gemini gets
-    /// the tool via one-click registration, not launch, so it's false here.
+    /// Claude/Codex (including wrappers like `stepcode claude`). Gemini has no
+    /// secure launch-time injection mechanism, so it is false there.
     /// Never blocks the launch — failures degrade to warnings.
     async fn sync_knowledge_workspace(
         &self,
@@ -779,9 +812,9 @@ impl TerminalService {
         cwd: &str,
         command: &str,
         args: &[String],
-    ) -> Vec<String> {
+    ) -> TerminalKnowledgeScope {
         let Some(ks) = self.knowledge_service() else {
-            return Vec::new();
+            return TerminalKnowledgeScope::default();
         };
         let id_str = id.to_string();
         // Workpath-first (session-list unification spec §7): the binding
@@ -798,14 +831,13 @@ impl TerminalService {
             .ensure_mounts_for_session(&wp_key, "terminal", &id_str, cwd_path)
             .await;
         if outcome.mounts.is_empty() {
-            return Vec::new();
+            return TerminalKnowledgeScope::default();
         }
         // Determine whether the knowledge_search MCP tool will ACTUALLY be
         // launch-injected for this terminal. The tool is injected only when
         // (a) the MCP config is wired and (b) the CLI resolves to Claude or
-        // Codex (including wrappers like `stepcode claude`). Gemini gets the
-        // tool via one-click registration (.gemini/settings.json), NOT at
-        // launch, so it is false here; unknown CLIs likewise.
+        // Codex (including wrappers like `stepcode claude`). Gemini and unknown
+        // CLIs cannot receive a session-bound capability at launch, so false.
         let (program, prog_args) = crate::types::resolve_command(command, args);
         let tool_available = self.knowledge_mcp_config().is_some()
             && matches!(
@@ -842,8 +874,10 @@ impl TerminalService {
                 warn!(terminal_id = id, error = %e, "failed to write knowledge README — continuing");
             }
         }
-        // kb_ids: extracted from mount outcome. Field is `id` on KnowledgeMountInfo.
-        outcome.mounts.iter().map(|m| m.id.clone()).collect()
+        TerminalKnowledgeScope {
+            kb_ids: outcome.mounts.iter().map(|m| m.id.clone()).collect(),
+            allow_write: outcome.writeback,
+        }
     }
 
     /// List sessions for a user.
@@ -1264,6 +1298,7 @@ impl TerminalService {
             .sync_knowledge_workspace(id, &row.cwd, &row.command, &args)
             .await;
         self.spawn_pty(
+            &row.user_id,
             id,
             &row.command,
             &args,
@@ -1285,6 +1320,7 @@ impl TerminalService {
 
     /// Kill the child process (session row remains, status flips to exited via on_exit).
     pub async fn kill(&self, id: i64) -> Result<(), TerminalError> {
+        self.live_capability_leases.remove(&id);
         let handle = self
             .live
             .get(&id)
@@ -1294,12 +1330,22 @@ impl TerminalService {
 
     /// Kill (if live) and delete the session row.
     pub async fn delete(&self, id: i64) -> Result<(), TerminalError> {
+        // Resolve the authoritative owner before deletion. The row is gone by
+        // the time `terminal.removed` is emitted, so the audience cannot be
+        // reconstructed afterwards.
+        let owner_id = self
+            .repo
+            .get_by_id(id)
+            .await?
+            .ok_or_else(|| TerminalError::NotFound(id.to_string()))?
+            .user_id;
         // Drop any pending deferred-spawn marker so a never-resized session does
         // not leak (and cannot later spawn against a deleted row).
         self.pending_spawn.remove(&id);
         // Drop per-session auto-title bookkeeping.
         self.titled.remove(&id);
         self.first_input.remove(&id);
+        self.live_capability_leases.remove(&id);
         if let Some((_, handle)) = self.live.remove(&id) {
             let _ = handle.kill();
         }
@@ -1316,9 +1362,9 @@ impl TerminalService {
             .map(|guard| guard.clone())
             .unwrap_or_default();
         for hook in hooks {
-            hook.on_terminal_deleted(id).await;
+            hook.on_terminal_deleted(&owner_id, id).await;
         }
-        self.emitter.emit_removed(id);
+        self.emitter.emit_removed(&owner_id, id);
         Ok(())
     }
 
@@ -1335,6 +1381,7 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
 
         // Tear down any still-running PTY for this id first.
+        self.live_capability_leases.remove(&id);
         if let Some((_, handle)) = self.live.remove(&id) {
             let _ = handle.kill();
         }
@@ -1355,6 +1402,7 @@ impl TerminalService {
             .sync_knowledge_workspace(id, &row.cwd, &row.command, &args)
             .await;
         if let Err(e) = self.spawn_pty(
+            &row.user_id,
             id,
             &row.command,
             &args,
@@ -1391,7 +1439,7 @@ impl TerminalService {
             .await?
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let resp = row_to_response(&updated, None, &self.work_dir);
-        self.emitter.emit_updated(&resp);
+        self.emitter.emit_updated(&updated.user_id, &resp);
         info!(terminal_id = id, "terminal session relaunched in place");
         // Re-arm IDMM supervision for the fresh PTY (the old supervisor stood
         // down when the previous PTY exited).
@@ -1421,6 +1469,7 @@ impl TerminalService {
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
 
         // Tear down any still-running (or wedged) PTY for this id first.
+        self.live_capability_leases.remove(&id);
         if let Some((_, handle)) = self.live.remove(&id) {
             let _ = handle.kill();
         }
@@ -1438,6 +1487,7 @@ impl TerminalService {
             .sync_knowledge_workspace(id, &row.cwd, crate::types::SHELL_SENTINEL, &[])
             .await;
         if let Err(e) = self.spawn_pty(
+            &row.user_id,
             id,
             crate::types::SHELL_SENTINEL,
             &[],
@@ -1465,7 +1515,7 @@ impl TerminalService {
             .await?
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let resp = row_to_response(&updated, None, &self.work_dir);
-        self.emitter.emit_updated(&resp);
+        self.emitter.emit_updated(&updated.user_id, &resp);
         info!(
             terminal_id = id,
             "terminal session fell back to a clean shell in place"
@@ -1489,7 +1539,7 @@ impl TerminalService {
             .await?
             .ok_or_else(|| TerminalError::NotFound(id.to_string()))?;
         let resp = row_to_response(&row, None, &self.work_dir);
-        self.emitter.emit_updated(&resp);
+        self.emitter.emit_updated(&row.user_id, &resp);
         Ok(resp)
     }
 
@@ -1636,9 +1686,35 @@ mod tests {
     use super::*;
     use crate::submit::SettleReason;
     use nomifun_api_types::WebSocketMessage;
-    use nomifun_realtime::EventBroadcaster;
+    use nomifun_realtime::{EventBroadcaster, UserEventSink};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    fn test_issuer() -> Arc<nomifun_common::LoopbackCapabilityIssuer> {
+        Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap())
+    }
+
+    fn knowledge_mcp_config(
+        port: u16,
+        binary: &str,
+    ) -> nomifun_api_types::KnowledgeMcpConfig {
+        nomifun_api_types::KnowledgeMcpConfig::from_issuer(
+            port,
+            test_issuer(),
+            binary.into(),
+        )
+    }
+
+    fn requirement_mcp_config(
+        port: u16,
+        binary: &str,
+    ) -> nomifun_api_types::RequirementMcpConfig {
+        nomifun_api_types::RequirementMcpConfig::from_issuer(
+            port,
+            test_issuer(),
+            binary.into(),
+        )
+    }
 
     // --- Emulator env defaults -------------------------------------------
 
@@ -2116,8 +2192,18 @@ mod tests {
     #[derive(Default, Clone)]
     struct CapturingBroadcaster {
         events: Arc<Mutex<Vec<WebSocketMessage<serde_json::Value>>>>,
+        owners: Arc<Mutex<Vec<String>>>,
     }
 
+    impl UserEventSink for CapturingBroadcaster {
+        fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+            self.owners.lock().unwrap().push(user_id.to_owned());
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    // Knowledge events are intentionally instance-shared.  This test double is
+    // used by both that public stream and the terminal's owner-scoped stream.
     impl EventBroadcaster for CapturingBroadcaster {
         fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
             self.events.lock().unwrap().push(event);
@@ -2348,9 +2434,10 @@ mod tests {
                 tags: None,
             },
         );
-        let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(Arc::new(
-            CapturingBroadcaster::default(),
-        ));
+        let emitter = nomifun_knowledge::KnowledgeEventEmitter::new(
+            Arc::new(CapturingBroadcaster::default()),
+            Arc::from("test-owner"),
+        );
         (
             Arc::new(nomifun_knowledge::KnowledgeService::new(
                 Arc::new(repo),
@@ -3253,7 +3340,7 @@ mod tests {
         ));
         assert!(matches!(
             svc.delete(999_999).await.unwrap_err(),
-            TerminalError::Database(_)
+            TerminalError::NotFound(_)
         ));
     }
 
@@ -3334,6 +3421,7 @@ mod tests {
                 .iter()
                 .any(|e| e.name == "terminal.removed")
         );
+        assert!(bc.owners.lock().unwrap().iter().all(|owner| owner == "u"));
     }
 
     #[tokio::test]
@@ -3417,13 +3505,9 @@ mod tests {
     #[tokio::test]
     async fn with_knowledge_mcp_config_is_stored() {
         let (svc, _bc) = service();
-        let cfg = nomifun_api_types::KnowledgeMcpConfig {
-            port: 51123,
-            token: "tok".into(),
-            binary_path: "/opt/nomi/nomicore".into(),
-        };
+        let cfg = knowledge_mcp_config(51123, "/opt/nomi/nomicore");
         svc.with_knowledge_mcp_config(cfg.clone(), std::env::temp_dir().join("nomi-term-mcp"));
-        assert_eq!(svc.knowledge_mcp_config().map(|c| c.port), Some(51123));
+        assert_eq!(svc.knowledge_mcp_config().map(|c| c.port()), Some(51123));
     }
 
     /// Three-way gate of `build_enhancement`:
@@ -3438,44 +3522,57 @@ mod tests {
 
         // Case 1: empty kb_ids → always empty regardless of config.
         svc.with_knowledge_mcp_config(
-            K {
-                port: 51123,
-                token: "tok".into(),
-                binary_path: "nomicore".into(),
-            },
+            knowledge_mcp_config(51123, "nomicore"),
             std::env::temp_dir(),
         );
-        let enh = svc.build_enhancement(&[], 1);
+        let (enh, leases) = svc.build_enhancement(
+            &TerminalKnowledgeScope::default(),
+            "user-1",
+            1,
+            "/workspace",
+        );
         assert!(
             enh.mcp_servers.is_empty(),
             "empty kb_ids must yield no MCP servers"
         );
+        assert!(leases.is_empty());
 
         // Case 2: kb_ids present but NO knowledge_mcp_config wired → empty.
         let (svc2, _bc2) = service(); // fresh service, config NOT wired
-        let enh = svc2.build_enhancement(&["kb_1".into()], 1);
+        let (enh, leases) = svc2.build_enhancement(
+            &TerminalKnowledgeScope { kb_ids: vec!["kb_1".into()], allow_write: false },
+            "user-1",
+            1,
+            "/workspace",
+        );
         assert!(
             enh.mcp_servers.is_empty(),
             "no config wired must yield no MCP servers"
         );
+        assert!(leases.is_empty());
 
         // Case 3: kb_ids present AND config wired → one McpServerSpec.
-        let enh = svc.build_enhancement(&["kb_1".into(), "kb_2".into()], 1);
+        let (enh, leases) = svc.build_enhancement(
+            &TerminalKnowledgeScope { kb_ids: vec!["kb_1".into(), "kb_2".into()], allow_write: false },
+            "user-1",
+            1,
+            "/workspace",
+        );
         assert_eq!(
             enh.mcp_servers.len(),
             1,
             "expected exactly one MCP server spec"
         );
         let spec = &enh.mcp_servers[0];
+        assert_eq!(leases.len(), 1);
         assert_eq!(spec.name, K::SERVER_NAME);
         assert_eq!(spec.args, vec!["mcp-knowledge-stdio".to_owned()]);
-        assert_eq!(spec.env.get(K::ENV_PORT).map(String::as_str), Some("51123"));
-        assert_eq!(spec.env.get(K::ENV_TOKEN).map(String::as_str), Some("tok"));
-        // ENV_KB_IDS must NOT be present — scope is resolved at runtime by cwd.
-        assert!(
-            spec.env.get(K::ENV_KB_IDS).is_none(),
-            "ENV_KB_IDS must not be baked into the bridge env (runtime cwd scope)"
-        );
+        assert_eq!(spec.env.len(), 1);
+        let bootstrap = spec
+            .env
+            .get(K::ENV_CAPABILITY)
+            .expect("single capability bootstrap");
+        assert!(bootstrap.contains("kb_1") && bootstrap.contains("/workspace"));
     }
 
     #[tokio::test]
@@ -3511,31 +3608,27 @@ mod tests {
         // Pure unit-level verification of the injector contract: construct an
         // enhancement → claude argv contains --mcp-config.
         let dir = tempfile::TempDir::new().unwrap();
-        let cfg = nomifun_api_types::KnowledgeMcpConfig {
-            port: 9,
-            token: "t".into(),
-            binary_path: "nomicore".into(),
-        };
+        let cfg = knowledge_mcp_config(9, "nomicore");
         let enh = TerminalLaunchEnhancement {
             mcp_servers: vec![McpServerSpec {
                 name: nomifun_api_types::KnowledgeMcpConfig::SERVER_NAME.into(),
                 command: cfg.binary_path.clone(),
                 args: vec!["mcp-knowledge-stdio".into()],
-                env: HashMap::from([
-                    (
-                        nomifun_api_types::KnowledgeMcpConfig::ENV_PORT.into(),
-                        "9".into(),
-                    ),
-                    (
-                        nomifun_api_types::KnowledgeMcpConfig::ENV_TOKEN.into(),
-                        "t".into(),
-                    ),
-                ]),
+                env: HashMap::from([(
+                    nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY.into(),
+                    "bootstrap".into(),
+                )]),
             }],
             lifecycle: None,
         };
-        let (argv, _env) = apply_enhancement("claude", vec![], &enh, dir.path(), None);
+        let (argv, env) = apply_enhancement("claude", vec![], &enh, dir.path(), None);
         assert!(argv.iter().any(|a| a == "--mcp-config"));
+        let env: HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            env.get(nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY)
+                .map(String::as_str),
+            Some("bootstrap")
+        );
     }
 
     #[tokio::test]
@@ -3593,17 +3686,13 @@ mod tests {
     #[tokio::test]
     async fn with_requirement_mcp_config_is_stored() {
         let (svc, _bc) = service();
-        let cfg = nomifun_api_types::RequirementMcpConfig {
-            port: 52222,
-            token: "req-tok".into(),
-            binary_path: "/opt/nomi/nomicore".into(),
-        };
+        let cfg = requirement_mcp_config(52222, "/opt/nomi/nomicore");
         svc.with_requirement_mcp_config(cfg.clone());
         let stored = svc
             .requirement_mcp_config()
             .expect("must be Some after wiring");
-        assert_eq!(stored.port, 52222);
-        assert_eq!(stored.token, "req-tok");
+        assert_eq!(stored.port(), 52222);
+        assert!(!format!("{stored:?}").contains("root-secret"));
     }
 
     /// `build_enhancement` with ONLY requirement_mcp_config wired (no kb_ids):
@@ -3612,35 +3701,31 @@ mod tests {
     async fn build_enhancement_requirement_only_no_kb() {
         use nomifun_api_types::RequirementMcpConfig as R;
         let (svc, _bc) = service();
-        svc.with_requirement_mcp_config(R {
-            port: 9876,
-            token: "rtok".into(),
-            binary_path: "/usr/bin/nomicore".into(),
-        });
+        svc.with_requirement_mcp_config(requirement_mcp_config(9876, "/usr/bin/nomicore"));
 
         // No kb_ids, terminal_id = 42
-        let enh = svc.build_enhancement(&[], 42);
+        let (enh, leases) = svc.build_enhancement(
+            &TerminalKnowledgeScope::default(),
+            "user-1",
+            42,
+            "/workspace",
+        );
         assert!(
             !enh.is_empty(),
             "requirement MCP alone must produce a non-empty enhancement"
         );
         assert_eq!(enh.mcp_servers.len(), 1);
+        assert_eq!(leases.len(), 1);
         let spec = &enh.mcp_servers[0];
         assert_eq!(spec.name, R::SERVER_NAME);
         assert_eq!(spec.command, "/usr/bin/nomicore");
         assert_eq!(spec.args, vec!["mcp-requirement-stdio".to_owned()]);
-        assert_eq!(spec.env.get(R::ENV_PORT).map(String::as_str), Some("9876"));
-        assert_eq!(spec.env.get(R::ENV_TOKEN).map(String::as_str), Some("rtok"));
-        assert_eq!(
-            spec.env.get(R::ENV_CONVERSATION_ID).map(String::as_str),
-            Some("42"),
-            "ENV_CONVERSATION_ID must carry the terminal_id"
-        );
-        assert_eq!(
-            spec.env.get(R::ENV_OWNER_KIND).map(String::as_str),
-            Some("terminal"),
-            "ENV_OWNER_KIND must be 'terminal'"
-        );
+        assert_eq!(spec.env.len(), 1);
+        let bootstrap = spec
+            .env
+            .get(R::ENV_CAPABILITY)
+            .expect("single capability bootstrap");
+        assert!(bootstrap.contains("terminal") && bootstrap.contains("42"));
     }
 
     /// When both knowledge AND requirement MCP are wired, `build_enhancement`
@@ -3650,25 +3735,23 @@ mod tests {
         use nomifun_api_types::{KnowledgeMcpConfig as K, RequirementMcpConfig as R};
         let (svc, _bc) = service();
         svc.with_knowledge_mcp_config(
-            K {
-                port: 111,
-                token: "ktok".into(),
-                binary_path: "nomicore".into(),
-            },
+            knowledge_mcp_config(111, "nomicore"),
             std::env::temp_dir(),
         );
-        svc.with_requirement_mcp_config(R {
-            port: 222,
-            token: "rtok".into(),
-            binary_path: "nomicore".into(),
-        });
+        svc.with_requirement_mcp_config(requirement_mcp_config(222, "nomicore"));
 
-        let enh = svc.build_enhancement(&["kb_x".into()], 7);
+        let (enh, leases) = svc.build_enhancement(
+            &TerminalKnowledgeScope { kb_ids: vec!["kb_x".into()], allow_write: true },
+            "user-1",
+            7,
+            "/workspace",
+        );
         assert_eq!(
             enh.mcp_servers.len(),
             2,
             "both knowledge + requirement MCP servers"
         );
+        assert_eq!(leases.len(), 2);
         let names: Vec<&str> = enh.mcp_servers.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&K::SERVER_NAME));
         assert!(names.contains(&R::SERVER_NAME));
@@ -3688,18 +3771,13 @@ mod tests {
                 name: R::SERVER_NAME.into(),
                 command: "/opt/nomi/nomicore".into(),
                 args: vec!["mcp-requirement-stdio".into()],
-                env: HashMap::from([
-                    (R::ENV_PORT.into(), "9876".into()),
-                    (R::ENV_TOKEN.into(), "rtok".into()),
-                    (R::ENV_CONVERSATION_ID.into(), "42".into()),
-                    (R::ENV_OWNER_KIND.into(), "terminal".into()),
-                ]),
+                env: HashMap::from([(R::ENV_CAPABILITY.into(), "bootstrap".into())]),
             }],
             lifecycle: None,
         };
 
         // claude → --mcp-config present (renders MCP)
-        let (argv, _env) = apply_enhancement("claude", vec![], &enh, dir.path(), None);
+        let (argv, env) = apply_enhancement("claude", vec![], &enh, dir.path(), None);
         assert!(
             argv.iter().any(|a| a == "--mcp-config"),
             "claude must get --mcp-config"
@@ -3716,15 +3794,23 @@ mod tests {
             doc["mcpServers"][R::SERVER_NAME].is_object(),
             "mcp.json must contain the requirement server"
         );
+        assert!(doc["mcpServers"][R::SERVER_NAME].get("env").is_none());
+        let env: HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
-            doc["mcpServers"][R::SERVER_NAME]["env"][R::ENV_OWNER_KIND],
-            "terminal"
+            env.get(R::ENV_CAPABILITY).map(String::as_str),
+            Some("bootstrap")
         );
 
-        // codex → renders via -c overrides
-        let (argv, _env) = apply_enhancement("codex", vec![], &enh, dir.path(), None);
+        // codex → renders via -c overrides while credentials stay out of argv.
+        let (argv, env) = apply_enhancement("codex", vec![], &enh, dir.path(), None);
         let joined = argv.join(" ");
         assert!(joined.contains(&format!("mcp_servers.{}.command=", R::SERVER_NAME)));
+        assert!(!joined.contains("bootstrap"));
+        let env: HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            env.get(R::ENV_CAPABILITY).map(String::as_str),
+            Some("bootstrap")
+        );
 
         // unknown CLI (bash) → no injection (honest)
         let (argv, _env) =

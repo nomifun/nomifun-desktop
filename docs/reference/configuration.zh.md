@@ -54,7 +54,7 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 |---|---|
 | `mcp-requirement-stdio` | AutoWork requirement 声明工具的 MCP stdio server。 |
 | `mcp-knowledge-stdio` | 每会话 knowledge search 的 MCP stdio server。 |
-| `mcp-gateway-stdio` | Desktop Gateway 工具的 MCP stdio server。 |
+| `mcp-gateway-stdio` | 平台 Gateway 工具的内部 stdio 传输；只接受宿主签发、带作用域、有效期和签名的能力声明。 |
 | `mcp-open-stdio` | 暴露可靠 OS `open` 工具的 MCP stdio server。 |
 | `mcp-computer-stdio` | 暴露 desktop computer-use 工具的 MCP stdio server。 |
 | `mcp-browser-stdio` | 暴露 browser-use 工具的 MCP stdio server。 |
@@ -62,7 +62,6 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `doctor` | 自检：填充智能体注册表，逐个探测 `$PATH` 上的每个 CLI，并打印一张按智能体维度的可用性表格。 |
 | `tools` | 以 JSON 列出 Remote 能力名称与描述。 |
 | `call <name> [json-args]` | 通过 `/v1` 调用运行中实例上的 Remote 能力。 |
-| `agent "<goal>"` | `nomi_agent_run` 能力的便捷包装。 |
 
 ## 共享环境变量
 
@@ -75,8 +74,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 | `JWT_SECRET` | `nomifun-app` | 用于签发会话 JWT 的密钥。解析顺序见 [鉴权密钥解析](#鉴权密钥解析)。 |
 | `NOMIFUN_HTTPS` | `nomifun-auth::CookieConfig` | 取真值时，会话与 CSRF cookie 会带上 `Secure` 标记和 `SameSite=Strict`。当应用通过 HTTPS 暴露（TLS 反向代理等）时请打开。默认 `false` → 不带 `Secure` 标记，`SameSite=Lax`。 |
 | `SHELL` | 智能体引擎（Linux/macOS） | 智能体引擎派生子进程时使用的 shell。在 systemd 下的 Linux 服务器上请显式设置（系统账户通常没有 `$SHELL`）。 |
-| `NOMIFUN_URL` | `nomicore call`, `nomicore agent` | 调用 Remote capability 时使用的运行中实例 base URL。 |
-| `NOMIFUN_COMPANION_TOKEN` | `nomicore call`, `nomicore agent` | 访问 `/v1` Remote capability 路由的 companion access token。 |
+| `NOMIFUN_URL` | `nomicore call` | 调用 Remote capability 时使用的运行中实例 base URL。 |
+| `NOMIFUN_COMPANION_TOKEN` | `nomicore call` | 访问 `/v1` Remote capability 路由的 companion access token。 |
 
 代码库不集成 `SENTRY_DSN`：这个环境变量并未被读取。
 

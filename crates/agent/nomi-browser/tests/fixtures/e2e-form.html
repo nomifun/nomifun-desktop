@@ -21,7 +21,7 @@
       navigate → observe → type username → type password → select_option plan → click submit。
     submit 按钮 accname 含 "Submit"（→ facade redline classify_action 判 Irreversible）：
       - yolo/审批旁路会话 click submit → facade redline 门 hard-deny Blocked（红线生效证据）；
-      - 普通会话 click submit → 门不拦（交 orchestration），表单真提交 → onsubmit 写可见标记。
+      - 普通会话 click submit → 门不拦（交 approval pipeline），表单真提交 → onsubmit 写可见标记。
     onsubmit preventDefault（不真导航），把提交时捕获的 username + 所选 plan 写进 #form-status（role=status，
     aria 可观测），证明 type/select 真写入 + click submit 真触发。password 值不回显（脱敏精神）。
   -->

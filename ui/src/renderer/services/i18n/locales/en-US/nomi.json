@@ -236,10 +236,10 @@
     "onThisDay": "On this day",
     "onThisDayEmpty": "No records from this day in past years yet."
   },
-  "orchestration": {
-    "title": "Smart orchestration",
-    "hint": "When enabled, for complex multi-step tasks the companion splits the work across sub-agents running in parallel, itself only coordinating and summarizing — keeping its own context clean. Simple things it still does directly.",
-    "enabled": "Enable smart orchestration"
+  "collaboration": {
+    "title": "Smart collaboration",
+    "hint": "When enabled, the companion can split complex work across collaborators, make progress in parallel, and combine the results. Simple tasks are still handled directly.",
+    "enabled": "Enable smart collaboration"
   },
   "learn": {
     "enabled": "Scheduled learning",

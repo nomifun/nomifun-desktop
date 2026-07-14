@@ -5,16 +5,27 @@
   "empty": "No terminals yet",
   "extended": {
     "autoworkApplyFailed": "Terminal created, but AutoWork failed to enable — retry inside the terminal",
-    "autoworkDesc": "Let the orchestrator auto-drive this terminal by requirement tag (Claude / Codex, including wrappers like stepcode claude)",
+    "autoworkDesc": "Let automatic tasks drive this terminal by requirement tag (Claude / Codex, including wrappers like stepcode claude)",
     "autoworkLabel": "AutoWork",
     "autoworkRequiresAgent": "AutoWork requires a Claude / Codex terminal (including wrappers like stepcode claude)",
     "idmmApplyFailed": "Terminal created, but Smart Decision failed to enable — retry inside the terminal",
     "idmmApplyNote": "Takes effect as soon as the terminal is created; you can adjust it inside the terminal.",
-    "knowledgeConnectNote": "Built-in Claude / Codex auto-inject on mount; for wrapper / custom / external commands, use One-click Connect to write into the workspace.",
+    "knowledgeConnectNote": "Platform-managed terminals inject this automatically; wrappers, custom commands, and external terminals can register the credential-free command in the workspace.",
     "knowledgeDesc": "Mount knowledge bases into the workspace for this terminal's agent to search.",
     "knowledgeLabel": "Platform Knowledge",
     "subtitle": "Expose platform capabilities to the agent CLI launched in this terminal",
     "title": "Extended Capabilities"
+  },
+  "registerKnowledge": {
+    "button": "Connect platform knowledge",
+    "buttonCompact": "Connect knowledge",
+    "confirm": "Connect",
+    "cwdRequired": "Please select a working directory first",
+    "modalDesc": "Choose a CLI and merge the knowledge MCP command into its config without overwriting existing settings.",
+    "modalTitle": "Connect Platform Knowledge",
+    "securityDesc": "No port or credential is stored. At startup, the CLI receives workspace-scoped access through a local channel protected for the current OS user; NomiFun must be running.",
+    "codexScope": "Writes user-level config",
+    "projectScope": "Writes project config"
   },
   "batchSelect": "Select",
   "selectAll": "Select all",
@@ -31,19 +42,6 @@
   "quickCommand": {
     "clear": "Clear the terminal",
     "interrupt": "Send Ctrl-C (interrupt)"
-  },
-  "registerKnowledge": {
-    "button": "Connect platform knowledge",
-    "buttonCompact": "Connect knowledge",
-    "confirm": "Connect",
-    "cwdRequired": "Please select a working directory first",
-    "familyNote": {
-      "claude": "Writes project config file",
-      "codex": "Writes global ~/.codex/config.toml",
-      "gemini": "Writes project config file"
-    },
-    "modalDesc": "Choose the CLI type to write the knowledge MCP into the workspace config.",
-    "modalTitle": "Connect Platform Knowledge"
   },
   "preset": {
     "shell": "Custom",
@@ -69,10 +67,11 @@
     "command": "Launch command",
     "commandHint": "You can customize the launch command; it will be injected automatically when the terminal is created.",
     "mcpPanel": {
-      "claudeCmd": "Claude command",
+      "claudeCommand": "Claude shell command",
       "claudeJson": "Claude .mcp.json",
+      "claudePowerShellCommand": "Claude PowerShell command",
       "codexToml": "Codex config.toml",
-      "description": "Using a custom or external terminal? Register the snippet below into your CLI to use the platform knowledge base in that terminal. Credentials are fetched at runtime by the bridge and never written into your config. Requires NomiFun desktop to be running.",
+      "description": "Templates contain only the launch command, never a port or credential. At startup, external CLIs receive workspace-scoped access through a local channel protected for the current OS user; NomiFun must be running.",
       "geminiJson": "Gemini settings.json",
       "loading": "Loading...",
       "title": "Advanced: manual registration for other CLIs / external terminals",

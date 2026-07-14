@@ -1,6 +1,6 @@
 //! Agent-session operations on ConversationService.
 //!
-//! These forward to the active AgentInstance (via `self.task(id)`) for
+//! These forward to the active AgentRuntimeHandle (via `self.runtime_handle(id)`) for
 //! mode/model/usage/slash-commands/side-question/openclaw-runtime queries,
 //! plus workspace browsing that needs the conversations.extra.workspace
 //! field.
@@ -14,74 +14,139 @@ use nomifun_api_types::{
 };
 use nomifun_common::AppError;
 use nomifun_file::list_workspace_level;
+use nomifun_db::models::ConversationRow;
 
 use crate::service::{ConversationService, parse_conv_id};
 
 impl ConversationService {
-    // ── Mode ────────────────────────────────────────────────────────
-
-    pub async fn get_mode(&self, conversation_id: &str) -> Result<AgentModeResponse, AppError> {
-        self.task(conversation_id)?.get_mode().await
+    async fn require_owned_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<ConversationRow, AppError> {
+        let key = parse_conv_id(conversation_id).map_err(|_| {
+            AppError::NotFound(format!("Conversation '{conversation_id}' not found"))
+        })?;
+        self.conversation_repo()
+            .get(key)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Conversation '{conversation_id}' not found"))
+            })
     }
 
-    pub async fn set_mode(&self, conversation_id: &str, req: SetModeRequest) -> Result<(), AppError> {
+    // ── Mode ────────────────────────────────────────────────────────
+
+    pub async fn get_mode(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<AgentModeResponse, AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.runtime_handle(conversation_id)?.get_mode().await
+    }
+
+    pub async fn set_mode(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        req: SetModeRequest,
+    ) -> Result<(), AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
         if req.mode.trim().is_empty() {
             return Err(AppError::BadRequest("mode must not be empty".into()));
         }
-        self.task(conversation_id)?.set_mode(&req.mode).await
+        self.runtime_handle(conversation_id)?.set_mode(&req.mode).await
     }
 
     // ── Model ───────────────────────────────────────────────────────
 
-    pub async fn get_model(&self, conversation_id: &str) -> Result<GetModelInfoResponse, AppError> {
-        self.task(conversation_id)?.get_model().await
+    pub async fn get_model(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<GetModelInfoResponse, AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.runtime_handle(conversation_id)?.get_model().await
     }
 
-    pub async fn set_model(&self, conversation_id: &str, req: SetModelRequest) -> Result<(), AppError> {
+    pub async fn set_model(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        req: SetModelRequest,
+    ) -> Result<(), AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
         if req.model_id.trim().is_empty() {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
-        let task = match self.task(conversation_id) {
-            Ok(task) => task,
+        let runtime = match self.runtime_handle(conversation_id) {
+            Ok(runtime) => runtime,
             Err(err) => {
                 tracing::warn!(
                     conversation_id,
                     model_id = %req.model_id,
                     error_code = err.error_code(),
-                    "Set model skipped because active agent task is unavailable"
+                    "Set model skipped because active Agent runtime is unavailable"
                 );
                 return Err(err);
             }
         };
-        task.set_model(&req.model_id).await
+        runtime.set_model(&req.model_id).await
     }
 
     // ── Usage / Slash commands ──────────────────────────────────────
 
-    pub async fn get_usage(&self, conversation_id: &str) -> Result<Option<serde_json::Value>, AppError> {
-        self.task(conversation_id)?.get_usage().await
+    pub async fn get_usage(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<serde_json::Value>, AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.runtime_handle(conversation_id)?.get_usage().await
     }
 
-    pub async fn get_slash_commands(&self, conversation_id: &str) -> Result<Vec<SlashCommandItem>, AppError> {
-        self.task(conversation_id)?.get_slash_commands().await
+    pub async fn get_slash_commands(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<SlashCommandItem>, AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.runtime_handle(conversation_id)?.get_slash_commands().await
     }
 
     // ── Side question ───────────────────────────────────────────────
 
     pub async fn handle_side_question(
         &self,
+        user_id: &str,
         conversation_id: &str,
         req: SideQuestionRequest,
     ) -> Result<SideQuestionResponse, AppError> {
-        // `AgentInstance::handle_side_question` already validates that the
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        // `AgentRuntimeHandle::handle_side_question` already validates that the
         // question is non-empty; no need to duplicate the check here.
-        self.task(conversation_id)?.handle_side_question(req).await
+        self.runtime_handle(conversation_id)?.handle_side_question(req).await
     }
 
     // ── OpenClaw runtime diagnostics ────────────────────────────────
 
-    pub async fn get_openclaw_runtime(&self, conversation_id: &str) -> Result<serde_json::Value, AppError> {
-        self.task(conversation_id)?.get_openclaw_runtime().await
+    pub async fn get_openclaw_runtime(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        self.require_owned_conversation(user_id, conversation_id)
+            .await?;
+        self.runtime_handle(conversation_id)?.get_openclaw_runtime().await
     }
 
     // ── Workspace browsing ──────────────────────────────────────────
@@ -92,6 +157,7 @@ impl ConversationService {
     /// guards + depth cap) to [`nomifun_file::list_workspace_level`].
     pub async fn browse_workspace(
         &self,
+        user_id: &str,
         conversation_id: &str,
         query: WorkspaceBrowseQuery,
     ) -> Result<Vec<WorkspaceEntry>, AppError> {
@@ -100,11 +166,8 @@ impl ConversationService {
         }
 
         let row = self
-            .conversation_repo()
-            .get(parse_conv_id(conversation_id)?)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to load conversation: {e}")))?
-            .ok_or_else(|| AppError::NotFound(format!("Conversation '{conversation_id}' not found")))?;
+            .require_owned_conversation(user_id, conversation_id)
+            .await?;
 
         let extra: serde_json::Value =
             serde_json::from_str(&row.extra).map_err(|e| AppError::Internal(format!("Invalid extra JSON: {e}")))?;

@@ -108,8 +108,8 @@ mod tests {
                 deferred: false,
             },
             ToolDef {
-                name: "SpawnTool".into(),
-                description: "Spawn sub-agents".into(),
+                name: "AgentDelegateTool".into(),
+                description: "Delegate work to an Agent".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
             },
@@ -125,19 +125,23 @@ mod tests {
     #[tokio::test]
     async fn search_by_exact_name() {
         let tool = ToolSearchTool::new(build_tool_defs());
-        let result = tool.execute(json!({"query": "SpawnTool"})).await;
+        let result = tool
+            .execute(json!({"query": "AgentDelegateTool"}))
+            .await;
         assert!(!result.is_error);
-        assert!(result.content.contains("SpawnTool"));
-        assert!(result.content.contains("Spawn sub-agents"));
+        assert!(result.content.contains("AgentDelegateTool"));
+        assert!(result.content.contains("Delegate work to an Agent"));
         assert!(result.content.contains("parameters"));
     }
 
     #[tokio::test]
     async fn search_case_insensitive() {
         let tool = ToolSearchTool::new(build_tool_defs());
-        let result = tool.execute(json!({"query": "spawntool"})).await;
+        let result = tool
+            .execute(json!({"query": "agentdelegatetool"}))
+            .await;
         assert!(!result.is_error);
-        assert!(result.content.contains("SpawnTool"));
+        assert!(result.content.contains("AgentDelegateTool"));
     }
 
     #[tokio::test]

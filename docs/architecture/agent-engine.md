@@ -9,7 +9,7 @@ implementation map for the current workspace, not an extraction plan.
 
 | Crate | Responsibility |
 | --- | --- |
-| `nomi-types` | Provider-neutral messages, tool types, compaction types, file state, skill types, and spawner types. |
+| `nomi-types` | Provider-neutral messages, tool types, compaction types, file state, skill types, plus the Agent task, tool-policy, and one-invocation primitives shared by local and persistent collaboration. |
 | `nomi-protocol` | Host/agent command and event protocol plus approval state. |
 | `nomi-compact` | Context compaction and message-window shaping. |
 | `nomi-config` | Runtime/provider/profile/auth configuration. |
@@ -18,12 +18,35 @@ implementation map for the current workspace, not an extraction plan.
 | `nomi-mcp` | MCP client, manager, transports, and tool proxying. |
 | `nomi-skills` | Skill discovery, frontmatter, loading, and skill-index support. |
 | `nomi-memory` | Memory storage and retrieval primitives. |
-| `nomi-agent` | Core engine loop, sessions, compaction glue, confirmations, output sinks, skill tool, requirement tools, and subagent spawning. |
+| `nomi-agent` | Core engine loop, sessions, compaction glue, confirmations, output sinks, skill tool, requirement tools, and the crate-private embedded AgentExecution projection. |
 | `nomi-cli` | Standalone `nomi` CLI consumer of the engine. |
 | `nomi-computer` | Desktop computer-use tool implementation. |
 | `nomi-a11y` | Accessibility helpers for computer-use flows. |
 | `nomi-browser-engine` | Self-hosted browser/CDP automation engine. |
 | `nomi-browser` | Browser-use tool facade. |
+
+`nomi_delegate` has one request and receipt contract in `nomi-types`:
+`ParallelDelegationRequest`, `AgentExecutionReceipt`, and
+`AgentExecutionStatus`. A platform deployment persists the aggregate and may
+return an active status while the scheduler continues asynchronously. An
+embedded CLI deployment runs the same Agent invocations in the current Turn and
+returns a terminal projection (`completed`, `completed_with_failures`, or
+`failed`) with typed results. This deployment choice is private host
+composition, not a user setting, model argument, product mode, or second state
+machine. Fork-mode skills reuse the same `AgentInvocationRunner` primitive.
+
+For multi-Agent embedded work, the host maintains a private progress ledger and
+injects only a bounded, JSON-encoded sibling assignment/status snapshot through
+`ContextContributor`. The block is explicitly marked as untrusted data and
+cannot grant authority. There is no model-visible task-board tool. Workspace
+placement is derived from the effective inherited tool scope and the same
+read/mutation effect catalog used to build the child registry. Zero or one
+mutation-capable sibling keeps direct writes; with two or more, only writers use
+private worktrees from one stable, self-contained source snapshot while readers
+continue to share the source workspace. A non-Git fallback is explicit in each
+affected result. Parent raw-shell hooks are intentionally not inherited: they
+were an authority bypass for read-only and synthesis Agents. Any future child
+hook support must run through the same process capability and effect boundary.
 
 The agent crates do not depend on `nomifun-*` backend crates. Backend-to-agent
 integration normally flows through `nomifun-ai-agent`; feature-gated bridge
@@ -57,11 +80,22 @@ Common sources include:
 - user-configured MCP server rows from `nomifun-mcp`,
 - requirement declaration tools when AutoWork requires them,
 - scoped knowledge search when a session has mounted knowledge bases,
-- Desktop Gateway tools for sessions flagged with desktop-gateway access,
+- platform Gateway tools when the factory derives instance-owner authority,
 - Windows/open helper bridge,
 - feature-gated computer-use and browser-use stdio bridges,
 - runtime-native skills or first-message skill injection,
 - Nomi's native tool registry.
+
+The platform Gateway is an internal capability transport, not a Conversation
+setting or persisted grant. The server derives authority from the authenticated
+principal. When an Agent runs in a child process, the parent issues only a
+scoped, expiring access claim plus a renewal proof bound to the same immutable
+authorization. Renewal is backed by a revocable process-local lease, so a
+long-lived or sleep-resumed child can refresh access without receiving the
+signing root or widening scope. The root and lease registry remain
+process-private and are never stored in build-extra, Conversation or database
+rows; runtime teardown and process restart revoke them. Public and non-owner
+contexts fail closed and receive no host capability.
 
 When documenting tool availability, cite the factory files above rather than
 assuming all agents receive the same injected servers.
@@ -89,7 +123,7 @@ Relevant source files:
 ```text
 UI request
   -> nomifun-conversation route/service
-  -> nomifun-ai-agent AgentService / WorkerTaskManager
+  -> nomifun-ai-agent AgentService / AgentRuntimeRegistry
   -> runtime family factory
   -> Nomi engine or external CLI process
   -> AgentStreamEvent
@@ -99,7 +133,7 @@ UI request
 
 Nomi-engine sessions run inside the process. ACP-style sessions spawn and manage
 child CLIs. Public remote capability calls enter through `nomifun-public` and
-the Desktop Gateway registry rather than the conversation HTTP route.
+the platform Gateway registry rather than the conversation HTTP route.
 
 ## Design Notes
 

@@ -31,7 +31,7 @@ pub use crate::registry_helpers::ExtensionSummary;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Central registry orchestrating extension loading, activation, contribution
+/// Central registry coordinating extension loading, activation, contribution
 /// resolution, and event broadcasting.
 ///
 /// Thread-safe: can be shared across HTTP handlers, the file watcher, and

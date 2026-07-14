@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::model_task::{derive_tasks_and_traits, ModelProfile, ModelTask, ModelTrait};
 use crate::provider::ProviderResponse;
 
-/// A concrete (provider, model) selection. Named to avoid colliding with the
-/// orchestrator's `ModelRef`.
+/// A concrete provider/model selection returned by catalog resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatalogModelRef {
     pub provider_id: String,

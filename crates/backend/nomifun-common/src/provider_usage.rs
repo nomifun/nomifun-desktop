@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderUsageFeature {
+    Conversation,
     DesktopCompanion,
     PublicCompanion,
     SmartDecision,
-    Orchestrator,
+    AgentExecution,
 }
 
 /// One concrete usage of a provider by a feature (for the "cannot delete" UI).
@@ -18,7 +19,7 @@ pub enum ProviderUsageFeature {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsage {
     pub feature: ProviderUsageFeature,
-    /// Human-readable name of the referencing entity (companion name, fleet name, …).
+    /// Human-readable name of the referencing entity (companion name, execution goal, …).
     pub label: String,
     /// Optional id to deep-link the user to the unbind location.
     pub target_id: Option<String>,

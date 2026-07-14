@@ -44,6 +44,8 @@ impl WebSocketCloseCode {
 
 /// Per-connection client state maintained by the server.
 pub struct ClientInfo {
+    /// Stable application user identity resolved from the authenticated token.
+    pub user_id: String,
     /// The JWT token this connection authenticated with.
     pub token: String,
     /// Timestamp of last ping/pong activity.

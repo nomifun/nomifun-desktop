@@ -50,7 +50,7 @@ const AgentRuntimeSettingsContent: React.FC = () => {
     <div className='flex flex-col h-full w-full'>
       <NomiScrollArea className='flex-1 min-h-0 pb-16px' disableOverflow={isPageMode}>
         <div className='px-[12px] md:px-[32px] py-16px bg-2 rd-16px space-y-12px'>
-          <div className='text-13px font-600 text-t-secondary'>{t('settings.agentRuntimeSection')}</div>
+          <div className='text-13px font-600 text-t-secondary'>{t('settings.agentParameters')}</div>
           <div className='w-full flex flex-col divide-y divide-border-2'>
             <PreferenceRow label={t('settings.promptTimeout')} description={t('settings.promptTimeoutDesc')}>
               <InputNumber

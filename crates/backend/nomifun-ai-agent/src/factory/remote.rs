@@ -6,18 +6,18 @@ use nomifun_api_types::RemoteBuildExtra;
 use nomifun_common::{AppError, RemoteAgentProtocol};
 use tracing::warn;
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
-use crate::manager::remote::{RemoteAgentConfig, RemoteAgentManager};
 use crate::manager::openclaw::device_identity::identity_from_secret_bytes;
-use crate::types::BuildTaskOptions;
+use crate::manager::remote::{RemoteAgentConfig, RemoteAgentManager};
+use crate::types::AgentRuntimeBuildOptions;
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
+    options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
-) -> Result<AgentInstance, AppError> {
+) -> Result<AgentRuntimeHandle, AppError> {
     let extra: RemoteBuildExtra = serde_json::from_value(options.extra)
         .map_err(|e| AppError::BadRequest(format!("Invalid Remote build options: {e}")))?;
     let resume_session_key = extra.session_key.clone();
@@ -83,5 +83,5 @@ pub(super) async fn build(
             .await
             .map_err(|e| AppError::Internal(format!("Failed to persist remote device token: {e}")))?;
     }
-    Ok(AgentInstance::Remote(agent))
+    Ok(AgentRuntimeHandle::Remote(agent))
 }

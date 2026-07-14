@@ -8,7 +8,7 @@ use agent_client_protocol::schema::{
 use super::agent_event_tracker::AcpSessionEvent;
 use super::agent_reconcile::ReconcileAction;
 use crate::protocol::error::CloseReason;
-use crate::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState, SessionId};
+use crate::session::{ConfigKey, ConfigValue, ModeId, ModelId, PersistedSessionState, SessionId};
 
 /// What the user wants the session to be (intent).
 #[derive(Debug, Clone, Default)]

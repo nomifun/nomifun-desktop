@@ -1,9 +1,9 @@
 //! Terminal launch enhancement: the single PTY-spawn seam that renders
 //! platform capabilities (today: MCP servers) into each agent CLI's NATIVE
-//! launch config. Per-CLI knowledge is isolated into `AgentCli` + renderers;
+//! launch config. Per-CLI capability rendering is isolated into `AgentCli`;
 //! unknown CLIs get nothing (honest — no pretense, no pollution).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// One MCP server to inject into a terminal-launched CLI. Backend-agnostic; a
@@ -17,7 +17,8 @@ pub struct McpServerSpec {
     pub command: String,
     /// Bridge subcommand args (e.g. ["mcp-knowledge-stdio"]).
     pub args: Vec<String>,
-    /// Env baked into the bridge process (port/token/scope).
+    /// Environment inherited by the bridge process (port/scoped token/claims).
+    /// Renderers keep these values out of config files and command-line args.
     pub env: HashMap<String, String>,
 }
 
@@ -100,7 +101,7 @@ pub fn detect_agent_cli(program: &str) -> Option<AgentCli> {
 impl AgentCli {
     /// Whether this CLI family has a lifecycle-hook renderer (Stop → TurnEnd)
     /// in `apply_enhancement`. Terminal AutoWork requires this: it is the ONLY
-    /// structured turn-end signal (see `nomifun-requirement`'s orchestrator —
+    /// structured turn-end signal (see `nomifun-requirement`'s AutoWork runner —
     /// no quiescence fallback). Claude/Codex have launch-flag renderers; Gemini
     /// has no launch-time injection mechanism, so it is NOT autowork-capable.
     pub fn supports_lifecycle_hooks(self) -> bool {
@@ -124,8 +125,8 @@ pub fn terminal_autowork_capable(command: &str, args: &[String], declared_backen
 /// Render the enhancement as a claude `--mcp-config` JSON file in `session_dir`
 /// and return the EXTRA argv to append. Additive (no `--strict-mcp-config`) so
 /// the user's own project/user `.mcp.json` servers are preserved; ours is added
-/// alongside. Collision risk is negligible (our server name is the reserved
-/// `nomifun-knowledge`). The file lives in the platform's session-private dir,
+/// alongside. Collision risk is negligible (platform servers use reserved
+/// `nomifun-*` names). The file lives in the platform's session-private dir,
 /// NEVER the user's cwd (no git pollution). claude auth (keychain/~/.claude) is
 /// untouched.
 fn claude_mcp_argv(enh: &TerminalLaunchEnhancement, session_dir: &Path) -> std::io::Result<Vec<String>> {
@@ -135,7 +136,7 @@ fn claude_mcp_argv(enh: &TerminalLaunchEnhancement, session_dir: &Path) -> std::
         .map(|s| {
             (
                 s.name.clone(),
-                serde_json::json!({ "command": s.command, "args": s.args, "env": s.env }),
+                serde_json::json!({ "command": s.command, "args": s.args }),
             )
         })
         .collect();
@@ -173,15 +174,25 @@ fn codex_mcp_argv(enh: &TerminalLaunchEnhancement) -> Vec<String> {
         argv.push(format!("{base}.command={}", toml_str(&s.command)));
         argv.push("-c".to_owned());
         argv.push(format!("{base}.args={}", toml_str_array(&s.args)));
-        // Deterministic env order so the rendered argv is testable.
-        let mut keys: Vec<&String> = s.env.keys().collect();
-        keys.sort();
-        for k in keys {
-            argv.push("-c".to_owned());
-            argv.push(format!("{base}.env.{k}={}", toml_str(&s.env[k])));
-        }
     }
     argv
+}
+
+/// Merge scoped bridge environments deterministically. These values are placed
+/// in the PTY process environment so MCP subprocesses inherit them naturally;
+/// secrets therefore never appear in Claude config files or Codex argv.
+fn mcp_process_env(enh: &TerminalLaunchEnhancement) -> Vec<(String, String)> {
+    let mut merged = BTreeMap::new();
+    for server in &enh.mcp_servers {
+        for (key, value) in &server.env {
+            if let Some(previous) = merged.insert(key.clone(), value.clone())
+                && previous != *value
+            {
+                tracing::warn!(key, server = %server.name, "conflicting MCP process environment; using the last scoped value");
+            }
+        }
+    }
+    merged.into_iter().collect()
 }
 
 /// TOML basic-string literal: wrap in quotes, escape `\`, `"`, and control chars.
@@ -320,7 +331,10 @@ pub fn apply_enhancement(
             // MCP injection
             if !enh.mcp_servers.is_empty() {
                 match claude_mcp_argv(enh, session_dir) {
-                    Ok(extra) => args.extend(extra),
+                    Ok(extra) => {
+                        args.extend(extra);
+                        env_additions.extend(mcp_process_env(enh));
+                    }
                     Err(e) => tracing::warn!(error = %e, "claude MCP config write failed; launching without knowledge tool"),
                 }
             }
@@ -339,6 +353,7 @@ pub fn apply_enhancement(
             // MCP injection
             if !enh.mcp_servers.is_empty() {
                 args.extend(codex_mcp_argv(enh));
+                env_additions.extend(mcp_process_env(enh));
             }
             // Lifecycle hooks
             if let Some(lc) = &enh.lifecycle {
@@ -348,9 +363,8 @@ pub fn apply_enhancement(
             }
         }
         Some(AgentCli::Gemini) => {
-            // Gemini has no launch-flag injection mechanism — it uses cwd-scoped
-            // `.gemini/settings.json` written by the one-click registration (Task 3).
-            // Treat as no-op for launch-time enhancement (honest: no pretense).
+            // Gemini has no secure launch-flag injection mechanism. A standalone
+            // config cannot obtain session-bound claims, so this is an honest no-op.
         }
         None => {} // unknown CLI: no injection (honest)
     }
@@ -367,10 +381,10 @@ mod tests {
             name: "nomifun-knowledge".into(),
             command: "/opt/nomi/nomicore".into(),
             args: vec!["mcp-knowledge-stdio".into()],
-            env: HashMap::from([
-                ("NOMI_KB_MCP_PORT".into(), "51123".into()),
-                ("NOMI_KB_MCP_TOKEN".into(), "tok-abc".into()),
-            ]),
+            env: HashMap::from([(
+                "NOMI_KB_MCP_CAPABILITY".into(),
+                "scoped-bootstrap".into(),
+            )]),
         }
     }
 
@@ -411,29 +425,33 @@ mod tests {
         assert!(argv[1].ends_with("mcp.json"));
         assert!(std::path::Path::new(&argv[1]).starts_with(dir.path())); // 不在用户 cwd
 
-        // 文件内容是合法 claude .mcp.json，含我们的 server + env
+        // 文件只含非敏感 server command/args；capability bootstrap 走进程环境。
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&argv[1]).unwrap()).unwrap();
         let srv = &doc["mcpServers"]["nomifun-knowledge"];
         assert_eq!(srv["command"], "/opt/nomi/nomicore");
         assert_eq!(srv["args"][0], "mcp-knowledge-stdio");
-        assert_eq!(srv["env"]["NOMI_KB_MCP_TOKEN"], "tok-abc");
+        assert!(
+            srv.get("env").is_none(),
+            "capability values must not be written to disk: {srv}"
+        );
     }
 
     #[test]
     fn codex_renderer_emits_c_overrides_preserving_user_config() {
         let enh = TerminalLaunchEnhancement { mcp_servers: vec![sample_kb_server()], lifecycle: None };
         let argv = codex_mcp_argv(&enh);
-        // 形如 -c mcp_servers.nomifun-knowledge.command="..." -c ...args=[...] -c ...env.K="V"
+        // 形如 -c mcp_servers.nomifun-knowledge.command="..." -c ...args=[...]
         let joined = argv.join(" ");
         assert!(joined.contains(r#"-c mcp_servers.nomifun-knowledge.command="/opt/nomi/nomicore""#));
         assert!(joined.contains(r#"mcp_servers.nomifun-knowledge.args=["mcp-knowledge-stdio"]"#));
-        assert!(joined.contains(r#"mcp_servers.nomifun-knowledge.env.NOMI_KB_MCP_TOKEN="tok-abc""#));
-        // 每个 override 前都有独立的 -c (command + args + 2 env = 4)
-        assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 4);
+        assert!(!joined.contains("scoped-bootstrap"));
+        assert!(!joined.contains("NOMI_KB_MCP_CAPABILITY"));
+        // 每个 override 前都有独立的 -c (command + args = 2)
+        assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
         // 不含 CODEX_HOME（那会丢用户 auth.json）
         assert!(!joined.contains("CODEX_HOME"));
-        // ENV_KB_IDS must NOT appear (runtime cwd scope)
+        // Loose KB_IDS must never appear; scope lives in signed claims.
         assert!(!joined.contains("KB_MCP_KB_IDS"), "kb_ids must not be baked");
     }
 
@@ -451,13 +469,21 @@ mod tests {
         let (out, env) = apply_enhancement("claude", vec!["--dangerously-skip-permissions".into()], &enh, dir.path(), None);
         assert_eq!(out[0], "--dangerously-skip-permissions");
         assert!(out.iter().any(|a| a == "--mcp-config"));
-        assert!(env.is_empty());
+        let env: HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            env.get("NOMI_KB_MCP_CAPABILITY").map(String::as_str),
+            Some("scoped-bootstrap")
+        );
 
         // codex → 追加 -c mcp_servers...
         let (out, env) = apply_enhancement("codex", vec![], &enh, dir.path(), None);
         assert!(out.iter().any(|a| a == "-c"));
         assert!(out.iter().any(|a| a.starts_with("mcp_servers.nomifun-knowledge")));
-        assert!(env.is_empty());
+        let env: HashMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            env.get("NOMI_KB_MCP_CAPABILITY").map(String::as_str),
+            Some("scoped-bootstrap")
+        );
 
         // 未知 CLI → 原样（诚实不注入）
         let (out, env) = apply_enhancement("/bin/bash", vec!["-l".into()], &enh, dir.path(), None);

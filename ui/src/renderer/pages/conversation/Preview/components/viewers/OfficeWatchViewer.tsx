@@ -7,12 +7,11 @@
 import { ipcBridge } from '@/common';
 import { getBaseUrl, isBackendHttpError } from '@/common/adapter/httpBridge';
 import { openExternalUrl } from '@/renderer/utils/platform';
-import { isDesktopShell } from '@/renderer/utils/platform';
 import { Button, Spin } from '@arco-design/web-react';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-type DocType = 'ppt' | 'word' | 'excel';
+export type DocType = 'ppt' | 'word' | 'excel';
 type OfficeWatchErrorCode =
   | 'OFFICECLI_NOT_FOUND'
   | 'OFFICECLI_INSTALL_FAILED'
@@ -26,7 +25,6 @@ const BRIDGE = {
   excel: ipcBridge.excelPreview,
 } as const;
 
-// Web-server proxy base paths (Electron uses the direct localhost URL instead)
 const PROXY_PATH: Record<DocType, string> = {
   ppt: '/api/ppt-proxy',
   word: '/api/office-watch-proxy',
@@ -82,30 +80,26 @@ interface OfficeWatchErrorState {
   message: string;
 }
 
-function resolveOfficeWatchUrl(url: string, docType: DocType): string {
-  const proxyMatch = url.match(/^\/api\/(?:office-watch-proxy|ppt-proxy)\/(\d+)(\/.*)?$/);
-  if (proxyMatch && isDesktopShell()) {
-    const [, port, suffix] = proxyMatch;
-    return `http://127.0.0.1:${port}${suffix || '/'}`;
+export function resolveOfficeWatchUrl(
+  url: string,
+  capability: string,
+  docType: DocType,
+  baseUrl = getBaseUrl()
+): string {
+  const expectedPrefix = PROXY_PATH[docType];
+  const match = url.match(new RegExp(`^${expectedPrefix}/([0-9a-f]{64})(/.*)$`));
+  const parsed = new URL(url, 'http://nomifun.invalid');
+  const canonicalRelativeUrl = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  if (
+    !match ||
+    match[1] !== capability ||
+    !/^[0-9a-f]{64}$/.test(capability) ||
+    canonicalRelativeUrl !== url
+  ) {
+    throw new Error('Invalid Office preview capability URL');
   }
 
-  if (url.startsWith('/')) {
-    if (!isDesktopShell()) {
-      const proxyPortMatch = url.match(/^\/api\/(?:office-watch-proxy|ppt-proxy)\/(\d+)(\/.*)?$/);
-      if (proxyPortMatch) {
-        const [, port, suffix] = proxyPortMatch;
-        return `${PROXY_PATH[docType]}/${port}${suffix || '/'}`;
-      }
-    }
-    return `${getBaseUrl()}${url}`;
-  }
-
-  if (!isDesktopShell()) {
-    const parsed = new URL(url);
-    return `${PROXY_PATH[docType]}/${parsed.port}/`;
-  }
-
-  return url;
+  return `${baseUrl.replace(/\/+$/, '')}${url}`;
 }
 
 function normalizeOfficeWatchErrorCode(error?: string | null): OfficeWatchErrorCode | undefined {
@@ -140,10 +134,8 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
   const [status, setStatus] = useState<'starting' | 'installing'>('starting');
   const [error, setError] = useState<OfficeWatchErrorState | null>(null);
   const [retryKey, setRetryKey] = useState(0);
-  const file_pathRef = useRef(file_path);
 
   useEffect(() => {
-    file_pathRef.current = file_path;
     const bridge = BRIDGE[docType];
 
     if (!file_path) {
@@ -153,6 +145,10 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
     }
 
     let cancelled = false;
+    let activeCapability: string | null = null;
+
+    const releaseCapability = (capability: string) =>
+      bridge.stop.invoke({ capability }).catch(() => {});
 
     const unsubStatus = bridge.status.on((evt) => {
       if (cancelled) return;
@@ -168,22 +164,41 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
         const result = await bridge.start.invoke({ file_path, workspace });
         const errorCode = normalizeOfficeWatchErrorCode(result.error);
         if (errorCode) {
-          setError({
-            code: errorCode,
-            message: t(OFFICE_ERROR_I18N_KEYS[errorCode]),
-          });
-          setLoading(false);
+          if (result.capability) void releaseCapability(result.capability);
+          if (!cancelled) {
+            setError({
+              code: errorCode,
+              message: t(OFFICE_ERROR_I18N_KEYS[errorCode]),
+            });
+            setLoading(false);
+          }
           return;
         }
 
         const url = result.url;
-        if (!url) {
+        const capability = result.capability;
+        if (!url || !capability) {
+          if (capability) void releaseCapability(capability);
           throw new Error(t(keys.startFailed));
         }
+        let resolvedUrl: string;
+        try {
+          resolvedUrl = resolveOfficeWatchUrl(url, capability, docType);
+        } catch (err) {
+          void releaseCapability(capability);
+          throw err;
+        }
+
+        activeCapability = capability;
+        if (cancelled) {
+          activeCapability = null;
+          void releaseCapability(capability);
+          return;
+        }
+
         // Small delay to ensure the watch HTTP server is fully ready for the iframe
         await new Promise((r) => setTimeout(r, 300));
         if (!cancelled) {
-          const resolvedUrl = resolveOfficeWatchUrl(url, docType);
           setWatchUrl(resolvedUrl);
           setLoading(false);
         }
@@ -210,8 +225,10 @@ const OfficeWatchViewer: React.FC<OfficeWatchViewerProps> = ({ docType, file_pat
     return () => {
       cancelled = true;
       unsubStatus();
-      if (file_pathRef.current) {
-        bridge.stop.invoke({ file_path: file_pathRef.current }).catch(() => {});
+      if (activeCapability) {
+        const capability = activeCapability;
+        activeCapability = null;
+        void releaseCapability(capability);
       }
     };
   }, [docType, file_path, retryKey, t, workspace]);

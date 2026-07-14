@@ -71,31 +71,8 @@ pub struct CronAgentConfigDto {
 }
 
 // ---------------------------------------------------------------------------
-// C. CronJob response — nested structure matching API Spec
+// C. CronJob response — one Agent execution contract
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind")]
-pub enum CronJobPayloadDto {
-    #[serde(rename = "message")]
-    Message { text: String },
-}
-
-fn default_target_kind() -> String {
-    "agent".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CronJobTargetDto {
-    pub payload: CronJobPayloadDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution_mode: Option<String>,
-    /// Only `"agent"` is supported. Kept on the wire so older clients sending
-    /// `"terminal"` receive a precise service-layer rejection instead of being
-    /// silently treated as an agent task.
-    #[serde(default = "default_target_kind")]
-    pub target_kind: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CronJobMetadataDto {
@@ -133,7 +110,8 @@ pub struct CronJobResponse {
     pub description: Option<String>,
     pub enabled: bool,
     pub schedule: CronScheduleDto,
-    pub target: CronJobTargetDto,
+    pub message: String,
+    pub execution_mode: String,
     pub metadata: CronJobMetadataDto,
     pub state: CronJobStateDto,
 }
@@ -151,6 +129,7 @@ pub struct CronJobRunResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCronJobRequest {
     pub name: String,
     #[serde(default)]
@@ -169,13 +148,10 @@ pub struct CreateCronJobRequest {
     pub execution_mode: Option<String>,
     #[serde(default)]
     pub agent_config: Option<CronAgentConfigDto>,
-    /// Only `"agent"` is supported. Non-agent values are rejected by the cron
-    /// service for compatibility with older clients.
-    #[serde(default = "default_target_kind")]
-    pub target_kind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateCronJobRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -195,9 +171,6 @@ pub struct UpdateCronJobRequest {
     pub conversation_title: Option<String>,
     #[serde(default)]
     pub max_retries: Option<i64>,
-    /// Only `"agent"` is supported. `None` keeps the current target kind.
-    #[serde(default)]
-    pub target_kind: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -495,13 +468,8 @@ mod tests {
                 tz: Some("Asia/Shanghai".into()),
                 description: Some("Daily at 9am".into()),
             },
-            target: CronJobTargetDto {
-                payload: CronJobPayloadDto::Message {
-                    text: "Generate report".into(),
-                },
-                execution_mode: Some("new_conversation".into()),
-                target_kind: "agent".into(),
-            },
+            message: "Generate report".into(),
+            execution_mode: "new_conversation".into(),
             metadata: CronJobMetadataDto {
                 conversation_id: 1,
                 conversation_title: Some("Reports".into()),
@@ -545,9 +513,8 @@ mod tests {
         assert_eq!(json["enabled"], true);
         assert_eq!(json["schedule"]["kind"], "cron");
         assert_eq!(json["schedule"]["expr"], "0 0 9 * * *");
-        assert_eq!(json["target"]["payload"]["kind"], "message");
-        assert_eq!(json["target"]["payload"]["text"], "Generate report");
-        assert_eq!(json["target"]["execution_mode"], "new_conversation");
+        assert_eq!(json["message"], "Generate report");
+        assert_eq!(json["execution_mode"], "new_conversation");
         assert_eq!(json["metadata"]["conversation_id"], 1);
         assert_eq!(json["metadata"]["agent_type"], "acp");
         assert_eq!(json["metadata"]["created_by"], "user");
@@ -579,13 +546,8 @@ mod tests {
                 every_ms: 60000,
                 description: None,
             },
-            target: CronJobTargetDto {
-                payload: CronJobPayloadDto::Message {
-                    text: "ping".into(),
-                },
-                execution_mode: None,
-                target_kind: "agent".into(),
-            },
+            message: "ping".into(),
+            execution_mode: "existing".into(),
             metadata: CronJobMetadataDto {
                 conversation_id: 2,
                 conversation_title: None,
@@ -606,7 +568,7 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert!(json["target"].get("execution_mode").is_none());
+        assert_eq!(json["execution_mode"], "existing");
         assert!(json["metadata"].get("conversation_title").is_none());
         assert!(json["metadata"].get("agent_config").is_none());
         assert!(json["state"].get("next_run_at_ms").is_none());
@@ -725,6 +687,19 @@ mod tests {
         assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
     }
 
+    #[test]
+    fn create_request_rejects_removed_target_discriminator() {
+        let raw = json!({
+            "name": "legacy terminal task",
+            "schedule": {"kind": "every", "every_ms": 1000},
+            "conversation_id": 1,
+            "agent_type": "nomi",
+            "created_by": "user",
+            "target_kind": "terminal"
+        });
+        assert!(serde_json::from_value::<CreateCronJobRequest>(raw).is_err());
+    }
+
     // -- E. UpdateCronJobRequest ----------------------------------------------
 
     #[test]
@@ -765,6 +740,16 @@ mod tests {
         let raw = json!({"max_retries": 5});
         let req: UpdateCronJobRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.max_retries, Some(5));
+    }
+
+    #[test]
+    fn update_request_rejects_removed_target_discriminator() {
+        assert!(
+            serde_json::from_value::<UpdateCronJobRequest>(json!({
+                "target_kind": "terminal"
+            }))
+            .is_err()
+        );
     }
 
     // -- F. ListCronJobsQuery -------------------------------------------------
@@ -892,28 +877,6 @@ mod tests {
         };
         let json = serde_json::to_string(&p).unwrap();
         let parsed: CronJobRemovedPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, p);
-    }
-
-    // -- Payload DTO ----------------------------------------------------------
-
-    #[test]
-    fn payload_message_serialize() {
-        let p = CronJobPayloadDto::Message {
-            text: "hello".into(),
-        };
-        let json = serde_json::to_value(&p).unwrap();
-        assert_eq!(json["kind"], "message");
-        assert_eq!(json["text"], "hello");
-    }
-
-    #[test]
-    fn payload_message_roundtrip() {
-        let p = CronJobPayloadDto::Message {
-            text: "test".into(),
-        };
-        let json = serde_json::to_string(&p).unwrap();
-        let parsed: CronJobPayloadDto = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, p);
     }
 }

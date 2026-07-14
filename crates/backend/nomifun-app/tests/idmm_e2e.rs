@@ -28,6 +28,48 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str) ->
     json["data"]["id"].as_i64().unwrap().to_string()
 }
 
+async fn create_terminal(app: &mut axum::Router, token: &str, csrf: &str) -> String {
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/terminals",
+            json!({
+                "name": "idmm-owner-e2e",
+                "cwd": std::env::temp_dir().to_string_lossy(),
+                "command": "cat",
+                "defer_spawn": true
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    body_json(response).await["data"]["id"]
+        .as_i64()
+        .unwrap()
+        .to_string()
+}
+
+/// IDMM's global backup provider is a hard executable binding. Seed the
+/// provider row explicitly so settings tests exercise a valid production
+/// configuration instead of relying on a dangling provider reference.
+async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers \
+         (id, platform, name, base_url, api_key_encrypted, models, enabled, \
+          capabilities, created_at, updated_at) \
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', ?, 1, '[]', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(format!("Provider {provider_id}"))
+    .bind(serde_json::json!([model]).to_string())
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn unauthenticated_get_is_rejected() {
     let (app, _services) = build_app().await;
@@ -40,6 +82,37 @@ async fn unauthenticated_get_is_rejected() {
         "expected 401/403, got {}",
         resp.status()
     );
+}
+
+#[tokio::test]
+async fn conversation_and_terminal_idmm_are_forbidden_to_another_user() {
+    let (mut app, services) = build_app().await;
+    let (owner_token, owner_csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let conversation_id = create_conversation(&mut app, &owner_token, &owner_csrf).await;
+    let terminal_id = create_terminal(&mut app, &owner_token, &owner_csrf).await;
+    let (other_token, _other_csrf) =
+        setup_and_login(&mut app, &services, "idmm-other", "StrongP@ss2").await;
+
+    let response = app
+        .clone()
+        .oneshot(get_with_token(
+            &format!("/api/idmm/conversation/{conversation_id}"),
+            &other_token,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = app
+        .oneshot(get_with_token(
+            &format!("/api/idmm/terminal/{terminal_id}"),
+            &other_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -123,6 +196,7 @@ async fn model_tier_without_freeform_policy_is_allowed() {
     // backup provider, enabling the model tier with no freeform must SUCCEED.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-1", "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
     let settings = json!({ "backup_provider_id": "prov-1", "default_steering_prompt": "" });
@@ -203,6 +277,7 @@ async fn fault_watch_model_tier_without_backup_is_rejected() {
 async fn model_tier_with_global_backup_succeeds() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-1", "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
     // Configure a global backup provider.
@@ -242,6 +317,7 @@ async fn model_tier_with_global_backup_succeeds() {
 async fn settings_roundtrip() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-xyz", "model-xyz").await;
 
     let settings = json!({
         "backup_provider_id": "prov-xyz",
@@ -271,6 +347,7 @@ async fn settings_roundtrip() {
 async fn settings_update_clears_optional_backup_fields_when_absent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-old", "model-old").await;
 
     let initial = json!({
         "backup_provider_id": "prov-old",
@@ -340,11 +417,15 @@ async fn terminal_target_not_found_is_rejected() {
 #[tokio::test]
 async fn disabled_state_reports_off() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    // A conversation id that was never configured → default disabled state.
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let conversation_id = create_conversation(&mut app, &token, &csrf).await;
+    // An owned conversation that was never configured → default disabled state.
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/idmm/conversation/999999", &token))
+        .oneshot(get_with_token(
+            &format!("/api/idmm/conversation/{conversation_id}"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -391,6 +472,7 @@ async fn enabled_to_disabled_transition_succeeds_without_validation() {
     // The disable POST must succeed even without the backup still resolving.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-1", "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
     let settings = json!({ "backup_provider_id": "prov-1", "backup_model": "m1", "default_steering_prompt": "" });
     let resp = app
@@ -435,6 +517,7 @@ async fn get_status_round_trips_persisted_config() {
     // tiers, bypass model, strategy) so the frontend can rehydrate its form.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_provider(&services, "prov-1", "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
     let settings = json!({ "backup_provider_id": "prov-1", "backup_model": "m1", "default_steering_prompt": "" });
@@ -524,20 +607,24 @@ async fn legacy_phase1_blob_disables_gracefully() {
 
 #[tokio::test]
 async fn get_status_omits_config_when_never_configured() {
-    // Targets that were never saved must not carry a `config` field so the
-    // frontend knows to seed from global defaults rather than a blank blob.
+    // Existing owned targets whose IDMM config was never saved must not carry
+    // a `config` field so the frontend can seed from global defaults.
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let conversation_id = create_conversation(&mut app, &token, &csrf).await;
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/idmm/conversation/999999", &token))
+        .oneshot(get_with_token(
+            &format!("/api/idmm/conversation/{conversation_id}"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
     assert!(
         j["data"].get("config").is_none() || j["data"]["config"].is_null(),
-        "unsaved targets must not carry a persisted config; got {j:?}"
+        "unconfigured targets must not carry a persisted config; got {j:?}"
     );
 }
 
@@ -554,12 +641,20 @@ async fn deleting_conversation_cascades_idmm_records() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
+    let owner_user_id = services
+        .user_repo
+        .find_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
 
     let records: SqliteIdmmInterventionRepository =
         SqliteIdmmInterventionRepository::new(services.database.pool().clone());
 
     let row = IdmmInterventionRow {
         id: "idmmrec_cascade_test".into(),
+        user_id: owner_user_id.clone(),
         target_kind: "conversation".into(),
         target_id: conv.clone(),
         watch: "decision".into(),
@@ -576,7 +671,10 @@ async fn deleting_conversation_cascades_idmm_records() {
     };
     records.insert(&row).await.unwrap();
 
-    let before = records.list_for_target("conversation", &conv, 30).await.unwrap();
+    let before = records
+        .list_for_target(&owner_user_id, "conversation", &conv, 30)
+        .await
+        .unwrap();
     assert_eq!(before.len(), 1, "record must exist before delete");
 
     // Delete the conversation — the cascade hook runs inside the delete path.
@@ -587,7 +685,10 @@ async fn deleting_conversation_cascades_idmm_records() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "conversation delete should succeed");
 
-    let after = records.list_for_target("conversation", &conv, 30).await.unwrap();
+    let after = records
+        .list_for_target(&owner_user_id, "conversation", &conv, 30)
+        .await
+        .unwrap();
     assert!(
         after.is_empty(),
         "IDMM records must be cascade-cleared when the conversation is deleted; got {after:?}"
@@ -596,20 +697,43 @@ async fn deleting_conversation_cascades_idmm_records() {
 
 #[tokio::test]
 async fn cross_session_activity_feed_round_trips() {
-    // The cross-session activity feed reads every target's records most-recent-
-    // first, and the bulk clear empties the whole table. Insert records for two
-    // targets directly, then exercise GET + DELETE /api/idmm/activity.
+    // IDMM is an installation-owner control plane. Its activity feed reads the
+    // owner's targets most-recent-first, rejects secondary users at the HTTP
+    // boundary, and bulk clear removes only the owner's rows. Insert records
+    // for two users directly so repository deletion isolation remains covered
+    // without granting the secondary user access to IDMM.
     use nomifun_db::models::IdmmInterventionRow;
     use nomifun_db::{IIdmmInterventionRepository, SqliteIdmmInterventionRepository};
 
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let (other_token, other_csrf) =
+        setup_and_login(&mut app, &services, "idmm-activity-other", "StrongP@ss2").await;
+    let owner_user_id = services
+        .user_repo
+        .find_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let other_user_id = services
+        .user_repo
+        .find_by_username("idmm-activity-other")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let owner_conversation_a = create_conversation(&mut app, &token, &csrf).await;
+    let owner_conversation_b = create_conversation(&mut app, &token, &csrf).await;
+    let owner_terminal = create_terminal(&mut app, &token, &csrf).await;
+    let other_conversation = create_conversation(&mut app, &other_token, &other_csrf).await;
 
     let records: SqliteIdmmInterventionRepository =
         SqliteIdmmInterventionRepository::new(services.database.pool().clone());
 
-    let make_row = |id: &str, target_kind: &str, target_id: &str, at: i64| IdmmInterventionRow {
+    let make_row = |user_id: &str, id: &str, target_kind: &str, target_id: &str, at: i64| IdmmInterventionRow {
         id: id.into(),
+        user_id: user_id.into(),
         target_kind: target_kind.into(),
         target_id: target_id.into(),
         watch: "decision".into(),
@@ -626,9 +750,46 @@ async fn cross_session_activity_feed_round_trips() {
     };
 
     // Two distinct targets, at interleaved → most-recent-first must mix them.
-    records.insert(&make_row("idmmrec_act_a", "conversation", "c1", 10)).await.unwrap();
-    records.insert(&make_row("idmmrec_act_b", "terminal", "1", 30)).await.unwrap();
-    records.insert(&make_row("idmmrec_act_c", "conversation", "c2", 20)).await.unwrap();
+    records
+        .insert(&make_row(
+            &owner_user_id,
+            "idmmrec_act_a",
+            "conversation",
+            &owner_conversation_a,
+            10,
+        ))
+        .await
+        .unwrap();
+    records
+        .insert(&make_row(
+            &owner_user_id,
+            "idmmrec_act_b",
+            "terminal",
+            &owner_terminal,
+            30,
+        ))
+        .await
+        .unwrap();
+    records
+        .insert(&make_row(
+            &owner_user_id,
+            "idmmrec_act_c",
+            "conversation",
+            &owner_conversation_b,
+            20,
+        ))
+        .await
+        .unwrap();
+    records
+        .insert(&make_row(
+            &other_user_id,
+            "idmmrec_other_private",
+            "conversation",
+            &other_conversation,
+            40,
+        ))
+        .await
+        .unwrap();
 
     // GET the feed → most-recent-first across ALL targets (30 -> 20 -> 10).
     let resp = app
@@ -645,7 +806,15 @@ async fn cross_session_activity_feed_round_trips() {
     assert_eq!(items[0]["target_kind"], "terminal");
     assert_eq!(items[1]["target_kind"], "conversation");
 
-    // DELETE the feed → clears every target's records.
+    // Secondary users cannot access the installation-wide IDMM control plane.
+    let resp = app
+        .clone()
+        .oneshot(get_with_token("/api/idmm/activity", &other_token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // DELETE the feed → clears this owner's records across every target.
     let resp = app
         .clone()
         .oneshot(delete_with_token("/api/idmm/activity", &token, &csrf))
@@ -667,4 +836,28 @@ async fn cross_session_activity_feed_round_trips() {
         j["data"].as_array().unwrap().is_empty(),
         "activity feed must be empty after bulk clear; got {j:?}"
     );
+
+    // Clearing the owner's feed must not delete a row belonging to another
+    // user, even though that user cannot access IDMM over HTTP.
+    let other_rows = records.list_recent(&other_user_id, 100).await.unwrap();
+    assert_eq!(other_rows.len(), 1);
+    assert_eq!(other_rows[0].id, "idmmrec_other_private");
+
+    // The owner-only boundary remains enforced after the owner's mutation.
+    let resp = app
+        .clone()
+        .oneshot(get_with_token("/api/idmm/activity", &other_token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resp = app
+        .oneshot(delete_with_token(
+            "/api/idmm/activity",
+            &other_token,
+            &other_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }

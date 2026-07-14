@@ -49,7 +49,7 @@ binary 存在，用于诊断、stdio MCP bridge、公开能力调用和无头场
 | 目录 | 前缀 | 数量 | 职责 |
 | --- | --- | --- | --- |
 | [`crates/agent/`](../../crates/agent) | `nomi-*` | 15 | AI agent 引擎，尽量保持独立。 |
-| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 29 | HTTP/WS 后端、数据层、认证、会话、cron、knowledge、terminal、companion、public gateway 等。 |
+| [`crates/backend/`](../../crates/backend) | `nomifun-*` | 32 | HTTP/WS 后端、数据层、认证、会话、cron、knowledge、terminal、companion、public gateway 等。 |
 | [`crates/shared/`](../../crates/shared) | mixed | 2 | 真正跨 agent/backend 使用的共享工具。 |
 
 ## Agent 层接缝

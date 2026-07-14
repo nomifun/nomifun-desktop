@@ -76,8 +76,9 @@ Legacy settings paths such as `/settings/model`, `/settings/agent`,
 `/settings/webui` and `/settings/webhook` are
 redirects. Do not document them as primary navigation.
 
-There is no current `/team/:id` frontend route. Backend team code may still
-exist, but the product route is not surfaced in the current router.
+Agent collaboration has no standalone route or separate page. Its
+AgentExecution projection is rendered inside the owning Conversation, so
+navigation does not introduce another product object.
 
 ## State And Data
 

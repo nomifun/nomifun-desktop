@@ -46,7 +46,7 @@ fn requirement(tag: &str) -> RequirementRow {
         completion_note: Some("did it".into()),
         owner_session_id: None,
         owner_kind: None,
-        claimed_at: None,
+        active_turn_started_at: None,
         lease_expires_at: None,
         started_at: None,
         completed_at: Some(1),
