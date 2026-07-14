@@ -376,6 +376,11 @@ impl KnowledgeMcpConfig {
 pub const GATEWAY_CAPABILITY_DOMAIN: &str = "nomifun-gateway-mcp-v2";
 pub const GATEWAY_LIST_TOOLS_OPERATION: &str = "tools/list";
 pub const GATEWAY_CALL_TOOL_OPERATION: &str = "tools/call";
+/// Top-level Conversation creation is a companion capability, not a capability
+/// of an ordinary Conversation. User-driven creation enters through the
+/// authenticated Conversation REST route; scheduled and Agent Execution
+/// creation use their dedicated backend services.
+pub const GATEWAY_CREATE_CONVERSATION_TOOL: &str = "nomi_create_conversation";
 
 /// Gateway-specific authorization surface inside the common loopback envelope.
 /// User and Conversation identity live once in the common claims; this scope
@@ -421,9 +426,16 @@ impl GatewayCapabilityScope {
     }
 
     pub fn excludes(&self, tool_name: &str) -> bool {
-        self.excluded_tools
-            .binary_search_by(|name| name.as_str().cmp(tool_name))
-            .is_ok()
+        // A plain Conversation may delegate multiple Agents inside its own
+        // Agent Execution, but it must never create peer top-level
+        // Conversations. Only a companion-bound caller is a Conversation
+        // creator on the Gateway surface. Keep this identity rule beside the
+        // signed scope so tools/list and tools/call enforce the same boundary.
+        (tool_name == GATEWAY_CREATE_CONVERSATION_TOOL && self.companion_id.is_none())
+            || self
+                .excluded_tools
+                .binary_search_by(|name| name.as_str().cmp(tool_name))
+                .is_ok()
     }
 }
 
@@ -948,6 +960,41 @@ mod tests {
             .issuer
             .verify_access(GATEWAY_CAPABILITY_DOMAIN, &forged_scope, &access.token)
             .is_err());
+    }
+
+    #[test]
+    fn gateway_scope_reserves_top_level_creation_for_companions() {
+        let cfg = gateway_config(41235, "/usr/bin/nomicore", "owner");
+        let plain = cfg
+            .issue_for_conversation("owner", "conv-1", None, None, None, &[])
+            .unwrap();
+        assert!(
+            plain
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .excludes(GATEWAY_CREATE_CONVERSATION_TOOL)
+        );
+
+        let companion = cfg
+            .issue_for_conversation(
+                "owner",
+                "conv-2",
+                Some("companion-1"),
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
+        assert!(
+            !companion
+                .bootstrap
+                .access
+                .claims
+                .scope
+                .excludes(GATEWAY_CREATE_CONVERSATION_TOOL)
+        );
     }
 
     #[test]

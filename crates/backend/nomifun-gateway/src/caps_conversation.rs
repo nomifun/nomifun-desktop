@@ -1,8 +1,9 @@
 //! Conversation-domain capabilities (registry form): list / status / send /
-//! create / update / delete. All self-protection guards from the legacy tool
-//! are preserved (no self-injection, no self-model-change, no self-deletion),
-//! and nomi sessions still get a model at creation via the shared resolution
-//! chain so downstream consumers never see a model-less nomi conversation.
+//! create / update / delete. Creation is companion-only on this Agent-facing
+//! surface. All self-protection guards from the legacy tool are preserved (no
+//! self-injection, no self-model-change, no self-deletion), and nomi sessions
+//! still get a model at creation via the shared resolution chain so downstream
+//! consumers never see a model-less nomi conversation.
 
 use std::sync::Arc;
 
@@ -112,6 +113,21 @@ fn require_user(ctx: &CallerCtx) -> Result<&str, Value> {
         Err(json!({ "error": "missing caller user identity" }))
     } else {
         Ok(&ctx.user_id)
+    }
+}
+
+fn require_companion_creator(ctx: &CallerCtx) -> Result<(), Value> {
+    if ctx
+        .companion_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|companion_id| !companion_id.is_empty())
+    {
+        Ok(())
+    } else {
+        Err(json!({
+            "error": "conversation_creation_forbidden: top-level conversations may only be created by the user, scheduled jobs, or a companion; use nomi_delegate for multi-Agent work inside the current conversation"
+        }))
     }
 }
 
@@ -225,6 +241,9 @@ async fn send(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SendToConversationParam
 }
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CreateConversationParams) -> Value {
+    if let Err(error) = require_companion_creator(&ctx) {
+        return error;
+    }
     let user_id = match require_user(&ctx) {
         Ok(u) => u.to_owned(),
         Err(e) => return e,
@@ -420,7 +439,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_create_conversation",
             "conversation",
-            "Open a fresh desktop session (nomi or acp). nomi sessions get a model at creation.",
+            "Open a fresh desktop session on behalf of the calling companion (nomi or acp). For multi-Agent work inside a conversation, use nomi_delegate.",
             DangerTier::Write,
         ),
         create,
@@ -475,5 +494,24 @@ mod tests {
         let v = json!({"content": "short"});
         let out = truncate_message_contents(v);
         assert_eq!(out["content"], "short");
+    }
+
+    #[test]
+    fn top_level_creation_requires_a_companion_identity() {
+        let plain = CallerCtx {
+            conversation_id: "111".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let error = require_companion_creator(&plain).unwrap_err();
+        assert!(error["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("conversation_creation_forbidden")));
+
+        let companion = CallerCtx {
+            companion_id: Some("companion-1".to_owned()),
+            ..plain
+        };
+        assert!(require_companion_creator(&companion).is_ok());
     }
 }

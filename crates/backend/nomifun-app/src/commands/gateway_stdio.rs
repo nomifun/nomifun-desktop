@@ -397,6 +397,34 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_conversation_hides_top_level_creation_but_companion_keeps_it() {
+        let mut claims = test_claims();
+        claims.scope.profile = GatewayMcpConfig::PROFILE_WORK.into();
+
+        let plain_names: Vec<&str> = GatewayStdioServer::visible_tool_specs(&claims)
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(!plain_names.contains(&"nomi_create_conversation"));
+        assert!(plain_names.contains(&"nomi_delegate"));
+        assert!(
+            GatewayStdioServer::blocked_tool_message(&claims, "nomi_create_conversation")
+                .is_some()
+        );
+
+        claims.scope.companion_id = Some("companion-1".to_owned());
+        let companion_names: Vec<&str> = GatewayStdioServer::visible_tool_specs(&claims)
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(companion_names.contains(&"nomi_create_conversation"));
+        assert!(
+            GatewayStdioServer::blocked_tool_message(&claims, "nomi_create_conversation")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn secondary_session_keeps_user_tools_and_never_sees_owner_tools() {
         let mut claims = test_claims();
         claims.user_id = "secondary-user".into();
