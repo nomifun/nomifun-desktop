@@ -101,7 +101,7 @@ PTY 子进程不能被暂停或在进程间迁移：当子进程退出时，
 ## 终端作为自动化目标
 
 驱动 UI 的同一个内存中的 PTY 映射通过 `TerminalDriver` trait
-与 `nomifun-requirement` 中的 **AutoWork orchestrator** 共享。该
+与 `nomifun-requirement` 中的 **AutoWork 执行循环** 共享。该
 trait 让 AutoWork：
 
 - 订阅终端实时输出的副本 (它会监视完成标记并检测静默 ——
@@ -112,10 +112,10 @@ trait 让 AutoWork：
   写入每个终端的 `autowork` 配置 blob。
 
 换句话说：**你在这里创建的终端可被 AutoWork 自动化**。
-在会话头的 AutoWork 工具栏上绑定一个 tag，orchestrator
+在会话头的 AutoWork 工具栏上绑定一个 tag，AutoWork 循环
 就会开始认领 requirement 并把它们喂给运行在该终端中的 CLI。
 只有 agent-CLI 终端 (`claude`、`codex`、`gemini`) 才符合条件 ——
-普通的 shell 可以手动驱动但不是 AutoWork 目标。orchestrator 也
+普通的 shell 可以手动驱动但不是 AutoWork 目标。AutoWork 循环也
 推荐使用 Full Auto 模式，因为一轮如果撞上交互式审批提示
 会一直阻塞直到超时。
 

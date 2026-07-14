@@ -15,13 +15,13 @@
 //! shape models are trained on, which raises adoption — the same form picked for
 //! the computer-use bridge.
 //!
-//! # R1 — no orchestration approval layer here (P4 decision D1)
+//! # R1 — no Nomi tool-execution approval layer here (P4 decision D1)
 //!
 //! This bridge is a short-lived process spawned by the ACP CLI; it has NO
-//! NomiFun orchestration / supervision layer. The `BrowserTool` redline gate runs
+//! NomiFun session/tool supervision layer. The `BrowserTool` redline gate runs
 //! with default policy (`session_bypasses_approval() == false` → normal-session
 //! semantics: it does NOT hard-deny irreversible actions, leaving them to the
-//! orchestration approval the nomi engine path provides). For the ACP path the
+//! tool-execution approval the nomi engine path provides). For the ACP path the
 //! human-in-the-loop is the **ACP CLI's own per-tool approval UI** (claude / codex
 //! prompt before each tool call). A stricter nomi-side hard-deny for the bridge is
 //! deferred to P6.

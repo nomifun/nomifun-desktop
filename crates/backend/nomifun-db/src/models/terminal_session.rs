@@ -25,7 +25,7 @@ pub struct TerminalSessionRow {
     pub pinned: bool,
     pub pinned_at: Option<TimestampMs>,
     /// AutoWork config JSON `{enabled, tag, max_requirements}`, nullable. Drives
-    /// the Requirements Platform AutoWork orchestrator for this terminal.
+    /// the Requirements Platform AutoWork execution loop for this terminal.
     pub autowork: Option<String>,
     /// IDMM config JSON, nullable. When set, the terminal operates under
     /// Iterative-Deepening Mental-Model guidance.

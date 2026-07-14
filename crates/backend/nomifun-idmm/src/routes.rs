@@ -48,19 +48,11 @@ pub fn idmm_routes(state: IdmmRouterState) -> Router {
         .with_state(state)
 }
 
-/// Resolve + ownership-check a `{kind}/{target_id}` pair.
-async fn resolve_owned(
-    state: &IdmmRouterState,
-    kind: &str,
-    target_id: &str,
-    user_id: &str,
-) -> Result<IdmmTargetKind, AppError> {
-    let kind =
-        IdmmTargetKind::parse(kind).ok_or_else(|| AppError::BadRequest(format!("unknown idmm target kind: {kind}")))?;
-    if kind == IdmmTargetKind::Terminal {
-        state.service.verify_terminal_owner(target_id, user_id).await?;
-    }
-    Ok(kind)
+/// Resolve a `{kind}` path segment. Ownership is enforced inside every service
+/// operation, so handlers cannot accidentally separate authorization from use.
+fn parse_kind(kind: &str) -> Result<IdmmTargetKind, AppError> {
+    IdmmTargetKind::parse(kind)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown idmm target kind: {kind}")))
 }
 
 async fn set_idmm(
@@ -69,12 +61,15 @@ async fn set_idmm(
     body: Result<Json<SetIdmmRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<IdmmState>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if req.kind == IdmmTargetKind::Terminal {
-        state.service.verify_terminal_owner(&req.target_id, &user.id).await?;
-    }
     let cfg: IdmmConfig = req.config;
-    state.service.save_config(req.kind, &req.target_id, &cfg).await?;
-    let st = state.service.build_state(req.kind, &req.target_id).await?;
+    state
+        .service
+        .save_config(&user.id, req.kind, &req.target_id, &cfg)
+        .await?;
+    let st = state
+        .service
+        .build_state(&user.id, req.kind, &req.target_id)
+        .await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
@@ -83,8 +78,8 @@ async fn get_idmm(
     Extension(user): Extension<CurrentUser>,
     Path((kind, target_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<IdmmState>>, AppError> {
-    let kind = resolve_owned(&state, &kind, &target_id, &user.id).await?;
-    let st = state.service.build_state(kind, &target_id).await?;
+    let kind = parse_kind(&kind)?;
+    let st = state.service.build_state(&user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
@@ -93,9 +88,12 @@ async fn intervene(
     Extension(user): Extension<CurrentUser>,
     Path((kind, target_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<IdmmState>>, AppError> {
-    let kind = resolve_owned(&state, &kind, &target_id, &user.id).await?;
-    state.service.intervene_now(kind, &target_id).await?;
-    let st = state.service.build_state(kind, &target_id).await?;
+    let kind = parse_kind(&kind)?;
+    state
+        .service
+        .intervene_now(&user.id, kind, &target_id)
+        .await?;
+    let st = state.service.build_state(&user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
 }
 
@@ -105,9 +103,9 @@ async fn get_log(
     Path((kind, target_id)): Path<(String, String)>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<ApiResponse<Vec<InterventionRecord>>>, AppError> {
-    let kind = resolve_owned(&state, &kind, &target_id, &user.id).await?;
+    let kind = parse_kind(&kind)?;
     let limit = q.limit.unwrap_or(DEFAULT_LOG_LIMIT);
-    let log = state.service.log(kind, &target_id, limit).await?;
+    let log = state.service.log(&user.id, kind, &target_id, limit).await?;
     Ok(Json(ApiResponse::ok(log)))
 }
 
@@ -116,26 +114,26 @@ async fn clear_log(
     Extension(user): Extension<CurrentUser>,
     Path((kind, target_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<u64>>, AppError> {
-    let kind = resolve_owned(&state, &kind, &target_id, &user.id).await?;
-    let removed = state.service.clear_log(kind, &target_id).await?;
+    let kind = parse_kind(&kind)?;
+    let removed = state.service.clear_log(&user.id, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(removed)))
 }
 
 async fn get_activity(
     State(state): State<IdmmRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Query(q): Query<ActivityQuery>,
 ) -> Result<Json<ApiResponse<Vec<InterventionRecord>>>, AppError> {
     let limit = q.limit.unwrap_or(DEFAULT_ACTIVITY_LIMIT);
-    let activity = state.service.recent_activity(limit).await?;
+    let activity = state.service.recent_activity(&user.id, limit).await?;
     Ok(Json(ApiResponse::ok(activity)))
 }
 
 async fn clear_activity(
     State(state): State<IdmmRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<u64>>, AppError> {
-    let removed = state.service.clear_all_activity().await?;
+    let removed = state.service.clear_activity(&user.id).await?;
     Ok(Json(ApiResponse::ok(removed)))
 }
 

@@ -9,7 +9,7 @@ use nomifun_conversation::stream_relay::StreamRelay;
 use nomifun_db::{
     IConversationRepository, SortOrder, SqliteConversationRepository, init_database_memory, models::ConversationRow,
 };
-use nomifun_realtime::BroadcastEventBus;
+use nomifun_realtime::WebSocketManager;
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -23,6 +23,10 @@ async fn setup_repo() -> (Arc<SqliteConversationRepository>, nomifun_db::Databas
         name: "Tool call test".into(),
         r#type: "nomi".into(),
         extra: "{}".into(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: None,
         status: Some("running".into()),
         source: Some("nomifun".into()),
@@ -45,7 +49,7 @@ async fn setup_repo() -> (Arc<SqliteConversationRepository>, nomifun_db::Databas
 #[tokio::test]
 async fn run_tool_call_with_empty_call_id_is_not_persisted() {
     let (repo, _db) = setup_repo().await;
-    let bus = Arc::new(BroadcastEventBus::new(64));
+    let bus = Arc::new(WebSocketManager::new());
     let (tx, _) = broadcast::channel(64);
 
     let relay = StreamRelay::new(

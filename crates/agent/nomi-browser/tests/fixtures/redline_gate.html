@@ -14,7 +14,7 @@
     F1-sec facade 集成测试用：一个不可逆（accname="Pay now"）按钮 + 一个良性（"Show more"）按钮。
     facade 的 redline 门据 observe 的 accname 分类 click：
       - yolo/companion（审批旁路）会话点 "Pay now" → hard-deny Blocked（证 fail-open 已闭）；
-      - 普通会话点 "Pay now" → 门不拦（交 orchestration）。
+      - 普通会话点 "Pay now" → 门不拦（交 approval pipeline）。
     用 file:// fixture（非 data: URL），与其它集成测试同接线，避免 data: URL 解析坑。
   -->
   <button id="pay" aria-label="Pay now">Pay now</button>

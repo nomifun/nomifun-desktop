@@ -563,9 +563,9 @@ officecli view "$FILE" html
 
 ---
 
-id: task-orchestrator
+id: multi-step-planning
 name: 多步骤任务规划
-triggers: 复杂任务, 多步骤, 规划, 组织, 分解, 编排, 项目计划, 工作流, complex task, multi-step
+triggers: 复杂任务, 多步骤, 规划, 组织, 分解, 项目计划, 工作流, complex task, multi-step
 
 ---
 
@@ -754,7 +754,7 @@ Write main.js → 运行构建 → Write output.min.js
 | 数据演示 | xlsx + pptx              | 分析 Excel 数据，在 PowerPoint 中生成图表 |
 | 文档归档 | pdf + docx               | 将 Word 文档转换为 PDF，合并为存档        |
 | 批量处理 | parallel-ops + 任意      | 同时处理多个文档                          |
-| 复杂项目 | task-orchestrator + 全部 | 规划和执行多格式文档工作流                |
+| 复杂项目 | multi-step-planning + 全部 | 规划和执行多格式文档工作流              |
 
 ## 性能指南
 

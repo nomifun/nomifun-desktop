@@ -26,6 +26,21 @@ fn create_body_with_extra(name: &str, extra: serde_json::Value) -> serde_json::V
     })
 }
 
+async fn seed_provider(services: &nomifun_app::AppServices, provider_id: &str, model: &str) {
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers \
+         (id, platform, name, base_url, api_key_encrypted, models, enabled, \
+          capabilities, created_at, updated_at) \
+         VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', ?, 1, '[]', 1, 1)",
+    )
+    .bind(provider_id)
+    .bind(format!("Provider {provider_id}"))
+    .bind(serde_json::json!([model]).to_string())
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+}
+
 // ── T1: Create ────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -502,6 +517,8 @@ async fn t4_3_update_extra_merge() {
 #[tokio::test]
 async fn t4_4_update_model() {
     let (mut app, services) = build_app().await;
+    seed_provider(&services, "p1", "m1").await;
+    seed_provider(&services, "p2", "new-model").await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     // nomi — only type that allows top-level model updates

@@ -27,9 +27,9 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use nomifun_ai_agent::protocol::events::{FinishEventData, TextEventData};
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentInstance, AgentSendError, AgentStreamEvent, IAgentTask, IMockAgent, IWorkerTaskManager, WorkerTaskManagerImpl,
+    AgentRuntimeHandle, AgentSendError, AgentStreamEvent, AgentRuntimeControl, MockAgentRuntime, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
 };
 use nomifun_api_types::AutoWorkTargetKind;
 use nomifun_app::{AppConfig, AppServices, create_router};
@@ -47,7 +47,7 @@ struct CompletingNomiAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for CompletingNomiAgent {
+impl AgentRuntimeControl for CompletingNomiAgent {
     fn agent_type(&self) -> AgentType {
         AgentType::Nomi
     }
@@ -84,29 +84,29 @@ impl IAgentTask for CompletingNomiAgent {
 }
 
 #[async_trait::async_trait]
-impl IMockAgent for CompletingNomiAgent {}
+impl MockAgentRuntime for CompletingNomiAgent {}
 
 /// Build an app whose agent factory returns a `CompletingNomiAgent`.
 async fn build_app_completing() -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let factory: Arc<
-        dyn Fn(BuildTaskOptions) -> futures_util::future::BoxFuture<'static, Result<AgentInstance, AppError>>
+        dyn Fn(AgentRuntimeBuildOptions) -> futures_util::future::BoxFuture<'static, Result<AgentRuntimeHandle, AppError>>
             + Send
             + Sync,
-    > = Arc::new(move |opts: BuildTaskOptions| {
+    > = Arc::new(move |opts: AgentRuntimeBuildOptions| {
         Box::pin(async move {
             let (event_tx, _) = tokio::sync::broadcast::channel(256);
-            Ok(AgentInstance::Mock(Arc::new(CompletingNomiAgent {
+            Ok(AgentRuntimeHandle::Mock(Arc::new(CompletingNomiAgent {
                 conversation_id: opts.conversation_id,
                 event_tx,
             })))
         })
     });
-    let wtm: Arc<dyn IWorkerTaskManager> = Arc::new(WorkerTaskManagerImpl::new(factory));
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
     let services = AppServices::from_config(db, &AppConfig::default())
         .await
         .unwrap()
-        .with_worker_task_manager(wtm);
+        .with_agent_runtime_registry(runtime_registry);
     let router = create_router(&services).await;
     (router, services)
 }
@@ -226,7 +226,7 @@ async fn autowork_and_idmm_enable_auto_resumes_paused_tag_and_runs_requirement()
 #[tokio::test]
 async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
     // REGRESSION (用户截图: 顶部「自动工作」图标=绿/active,但侧边栏同一会话=橙/idle):
-    // the orchestrator updated its in-memory `live_progress` on claim/finish but
+    // the AutoWork runner updated its in-memory `live_progress` on claim/finish but
     // emitted NO autowork state event, so the session-list capability icon — which
     // updates ONLY from `autowork.statusChanged` (no per-row GET) — kept its stale
     // bulk-loaded run-state while the per-session control (which re-GETs on open)
@@ -257,8 +257,10 @@ async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
         body_json(resp).await["data"]["id"].as_i64().unwrap()
     };
 
-    // Capture broadcast events BEFORE enabling, so the loop's emits are observed.
-    let mut events = services.event_bus.subscribe();
+    // Capture owner-scoped events BEFORE enabling, so the loop's emits are
+    // observed without weakening private runtime state back into the
+    // installation-wide broadcast channel.
+    let mut events = services.event_bus.subscribe_user();
 
     let resp = app
         .clone()
@@ -280,12 +282,19 @@ async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
     for _ in 0..240 {
         loop {
             match events.try_recv() {
-                Ok(msg) => {
+                Ok(envelope) => {
+                    let msg = envelope.event;
                     if msg.name == "autowork.statusChanged"
                         && msg.data.get("target_id").and_then(|v| v.as_str()) == Some(conv.as_str())
-                        && let Some(rs) = msg.data.get("run_state").and_then(|v| v.as_str())
                     {
-                        run_states.push(rs.to_string());
+                        assert_eq!(
+                            envelope.user_id,
+                            nomifun_auth::SYSTEM_USER_ID,
+                            "AutoWork runtime state must remain scoped to the canonical owner"
+                        );
+                        if let Some(rs) = msg.data.get("run_state").and_then(|v| v.as_str()) {
+                            run_states.push(rs.to_string());
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,

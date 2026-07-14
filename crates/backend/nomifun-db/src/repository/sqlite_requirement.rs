@@ -55,7 +55,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         let result = sqlx::query(
             "INSERT INTO requirements (\
                 title, content, tag, order_key, sort_seq, status, priority, \
-                completion_note, owner_session_id, owner_kind, claimed_at, lease_expires_at, \
+                completion_note, owner_session_id, owner_kind, active_turn_started_at, lease_expires_at, \
                 started_at, completed_at, attempt_count, created_by, extra, created_at, updated_at\
             ) VALUES (\
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?\
@@ -71,7 +71,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         .bind(&row.completion_note)
         .bind(row.owner_session_id)
         .bind(&row.owner_kind)
-        .bind(row.claimed_at)
+        .bind(row.active_turn_started_at)
         .bind(row.lease_expires_at)
         .bind(row.started_at)
         .bind(row.completed_at)
@@ -132,7 +132,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         push_opt_str!(completion_note);
         push_opt_i64!(owner_session_id);
         push_opt_str!(owner_kind);
-        push_opt_i64!(claimed_at);
+        push_opt_i64!(active_turn_started_at);
         push_opt_i64!(lease_expires_at);
         push_opt_i64!(started_at);
         push_opt_i64!(completed_at);
@@ -276,7 +276,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
             "UPDATE requirements \
              SET status='in_progress', \
                  owner_session_id=?1, owner_kind=?2, \
-                 claimed_at=?3, started_at=COALESCE(started_at, ?3), \
+                 active_turn_started_at=?3, started_at=COALESCE(started_at, ?3), \
                  lease_expires_at=?3 + ?4, \
                  attempt_count=attempt_count + 1, \
                  updated_at=?3 \
@@ -336,7 +336,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         let sql = format!(
             "UPDATE requirements \
              SET status='pending', owner_session_id=NULL, owner_kind=NULL, \
-                 claimed_at=NULL, lease_expires_at=NULL, updated_at=? \
+                 active_turn_started_at=NULL, lease_expires_at=NULL, updated_at=? \
              WHERE status='in_progress' \
                AND lease_expires_at IS NOT NULL \
                AND lease_expires_at < ?{active_clause}"
@@ -402,7 +402,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         let result = sqlx::query(
             "UPDATE requirements \
              SET status='pending', owner_session_id=NULL, owner_kind=NULL, \
-                 claimed_at=NULL, lease_expires_at=NULL, \
+                 active_turn_started_at=NULL, lease_expires_at=NULL, \
                  attempt_count = MAX(attempt_count - 1, 0), \
                  updated_at=?1 \
              WHERE id=?2 AND status='in_progress' AND owner_session_id=?3",
@@ -424,20 +424,39 @@ mod tests {
     async fn setup() -> (SqliteRequirementRepository, crate::Database) {
         let db = init_database_memory().await.expect("init db");
         let repo = SqliteRequirementRepository::new(db.pool().clone());
-        // A user is seeded for realism; `owner_session_id` has no FK (dual-domain
-        // owner token, now an i64), so claims do not require a real conversation.
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-             VALUES ('user_1', 'tester', 'hash', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+
+        // Requirement ownership is a polymorphic soft reference, but the DB
+        // authority trigger requires every claimed target to exist and belong
+        // to the installation owner. Seed each identity used by this module so
+        // claim tests exercise real, authorized runtime principals.
+        for conversation_id in [5_i64, CONV_OWNER, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007] {
+            sqlx::query(
+                "INSERT INTO conversations \
+                    (id, user_id, name, type, created_at, updated_at) \
+                 VALUES (?1, 'system_default_user', ?2, 'nomi', 0, 0)",
+            )
+            .bind(conversation_id)
+            .bind(format!("requirement-owner-conversation-{conversation_id}"))
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        for terminal_id in [5_i64, 7] {
+            sqlx::query(
+                "INSERT INTO terminal_sessions \
+                    (id, name, cwd, command, args, created_at, updated_at, user_id) \
+                 VALUES (?1, ?2, '/tmp', '$SHELL', '[]', 0, 0, 'system_default_user')",
+            )
+            .bind(terminal_id)
+            .bind(format!("requirement-owner-terminal-{terminal_id}"))
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
         (repo, db)
     }
 
-    /// A conversation owner id used by claim tests. owner_session_id has no FK,
-    /// so this is just an arbitrary i64.
+    /// Installation-owned Conversation used by the ordinary claim tests.
     const CONV_OWNER: i64 = 1001;
 
     fn make_row(tag: &str, sort_seq: &str) -> RequirementRow {
@@ -455,7 +474,7 @@ mod tests {
             completion_note: None,
             owner_session_id: None,
             owner_kind: None,
-            claimed_at: None,
+            active_turn_started_at: None,
             lease_expires_at: None,
             started_at: None,
             completed_at: None,
@@ -633,9 +652,9 @@ mod tests {
     #[tokio::test]
     async fn claim_allows_non_conversation_owner() {
         // Regression for terminal AutoWork: the claim owner may be a terminal id
-        // recorded with owner_kind='terminal'. owner_session_id carries no FK
-        // (dual-domain), so the claim must succeed and record both the owner
-        // token and its kind (paired, satisfying the table's CHECK).
+        // recorded with owner_kind='terminal'. The seeded terminal belongs to
+        // the installation owner, so the claim must succeed and record both the
+        // owner token and its kind (paired, satisfying the table's CHECK).
         let (repo, _db) = setup().await;
         repo.insert(&make_row("t", "00000001")).await.unwrap();
         let term_owner: i64 = 7;
@@ -647,6 +666,47 @@ mod tests {
         assert_eq!(claimed.status, "in_progress");
         assert_eq!(claimed.owner_session_id, Some(term_owner));
         assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_secondary_user_runtime_owner() {
+        let (repo, db) = setup().await;
+        const SECONDARY_CONVERSATION: i64 = 9001;
+
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
+             VALUES ('requirement-secondary', 'requirement_secondary', 'hash', 0, 0)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversations \
+                (id, user_id, name, type, delegation_policy, created_at, updated_at) \
+             VALUES \
+                (?1, 'requirement-secondary', 'Secondary model-only', 'nomi', 'disabled', 0, 0)",
+        )
+        .bind(SECONDARY_CONVERSATION)
+        .execute(db.pool())
+        .await
+        .unwrap();
+        repo.insert(&make_row("t", "00000001")).await.unwrap();
+
+        let err = repo
+            .claim_next(
+                "t",
+                SECONDARY_CONVERSATION,
+                "conversation",
+                60_000,
+                now_ms(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requirement owner must belong to the installation owner"),
+            "unexpected authority error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -834,7 +894,7 @@ mod tests {
     // call that passes only the numeric owner `5` — i.e. the DB primitive itself
     // does not isolate domains. This is NOT a reachable production hole because:
     //   (a) the row is pinned by its UNIQUE requirement id (`id = ?`), and
-    //   (b) the only callers (orchestrator run_loop) always pass the req_id they
+    //   (b) the only callers (the execution loop) always pass the req_id they
     //       themselves just claimed via claim_next(kind, owner), so owner_kind
     //       always matches in the self-flow,
     // but it documents that the kind-less guard relies on caller discipline +

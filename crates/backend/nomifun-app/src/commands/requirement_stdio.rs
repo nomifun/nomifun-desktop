@@ -8,7 +8,7 @@
 //!
 //! Tool calls are forwarded as authenticated HTTP POSTs to the in-process
 //! `RequirementMcpServer` running in the main backend process at
-//! `http://127.0.0.1:{NOMI_REQ_MCP_PORT}/tool`. This stdio→HTTP hop exists
+//! the loopback port inside `NOMI_REQ_MCP_CAPABILITY`. This stdio→HTTP hop exists
 //! because the spawned process cannot share the main process's
 //! `RequirementService`, and because claude / codex / gemini advertise
 //! stdio-only MCP capabilities (a direct HTTP MCP server would be dropped by
@@ -20,46 +20,45 @@
 
 use std::process::ExitCode;
 
-use nomifun_api_types::RequirementMcpConfig;
+use nomifun_api_types::{
+    REQUIREMENT_CAPABILITY_DOMAIN, RequirementCapabilityScope,
+    RequirementMcpConfig,
+};
+use nomifun_common::{LoopbackCapabilityError, LoopbackCapabilityClaims};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
 use serde::Deserialize;
 
 pub async fn run_requirement_stdio() -> ExitCode {
-    let port = match std::env::var(RequirementMcpConfig::ENV_PORT) {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("[mcp-requirement-stdio] ERROR: missing {}", RequirementMcpConfig::ENV_PORT);
+    let client = match super::stdio_common::ScopedBridgeClient::from_env(
+        RequirementMcpConfig::ENV_CAPABILITY,
+        REQUIREMENT_CAPABILITY_DOMAIN,
+        "mcp-requirement-stdio",
+        validate_requirement_claims,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("[mcp-requirement-stdio] ERROR: {error}");
             return ExitCode::from(1);
         }
     };
-    let token = match std::env::var(RequirementMcpConfig::ENV_TOKEN) {
-        Ok(t) => t,
-        Err(_) => {
-            eprintln!("[mcp-requirement-stdio] ERROR: missing {}", RequirementMcpConfig::ENV_TOKEN);
-            return ExitCode::from(1);
-        }
-    };
-    let conversation_id = std::env::var(RequirementMcpConfig::ENV_CONVERSATION_ID).unwrap_or_default();
-    // owner_kind: "conversation" (default, back-compat) or "terminal". Controls
-    // verify_scope's cross-domain check on the server side.
-    let owner_kind = std::env::var(RequirementMcpConfig::ENV_OWNER_KIND)
-        .unwrap_or_else(|_| "conversation".to_owned());
+    let claims = client.access().await.expect("startup renewal succeeded").claims;
 
-    eprintln!("[mcp-requirement-stdio] Started OK. PORT={port}, CONV_ID={conversation_id}, KIND={owner_kind}");
+    eprintln!(
+        "[mcp-requirement-stdio] Started OK. PORT={}, SESSION={}:{}, EXP={}",
+        client.port(),
+        claims.session.kind.as_str(),
+        claims.session.session_id,
+        claims.expires_at_unix_secs,
+    );
 
-    let http_client = super::stdio_common::build_bridge_http_client();
-
-    let server = RequirementStdioServer {
-        port: port.parse().unwrap_or(0),
-        token,
-        conversation_id,
-        owner_kind,
-        http_client,
-    };
+    let lifecycle = client.clone();
+    let server = RequirementStdioServer { client };
 
     let transport = transport::io::stdio();
-    match server.serve(transport).await {
+    let exit = match server.serve(transport).await {
         Ok(peer) => {
             eprintln!("[mcp-requirement-stdio] MCP session started, waiting for completion...");
             if let Err(e) = peer.waiting().await {
@@ -73,17 +72,21 @@ pub async fn run_requirement_stdio() -> ExitCode {
             eprintln!("[mcp-requirement-stdio] Failed to start MCP server: {e}");
             ExitCode::from(1)
         }
-    }
+    };
+    lifecycle.revoke().await;
+    exit
 }
 
 #[derive(Clone)]
 struct RequirementStdioServer {
-    port: u16,
-    token: String,
-    conversation_id: String,
-    /// "conversation" or "terminal" — forwarded to verify_scope on the server.
-    owner_kind: String,
-    http_client: reqwest::Client,
+    client: super::stdio_common::ScopedBridgeClient<RequirementCapabilityScope>,
+}
+
+fn validate_requirement_claims(
+    claims: &LoopbackCapabilityClaims<RequirementCapabilityScope>,
+) -> Result<(), LoopbackCapabilityError> {
+    claims.validate_renewable_shape()?;
+    claims.scope.validate(&claims.session)
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -108,7 +111,7 @@ struct UpdateStatusParams {
     note: Option<String>,
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl RequirementStdioServer {
     #[tool(
         name = "requirement_complete",
@@ -144,6 +147,52 @@ impl RequirementStdioServer {
     }
 }
 
+#[rmcp::tool_handler(router = Self::tool_router())]
+impl rmcp::ServerHandler for RequirementStdioServer {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        let claims = self
+            .client
+            .access()
+            .await
+            .map_err(capability_request_error)?
+            .claims;
+        let tools = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|tool| claims.allows(&tool.name))
+            .collect();
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.client
+            .access_for(&request.name)
+            .await
+            .map_err(capability_request_error)?;
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router().call(call).await
+    }
+}
+
+fn capability_request_error(error: String) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_request(
+        format!("requirement capability is no longer valid: {error}"),
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,17 +226,7 @@ impl RequirementStdioServer {
         let body = serde_json::json!({
             "tool": tool_name,
             "args": args,
-            "conversation_id": self.conversation_id,
-            "owner_kind": self.owner_kind,
         });
-        super::stdio_common::forward_tool_http(
-            &self.http_client,
-            self.port,
-            &self.token,
-            "mcp-requirement-stdio",
-            &body,
-            false,
-        )
-        .await
+        self.client.forward_tool(tool_name, body, false).await
     }
 }

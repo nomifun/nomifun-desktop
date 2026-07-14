@@ -26,9 +26,6 @@ const toFileOrFolderItem = (item: SelectedFile, keepEmptyRelativePath: boolean):
   relativePath: keepEmptyRelativePath ? item.relativePath : item.relativePath || undefined,
 });
 
-/** Agent tool calls that touch the team layer, not the filesystem. */
-const isNonFileSystemTool = (name: string) => /^mcp__nomifun-team-|^team_/.test(name);
-
 /**
  * ChatWorkspace — 会话工作区右栏（会话源绑定）
  *
@@ -122,20 +119,17 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
         if (data.conversation_id && data.conversation_id !== conversation_id) return;
 
         if (data.type === 'acp_tool_call') {
-          const acpData = data.data as { update?: { kind?: string; status?: string; title?: string } } | undefined;
+          const acpData = data.data as { update?: { kind?: string; status?: string } } | undefined;
           const kind = acpData?.update?.kind;
           const status = acpData?.update?.status;
-          const title = acpData?.update?.title;
           const shouldRefresh = kind === 'edit' || kind === 'execute' || (status === 'completed' && kind !== 'read');
           if (shouldRefresh) {
-            if (title && isNonFileSystemTool(title)) return;
             throttledRefresh();
           }
         }
         if (data.type === 'tool_call') {
-          const toolData = data.data as { status?: string; name?: string } | undefined;
+          const toolData = data.data as { status?: string } | undefined;
           if (toolData?.status === 'completed') {
-            if (toolData.name && isNonFileSystemTool(toolData.name)) return;
             throttledRefresh();
           }
         }

@@ -77,14 +77,14 @@ pub enum ChannelError {
 
     /// The bound conversation is already running a turn. For companion sessions
     /// (now shared by the desktop bubble, chat tab, and every IM chat) a
-    /// concurrent turn surfaces as a turn-claim `Conflict`; the orchestrator
+    /// concurrent turn surfaces as a turn-claim `Conflict`; the message loop
     /// answers the user with the friendly "still processing" notice rather than
     /// a raw error.
     #[error("conversation busy")]
     ConversationBusy,
 
     /// A companion is bound to this channel but has no chat model configured, so
-    /// its single session can't be created. The orchestrator relays this as a
+    /// its single session can't be created. The message loop relays this as a
     /// plain notice instead of the generic ❌ failure line.
     #[error("{0}")]
     CompanionNotReady(String),

@@ -29,7 +29,7 @@ pub fn resolve_command(command: &str, args: &[String]) -> (String, Vec<String>) 
 ///
 /// Inputs that already contain a path separator (an absolute path, or the
 /// expanded login shell) or that don't resolve are returned unchanged.
-/// Mirrors `nomifun_runtime::Builder`'s `resolve_program`.
+/// Uses the bundled-toolchain resolver before the PTY backend starts the process.
 fn resolve_program(program: &str) -> String {
     if !program.is_empty()
         && !program.contains('/')
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn resolve_command_passes_through_path_like_command() {
         // Inputs that already carry a path separator are used as-is — no PATH
-        // search, mirroring nomifun_runtime::Builder's resolve_program.
+        // search, matching the production resolver above.
         let p = if cfg!(windows) {
             r"C:\tools\my agent.exe"
         } else {

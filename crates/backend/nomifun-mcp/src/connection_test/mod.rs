@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nomifun_api_types::{McpConnectionTestErrorCode, McpConnectionTestResult};
-use nomifun_runtime::{Builder as CmdBuilder, kill_process_tree, resolve_command_path};
+use nomi_process_runtime::{ChildProcessBuilder as CmdBuilder, kill_process_tree};
+use nomifun_runtime::resolve_command_path;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};

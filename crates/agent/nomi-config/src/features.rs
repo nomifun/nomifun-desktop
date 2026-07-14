@@ -24,7 +24,7 @@ pub enum Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
     /// Engine winds down cooperatively via a `CancellationToken` instead of the
-    /// manager dropping the run future mid-flight (Phase 0 F0.4).
+    /// manager dropping the turn future mid-flight (Phase 0 F0.4).
     CooperativeCancel,
     /// Manager-level terminal-event guarantee guard rollout (Phase 0 F0.2).
     TerminationGuard,

@@ -70,9 +70,8 @@ Each group is owned by a specific crate. The base path is the actual URL prefix 
 | Webhooks + tag settings | `/api/webhooks/*`, `/api/tags/{tag}/settings` | authenticated | [`nomifun-webhook/src/routes.rs`](../../crates/backend/nomifun-webhook/src/routes.rs) |
 | Requirements (project board) | `/api/requirements/*` | authenticated | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
 | AutoWork / IDMM | `/api/idmm/*`, `/api/requirements/autowork*` | authenticated | [`nomifun-idmm/src/routes.rs`](../../crates/backend/nomifun-idmm/src/routes.rs) |
-| Teams (backend implementation surface; no current frontend guide route) | `/api/teams/*` | authenticated | [`nomifun-team/src/routes.rs`](../../crates/backend/nomifun-team/src/routes.rs) |
+| Agent executions | `/api/agent-executions/*` | authenticated | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
 | Terminals | `/api/terminals/*` | authenticated | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
-| Terminal knowledge registration helpers | `/api/terminals/mcp-register-template`, `/api/terminals/register-knowledge*`, `/api/terminals/knowledge-global-status` | authenticated | [`router/health.rs`](../../crates/backend/nomifun-app/src/router/health.rs) |
 | Knowledge bases | `/api/knowledge/*` | authenticated | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | Companion | `/api/companion/*` | authenticated | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | Companion access tokens for WebUI/public capability use | `/api/webui/companions/{id}/access-token` | authenticated/local WebUI admin flow | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
@@ -111,7 +110,7 @@ These are the auth endpoints clients are most likely to interact with directly:
 
 ## WebSocket event model
 
-`/ws` is the single bidirectional channel for streaming updates: agent token streams, terminal output, requirement / cron / team state changes, etc.
+`/ws` is the single bidirectional channel for streaming updates: agent token streams, terminal output, and requirement / scheduled-task / collaboration state changes.
 
 - Authentication: a JWT obtained from `GET /api/ws-token`, sent in the WebSocket `Sec-WebSocket-Protocol` header (or `Authorization`). Invalid or expired token → server sends an `auth-expired` event and closes with code `1008`. No token at all → close with `1008`, reason `"no token provided"`.
 - After a successful upgrade, every message is a JSON object with a `type` and a `payload`. Messages are pushed by the server when domain events occur (a new agent token, a terminal byte, a requirement transition); clients usually do not need to send anything back. The server multiplexes a single `BroadcastEventBus` to every connected client.

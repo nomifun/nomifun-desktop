@@ -150,9 +150,9 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
             isFirstLoadRef.current = false;
           }
 
-          // Only dispatch expand signal when there are files; never actively
-          // collapse — avoids fighting with team mode's explicit expand and
-          // prevents flicker when workspace starts empty.
+          // Only dispatch an expand signal when there are files; never
+          // actively collapse, which prevents flicker while a workspace is
+          // still empty.
           if (hasFiles) {
             // workspace-has-files is a string-keyed window CustomEvent channel; the
             // source's `key` is the identity (conversation id string, or cwd).

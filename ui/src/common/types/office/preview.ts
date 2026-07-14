@@ -36,6 +36,12 @@ export interface PreviewSnapshotInfo {
   file_path?: string;
 }
 
+export interface PreviewUrlResponse {
+  url: string;
+  capability?: string;
+  error?: string;
+}
+
 export interface RemoteImageFetchRequest {
   url: string;
 }

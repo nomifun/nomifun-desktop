@@ -59,16 +59,26 @@ pub enum DangerTier {
     Sensitive,
 }
 
+/// Data-ownership boundary independent from operation danger and transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessScope {
+    /// The handler owns its user scoping (Conversation, Terminal, Cron, etc.).
+    User,
+    /// The capability controls installation-wide state and is available only
+    /// to the canonical installation owner.
+    InstanceOwner,
+}
+
 /// Which kind of session is calling. Derived from [`CallerCtx`]: a channel
 /// platform marks an external IM session; otherwise it is a local desktop
-/// session. `Remote` is reserved for future LAN/web/device sessions.
+/// session. `Remote` is a companion-token-authenticated network caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
     /// Local desktop session (companion thread or a plain local conversation).
     Desktop,
-    /// External IM channel master-agent session (telegram / lark / …).
+    /// External IM channel Agent session (telegram / lark / …).
     Channel,
-    /// Future: remote LAN / web / external-device session.
+    /// Remote REST/MCP companion session.
     Remote,
 }
 
@@ -151,6 +161,8 @@ pub struct CapabilityMeta {
     pub summary: &'static str,
     /// Danger tier — drives the default permission decision.
     pub danger: DangerTier,
+    /// Ownership gate evaluated centrally before the capability handler.
+    pub access_scope: AccessScope,
     /// Surfaces where this capability is hard-denied regardless of confirmation
     /// (escape hatch beyond the danger matrix, e.g. a `Write` too risky for IM).
     pub deny_on: &'static [Surface],
@@ -172,9 +184,16 @@ impl CapabilityMeta {
             domain,
             summary,
             danger,
+            access_scope: AccessScope::User,
             deny_on: &[],
             confirm_on: &[],
         }
+    }
+
+    /// Restrict this installation-scoped capability to the canonical owner.
+    pub const fn instance_owner(mut self) -> Self {
+        self.access_scope = AccessScope::InstanceOwner;
+        self
     }
 
     /// Hard-deny this capability on the given surfaces (beyond the danger matrix).
@@ -204,7 +223,7 @@ pub struct Capability {
     pub input_schema: Map<String, Value>,
     pub handler: Handler,
     /// Optional streaming handler. `Some` for capabilities that can emit
-    /// incremental progress (e.g. `nomi_agent_run`); consumed by
+    /// incremental progress; consumed by
     /// [`Registry::dispatch_stream`]. The buffered [`handler`](Self::handler) is
     /// always present, so non-streaming adapters are unaffected.
     pub stream: Option<StreamingHandler>,
@@ -528,6 +547,7 @@ mod tests {
         domain: "test",
         summary: "delete a thing",
         danger: DangerTier::Destructive,
+        access_scope: AccessScope::User,
         deny_on: &[],
         confirm_on: &[],
     };
@@ -554,6 +574,7 @@ mod tests {
         domain: "test",
         summary: "write a thing",
         danger: DangerTier::Write,
+        access_scope: AccessScope::User,
         deny_on: &[Surface::Channel],
         confirm_on: &[],
     };

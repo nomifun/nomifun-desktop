@@ -1,4 +1,4 @@
-//! E2E tests for the Desktop Gateway MCP server (`nomifun-gateway`).
+//! E2E tests for the Platform Gateway MCP server (`nomifun-gateway`).
 //!
 //! The gateway is not part of the axum app router — it is a separate
 //! localhost HTTP server started by `AppServices::from_config` and
@@ -12,8 +12,7 @@ use common::build_app;
 use serde_json::{Value, json};
 
 struct Gateway {
-    port: u16,
-    token: String,
+    config: nomifun_api_types::GatewayMcpConfig,
     client: reqwest::Client,
 }
 
@@ -28,22 +27,25 @@ impl Gateway {
             .as_ref()
             .expect("gateway MCP server must start in tests");
         Self {
-            port: cfg.port,
-            token: cfg.token.clone(),
+            config: cfg.clone(),
             client: local_http_client(),
         }
     }
 
     async fn call(&self, tool: &str, caller_conv: &str, user_id: &str, args: Value) -> Value {
+        let child = self
+            .config
+            .issue_for_conversation(user_id, caller_conv, None, None, None, &[])
+            .expect("valid Gateway child capability");
+        let access = &child.bootstrap.access;
         let resp = self
             .client
-            .post(format!("http://127.0.0.1:{}/tool", self.port))
-            .header("Authorization", format!("Bearer {}", self.token))
+            .post(format!("http://127.0.0.1:{}/tool", self.config.port()))
+            .header("Authorization", format!("Bearer {}", access.token))
             .json(&json!({
                 "tool": tool,
                 "args": args,
-                "conversation_id": caller_conv,
-                "user_id": user_id,
+                "session": access.claims,
             }))
             .send()
             .await
@@ -63,7 +65,7 @@ async fn seed_user_and_conversation(services: &nomifun_app::AppServices, user_id
 }
 
 /// Same as [`seed_user_and_conversation`] but with a caller-provided `extra`
-/// JSON (e.g. a channel master-agent session carrying `companionId`).
+/// JSON (e.g. a Channel Agent session carrying `companionId`).
 async fn seed_user_and_conversation_with_extra(
     services: &nomifun_app::AppServices,
     user_id: &str,
@@ -77,8 +79,9 @@ async fn seed_user_and_conversation_with_extra(
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at) \
-         VALUES (?, ?, ?, 'nomi', ?, 0, 0)",
+        "INSERT INTO conversations \
+         (id, user_id, name, type, extra, delegation_policy, created_at, updated_at) \
+         VALUES (?, ?, ?, 'nomi', ?, 'disabled', 0, 0)",
     )
     .bind(conv_id)
     .bind(user_id)
@@ -124,7 +127,7 @@ async fn gw_unauthenticated_tool_call_is_rejected() {
     let (_app, services) = build_app().await;
     let cfg = services.gateway_mcp_config.as_ref().unwrap();
     let resp = local_http_client()
-        .post(format!("http://127.0.0.1:{}/tool", cfg.port))
+        .post(format!("http://127.0.0.1:{}/tool", cfg.port()))
         .json(&json!({"tool": "nomi_list_conversations", "args": {}}))
         .send()
         .await
@@ -136,8 +139,30 @@ async fn gw_unauthenticated_tool_call_is_rejected() {
 async fn gw_unknown_tool_returns_error() {
     let (_app, services) = build_app().await;
     let gw = Gateway::from_services(&services);
-    let body = gw.call("nomi_explode_desktop", "", "u", json!({})).await;
+    let body = gw
+        .call(
+            "nomi_explode_desktop",
+            "owner-session",
+            "system_default_user",
+            json!({}),
+        )
+        .await;
     assert!(error_of(&body).contains("Unknown tool"));
+}
+
+#[tokio::test]
+async fn gw_secondary_session_cannot_invoke_owner_only_tool_with_valid_session_token() {
+    let (_app, services) = build_app().await;
+    let gw = Gateway::from_services(&services);
+    let body = gw
+        .call(
+            "nomi_system_get_settings",
+            "secondary-session",
+            "secondary-user",
+            json!({}),
+        )
+        .await;
+    assert_eq!(error_of(&body), "session_capability_denied");
 }
 
 // ── conversations ────────────────────────────────────────────────────
@@ -162,11 +187,15 @@ async fn gw_list_conversations_returns_rows_with_runtime_state() {
 }
 
 #[tokio::test]
-async fn gw_conversation_tools_require_user_identity() {
+async fn gw_issuer_rejects_missing_user_identity_before_bridge_spawn() {
     let (_app, services) = build_app().await;
     let gw = Gateway::from_services(&services);
-    let body = gw.call("nomi_list_conversations", "1", "", json!({})).await;
-    assert!(error_of(&body).contains("user identity"));
+    assert_eq!(
+        gw.config
+            .issue_for_conversation("", "1", None, None, None, &[])
+            .unwrap_err(),
+        nomifun_common::LoopbackCapabilityError::InvalidIdentity
+    );
 }
 
 #[tokio::test]
@@ -184,7 +213,7 @@ async fn gw_list_conversations_excludes_companion_sessions() {
     seed_user_and_conversation(&services, "user_companion", 2).await;
     let gw = Gateway::from_services(&services);
 
-    let body = gw.call("nomi_list_conversations", "", "user_companion", json!({})).await;
+    let body = gw.call("nomi_list_conversations", "2", "user_companion", json!({})).await;
     let result = result_of(&body);
     let convs = result["conversations"].as_array().unwrap().clone();
 
@@ -261,7 +290,7 @@ async fn gw_conversation_status_reports_idle_and_messages() {
     let body = gw
         .call(
             "nomi_conversation_status",
-            "",
+            "1",
             "user_gw",
             json!({"conversation_id": 1}),
         )
@@ -283,7 +312,7 @@ async fn gw_user_isolation_hides_other_users_conversations() {
     let body = gw
         .call(
             "nomi_conversation_status",
-            "",
+            "2",
             "user_b",
             json!({"conversation_id": 1}),
         )
@@ -292,7 +321,7 @@ async fn gw_user_isolation_hides_other_users_conversations() {
     let body = gw
         .call(
             "nomi_delete_conversation",
-            "",
+            "2",
             "user_b",
             json!({"conversation_id": 1, "confirm": true}),
         )
@@ -365,32 +394,52 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_save",
-            "",
-            "user_gw",
+            "owner-session",
+            "system_default_user",
             json!({"content": "主人喜欢深色主题", "kind": "preference", "tags": ["ui"]}),
         )
         .await;
     let memory_id = result_of(&body)["id"].as_str().unwrap().to_owned();
 
     let body = gw
-        .call("nomi_memory_list", "", "user_gw", json!({"query": "深色主题"}))
+        .call(
+            "nomi_memory_list",
+            "owner-session",
+            "system_default_user",
+            json!({"query": "深色主题"}),
+        )
         .await;
     let memories = result_of(&body).as_array().unwrap();
     assert_eq!(memories.len(), 1);
     assert_eq!(memories[0]["kind"], json!("preference"));
 
     let body = gw
-        .call("nomi_memory_update", "", "user_gw", json!({"id": memory_id, "pinned": true}))
+        .call(
+            "nomi_memory_update",
+            "owner-session",
+            "system_default_user",
+            json!({"id": memory_id, "pinned": true}),
+        )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("updated"));
 
     let body = gw
-        .call("nomi_memory_delete", "", "user_gw", json!({"id": memory_id, "confirm": true}))
+        .call(
+            "nomi_memory_delete",
+            "owner-session",
+            "system_default_user",
+            json!({"id": memory_id, "confirm": true}),
+        )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("deleted"));
 
     let body = gw
-        .call("nomi_memory_list", "", "user_gw", json!({"query": "深色主题"}))
+        .call(
+            "nomi_memory_list",
+            "owner-session",
+            "system_default_user",
+            json!({"query": "深色主题"}),
+        )
         .await;
     assert!(result_of(&body).as_array().unwrap().is_empty());
 }
@@ -400,7 +449,12 @@ async fn gw_memory_update_with_no_fields_is_rejected() {
     let (_app, services) = build_app().await;
     let gw = Gateway::from_services(&services);
     let body = gw
-        .call("nomi_memory_update", "", "user_gw", json!({"id": "mem_x"}))
+        .call(
+            "nomi_memory_update",
+            "owner-session",
+            "system_default_user",
+            json!({"id": "mem_x"}),
+        )
         .await;
     assert!(error_of(&body).contains("nothing to update"));
 }
@@ -415,8 +469,8 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_requirement_create",
-            "",
-            "user_gw",
+            "owner-session",
+            "system_default_user",
             json!({"title": "修复登录页样式", "content": "按钮溢出", "tag": "前端"}),
         )
         .await;
@@ -424,7 +478,12 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     assert_eq!(result_of(&body)["created_by"], json!("agent"));
 
     let body = gw
-        .call("nomi_requirement_list", "", "user_gw", json!({"tag": "前端"}))
+        .call(
+            "nomi_requirement_list",
+            "owner-session",
+            "system_default_user",
+            json!({"tag": "前端"}),
+        )
         .await;
     let items = result_of(&body)["items"].as_array().unwrap().clone();
     assert_eq!(items.len(), 1);
@@ -432,15 +491,20 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_requirement_update",
-            "",
-            "user_gw",
+            "owner-session",
+            "system_default_user",
             json!({"id": req_id, "title": "修复登录页按钮溢出"}),
         )
         .await;
     assert_eq!(result_of(&body)["title"], json!("修复登录页按钮溢出"));
 
     let body = gw
-        .call("nomi_requirement_delete", "", "user_gw", json!({"id": req_id, "confirm": true}))
+        .call(
+            "nomi_requirement_delete",
+            "owner-session",
+            "system_default_user",
+            json!({"id": req_id, "confirm": true}),
+        )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("deleted"));
 }

@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use nomifun_common::CommandSpec;
 
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::capability::cli_process::CliAgentProcess;
 use crate::manager::process_registry::register_session_process;
 use crate::protocol::events::AgentStreamEvent;
@@ -32,7 +32,7 @@ struct NanobotState {
 /// - No confirmation system
 /// - Single response stream only
 pub struct NanobotAgentManager {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     process: Arc<CliAgentProcess>,
     state: RwLock<NanobotState>,
     raw_rx: Mutex<Option<broadcast::Receiver<Value>>>,
@@ -61,7 +61,7 @@ impl NanobotAgentManager {
         let raw_rx = process
             .take_initial_receiver()
             .expect("Initial receiver should be available immediately after spawn");
-        let runtime = AgentRuntime::new(conversation_id, workspace, 256);
+        let runtime = AgentRuntimeState::new(conversation_id, workspace, 256);
 
         Ok(Self {
             runtime,
@@ -163,7 +163,7 @@ impl NanobotAgentManager {
 }
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for NanobotAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for NanobotAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::Nanobot
     }
@@ -250,7 +250,7 @@ impl NanobotAgentManager {
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
+        let _ = crate::runtime_handle::AgentRuntimeControl::kill(self, reason);
         let process = Arc::clone(&self.process);
         let grace = Duration::from_millis(NANOBOT_KILL_GRACE_MS);
         Box::pin(async move {
@@ -259,7 +259,7 @@ impl NanobotAgentManager {
     }
 }
 
-/// Nanobot-specific operations reached through `AgentInstance::Nanobot(..)`.
+/// Nanobot-specific operations reached through `AgentRuntimeHandle::Nanobot(..)`.
 /// Nanobot does not track tool confirmations or approval memory, so these
 /// are trivial stubs matching the semantics of the removed `IAgentManager`
 /// default impls.

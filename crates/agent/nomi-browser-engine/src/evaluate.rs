@@ -20,8 +20,8 @@
 //!    （即便全权也被互斥拦下）。判定是纯函数 [`check_full_power_eligible`]。
 //!
 //! 4. **yolo 不豁免**：yolo / companion 会话**不**自动开 evaluate——evaluate 的放行**只看全权开关**，
-//!    **绝不看 `SessionMode`**。这呼应裁决⑧的不变量⑧「红线不靠被旁路的 orchestration 闸」：yolo /
-//!    companion 旁路的是 orchestration 审批闸（orchestration.rs:271 / lib.rs:100 / companion.rs:281），
+//!    **绝不看 `SessionMode`**。这呼应裁决⑧的不变量⑧「红线不靠被旁路的 tool-execution 闸」：yolo /
+//!    companion 旁路的是 tool-execution 审批闸（tool_execution.rs:271 / lib.rs:100 / companion.rs:281），
 //!    而 evaluate 走的是本模块这道**独立**门——它不读 session_mode，故 yolo 无从豁免。本模块的任何 API
 //!    都**不**接受 session_mode 入参（类型层杜绝「被 yolo 旁路」）。
 //!

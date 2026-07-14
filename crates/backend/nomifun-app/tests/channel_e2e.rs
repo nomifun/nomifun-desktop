@@ -409,7 +409,11 @@ async fn pairing_approve_creates_user() {
     let pool = services.database.pool().clone();
     let repo: std::sync::Arc<dyn nomifun_db::IChannelRepository> =
         std::sync::Arc::new(nomifun_db::SqliteChannelRepository::new(pool));
-    let pairing_svc = nomifun_channel::pairing::PairingService::new(repo.clone(), services.event_bus.clone());
+    let pairing_svc = nomifun_channel::pairing::PairingService::new(
+        repo.clone(),
+        services.event_bus.clone(),
+        "system_default_user",
+    );
 
     // The pairing/user rows carry an FK channel_id → channel_plugins(id), so
     // the telegram bot channel must exist before request_pairing runs.
@@ -504,7 +508,11 @@ async fn pairing_reject_removes_from_pending() {
     let pool = services.database.pool().clone();
     let repo: std::sync::Arc<dyn nomifun_db::IChannelRepository> =
         std::sync::Arc::new(nomifun_db::SqliteChannelRepository::new(pool));
-    let pairing_svc = nomifun_channel::pairing::PairingService::new(repo.clone(), services.event_bus.clone());
+    let pairing_svc = nomifun_channel::pairing::PairingService::new(
+        repo.clone(),
+        services.event_bus.clone(),
+        "system_default_user",
+    );
 
     // FK channel_id → channel_plugins(id): seed the bot channel first.
     seed_telegram_channel(&repo).await;

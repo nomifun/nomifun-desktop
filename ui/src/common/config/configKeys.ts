@@ -40,9 +40,9 @@ export type ConfigKeyMap = {
   'css.activeThemeId': string;
   'nomi.config': { preferredMode?: string } | undefined;
   'nomi.defaultModel': { id: string; use_model: string } | undefined;
-  // 智能编排「协作模型」默认偏好：主模型(=nomi.defaultModel)之外、供主模型按任务难度
-  // 为各节点挑选的额外 worker 模型池。仅编排发起时使用；空 = 全程用主模型。
-  'nomi.orchestrationCollaborators': { provider_id: string; model: string }[] | undefined;
+  // 智能协作的模型偏好：除主模型（nomi.defaultModel）外，可为不同任务选择的
+  // 额外模型。仅创建 Nomi 对话时使用；空数组表示只使用主模型。
+  'nomi.collaborationModels': { provider_id: string; model: string }[] | undefined;
   // Default provider+model for the knowledge-base AI description/overview
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.
@@ -102,7 +102,7 @@ export type ConfigKeyMap = {
   'channels.telegram.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  // Master-agent greeter companion per IM platform (mirror of the backend
+  // Companion binding per IM channel platform (mirror of the backend
   // client-preference written by POST /api/channel/settings/companion).
   // Empty/missing = no binding → no companion greets this platform's channel.
   'channels.telegram.companionId': string | undefined;

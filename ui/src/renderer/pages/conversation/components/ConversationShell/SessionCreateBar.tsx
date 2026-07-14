@@ -38,7 +38,7 @@ export interface SessionCreateBarProps {
  *
  * The four session actions share one compact 2x2 grid. Search is deliberately
  * below the action group so creation/selection controls read as one coherent
- * command cluster before the user scans existing sessions.
+ * command group before the user scans existing sessions.
  */
 const SessionCreateBar: React.FC<SessionCreateBarProps> = ({
   batchMode,

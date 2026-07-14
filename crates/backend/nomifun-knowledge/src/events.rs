@@ -1,19 +1,25 @@
-//! WS push events for the knowledge domain. Same shape as `CompanionEventEmitter`:
-//! a thin wrapper over the global `EventBroadcaster`.
+//! Installation-owner-scoped WS events for the knowledge domain.
 
 use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 #[derive(Clone)]
 pub struct KnowledgeEventEmitter {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    sink: Arc<dyn UserEventSink>,
+    authoritative_user_id: Arc<str>,
 }
 
 impl KnowledgeEventEmitter {
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>) -> Self {
-        Self { broadcaster }
+    pub fn new(
+        sink: Arc<dyn UserEventSink>,
+        authoritative_user_id: Arc<str>,
+    ) -> Self {
+        Self {
+            sink,
+            authoritative_user_id,
+        }
     }
 
     fn broadcast<T: serde::Serialize>(&self, event_name: &str, payload: &T) {
@@ -24,7 +30,10 @@ impl KnowledgeEventEmitter {
                 return;
             }
         };
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, value));
+        self.sink.send_to_user(
+            &self.authoritative_user_id,
+            WebSocketMessage::new(event_name, value),
+        );
     }
 
     pub fn emit_base_created<T: serde::Serialize>(&self, base: &T) {

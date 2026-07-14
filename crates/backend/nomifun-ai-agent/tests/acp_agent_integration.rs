@@ -23,7 +23,7 @@ use std::time::Duration;
 use nomifun_ai_agent::factory::acp_assembler::{WorkspaceInfo, assemble_acp_params};
 use nomifun_ai_agent::manager::acp::AcpAgentManager;
 use nomifun_ai_agent::registry::AgentRegistry;
-use nomifun_ai_agent::{AgentInstance, AgentStreamEvent, IAgentTask};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentStreamEvent, AgentRuntimeControl};
 use nomifun_common::ConversationStatus;
 use nomifun_db::{SqliteAgentMetadataRepository, init_database_memory};
 use tokio::sync::broadcast;
@@ -59,8 +59,8 @@ async fn make_mock_agent(script: &str, backend: &str) -> (Arc<AcpAgentManager>, 
     }
 
     let config = nomifun_ai_agent::AcpBuildExtra {
-        desktop_gateway: false,
         gateway_mcp_config: None,
+        gateway_excluded_tools: Vec::new(),
         open_mcp_config: None,
         computer_mcp_config: None,
         browser_mcp_config: None,
@@ -75,7 +75,6 @@ async fn make_mock_agent(script: &str, backend: &str) -> (Arc<AcpAgentManager>, 
         session_mode: None,
         current_model_id: None,
         cron_job_id: None,
-        guide_mcp_config: None,
         requirement_mcp_config: None,
         knowledge_mcp_config: None,
         mcp_server_ids: None,
@@ -322,11 +321,11 @@ async fn acp_agent_model_info_captured() {
 
     wait_for_event(&mut rx, |e| matches!(e, AgentStreamEvent::AcpModelInfo(_))).await;
 
-    // Route through the public `AgentInstance` API rather than reaching
+    // Route through the public `AgentRuntimeHandle` API rather than reaching
     // into the private `AcpAgentManager::model()`: the ai-agent crate only
-    // exposes `AgentInstance` to downstream callers, so tests should
+    // exposes `AgentRuntimeHandle` to downstream callers, so tests should
     // exercise the same surface.
-    let instance = AgentInstance::Acp(agent.clone());
+    let instance = AgentRuntimeHandle::Acp(agent.clone());
     let resp = instance.get_model().await.expect("get_model should succeed");
     let info = resp.model_info.expect("Model info should be captured");
     assert_eq!(info.current_model_id.as_deref(), Some("claude-sonnet-4"));

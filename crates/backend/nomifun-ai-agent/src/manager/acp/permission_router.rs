@@ -1,4 +1,4 @@
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::protocol::acp::{PermissionDecision, PermissionRequest};
 use crate::protocol::events::{AgentStreamEvent, permission_request_to_event_data};
 use nomifun_common::Confirmation;
@@ -47,7 +47,7 @@ impl PermissionRouter {
     /// `runtime` is shared with the parent manager so permission
     /// arrivals count as activity (preventing idle timeouts) via
     /// `runtime.bump_activity()`.
-    pub fn start(self: &Arc<Self>, runtime: AgentRuntime) {
+    pub fn start(self: &Arc<Self>, runtime: AgentRuntimeState) {
         let this = Arc::clone(self);
 
         tokio::spawn(async move {
@@ -274,7 +274,7 @@ mod tests {
     async fn start_routes_permission_request_and_exposes_recoverable_confirmation() {
         let (permission_tx, permission_rx) = mpsc::channel(1);
         let router = Arc::new(PermissionRouter::new(permission_rx));
-        let runtime = AgentRuntime::new("conv-1", "/tmp/workspace", 8);
+        let runtime = AgentRuntimeState::new("conv-1", "/tmp/workspace", 8);
         let mut event_rx = runtime.subscribe();
         router.start(runtime);
 
@@ -326,48 +326,4 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn start_routes_team_prefixed_mcp_permission_request_to_user_confirmation() {
-        let (permission_tx, permission_rx) = mpsc::channel(1);
-        let router = Arc::new(PermissionRouter::new(permission_rx));
-        let runtime = AgentRuntime::new("conv-1", "/tmp/workspace", 8);
-        let mut event_rx = runtime.subscribe();
-        router.start(runtime);
-
-        let request = RequestPermissionRequest::new(
-            "session-1",
-            SdkToolCallUpdate::new(
-                "tool-1",
-                ToolCallUpdateFields::new()
-                    .title("mcp__nomifun-team__team_send_message")
-                    .kind(SdkToolKind::Other)
-                    .raw_input(json!({ "to": "slot-1", "message": "hello" })),
-            ),
-            vec![PermissionOption::new(
-                "allow_once",
-                "Allow",
-                SdkPermissionOptionKind::AllowOnce,
-            )],
-        );
-        let (response_tx, mut response_rx) = oneshot::channel();
-
-        permission_tx
-            .send(PermissionRequest {
-                request,
-                response_tx,
-            })
-            .await
-            .expect("permission request should be accepted");
-
-        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("team-prefixed MCP permission should be emitted")
-            .expect("permission event channel should stay open");
-        assert!(matches!(event, AgentStreamEvent::AcpPermission(_)));
-        assert!(matches!(
-            response_rx.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-        ));
-        assert_eq!(router.get_confirmations().len(), 1);
-    }
 }

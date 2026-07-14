@@ -6,13 +6,12 @@
 
 use std::sync::Arc;
 
-use nomifun_ai_agent::IWorkerTaskManager;
+use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_api_types::ListMessagesQuery;
 use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::ConversationService;
 
 use crate::archiver::{ArchiveConversationPort, WindowMessage};
-use crate::companion::COMPANION_USER_ID;
 
 /// Upper bound on messages pulled for one digest — a chatty window only needs
 /// its most-recent turns summarized (the digest prompt caps again). Keeping this
@@ -20,13 +19,22 @@ use crate::companion::COMPANION_USER_ID;
 const FETCH_LIMIT: u32 = 400;
 
 pub struct ConversationArchivePort {
+    authoritative_user_id: Arc<str>,
     conversations: Arc<ConversationService>,
-    task_manager: Arc<dyn IWorkerTaskManager>,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 }
 
 impl ConversationArchivePort {
-    pub fn new(conversations: Arc<ConversationService>, task_manager: Arc<dyn IWorkerTaskManager>) -> Self {
-        Self { conversations, task_manager }
+    pub fn new(
+        authoritative_user_id: Arc<str>,
+        conversations: Arc<ConversationService>,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
+    ) -> Self {
+        Self {
+            authoritative_user_id,
+            conversations,
+            runtime_registry,
+        }
     }
 }
 
@@ -57,7 +65,10 @@ impl ArchiveConversationPort for ConversationArchivePort {
             page_size: Some(FETCH_LIMIT),
             ..Default::default()
         };
-        let resp = self.conversations.list_messages(COMPANION_USER_ID, conversation_id, query).await?;
+        let resp = self
+            .conversations
+            .list_messages(self.authoritative_user_id.as_ref(), conversation_id, query)
+            .await?;
         let mut out = Vec::new();
         for m in resp.items {
             if m.hidden || m.created_at <= since_ts {
@@ -90,10 +101,18 @@ impl ArchiveConversationPort for ConversationArchivePort {
         // builds the task without sending a message; clear_context then empties
         // and persists it.
         self.conversations
-            .warmup(COMPANION_USER_ID, conversation_id, &self.task_manager)
+            .warmup(
+                self.authoritative_user_id.as_ref(),
+                conversation_id,
+                &self.runtime_registry,
+            )
             .await?;
         self.conversations
-            .clear_context(COMPANION_USER_ID, conversation_id, &self.task_manager)
+            .clear_context(
+                self.authoritative_user_id.as_ref(),
+                conversation_id,
+                &self.runtime_registry,
+            )
             .await
     }
 }

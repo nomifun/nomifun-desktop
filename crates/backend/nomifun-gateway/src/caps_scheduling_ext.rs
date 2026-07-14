@@ -9,13 +9,13 @@
 
 use std::sync::Arc;
 
-use nomifun_api_types::IdmmTargetKind;
 use nomifun_cron::types::cron_job_to_response;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::deps::{CallerCtx, GatewayDeps};
+use crate::caps_idmm::{parse_kind as parse_idmm_kind, verify_target as verify_idmm_target};
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
@@ -35,15 +35,15 @@ struct CronRunNowParams {
     job_id: String,
 }
 
-async fn cron_get_job(deps: Arc<GatewayDeps>, p: CronGetJobParams) -> Value {
-    match deps.cron_service.get_job(&p.job_id).await {
+async fn cron_get_job(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronGetJobParams) -> Value {
+    match deps.cron_service.get_job(&ctx.user_id, &p.job_id).await {
         Ok(job) => ok(cron_job_to_response(&job)),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn cron_run_now(deps: Arc<GatewayDeps>, p: CronRunNowParams) -> Value {
-    match deps.cron_service.run_now(&p.job_id).await {
+async fn cron_run_now(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronRunNowParams) -> Value {
+    match deps.cron_service.run_now(&ctx.user_id, &p.job_id).await {
         Ok(resp) => ok(json!({
             "triggered": true,
             "conversation_id": resp.conversation_id,
@@ -195,25 +195,6 @@ struct IdmmClearLogParams {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-fn parse_idmm_kind(raw: &str) -> Result<IdmmTargetKind, Value> {
-    IdmmTargetKind::parse(raw)
-        .ok_or_else(|| json!({"error": format!("unknown kind '{raw}' (expected conversation | terminal)")}))
-}
-
-/// Terminal targets are ownership-checked (same gate as caps_idmm).
-async fn verify_idmm_terminal(deps: &GatewayDeps, ctx: &CallerCtx, kind: IdmmTargetKind, target_id: &str) -> Option<Value> {
-    if kind != IdmmTargetKind::Terminal {
-        return None;
-    }
-    if ctx.user_id.is_empty() {
-        return Some(json!({"error": "missing caller user identity"}));
-    }
-    match deps.idmm_service.verify_terminal_owner(target_id, &ctx.user_id).await {
-        Ok(()) => None,
-        Err(e) => Some(json!({"error": e.to_string()})),
-    }
-}
-
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
 async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParams) -> Value {
@@ -221,19 +202,22 @@ async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParam
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Some(err) = verify_idmm_terminal(&deps, &ctx, kind, &p.target_id).await {
+    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.log(kind, &p.target_id, limit).await {
+    match deps.idmm_service.log(&ctx.user_id, kind, &p.target_id, limit).await {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-async fn idmm_get_activity(deps: Arc<GatewayDeps>, p: IdmmGetActivityParams) -> Value {
+async fn idmm_get_activity(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetActivityParams) -> Value {
+    if ctx.user_id.trim().is_empty() {
+        return json!({"error": "missing caller user identity"});
+    }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.recent_activity(limit).await {
+    match deps.idmm_service.recent_activity(&ctx.user_id, limit).await {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -244,13 +228,21 @@ async fn idmm_intervene(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmIntervene
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Some(err) = verify_idmm_terminal(&deps, &ctx, kind, &p.target_id).await {
+    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
-    match deps.idmm_service.intervene_now(kind, &p.target_id).await {
+    match deps
+        .idmm_service
+        .intervene_now(&ctx.user_id, kind, &p.target_id)
+        .await
+    {
         Ok(()) => {
             // Return the updated state (same as the REST route).
-            match deps.idmm_service.build_state(kind, &p.target_id).await {
+            match deps
+                .idmm_service
+                .build_state(&ctx.user_id, kind, &p.target_id)
+                .await
+            {
                 Ok(state) => ok(json!({
                     "intervened": true,
                     "state": state,
@@ -297,10 +289,10 @@ async fn idmm_clear_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmClearLogP
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Some(err) = verify_idmm_terminal(&deps, &ctx, kind, &p.target_id).await {
+    if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
-    match deps.idmm_service.clear_log(kind, &p.target_id).await {
+    match deps.idmm_service.clear_log(&ctx.user_id, kind, &p.target_id).await {
         Ok(count) => json!({"result": format!("cleared {count} intervention records")}),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -320,7 +312,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Get a single cron job by id (full detail including schedule, next/last run, error).",
             DangerTier::Read,
         ),
-        |deps, _ctx, p| cron_get_job(deps, p),
+        cron_get_job,
     ));
     out.push(Capability::new::<CronRunNowParams, _, _>(
         CapabilityMeta::new(
@@ -329,7 +321,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "Trigger a cron job to execute immediately (out-of-schedule one-shot run).",
             DangerTier::Write,
         ),
-        |deps, _ctx, p| cron_run_now(deps, p),
+        cron_run_now,
     ));
 
     // ── Requirement extensions ──────────────────────────────────────────────
@@ -339,7 +331,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "requirement",
             "Fetch a single requirement by id (full detail including attachments, timestamps, status).",
             DangerTier::Read,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| requirement_get(deps, p),
     ));
     out.push(Capability::new::<RequirementListTagsParams, _, _>(
@@ -348,7 +341,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "requirement",
             "List all AutoWork tags with per-status counts, paused state, and totals.",
             DangerTier::Read,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| requirement_list_tags(deps, p),
     ));
     out.push(Capability::new::<RequirementGetBoardParams, _, _>(
@@ -357,7 +351,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "requirement",
             "Get the kanban board view for a tag (requirements grouped by status column).",
             DangerTier::Read,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| requirement_get_board(deps, p),
     ));
     out.push(Capability::new::<RequirementResumeTagParams, _, _>(
@@ -366,7 +361,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "requirement",
             "Resume a paused AutoWork tag and optionally re-queue failed requirements back to pending.",
             DangerTier::Write,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| requirement_resume_tag(deps, p),
     ));
 
@@ -384,10 +380,10 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_idmm_get_activity",
             "idmm",
-            "Read the cross-session recent intervention feed (all targets, most-recent-first).",
+            "Read the caller's cross-session intervention feed (their targets only, most-recent-first).",
             DangerTier::Read,
         ),
-        |deps, _ctx, p| idmm_get_activity(deps, p),
+        idmm_get_activity,
     ));
     out.push(Capability::new::<IdmmInterveneParams, _, _>(
         CapabilityMeta::new(
@@ -404,7 +400,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "idmm",
             "Read global IDMM settings (backup provider/model, default steering prompt).",
             DangerTier::Read,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| idmm_get_settings(deps, p),
     ));
     out.push(Capability::new::<IdmmSetSettingsParams, _, _>(
@@ -413,7 +410,8 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
             "idmm",
             "Update global IDMM settings (backup provider/model, default steering prompt). Partial update: omitted fields keep their current value.",
             DangerTier::Sensitive,
-        ),
+        )
+        .instance_owner(),
         |deps, _ctx, p| idmm_set_settings(deps, p),
     ));
     out.push(Capability::new::<IdmmClearLogParams, _, _>(

@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 use nomifun_common::{generate_prefixed_id, now_ms};
 
 use crate::config::CompanionConfig;
-use crate::profile::{CompanionProfileConfig, CompanionWindowConfig, SharedLearnConfig, SharedCompanionConfig};
+use crate::profile::{
+    CompanionProfileConfig, CompanionWindowConfig, SharedCompanionConfig, SharedLearnConfig,
+};
 
 /// Marker file written into the legacy dir after a successful migration;
 /// its content is the generated first-companion id.
@@ -110,6 +112,31 @@ fn migrate_companion_config_keys(data_dir: &Path) {
             ("\"pet_dialogues\"", "\"companion_dialogues\""),
         ],
     );
+
+    // `smart_orchestration` was the persisted name for the companion's Agent
+    // collaboration switch. Rewrite the stored object once before typed config
+    // loading; the runtime schema intentionally has no alias or fallback. If a
+    // partially upgraded file already has both keys, the new key is authoritative.
+    let shared_config_path = shared.join("config.json");
+    if let Ok(raw) = std::fs::read_to_string(&shared_config_path) {
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(object) = value.as_object_mut() {
+                if let Some(legacy_value) = object.remove("smart_orchestration") {
+                    object
+                        .entry("smart_collaboration".to_string())
+                        .or_insert(legacy_value);
+                    if let Err(error) = crate::fsio::save_json_atomic(&shared, "config.json", &value)
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            path = %shared_config_path.display(),
+                            "migrate companion smart-collaboration config key failed; continuing"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     if let Ok(entries) = std::fs::read_dir(companion.join("companions")) {
         for e in entries.flatten() {
@@ -452,6 +479,62 @@ mod tests {
         .unwrap();
         std::fs::write(legacy.join("memory.db"), "fake-db-bytes").unwrap();
         std::fs::write(legacy.join("events").join("20260101.jsonl"), "{\"e\":1}\n").unwrap();
+    }
+
+    #[test]
+    fn migrates_smart_collaboration_key_once_without_dual_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
+        std::fs::create_dir_all(&shared).unwrap();
+        let path = shared.join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "smart_orchestration": true,
+                "default_companion_id": "companion_1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        migrate_pet_dir_to_companion(dir.path());
+
+        let migrated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(migrated["smart_collaboration"], true);
+        assert!(migrated.get("smart_orchestration").is_none());
+        let config = SharedCompanionConfig::load(&shared);
+        assert!(config.smart_collaboration);
+        assert_eq!(config.default_companion_id, "companion_1");
+
+        let after_first_run = std::fs::read_to_string(&path).unwrap();
+        migrate_pet_dir_to_companion(dir.path());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), after_first_run);
+    }
+
+    #[test]
+    fn smart_collaboration_key_wins_during_interrupted_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join(crate::COMPANION_SHARED_REL_DIR);
+        std::fs::create_dir_all(&shared).unwrap();
+        let path = shared.join("config.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "smart_orchestration": true,
+                "smart_collaboration": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        migrate_pet_dir_to_companion(dir.path());
+
+        let migrated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(migrated["smart_collaboration"], false);
+        assert!(migrated.get("smart_orchestration").is_none());
+        assert!(!SharedCompanionConfig::load(&shared).smart_collaboration);
     }
 
     #[test]

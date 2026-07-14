@@ -379,7 +379,7 @@ impl OutputSink for BackendOutputSink {
 
     fn emit_warning(&self, msg: &str) {
         // Benign, non-fatal diagnostic: emit as Tips{Warning} on the broadcast —
-        // NOT an Error — so the AutoWork / requirement orchestrator does not read
+        // NOT an Error — so the AutoWork runner does not read
         // an otherwise-successful turn as failed. See OutputSink::emit_warning.
         let _ = self.event_tx.send(AgentStreamEvent::Tips(TipsEventData {
             content: msg.to_owned(),
@@ -544,7 +544,7 @@ mod tests {
         // Benign, non-fatal diagnostics (autocompact failure, session save/index
         // hiccup, MCP-init failure, /compact failure) must reach the stream as a
         // non-failing Tips{Warning} — NOT an Error. The AutoWork / requirement
-        // orchestrator classifies any non-retryable Error stream event as a FAILED
+        // AutoWork runner classifies any non-retryable Error stream event as a FAILED
         // turn, so routing a benign warning through emit_error would re-pend the
         // requirement / burn an attempt / pause the tag on an otherwise-successful
         // turn (the regression this guards against).

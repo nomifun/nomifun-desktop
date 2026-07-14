@@ -54,9 +54,9 @@ pub struct McpManager {
 
 /// Timeout for connecting + initializing a single MCP server (transport spawn,
 /// `initialize` handshake, `tools/list`). Without it, a server that starts but
-/// never answers the handshake would hang the entire agent bootstrap — and thus
-/// any solo nomi conversation that injects the guide MCP — indefinitely, with no
-/// error surfaced to the user.
+/// never answers the handshake would hang the entire Agent bootstrap — and thus
+/// any Conversation that injects that server — indefinitely, with no error
+/// surfaced to the user.
 const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl McpManager {

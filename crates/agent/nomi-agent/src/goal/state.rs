@@ -1,4 +1,4 @@
-//! In-memory goal state for a single engine run. P0: not persisted, no SQLite.
+//! In-memory goal state for one Agent engine session. P0: not persisted, no SQLite.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalStatus {
@@ -8,7 +8,7 @@ pub enum GoalStatus {
 }
 
 /// Per-session goal state. Lives in engine memory for the lifetime of one
-/// `engine.run()`; lost on restart (degrades to a plain session, no data loss).
+/// `engine.execute_turn()`; lost on restart (degrades to a plain session, no data loss).
 #[derive(Debug, Clone)]
 pub struct GoalState {
     /// The objective text (provided at session start).

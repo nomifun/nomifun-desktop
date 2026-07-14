@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 nomifun-runtime.workspace = true
+nomi-process-runtime.workspace = true
 nomifun-common.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true

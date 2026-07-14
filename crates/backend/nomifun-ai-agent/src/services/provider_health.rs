@@ -180,6 +180,7 @@ impl ProviderHealthCheckService {
             session_directory: self.data_dir.join("nomi-health-check-sessions"),
             session_mode: None,
             extra_mcp_servers: HashMap::new(),
+            loopback_capability_leases: Default::default(),
             bedrock_config,
             computer_use: false,
             browser_use: false,
@@ -194,8 +195,8 @@ impl ProviderHealthCheckService {
             goal: None,
             browser_secret_vault: None,
             owner_token: None,
-            // 健康探针一回合、不用工具：不必构造进程内 Spawn。
-            in_process_spawn: false,
+            // 健康探针一回合、不用工具：不安装 embedded AgentExecution。
+            install_embedded_agent_execution: false,
             allowed_tools: Vec::new(),
             write_root: None,
 })
@@ -353,7 +354,7 @@ async fn run_probe(
 
     match tokio::time::timeout(
         HEALTH_CHECK_TIMEOUT,
-        engine.run(HEALTH_CHECK_PROMPT, HEALTH_CHECK_MSG_ID),
+        engine.execute_turn(HEALTH_CHECK_PROMPT, HEALTH_CHECK_MSG_ID),
     )
     .await
     {
@@ -612,6 +613,7 @@ async fn build_probe_engine(config_extra: NomiResolvedConfig) -> Result<AgentEng
     }
 
     let mut result = AgentBootstrap::new(config, workspace, sink)
+        .install_embedded_agent_execution(config_extra.install_embedded_agent_execution)
         .build()
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
@@ -726,6 +728,7 @@ mod tests {
             session_directory,
             session_mode: None,
             extra_mcp_servers: HashMap::new(),
+            loopback_capability_leases: Default::default(),
             bedrock_config: None,
             computer_use: false,
             browser_use: false,
@@ -740,7 +743,7 @@ mod tests {
             goal: None,
             browser_secret_vault: None,
             owner_token: None,
-            in_process_spawn: false,
+            install_embedded_agent_execution: false,
             allowed_tools: Vec::new(),
             write_root: None,
         }
@@ -817,6 +820,7 @@ mod tests {
             session_directory: PathBuf::from("/tmp/nomi-health"),
             session_mode: None,
             extra_mcp_servers: HashMap::new(),
+            loopback_capability_leases: Default::default(),
             bedrock_config: None,
             computer_use: false,
             browser_use: false,
@@ -831,7 +835,7 @@ mod tests {
             goal: None,
             browser_secret_vault: None,
             owner_token: None,
-            in_process_spawn: false,
+            install_embedded_agent_execution: false,
             allowed_tools: Vec::new(),
             write_root: None,
 };

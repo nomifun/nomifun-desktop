@@ -34,14 +34,7 @@ interface ExtendedCapabilitiesPanelProps {
 /**
  * Unified "Extended Capabilities" section on the terminal create page — the
  * single home for the platform's signature terminal superpowers (knowledge
- * mount + connect, IDMM, AutoWork).
- *
- * The knowledge sub-block is self-contained: it owns BOTH halves of the
- * knowledge flow — mounting libraries (which bases bind to this workpath) AND
- * connecting (writing the knowledge MCP into the workpath so wrapper / custom /
- * external CLIs can search them). Built-in Claude / Codex auto-inject the search
- * tool on mount; the one-click "connect" (and advanced manual templates) cover
- * everything else.
+ * mount, IDMM, AutoWork, and secret-free external CLI registration).
  */
 const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
   cwd,
@@ -93,7 +86,7 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
 
       {expanded && (
         <div className='px-16px pb-16px'>
-          {/* 平台知识库 — mount + connect unified in one block */}
+          {/* 平台知识库 — mounted into the platform-managed terminal session. */}
           {hasKnowledge && (
             <div className='rounded-8px bg-fill-0 px-12px py-10px'>
               <div className='text-13px font-medium text-t-primary'>
@@ -105,7 +98,6 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
                 })}
               </div>
 
-              {/* Step 1 — mount: which libraries bind to this workpath */}
               <Select
                 className='mt-8px w-full'
                 mode='multiple'
@@ -116,21 +108,17 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
                 options={knowledgeBases.map((b) => ({ label: b.name, value: b.id }))}
                 onChange={(v) => onKbIdsChange(v as string[])}
               />
-
-              {/* Step 2 — connect: expose the search tool to the launched CLI */}
               <div className='mt-8px flex items-start justify-between gap-12px'>
                 <div className='min-w-0 flex-1 text-12px leading-16px text-t-tertiary'>
                   {t('terminal.extended.knowledgeConnectNote', {
                     defaultValue:
-                      '内置 Claude / Codex 挂载即自动注入；包装命令 / 自定义 / 外置终端请用「一键接入」写入工作路径。',
+                      '平台终端会自动注入；包装命令、自定义或外置终端可把无密钥命令注册到工作路径。',
                   })}
                 </div>
                 <div className='shrink-0'>
                   <RegisterKnowledgeButton cwd={cwd} command={command} />
                 </div>
               </div>
-
-              {/* Advanced: manual registration templates for other / external CLIs */}
               <div className='mt-8px'>
                 <PlatformMcpRegisterPanel />
               </div>
@@ -165,7 +153,7 @@ const ExtendedCapabilitiesPanel: React.FC<ExtendedCapabilitiesPanelProps> = ({
               </div>
               <div className='mt-2px text-12px leading-16px text-t-tertiary'>
                 {t('terminal.extended.autoworkDesc', {
-                  defaultValue: '让编排器在该终端按需求标签自动驱动并裁决完成（仅 Claude / Codex）',
+                  defaultValue: '让自动任务按需求标签驱动该终端并确认完成（仅 Claude / Codex）',
                 })}
               </div>
             </div>

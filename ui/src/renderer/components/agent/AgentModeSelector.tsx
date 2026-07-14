@@ -62,7 +62,7 @@ export interface AgentModeSelectorProps {
   compactLabelPrefix?: string;
   /** Hide compact prefix on mobile */
   hideCompactLabelPrefixOnMobile?: boolean;
-  /** Callback fired after a successful mode change (for team-mode propagation) */
+  /** Callback fired after a successful mode change. */
   onModeChanged?: (mode: string) => void;
   /** Dynamic modes from capabilities (overrides static list when non-empty) */
   dynamicModes?: AgentModeOption[];

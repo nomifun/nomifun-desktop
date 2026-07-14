@@ -440,7 +440,10 @@ const TerminalSessionPage: React.FC = () => {
               footer={
                 <div className='flex flex-col gap-6px'>
                   <span className='text-11px leading-15px text-t-tertiary'>
-                    {t('terminal.extended.knowledgeConnectNote')}
+                    {t('terminal.extended.knowledgeConnectNote', {
+                      defaultValue:
+                        '外置 CLI 可注册无密钥命令；启动时由当前系统用户专属的本地安全通道授权。',
+                    })}
                   </span>
                   <RegisterKnowledgeButton cwd={session?.cwd ?? ''} command={session?.command ?? ''} />
                 </div>

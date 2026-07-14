@@ -3,17 +3,17 @@ use std::sync::Arc;
 use nomifun_api_types::OpenClawBuildExtra;
 use nomifun_common::{AgentType, AppError};
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::factory::AgentFactoryDeps;
 use crate::factory::context::FactoryContext;
 use crate::manager::openclaw::OpenClawAgentManager;
-use crate::types::BuildTaskOptions;
+use crate::types::AgentRuntimeBuildOptions;
 
 pub(super) async fn build(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
+    options: AgentRuntimeBuildOptions,
     ctx: FactoryContext,
-) -> Result<AgentInstance, AppError> {
+) -> Result<AgentRuntimeHandle, AppError> {
     let mut config: OpenClawBuildExtra = serde_json::from_value(options.extra)
         .map_err(|e| AppError::BadRequest(format!("Invalid OpenClaw build options: {e}")))?;
 
@@ -42,5 +42,5 @@ pub(super) async fn build(
     .await?;
     let arc = Arc::new(agent);
     arc.start_event_relay();
-    Ok(AgentInstance::OpenClaw(arc))
+    Ok(AgentRuntimeHandle::OpenClaw(arc))
 }

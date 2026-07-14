@@ -12,13 +12,13 @@ use base64::Engine;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_file::{FileService, IFileService};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 /// No-op broadcaster for tests that don't need event verification.
 struct NoopBroadcaster;
 
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 fn make_service(root: &std::path::Path) -> FileService {

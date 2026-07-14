@@ -1,215 +1,156 @@
-//! Manual MCP registration template generator.
+//! Secret-free manual registration templates for the external knowledge MCP.
 //!
-//! Produces shell/JSON/TOML snippets that users can paste into external/wrapper
-//! CLIs to register the platform `knowledge_search` bridge. CRITICAL: templates
-//! contain NO port, token, or `NOMI_KB_MCP` env — the bridge discovers them at
-//! runtime via the beacon file.
+//! Every format stores only the canonical executable plus
+//! `mcp-knowledge-stdio`. Runtime authority is obtained from the OS-authenticated
+//! local broker, never from a persisted port, token, environment variable, or
+//! endpoint beacon.
 
 use serde::Serialize;
 
-/// Registration snippets for all supported CLI formats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RegisterTemplate {
-    /// `claude mcp add ...` one-liner.
     pub claude_cmd: String,
-    /// Claude `.mcp.json` / `--mcp-config` JSON fragment.
     pub claude_json: String,
-    /// Codex `config.toml` fragment.
     pub codex_toml: String,
-    /// Gemini `settings.json` MCP fragment (same shape as claude).
     pub gemini_json: String,
 }
 
-/// Generate all four registration template strings for the given backend binary
-/// path (`nomicore_path`). The path is quoted/escaped per format so spaced paths
-/// are safe. No token/port is ever included.
 pub fn knowledge_register_template(nomicore_path: &str) -> RegisterTemplate {
     let shell_quoted = shell_quote_arg(nomicore_path);
     let json_escaped = json_escape_string(nomicore_path);
     let toml_escaped = toml_basic_string(nomicore_path);
-
-    // claude mcp add command (shell)
     let claude_cmd = format!(
         "claude mcp add nomifun-knowledge --scope user -- {} mcp-knowledge-stdio",
         shell_quoted
     );
-
-    // claude JSON (mcpServers shape)
     let claude_json = format!(
         "{{\n  \"mcpServers\": {{\n    \"nomifun-knowledge\": {{\n      \"command\": \"{}\",\n      \"args\": [\"mcp-knowledge-stdio\"]\n    }}\n  }}\n}}",
         json_escaped
     );
-
-    // codex TOML
     let codex_toml = format!(
         "[mcp_servers.nomifun-knowledge]\ncommand = {}\nargs = [\"mcp-knowledge-stdio\"]",
         toml_escaped
     );
-
-    // gemini JSON (same mcpServers shape)
-    let gemini_json = claude_json.clone();
-
     RegisterTemplate {
         claude_cmd,
+        gemini_json: claude_json.clone(),
         claude_json,
         codex_toml,
-        gemini_json,
     }
 }
 
-// --- Quoting helpers (mirrored from nomifun-terminal/src/enhance.rs) ---
-
-/// Double-quote a string for shell use (handles spaces, escapes `\` and `"`).
-fn shell_quote_arg(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+#[cfg(not(windows))]
+fn shell_quote_arg(value: &str) -> String {
+    // POSIX shells do not expand $, backticks, backslashes, or command
+    // substitutions inside single quotes. A literal quote is represented by
+    // closing the quote, emitting one double-quoted quote, then reopening it.
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-/// Escape a string for embedding inside a JSON `"..."` value (the outer quotes
-/// are NOT included — caller wraps). Handles `\`, `"`, and control chars.
-fn json_escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
+#[cfg(windows)]
+fn shell_quote_arg(value: &str) -> String {
+    // The Windows command template targets PowerShell. PowerShell single quotes
+    // suppress $, backtick, and subexpression expansion; two adjacent quotes
+    // encode one literal quote.
+    format!("'{}'", value.replace('\'', "''"))
 }
 
-/// TOML basic-string literal: wrapped in quotes, internal `\`, `"`, and control
-/// chars escaped.
-fn toml_basic_string(s: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{:04X}", c as u32);
+fn json_escape_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", character as u32);
             }
-            c => out.push(c),
+            character => escaped.push(character),
         }
     }
-    out.push('"');
-    out
+    escaped
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn toml_basic_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn template_contains_path_and_subcommand() {
-        let t = knowledge_register_template("/usr/local/bin/nomicore");
-        assert!(t.claude_cmd.contains("/usr/local/bin/nomicore"));
-        assert!(t.claude_cmd.contains("mcp-knowledge-stdio"));
-        assert!(t.claude_json.contains("/usr/local/bin/nomicore"));
-        assert!(t.claude_json.contains("mcp-knowledge-stdio"));
-        assert!(t.codex_toml.contains("/usr/local/bin/nomicore"));
-        assert!(t.codex_toml.contains("mcp-knowledge-stdio"));
-        assert!(t.gemini_json.contains("/usr/local/bin/nomicore"));
-        assert!(t.gemini_json.contains("mcp-knowledge-stdio"));
-    }
-
-    #[test]
-    fn template_never_contains_token_or_port_or_env() {
-        let t = knowledge_register_template("/Users/John Doe/bin/nomicore");
-        for field in [&t.claude_cmd, &t.claude_json, &t.codex_toml, &t.gemini_json] {
-            let lower = field.to_lowercase();
-            assert!(!lower.contains("token"), "field contains 'token': {field}");
-            assert!(
-                !lower.contains("nomi_kb_mcp"),
-                "field contains 'NOMI_KB_MCP': {field}"
-            );
-            // No port number patterns (port = digits after "port" keyword)
-            assert!(!lower.contains("\"port\""), "field contains port key: {field}");
-            assert!(!lower.contains("port ="), "field contains port key: {field}");
+    fn templates_are_command_only_and_secret_free() {
+        let template = knowledge_register_template("/Users/John Doe/bin/nomicore");
+        for value in [
+            &template.claude_cmd,
+            &template.claude_json,
+            &template.codex_toml,
+            &template.gemini_json,
+        ] {
+            assert!(value.contains("mcp-knowledge-stdio"));
+            let lower = value.to_ascii_lowercase();
+            assert!(!lower.contains("token"));
+            assert!(!lower.contains("capability"));
+            assert!(!lower.contains("nomi_kb_mcp"));
+            assert!(!lower.contains("\"port\""));
+            assert!(!lower.contains("port ="));
         }
-    }
-
-    #[test]
-    fn spaced_path_is_correctly_quoted_in_each_format() {
-        let path = "/Users/John Doe/bin/nomicore";
-        let t = knowledge_register_template(path);
-
-        // Shell: path must be wrapped in double-quotes
-        assert!(
-            t.claude_cmd.contains("\"/Users/John Doe/bin/nomicore\""),
-            "shell quoting broken: {}",
-            t.claude_cmd
-        );
-
-        // JSON: path in a JSON string value (spaces are literal, no escaping needed for space)
-        assert!(
-            t.claude_json.contains("/Users/John Doe/bin/nomicore"),
-            "json missing spaced path: {}",
-            t.claude_json
-        );
-        // Verify valid JSON
-        let parsed: serde_json::Value = serde_json::from_str(&t.claude_json)
-            .unwrap_or_else(|e| panic!("claude_json is not valid JSON: {e}\n{}", t.claude_json));
+        let json: serde_json::Value = serde_json::from_str(&template.claude_json).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"].as_str().unwrap(),
-            path
-        );
-
-        // TOML: command value must be a quoted string containing the spaced path
-        assert!(
-            t.codex_toml.contains("\"/Users/John Doe/bin/nomicore\""),
-            "toml quoting broken: {}",
-            t.codex_toml
-        );
-
-        // Gemini JSON: same as claude
-        let parsed_g: serde_json::Value = serde_json::from_str(&t.gemini_json)
-            .unwrap_or_else(|e| panic!("gemini_json is not valid JSON: {e}\n{}", t.gemini_json));
-        assert_eq!(
-            parsed_g["mcpServers"]["nomifun-knowledge"]["command"].as_str().unwrap(),
-            path
+            json["mcpServers"]["nomifun-knowledge"]["command"],
+            "/Users/John Doe/bin/nomicore"
         );
     }
 
     #[test]
-    fn path_with_backslash_and_quotes_is_safe() {
-        // Windows-ish path with both tricky chars
-        let path = r#"C:\Program Files\Nomi "Fun"\nomicore.exe"#;
-        let t = knowledge_register_template(path);
-
-        // JSON must be parseable
-        let parsed: serde_json::Value = serde_json::from_str(&t.claude_json)
-            .unwrap_or_else(|e| panic!("claude_json parse failed: {e}\n{}", t.claude_json));
-        assert_eq!(
-            parsed["mcpServers"]["nomifun-knowledge"]["command"].as_str().unwrap(),
-            path
-        );
-
-        // TOML command value — parse just the value portion
-        // The full TOML should contain escaped backslashes and quotes
-        assert!(t.codex_toml.contains("\\\\"), "TOML must escape backslash");
-        assert!(t.codex_toml.contains("\\\""), "TOML must escape quote");
+    fn quoting_preserves_windows_path() {
+        let path = r#"C:\Program Files\Nomi \"Fun\"\nomicore.exe"#;
+        let template = knowledge_register_template(path);
+        let json: serde_json::Value = serde_json::from_str(&template.gemini_json).unwrap();
+        assert_eq!(json["mcpServers"]["nomifun-knowledge"]["command"], path);
+        assert!(template.codex_toml.contains("\\\\"));
+        assert!(template.codex_toml.contains("\\\""));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn claude_cmd_format() {
-        let t = knowledge_register_template("/bin/nomicore");
+    fn shell_template_roundtrips_without_expansion() {
+        let path = r#"/tmp/Nomi $HOME `printf backtick` $(printf subshell) it's/nomicore"#;
+        let quoted = shell_quote_arg(path);
+        let script = format!("set -- {quoted}; printf '%s' \"$1\"");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, path.as_bytes());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_template_suppresses_expansion() {
+        let path = r#"C:\Nomi $env:TEMP `whoami` $(whoami) it's\nomicore.exe"#;
         assert_eq!(
-            t.claude_cmd,
-            "claude mcp add nomifun-knowledge --scope user -- \"/bin/nomicore\" mcp-knowledge-stdio"
+            shell_quote_arg(path),
+            r#"'C:\Nomi $env:TEMP `whoami` $(whoami) it''s\nomicore.exe'"#
         );
     }
 }

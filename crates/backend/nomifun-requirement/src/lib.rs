@@ -1,11 +1,11 @@
-//! Requirements Platform: CRUD store + AutoWork orchestrator for "requirements".
+//! Requirements Platform: CRUD store + AutoWork runner for "requirements".
+pub mod auto_work_runner;
 pub mod attachments;
 mod convert;
 pub mod events;
 pub mod hooks;
 pub mod mcp_server;
 pub mod notifier;
-pub mod orchestrator;
 pub mod order_key;
 pub mod prompt;
 pub mod routes;
@@ -18,7 +18,7 @@ pub use events::RequirementEventEmitter;
 pub use hooks::IdmmHandle;
 pub use mcp_server::RequirementMcpServer;
 pub use notifier::CompletionNotifier;
-pub use orchestrator::{Orchestrator, OrchestratorDeps};
+pub use auto_work_runner::{AutoWorkRunner, AutoWorkRunnerDeps};
 pub use routes::requirement_routes;
 pub use service::RequirementService;
 pub use sink::RequirementServiceSink;

@@ -10,20 +10,19 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('GuidPage advanced controls', () => {
-  test('keeps supported draft controls but hides the multi-agent entry', () => {
+  test('keeps the supported per-conversation draft controls', () => {
     const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
     expect(source.includes('<KnowledgeControl')).toBe(true);
-    expect(source.includes('MultiAgentControl')).toBe(false);
   });
 
-  test('does not persist multi-agent draft config from the session creation page', () => {
+  test('keeps advanced drafts focused on knowledge, AutoWork, and IDMM', () => {
     const source = readSource(new URL('./hooks/useGuidAdvancedConfig.ts', import.meta.url));
 
-    expect(source.includes('multi_agent')).toBe(false);
-    expect(source.includes('multiAgent')).toBe(false);
-    expect(source.includes('setMultiAgent')).toBe(false);
+    expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
+    expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
+    expect(source.includes('idmm: IIdmmConfig')).toBe(true);
   });
 });

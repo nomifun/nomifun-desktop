@@ -354,7 +354,7 @@ impl CreationService {
         Ok(updated.into())
     }
 
-    /// Boot reconciliation ("running ⟺ live worker" invariant). Async tasks that
+    /// Boot reconciliation ("running ⟺ active executor" invariant). Async tasks that
     /// have a remote job id are RESUMED (their poll loop restarts); every other
     /// live task (queued, or running with no remote handle) is converged to
     /// `failed(interrupted)`. Returns the count settled as failed.
@@ -393,7 +393,7 @@ impl CreationService {
 
             let err = CreationError::new(
                 "interrupted",
-                "task did not survive a restart (no live worker); settled at boot",
+                "task did not survive a restart (no active executor); settled at boot",
             );
             match self.write_failed(&row.id, &err).await {
                 Ok(()) => settled += 1,
@@ -1561,4 +1561,3 @@ mod http_e2e_tests {
         assert_eq!(String::from_utf8_lossy(&persisted[0].1), "gemini says hi");
     }
 }
-

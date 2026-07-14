@@ -9,31 +9,30 @@ use tracing::{info, warn};
 
 #[derive(Debug, Default)]
 pub struct ConversationRuntimeStateService {
-    /// Conversations with a live turn claim, mapped to the wall-clock time
-    /// (epoch ms) the claim was taken. The timestamp is surfaced in
+    /// Conversations with an acquired turn handle, mapped to the wall-clock
+    /// time (epoch ms) the handle was acquired. The timestamp is surfaced in
     /// `ConversationRuntimeSummary::processing_started_at` so the frontend's
     /// elapsed-time indicator can anchor to the real turn start and survive
     /// view unmount/remount instead of restarting from zero.
     active_turns: Mutex<HashMap<String, i64>>,
-    /// Per-conversation signature of the knowledge mounts the live agent task
-    /// was last built with. The agent bakes the knowledge retrieval-protocol
+    /// Per-conversation signature of the knowledge mounts the live Agent runtime
+    /// was last created with. The Agent bakes the knowledge retrieval-protocol
     /// section at build time and is cached per conversation, so a binding
     /// toggled mid-session does not reach the already-running agent.
     /// `apply_knowledge_mounts` compares the freshly-resolved signature against
-    /// this map to decide whether to recycle the cached task. In-memory only
-    /// (cleared on restart), which is intentional: after a restart the task map
+    /// this map to decide whether to recycle the cached runtime. In-memory only
+    /// (cleared on restart), which is intentional: after a restart the runtime registry
     /// is empty too, so the first build naturally carries the current mounts.
     knowledge_signatures: Mutex<HashMap<String, String>>,
     /// Per-conversation CUMULATIVE token usage (`input + output`) for the turns
     /// run on that conversation, accumulated from the per-turn `TurnCompleted`
     /// metrics event the stream relay sees. Keyed by conversation id string.
     ///
-    /// The orchestrator worker drives a FRESH conversation per task to
-    /// completion, then reads (and removes) this total via
-    /// [`Self::take_turn_tokens`] to populate `orch_run_tasks.tokens` — the
-    /// DAG/inspector per-node token display. The relay's `add_turn_tokens` write
-    /// happens BEFORE the turn claim releases (i.e. before `is_processing` flips
-    /// false), so a worker that reads only AFTER `await_turn` observes the full
+    /// A persisted execution attempt drives a fresh conversation to completion,
+    /// then reads and removes this total via [`Self::take_turn_tokens`] for its
+    /// per-step usage record. The relay's `add_turn_tokens` write happens before
+    /// the [`AgentTurnHandle`] releases (and before `is_processing` flips false),
+    /// so an attempt that reads only after turn completion observes the full
     /// total without a race. In-memory only (cleared on restart), like the maps
     /// above; an un-taken entry is dropped on the next `take`. Continuation turns
     /// (cron/autowork follow-ups, model-failover resends) accumulate additively.
@@ -41,24 +40,24 @@ pub struct ConversationRuntimeStateService {
 }
 
 #[derive(Debug)]
-pub struct TurnClaim {
+pub struct AgentTurnHandle {
     conversation_id: String,
     state: Weak<ConversationRuntimeStateService>,
     released: bool,
 }
 
 impl ConversationRuntimeStateService {
-    pub fn try_claim_turn(self: &Arc<Self>, conversation_id: &str) -> Result<TurnClaim, AppError> {
+    pub fn try_acquire_turn(self: &Arc<Self>, conversation_id: &str) -> Result<AgentTurnHandle, AppError> {
         let mut active_turns = self.active_turns.lock().map_err(|_| {
             warn!(
                 conversation_id,
-                "conversation runtime state lock poisoned while claiming turn"
+                "conversation runtime state lock poisoned while acquiring turn"
             );
             AppError::Internal("conversation runtime state lock poisoned".into())
         })?;
 
         if active_turns.contains_key(conversation_id) {
-            info!(conversation_id, "conversation runtime turn claim rejected");
+            info!(conversation_id, "conversation runtime turn acquisition rejected");
             return Err(AppError::Conflict(format!(
                 "conversation {conversation_id} is already running"
             )));
@@ -66,16 +65,16 @@ impl ConversationRuntimeStateService {
 
         active_turns.insert(conversation_id.to_owned(), now_ms());
 
-        info!(conversation_id, "conversation runtime turn claimed");
+        info!(conversation_id, "conversation runtime turn acquired");
 
-        Ok(TurnClaim {
+        Ok(AgentTurnHandle {
             conversation_id: conversation_id.to_owned(),
             state: Arc::downgrade(self),
             released: false,
         })
     }
 
-    pub fn is_claimed(&self, conversation_id: &str) -> bool {
+    pub fn has_active_turn(&self, conversation_id: &str) -> bool {
         self.active_turns
             .lock()
             .map(|active_turns| active_turns.contains_key(conversation_id))
@@ -83,8 +82,8 @@ impl ConversationRuntimeStateService {
     }
 
     /// Wall-clock time (epoch ms) the live turn for `conversation_id` was
-    /// claimed, if one is active. `None` when no turn is in flight.
-    pub fn claimed_at(&self, conversation_id: &str) -> Option<i64> {
+    /// acquired, if one is active. `None` when no turn is in flight.
+    pub fn active_turn_started_at(&self, conversation_id: &str) -> Option<i64> {
         self.active_turns
             .lock()
             .ok()
@@ -137,11 +136,10 @@ impl ConversationRuntimeStateService {
     /// Read AND remove the conversation's accumulated token total. Returns
     /// `None` when nothing was recorded (no `TurnCompleted` seen — e.g. a
     /// non-nomi engine, a turn that errored before completing, or a relay not
-    /// wired with the runtime state). The orchestrator worker calls this once,
-    /// after its turn settles, to populate the task's `tokens` — removing the
+    /// wired with the runtime state). An execution attempt calls this once after
+    /// its Agent turn settles to persist token usage; removing the
     /// entry keeps the map bounded and prevents a stale read on conversation-id
-    /// reuse (which the orchestrator avoids anyway: one fresh conversation per
-    /// task).
+    /// reuse (execution attempts use a fresh conversation).
     pub fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64> {
         self.turn_tokens
             .lock()
@@ -150,8 +148,8 @@ impl ConversationRuntimeStateService {
     }
 
     /// Evict a conversation's accumulated token entry WITHOUT reading it. Bounds the
-    /// map for the benign leak case: an orchestrator worker conversation that
-    /// accumulated some `TurnCompleted` usage but ERRORED before the worker called
+    /// map for the benign leak case: an execution-attempt conversation that
+    /// accumulated some `TurnCompleted` usage but errored before the attempt called
     /// [`Self::take_turn_tokens`] would otherwise linger until process restart.
     /// Called on conversation delete (alongside [`Self::clear_knowledge_signature`]),
     /// so a removed conversation never keeps a stale accumulator entry. Idempotent —
@@ -165,18 +163,18 @@ impl ConversationRuntimeStateService {
     pub fn summary_from_parts(
         &self,
         conversation_id: &str,
-        task_status: Option<ConversationStatus>,
-        has_task: bool,
+        runtime_status: Option<ConversationStatus>,
+        has_runtime: bool,
         pending_confirmations: usize,
     ) -> ConversationRuntimeSummary {
-        let claimed_at = self.claimed_at(conversation_id);
-        let claimed = claimed_at.is_some();
+        let active_turn_started_at = self.active_turn_started_at(conversation_id);
+        let turn_is_active = active_turn_started_at.is_some();
 
         let state = if pending_confirmations > 0 {
             ConversationRuntimeStateKind::WaitingConfirmation
-        } else if claimed && task_status != Some(ConversationStatus::Running) {
+        } else if turn_is_active && runtime_status != Some(ConversationStatus::Running) {
             ConversationRuntimeStateKind::Starting
-        } else if claimed || task_status == Some(ConversationStatus::Running) {
+        } else if turn_is_active || runtime_status == Some(ConversationStatus::Running) {
             ConversationRuntimeStateKind::Running
         } else {
             ConversationRuntimeStateKind::Idle
@@ -187,15 +185,15 @@ impl ConversationRuntimeStateService {
         ConversationRuntimeSummary {
             state,
             can_send_message: !is_processing,
-            has_task,
-            task_status,
+            has_runtime,
+            runtime_status,
             is_processing,
             pending_confirmations,
             // Only surface a start time while actually processing. When the
             // turn is driven purely by a persisted Running status (no live
-            // claim, e.g. an edge case after restart), `claimed_at` is None and
+            // handle, e.g. an edge case after restart), `active_turn_started_at` is None and
             // the frontend gracefully falls back to its local mount time.
-            processing_started_at: if is_processing { claimed_at } else { None },
+            processing_started_at: if is_processing { active_turn_started_at } else { None },
         }
     }
 
@@ -203,7 +201,7 @@ impl ConversationRuntimeStateService {
         match self.active_turns.lock() {
             Ok(mut active_turns) => {
                 active_turns.remove(conversation_id);
-                info!(conversation_id, "conversation runtime turn claim released");
+                info!(conversation_id, "conversation runtime turn handle released");
             }
             Err(_) => {
                 warn!(
@@ -215,7 +213,7 @@ impl ConversationRuntimeStateService {
     }
 }
 
-impl TurnClaim {
+impl AgentTurnHandle {
     pub fn release(&mut self) {
         self.release_inner();
     }
@@ -232,7 +230,7 @@ impl TurnClaim {
     }
 }
 
-impl Drop for TurnClaim {
+impl Drop for AgentTurnHandle {
     fn drop(&mut self) {
         self.release_inner();
     }
@@ -245,30 +243,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claim_rejects_second_active_turn() {
+    fn turn_handle_rejects_second_active_turn() {
         let state = Arc::new(ConversationRuntimeStateService::default());
-        let _claim = state.try_claim_turn("conv-1").expect("first claim should win");
+        let _turn_handle = state.try_acquire_turn("conv-1").expect("first acquisition should win");
 
-        let err = state.try_claim_turn("conv-1").expect_err("second claim should fail");
+        let err = state
+            .try_acquire_turn("conv-1")
+            .expect_err("second acquisition should fail");
         assert!(err.to_string().contains("already running"));
     }
 
     #[test]
-    fn claim_releases_on_drop() {
+    fn turn_handle_releases_on_drop() {
         let state = Arc::new(ConversationRuntimeStateService::default());
         {
-            let _claim = state.try_claim_turn("conv-1").expect("claim should be created");
-            assert!(state.is_claimed("conv-1"));
+            let _turn_handle = state.try_acquire_turn("conv-1").expect("turn handle should be acquired");
+            assert!(state.has_active_turn("conv-1"));
         }
 
-        assert!(!state.is_claimed("conv-1"));
-        assert!(state.try_claim_turn("conv-1").is_ok());
+        assert!(!state.has_active_turn("conv-1"));
+        assert!(state.try_acquire_turn("conv-1").is_ok());
     }
 
     #[test]
-    fn summary_uses_claim_as_starting_state() {
+    fn summary_uses_active_turn_as_starting_state() {
         let state = Arc::new(ConversationRuntimeStateService::default());
-        let _claim = state.try_claim_turn("conv-1").expect("claim should be created");
+        let _turn_handle = state.try_acquire_turn("conv-1").expect("turn handle should be acquired");
 
         let summary = state.summary_from_parts("conv-1", None, false, 0);
 
@@ -277,23 +277,23 @@ mod tests {
         assert!(!summary.can_send_message);
         assert!(
             summary.processing_started_at.is_some(),
-            "a claimed turn must expose its start time"
+            "an active turn must expose its start time"
         );
     }
 
     #[test]
-    fn summary_exposes_claim_time_and_clears_when_idle() {
+    fn summary_exposes_turn_start_time_and_clears_when_idle() {
         let state = Arc::new(ConversationRuntimeStateService::default());
 
-        // Idle: no claim, no start time.
+        // Idle: no active turn, no start time.
         let idle = state.summary_from_parts("conv-1", None, false, 0);
         assert_eq!(idle.state, ConversationRuntimeStateKind::Idle);
         assert!(!idle.is_processing);
         assert_eq!(idle.processing_started_at, None);
 
-        // Claimed: start time matches the recorded claim time.
-        let claim = state.try_claim_turn("conv-1").expect("claim should be created");
-        let expected = state.claimed_at("conv-1");
+        // Active: start time matches the recorded acquisition time.
+        let turn_handle = state.try_acquire_turn("conv-1").expect("turn handle should be acquired");
+        let expected = state.active_turn_started_at("conv-1");
         assert!(expected.is_some());
 
         let running = state.summary_from_parts("conv-1", None, false, 0);
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(running.processing_started_at, expected);
 
         // Released: back to idle, start time gone.
-        drop(claim);
+        drop(turn_handle);
         let after = state.summary_from_parts("conv-1", None, false, 0);
         assert!(!after.is_processing);
         assert_eq!(after.processing_started_at, None);
@@ -345,7 +345,7 @@ mod tests {
     }
 
     // C item 5: clear_turn_tokens evicts an accumulated entry without reading it
-    // (the benign-leak bound for an errored orchestrator conv), and is idempotent.
+    // (the benign-leak bound for an errored conversation), and is idempotent.
     #[test]
     fn clear_turn_tokens_evicts_entry() {
         let state = Arc::new(ConversationRuntimeStateService::default());

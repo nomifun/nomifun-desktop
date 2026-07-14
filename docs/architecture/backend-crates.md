@@ -1,6 +1,6 @@
 # Backend Crates
 
-The 29 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
+The 32 `nomifun-*` crates under [`crates/backend/`](../../crates/backend/) form
 the HTTP/WS server. Together they compile into the `nomifun-app` library crate
 and, via `nomifun-app/src/main.rs`, the **`nomicore`** binary. The two app hosts
 (`nomifun-desktop` and `nomifun-web`) link `nomifun-app` directly and call
@@ -26,7 +26,7 @@ There are deliberate, feature-gated direct-dependency exceptions:
   subcommands.
 - [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) depends on optional
   `nomi-browser`, `nomi-computer`, `nomi-config`, `nomi-tools`, and
-  `nomi-types` for the Desktop Gateway browser/computer registries.
+  `nomi-types` for the platform Gateway browser/computer registries.
 
 Do not add another direct `nomi-*` dependency without documenting why it cannot
 go through the normal seam or one of those bridge surfaces.
@@ -39,7 +39,7 @@ go through the normal seam or one of those bridge surfaces.
 | [`nomifun-api-types`](../../crates/backend/nomifun-api-types/) | Every HTTP request / response DTO, the `WebSocketMessage` envelope, ACP / Nomi / OpenClaw / Remote build-extras. The frontend's TypeScript types mirror this crate. |
 | [`nomifun-db`](../../crates/backend/nomifun-db/) | SQLite via `sqlx`, embedded migrations, repository traits and Sqlite implementations for users, conversations, MCP, requirements, cron, ACP sessions, presets, terminal sessions, companion tokens, webhooks, and more. Owns the `Database` handle and `init_database`. |
 | [`nomifun-realtime`](../../crates/backend/nomifun-realtime/) | `WebSocketManager`, `BroadcastEventBus`, `/ws` upgrade handler with token validation, message router trait, heartbeat timing, per-connection buffer constants. |
-| [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | Bundled runtime support for Bun, PATH enhancement for child processes, cross-platform process-tree kill, and a spawn `Builder` with the merged PATH. |
+| [`nomifun-runtime`](../../crates/backend/nomifun-runtime/) | Bundled Bun extraction, cache management, command discovery, and startup-time `PATH` enhancement. Child-process ownership lives in the shared `nomi-process-runtime` crate. |
 | [`nomifun-assets`](../../crates/backend/nomifun-assets/) | Embedded static assets (`include_dir!`) shipped with the server. |
 
 ## Authentication and session
@@ -52,23 +52,23 @@ go through the normal seam or one of those bridge surfaces.
 
 | Crate | Responsibility |
 | --- | --- |
-| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds the agent factory (ACP / Nomi / OpenClaw / Nanobot / Remote variants), holds the `AgentRegistry` and `WorkerTaskManagerImpl`, persists ACP sessions, broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...) and `remote_agent_routes`. Re-exports `nomi_config`, `nomi_types`, and `RequirementSink` for the rest of the backend. |
+| [`nomifun-ai-agent`](../../crates/backend/nomifun-ai-agent/) | **The single bridge to `crates/agent/`.** Builds Agent runtimes (ACP / Nomi / OpenClaw / Nanobot / Remote variants), while `AgentRuntimeRegistry` caches one process-local runtime handle per Conversation. It persists ACP sessions, broadcasts `AgentStreamEvent`, exposes `agent_routes` (model info, capabilities, slash commands, ...) and `remote_agent_routes`, and re-exports `nomi_config`, `nomi_types`, and `RequirementSink` for the rest of the backend. |
 
 ## Feature crates (the bulk of the product)
 
 | Crate | Responsibility |
 | --- | --- |
 | [`nomifun-conversation`](../../crates/backend/nomifun-conversation/) | Conversation and message CRUD, send-message route, **streaming relay** that fans backend agent tokens onto `/ws`, ACP error recovery, response middleware (e.g. `/cron` slash-command detection, `<think>` stripping), skill resolver / snapshot, runtime-state persistence. |
+| [`nomifun-agent-execution`](../../crates/backend/nomifun-agent-execution/) | Persistent Agent collaboration: the `AgentExecutionEngine` facade owns planning, dependency scheduling, Attempts, recovery, decisions, events, and explicit Conversation links. Single- and multi-Agent work use this same aggregate; see the [unified execution architecture](agent-execution.zh.md). |
 | [`nomifun-mcp`](../../crates/backend/nomifun-mcp/) | MCP server CRUD, **OAuth flow**, multi-CLI sync (`Claude`, `Codex`, `CodeBuddy`, `Gemini`, `Qwen`, `OpenCode`, `Nomi`, `Nomifun` adapters under `adapters/`), connection test, session injection of MCP capabilities (incl. built-in image-gen). |
 | [`nomifun-extension`](../../crates/backend/nomifun-extension/) | Extension and skill hub: manifests, dependency graph, classifier, install / enable / disable, packs that bundle skills + MCP servers + presets. |
-| [`nomifun-team`](../../crates/backend/nomifun-team/) | Multi-agent teams: scheduler, mailbox, task board, crash detection, event loop, the team-MCP server (`mcp/`), the Guide MCP `nomi_create_team` tool, prompts. |
-| [`nomifun-channel`](../../crates/backend/nomifun-channel/) | External chat-channel adapters (Telegram, Lark, DingTalk, WeChat) — feature-gated. New conversations default to **master-agent mode**: companion persona + the Desktop Gateway tools (opt-out per platform via `channels.{platform}.masterAgent`). |
-| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **Desktop Gateway MCP** — in-process HTTP tool server exposing the whole desktop (conversations, cron, companion memory, requirements, and feature-gated browser/computer tools) as `nomi_*` tools to internal and external agent surfaces. Reached internally via the `nomicore mcp-gateway-stdio` bridge. |
+| [`nomifun-channel`](../../crates/backend/nomifun-channel/) | External chat-channel adapters (Telegram, Lark, DingTalk, WeChat) — feature-gated. Maps inbound messages into the shared Agent / Conversation runtime, resolves per-bot or per-platform companion ownership, and applies channel Agent context. This is an integration boundary, not a separate Agent type or mode. |
+| [`nomifun-gateway`](../../crates/backend/nomifun-gateway/) | **Platform Gateway MCP** — in-process capability registry and transport for `nomi_*` tools (conversations, cron, companion memory, requirements, and feature-gated browser/computer tools). Internal child processes reach it through `nomicore mcp-gateway-stdio` with a server-derived, scoped, expiring signed claim; no Conversation or build-extra field grants access. Authenticated public fronts project only their allowed capability subset. |
 | [`nomifun-cron`](../../crates/backend/nomifun-cron/) | Scheduled tasks: cron expressions, timezone repair, the cron daemon, slash-command-driven creation. |
-| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **AutoWork orchestrator** — backend-driven, boot-resume, persistent loop. Speaks to the agent layer through `RequirementSink`. |
+| [`nomifun-requirement`](../../crates/backend/nomifun-requirement/) | **Persistent AutoWork runner** — backend-driven, boot-resume loop. Speaks to the Agent layer through `RequirementSink`. |
 | [`nomifun-idmm`](../../crates/backend/nomifun-idmm/) | Intelligent Decision-Making Mode: a per-session supervisor that keeps agent / terminal sessions alive through provider faults and decision stalls (rule tier + sidecar model). See [Intelligent Decision](../guides/intelligent-decision.md). |
-| [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | Outbound Lark sender, `CompletionNotifier` for finished agent runs. |
-| [`nomifun-preset`](../../crates/backend/nomifun-preset/) | Reusable launch configurations for conversations, cluster members, companions, and cron: merged builtin/user/extension catalog, relational CRUD, target-aware resolution, immutable snapshots, and import. |
+| [`nomifun-webhook`](../../crates/backend/nomifun-webhook/) | Outbound Lark sender and `CompletionNotifier` for completed Agent work. |
+| [`nomifun-preset`](../../crates/backend/nomifun-preset/) | Reusable launch configurations for Conversations, Execution participants, companions, and cron: merged builtin/user/extension catalog, relational CRUD, target-aware resolution, immutable snapshots, and import. |
 | [`nomifun-companion`](../../crates/backend/nomifun-companion/) | Desktop companion state, figure/image assets, memory/persona data, companion public image serving, and companion-bound token integration. |
 | [`nomifun-knowledge`](../../crates/backend/nomifun-knowledge/) | Knowledge bases, source ingestion, bound-base mount state, and scoped read-only knowledge MCP server. |
 | [`nomifun-public`](../../crates/backend/nomifun-public/) | Companion-token authenticated public front doors: `/mcp`, `/mcp-agent`, and `/v1`. |

@@ -119,7 +119,7 @@ impl LlmProvider for MockLlmProvider {
 }
 
 // ---------------------------------------------------------------------------
-// MockTool — deterministic tool for orchestration tests
+// MockTool — deterministic tool for tool-execution tests
 // ---------------------------------------------------------------------------
 
 /// A simple mock tool that returns a pre-configured result.

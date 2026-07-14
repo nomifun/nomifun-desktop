@@ -96,7 +96,7 @@ pub struct PushDocumentRequest {
 }
 
 /// A pluggable source connector. Implementors own the remote API + format
-/// conversion; the sync orchestrator drives them and writes snapshots.
+/// conversion; the sync coordinator drives them and writes snapshots.
 #[async_trait]
 pub trait KnowledgeConnector: Send + Sync {
     /// Discriminator stored in `extra.source.kind` (e.g. "feishu").

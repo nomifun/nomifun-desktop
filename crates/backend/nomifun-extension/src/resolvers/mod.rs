@@ -2,7 +2,7 @@
 //! runtime-ready structures.
 //!
 //! Each sub-module handles one contribution type. The top-level
-//! [`resolve_all_contributions`] orchestrates resolution across all
+//! [`resolve_all_contributions`] coordinates resolution across all
 //! enabled extensions.
 
 pub mod acp_adapter;

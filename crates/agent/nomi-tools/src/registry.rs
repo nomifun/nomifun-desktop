@@ -73,7 +73,7 @@ impl ToolRegistry {
 
     /// Keep only the tools whose name is in `allowed`. An EMPTY `allowed` is a
     /// no-op (= unrestricted), so callers can pass a config value straight
-    /// through. Used for restricted sub-agent worker sessions (per-node tool
+    /// through. Used for restricted delegated Agent sessions (per-step tool
     /// whitelist) — registration-time filtering, because the registry has no
     /// unregister.
     pub fn retain_named(&mut self, allowed: &[String]) {

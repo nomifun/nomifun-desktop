@@ -8,6 +8,8 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Spin } from '@arco-design/web-react';
 import type { TChatConversation } from '@/common/config/storage';
+import ChatSlider from '@/renderer/pages/conversation/components/ChatSlider';
+import ExecutionConversationLayout from '@/renderer/pages/conversation/execution/ExecutionConversationLayout';
 import { useCompanion } from '../useNomi';
 import CompanionConversation from './CompanionConversation';
 import CompanionModelControl from '../CompanionModelControl';
@@ -38,22 +40,39 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation }) => {
   const companionId = conversation.extra?.companionId ?? null;
   const companion = useCompanion(companionId);
   const { profile, status } = companion;
+  const workspace = conversation.extra?.workspace ?? '';
+
+  const renderInExecutionShell = (content: React.ReactNode, showModelControl = false) => (
+    <ExecutionConversationLayout
+      title={conversation.name}
+      conversation_id={conversation.id}
+      hideAdvancedControls
+      disableRename
+      workspaceEnabled={Boolean(workspace)}
+      workspacePath={workspace || undefined}
+      sider={<ChatSlider conversation={conversation} />}
+      siderTitle={<span className='text-16px font-bold text-t-primary'>{t('conversation.workspace.title')}</span>}
+      headerExtra={showModelControl ? <CompanionModelControl companion={companion} /> : undefined}
+    >
+      {content}
+    </ExecutionConversationLayout>
+  );
 
   // 会话被标记为伙伴会话但缺 companionId（异常数据）：兜底，避免空白面板。
   if (!companionId) {
-    return (
+    return renderInExecutionShell(
       <div className='flex-1 flex items-center justify-center text-13px text-t-tertiary px-16px text-center'>
         {t('nomi.companion.chatError')}
-      </div>
+      </div>,
     );
   }
 
   // 解析伙伴 profile 中（切伙伴时 useCompanion 同步置空，避免 stale）。
   if (!profile) {
-    return (
+    return renderInExecutionShell(
       <div className='flex-1 flex justify-center items-center py-40px'>
         <Spin />
-      </div>
+      </div>,
     );
   }
 
@@ -62,15 +81,18 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation }) => {
     ? status.model_configured
     : Boolean(profile.model.provider_id && profile.model.model);
   if (!modelConfigured) {
-    return (
+    return renderInExecutionShell(
       <div className='flex flex-col h-full min-h-0 items-center justify-center gap-14px px-16px text-center'>
         <CompanionModelControl companion={companion} />
         <div className='text-13px text-t-tertiary'>{t('nomi.chat.modelMissing')}</div>
-      </div>
+      </div>,
     );
   }
 
-  return <CompanionConversation conversation={conversation} companion={companion} />;
+  return renderInExecutionShell(
+    <CompanionConversation conversation={conversation} companion={companion} />,
+    true,
+  );
 };
 
 export default CompanionChatPanel;

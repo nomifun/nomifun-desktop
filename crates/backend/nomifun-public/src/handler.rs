@@ -10,7 +10,6 @@
 
 use std::sync::Arc;
 
-use nomifun_auth::SYSTEM_USER_ID;
 use nomifun_gateway::{CallerCtx, GatewayDeps, Registry, Surface};
 use rmcp::ServerHandler;
 use rmcp::model::{
@@ -165,7 +164,7 @@ impl ServerHandler for RemoteMcpHandler {
         }
         let caller = CallerCtx {
             remote: true,
-            user_id: SYSTEM_USER_ID.to_string(),
+            user_id: self.deps.authoritative_user_id.to_string(),
             companion_id,
             ..Default::default()
         };

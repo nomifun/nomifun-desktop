@@ -217,7 +217,7 @@ impl BrowserRegistry {
 
     /// Resolve the registry key for a caller. A companion binding scopes the
     /// browser to that companion (multi-companion isolation); a session without
-    /// one (e.g. an IM master agent) gets a `conversation:<id>` key so it still
+    /// one (e.g. an IM Channel Agent) gets a `conversation:<id>` key so it still
     /// has its own isolated tool. An empty/unknown caller falls back to a shared
     /// `"_default"` key.
     pub fn key_for(companion_id: Option<&str>, conversation_id: &str) -> String {
@@ -434,7 +434,7 @@ fn sanitize_key(key: &str) -> String {
 
 /// Render a facade [`ToolResult`] into the gateway's JSON envelope. An error
 /// result becomes `{"error": ...}`; a success result carries the text and any
-/// images (base64 PNG) so a remote master agent can relay/inspect them.
+/// images (base64 PNG) so a remote Agent can relay/inspect them.
 pub fn tool_result_to_value(result: ToolResult) -> Value {
     if result.is_error {
         return json!({"error": result.content});

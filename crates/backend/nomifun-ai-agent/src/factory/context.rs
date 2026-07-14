@@ -5,7 +5,7 @@
 use nomifun_common::{AgentType, AppError};
 
 use crate::factory::AgentFactoryDeps;
-use crate::types::BuildTaskOptions;
+use crate::types::AgentRuntimeBuildOptions;
 
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 
@@ -16,7 +16,7 @@ pub(super) struct FactoryContext {
 }
 
 impl FactoryContext {
-    pub async fn resolve(deps: &AgentFactoryDeps, options: &BuildTaskOptions) -> Result<Self, AppError> {
+    pub async fn resolve(deps: &AgentFactoryDeps, options: &AgentRuntimeBuildOptions) -> Result<Self, AppError> {
         let conversation_id = options.conversation_id.clone();
 
         // `is_custom_workspace` is the authoritative signal for "user
@@ -69,7 +69,7 @@ fn workspace_label(agent_type: &AgentType, backend: Option<&serde_json::Value>) 
     agent_type.serde_name().to_owned()
 }
 
-fn temp_workspace_id_for_options(options: &BuildTaskOptions) -> String {
+fn temp_workspace_id_for_options(options: &AgentRuntimeBuildOptions) -> String {
     options
         .extra
         .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
@@ -89,8 +89,9 @@ mod tests {
     use nomifun_common::ProviderWithModel;
     use serde_json::json;
 
-    fn options(extra: serde_json::Value, created_at: Option<i64>) -> BuildTaskOptions {
-        BuildTaskOptions {
+    fn options(extra: serde_json::Value, created_at: Option<i64>) -> AgentRuntimeBuildOptions {
+        AgentRuntimeBuildOptions {
+            user_id: "test-user".into(),
             agent_type: AgentType::Acp,
             workspace: String::new(),
             model: ProviderWithModel {
@@ -99,6 +100,7 @@ mod tests {
                 use_model: None,
             },
             conversation_id: "1".into(),
+            delegation_policy: Default::default(),
             extra,
             conversation_created_at: created_at,
         }

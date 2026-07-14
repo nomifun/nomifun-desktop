@@ -7,16 +7,10 @@
 //! can register the native `KnowledgeSearchTool` into (only the nomi engine
 //! does). To give ACP agents the same knowledge-retrieval surface the nomi
 //! engine has natively, this server exposes ONE scoped tool, `knowledge_search`,
-//! over authenticated HTTP. Scope resolution has two paths:
-//!
-//! 1. **Explicit `kb_ids`** — baked at injection time and forwarded by the stdio
-//!    bridge in each request body. The model searches only those bases.
-//! 2. **Runtime `cwd` resolution** — when no explicit `kb_ids` are supplied, the
-//!    server resolves scope from the caller's working directory: workpath-bound
-//!    bases if an enabled binding exists, or all mounted bases as fallback.
-//!
-//! In both paths the security invariant holds: the model supplies only `query`;
-//! scope is decided server-side; the model cannot widen the searchable set.
+//! over authenticated HTTP. The backend resolves workspace + mounted base ids
+//! before spawn and signs them into the child's capability. The model supplies
+//! only tool arguments; `cwd`, `kb_ids`, user, and session never come from an
+//! unsigned request body.
 //!
 //! ## Shape (mirrors `nomifun-requirement::mcp_server::RequirementMcpServer`)
 //!
@@ -29,9 +23,9 @@
 //!
 //! ## Security
 //!
-//! A random opaque bearer token gates every request (per-process, like the
-//! requirement server). The tool is read-only, so there is no mutation scope to
-//! verify beyond the bound base set carried in `kb_ids`.
+//! The process-local issuer stays in this server. A child receives a renewable
+//! lease bootstrap: short-lived access binds user, session, tools, workspace,
+//! and mounted base ids, while the renewal proof carries no mutable scope.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
@@ -40,7 +34,14 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
-use nomifun_common::generate_id;
+use nomifun_api_types::{
+    KNOWLEDGE_CAPABILITY_DOMAIN, KnowledgeCapabilityClaims, KnowledgeCapabilityScope,
+    KnowledgeMcpConfig,
+};
+use nomifun_common::{
+    LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
+    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
+};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -50,6 +51,7 @@ use crate::service::{
     KnowledgeBinding, KnowledgeSearchHit, KnowledgeService, WriteOp, WriteRequest, WriteSurface, WriteTargetSpec,
     decode_doc_handle, encode_doc_handle, resolve_write_policy,
 };
+use crate::broker::KnowledgeBroker;
 
 /// Late-bound handle to the singleton `KnowledgeService`. Held as a `Weak` so
 /// the server never keeps the service alive on its own (matches the requirement
@@ -58,24 +60,26 @@ type ServiceSlot = Arc<RwLock<Weak<KnowledgeService>>>;
 
 #[derive(Clone)]
 struct KbMcpState {
-    auth_token: String,
+    issuer: Arc<LoopbackCapabilityIssuer>,
     service: ServiceSlot,
 }
 
 /// In-process HTTP MCP server for the scoped `knowledge_search` tool.
 pub struct KnowledgeMcpServer {
     http_addr: SocketAddr,
-    auth_token: String,
+    issuer: Arc<LoopbackCapabilityIssuer>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
     service_slot: ServiceSlot,
+    external_broker: Option<KnowledgeBroker>,
 }
 
 impl KnowledgeMcpServer {
-    /// Bind a fresh `127.0.0.1:0` listener, mint a random bearer token, and
-    /// start serving `POST /tool`. The service must be wired separately via
-    /// [`set_service`](Self::set_service) before the first tool call arrives.
+    /// Bind a fresh `127.0.0.1:0` listener, create a process-local issuer, and
+    /// start serving capability lifecycle routes plus `POST /tool`. The service
+    /// must be wired separately via [`set_service`](Self::set_service) before
+    /// the first tool call arrives.
     pub async fn start() -> Result<Self, String> {
-        let auth_token = generate_id();
+        let issuer = Arc::new(LoopbackCapabilityIssuer::random()?);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("Failed to bind knowledge MCP HTTP listener: {e}"))?;
@@ -86,12 +90,20 @@ impl KnowledgeMcpServer {
         let service_slot: ServiceSlot = Arc::new(RwLock::new(Weak::new()));
 
         let state = KbMcpState {
-            auth_token: auth_token.clone(),
+            issuer: issuer.clone(),
             service: service_slot.clone(),
         };
 
         let app = axum::Router::new()
             .route("/tool", axum::routing::post(handle_tool_request))
+            .route(
+                LOOPBACK_CAPABILITY_RENEW_PATH,
+                axum::routing::post(handle_capability_renew),
+            )
+            .route(
+                LOOPBACK_CAPABILITY_REVOKE_PATH,
+                axum::routing::post(handle_capability_revoke),
+            )
             .with_state(state);
 
         let handle = tokio::spawn(async move {
@@ -104,9 +116,10 @@ impl KnowledgeMcpServer {
 
         Ok(Self {
             http_addr,
-            auth_token,
+            issuer,
             shutdown_handle: Some(handle),
             service_slot,
+            external_broker: None,
         })
     }
 
@@ -127,11 +140,37 @@ impl KnowledgeMcpServer {
         self.http_addr.port()
     }
 
-    pub fn auth_token(&self) -> &str {
-        &self.auth_token
+    /// Build the non-serializable issuer configuration used by the main
+    /// process to mint one capability per Agent/Terminal child.
+    pub fn issuer_config(&self, binary_path: String) -> KnowledgeMcpConfig {
+        KnowledgeMcpConfig::from_issuer(
+            self.http_addr.port(),
+            self.issuer.clone(),
+            binary_path,
+        )
+    }
+
+    /// Start the owner-authenticated local broker used by persistent external
+    /// Claude/Gemini/Codex registrations. The broker reuses this server's
+    /// private issuer and service slot but never exposes either through config.
+    pub async fn start_external_broker(
+        &mut self,
+        config: KnowledgeMcpConfig,
+        installation_owner_id: String,
+    ) -> Result<(), String> {
+        let service = self.service_slot.read().await.clone();
+        if service.upgrade().is_none() {
+            return Err("knowledge service must be wired before broker start".into());
+        }
+        let broker = KnowledgeBroker::start(config, service, installation_owner_id).await?;
+        self.external_broker = Some(broker);
+        Ok(())
     }
 
     pub fn stop(&mut self) {
+        // Revoke all external-process leases before stopping their HTTP renewal
+        // endpoint. This makes restart invalidation immediate and deterministic.
+        self.external_broker.take();
         if let Some(handle) = self.shutdown_handle.take() {
             handle.abort();
             debug!(http_port = self.http_addr.port(), "Knowledge MCP Server stop requested");
@@ -154,33 +193,48 @@ async fn handle_tool_request(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    let provided_token = headers
+    let presented_token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
 
-    if provided_token != state.auth_token {
-        warn!("Knowledge MCP: unauthorized request");
-        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response();
-    }
+    let claims: KnowledgeCapabilityClaims = match body
+        .get("session")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<KnowledgeCapabilityClaims>(value).ok())
+    {
+        Some(claims)
+            if state
+                .issuer
+                .verify_access(
+                    KNOWLEDGE_CAPABILITY_DOMAIN,
+                    &claims,
+                    presented_token,
+                )
+                .is_ok()
+                && claims.scope.validate().is_ok() => claims,
+        _ => {
+            warn!("Knowledge MCP: rejected invalid, expired, or missing scoped capability");
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                .into_response();
+        }
+    };
 
     let tool = body.get("tool").and_then(Value::as_str).unwrap_or("");
+    if !claims.allows(tool) {
+        warn!(tool, "Knowledge MCP: tool is outside signed capability scope");
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden"})))
+            .into_response();
+    }
 
     let Some(service) = state.service.read().await.upgrade() else {
         warn!("Knowledge MCP: service not available");
         return finish(json!({"error": "knowledge service unavailable"}));
     };
 
-    // Back-compat: an old bridge may still bake explicit kb_ids. Otherwise scope
-    // is resolved server-side from cwd. Security invariant (all tools): the model
-    // supplies only query/handle/content; scope + write policy are decided
-    // server-side and cannot be widened by the model.
-    let explicit_kb_ids: Vec<String> = body
-        .get("kb_ids")
-        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
-        .unwrap_or_default();
-    let cwd = body.get("cwd").and_then(Value::as_str).unwrap_or("").to_string();
+    let kb_ids = &claims.scope.kb_ids;
+    let workspace_path = &claims.scope.workspace_path;
     let args = body.get("args").cloned().unwrap_or(Value::Null);
 
     match tool {
@@ -192,42 +246,72 @@ async fn handle_tool_request(
                 .map(|n| n as usize)
                 .unwrap_or(8)
                 .clamp(1, 20);
-            let kb_ids = if !explicit_kb_ids.is_empty() {
-                explicit_kb_ids
-            } else {
-                service.resolve_kb_ids_for_cwd(&cwd).await
-            };
-            info!(tool, kb_ids = kb_ids.len(), cwd = %cwd, "Knowledge MCP: dispatching tool");
-            finish(dispatch_search(&service, &kb_ids, &query, limit).await)
+            info!(tool, kb_ids = kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
+            finish(dispatch_search(&service, kb_ids, &query, limit).await)
         }
         "knowledge_read" => {
             let handle = args.get("handle").and_then(Value::as_str).unwrap_or("").trim().to_string();
-            let kb_ids = if !explicit_kb_ids.is_empty() {
-                explicit_kb_ids
-            } else {
-                service.resolve_kb_ids_for_cwd(&cwd).await
-            };
-            info!(tool, kb_ids = kb_ids.len(), cwd = %cwd, "Knowledge MCP: dispatching tool");
-            finish(dispatch_read(&service, &kb_ids, &handle).await)
+            info!(tool, kb_ids = kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
+            finish(dispatch_read(&service, kb_ids, &handle).await)
         }
         "knowledge_write" => {
-            let (bound_kb_ids, binding, wp_key) = service.resolve_write_context_for_cwd(&cwd).await;
-            // Staged inbox scope: prefer an explicit conversation id (per-session
-            // inbox, matching the nomi engine) when the bridge forwards one;
-            // otherwise fall back to the workpath key (per-workspace inbox).
-            let scope = body
-                .get("conversation_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .unwrap_or(wp_key);
-            info!(tool, kb_ids = bound_kb_ids.len(), cwd = %cwd, "Knowledge MCP: dispatching tool");
-            finish(dispatch_write(&service, &bound_kb_ids, &binding, &scope, &args).await)
+            let (resolved_kb_ids, binding, wp_key) = service
+                .resolve_write_context_for_cwd(workspace_path)
+                .await;
+            let bound_kb_ids: Vec<String> = resolved_kb_ids
+                .into_iter()
+                .filter(|id| kb_ids.contains(id))
+                .collect();
+            let write_scope = claims
+                .session
+                .conversation_id
+                .as_deref()
+                .unwrap_or(&wp_key);
+            info!(tool, kb_ids = bound_kb_ids.len(), workspace = %workspace_path, "Knowledge MCP: dispatching tool");
+            finish(dispatch_write(&service, &bound_kb_ids, &binding, write_scope, &args).await)
         }
         _ => {
             warn!(tool, "Knowledge MCP: unknown tool");
             finish(json!({"error": format!("unknown tool: {tool}")}))
+        }
+    }
+}
+
+/// Renew access from the issuer's immutable authorization registry. The
+/// request intentionally contains no user, session, tools, workspace, or base
+/// ids that a child could widen.
+async fn handle_capability_renew(
+    State(state): State<KbMcpState>,
+    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+) -> axum::response::Response {
+    match state
+        .issuer
+        .renew::<KnowledgeCapabilityScope>(KNOWLEDGE_CAPABILITY_DOMAIN, &request)
+    {
+        Ok(access) if access.claims.scope.validate().is_ok() => Json(access).into_response(),
+        _ => {
+            warn!("Knowledge MCP: rejected invalid capability renewal");
+            (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                .into_response()
+        }
+    }
+}
+
+/// Explicit child/runtime teardown. Invalid proofs fail closed; transport
+/// failure is best-effort because the issuer registry is process-local.
+async fn handle_capability_revoke(
+    State(state): State<KbMcpState>,
+    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+) -> axum::response::Response {
+    match state
+        .issuer
+        .revoke(KNOWLEDGE_CAPABILITY_DOMAIN, &request)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => {
+            warn!("Knowledge MCP: rejected invalid capability revocation");
+            (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                .into_response()
         }
     }
 }
@@ -382,8 +466,13 @@ mod tests {
 
     #[derive(Default)]
     struct NoopBroadcaster;
-    impl nomifun_realtime::EventBroadcaster for NoopBroadcaster {
-        fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    impl nomifun_realtime::UserEventSink for NoopBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
     }
 
     fn hit(kb_name: &str, rel_path: &str, heading: &str, snippet: &str) -> KnowledgeSearchHit {
@@ -429,7 +518,10 @@ mod tests {
         let db = nomifun_db::init_database_memory().await.expect("in-memory db");
         let repo = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(db.pool().clone()));
         let tmp = tempfile::tempdir().unwrap();
-        let emitter = KnowledgeEventEmitter::new(Arc::new(NoopBroadcaster));
+        let emitter = KnowledgeEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from("system_default_user"),
+        );
         let svc = Arc::new(KnowledgeService::new(repo, tmp.path(), emitter));
         (svc, tmp)
     }
@@ -464,116 +556,253 @@ mod tests {
         assert!(result.contains("No matches"), "got: {result}");
     }
 
-    // ── cwd-based scope resolution (Task 5) ─────────────────────────────
+    // ── Signed scope HTTP boundary ───────────────────────────────────────
 
     /// Helper: start a `KnowledgeMcpServer`, wire a service, and return
-    /// (server, service, port, token) for HTTP-level tests.
-    async fn start_wired_server() -> (KnowledgeMcpServer, Arc<KnowledgeService>, u16, String, tempfile::TempDir) {
+    /// (server, service, temp dir) for HTTP-level tests.
+    async fn start_wired_server() -> (KnowledgeMcpServer, Arc<KnowledgeService>, tempfile::TempDir) {
         let (svc, tmp) = build_service().await;
         let server = KnowledgeMcpServer::start().await.expect("bind");
         server.set_service(&svc).await;
-        let port = server.http_port();
-        let token = server.auth_token().to_owned();
-        (server, svc, port, token, tmp)
+        (server, svc, tmp)
     }
 
-    /// POST /tool with a JSON body, return the response JSON.
-    async fn post_tool(port: u16, token: &str, body: Value) -> Value {
+    fn conversation_child(
+        server: &KnowledgeMcpServer,
+        conversation_id: &str,
+        workspace: &str,
+        kb_ids: &[String],
+        allow_write: bool,
+    ) -> nomifun_api_types::KnowledgeMcpChildConfig {
+        server
+            .issuer_config("/bin/nomicore".into())
+            .issue_for_conversation(
+                "system_default_user",
+                conversation_id,
+                workspace,
+                kb_ids,
+                allow_write,
+            )
+            .unwrap()
+    }
+
+    /// POST /tool with signed claims, returning status + JSON.
+    async fn post_tool(
+        server: &KnowledgeMcpServer,
+        token: &str,
+        claims: &KnowledgeCapabilityClaims,
+        mut body: Value,
+    ) -> (u16, Value) {
+        body["session"] = serde_json::to_value(claims).unwrap();
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .expect("test http client");
         let resp = client
-            .post(format!("http://127.0.0.1:{port}/tool"))
+            .post(format!("http://127.0.0.1:{}/tool", server.http_port()))
             .header("Authorization", format!("Bearer {token}"))
             .json(&body)
             .send()
             .await
             .expect("request");
-        resp.json::<Value>().await.expect("json")
+        let status = resp.status().as_u16();
+        (status, resp.json::<Value>().await.expect("json"))
+    }
+
+    async fn post_renew(
+        server: &KnowledgeMcpServer,
+        request: &LoopbackCapabilityRenewalRequest,
+    ) -> (
+        u16,
+        Option<nomifun_common::LoopbackCapabilityAccess<KnowledgeCapabilityClaims>>,
+    ) {
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!(
+                "http://127.0.0.1:{}{}",
+                server.http_port(),
+                LOOPBACK_CAPABILITY_RENEW_PATH
+            ))
+            .json(request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let access = if status == StatusCode::OK.as_u16() {
+            Some(response.json().await.unwrap())
+        } else {
+            None
+        };
+        (status, access)
+    }
+
+    async fn post_revoke(
+        server: &KnowledgeMcpServer,
+        request: &LoopbackCapabilityRenewalRequest,
+    ) -> u16 {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!(
+                "http://127.0.0.1:{}{}",
+                server.http_port(),
+                LOOPBACK_CAPABILITY_REVOKE_PATH
+            ))
+            .json(request)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
     }
 
     #[tokio::test]
-    async fn tool_request_with_cwd_resolves_scope_via_service() {
-        let (_server, svc, port, token, _tmp) = start_wired_server().await;
+    async fn renewal_restores_immutable_scope_and_revoke_closes_the_lease() {
+        let server = KnowledgeMcpServer::start().await.unwrap();
+        let child = conversation_child(
+            &server,
+            "17",
+            "/workspace",
+            &["kb_1".to_owned(), "kb_2".to_owned()],
+            true,
+        );
 
-        // Create a base and bind it to a workpath.
+        let mut forged_proof = child.bootstrap.renewal.clone();
+        forged_proof.renewal_proof.push('x');
+        assert_eq!(post_renew(&server, &forged_proof).await.0, 401);
+        assert_eq!(post_revoke(&server, &forged_proof).await, 401);
+
+        let (status, renewed) = post_renew(&server, &child.bootstrap.renewal).await;
+        assert_eq!(status, 200);
+        let renewed = renewed.expect("valid proof should renew");
+        let original = &child.bootstrap.access.claims;
+        assert_eq!(renewed.claims.lease_id, original.lease_id);
+        assert_eq!(renewed.claims.user_id, original.user_id);
+        assert_eq!(renewed.claims.session, original.session);
+        assert_eq!(renewed.claims.allowed_tools, original.allowed_tools);
+        assert_eq!(renewed.claims.scope, original.scope);
+        assert_ne!(renewed.claims.nonce, original.nonce);
+
+        assert_eq!(post_revoke(&server, &child.bootstrap.renewal).await, 204);
+        let (status, _) = post_tool(
+            &server,
+            &renewed.token,
+            &renewed.claims,
+            json!({"tool": "knowledge_search", "args": {"query": "x"}}),
+        )
+        .await;
+        assert_eq!(status, 401, "revoked access must fail before dispatch");
+        assert_eq!(post_renew(&server, &child.bootstrap.renewal).await.0, 401);
+    }
+
+    #[tokio::test]
+    async fn renewal_rejects_registry_authorization_with_invalid_knowledge_scope() {
+        let server = KnowledgeMcpServer::start().await.unwrap();
+        let claims = KnowledgeCapabilityClaims::issue(
+            "system_default_user",
+            nomifun_common::LoopbackSessionBinding::conversation("17"),
+            ["knowledge_search"],
+            KnowledgeCapabilityScope {
+                workspace_path: " /not-canonical".to_owned(),
+                kb_ids: vec!["kb_1".to_owned()],
+            },
+        )
+        .unwrap();
+        let (_, renewal_proof) = server
+            .issuer
+            .activate(KNOWLEDGE_CAPABILITY_DOMAIN, &claims)
+            .unwrap();
+        let request = LoopbackCapabilityRenewalRequest {
+            lease_id: claims.lease_id,
+            renewal_proof,
+        };
+        assert_eq!(post_renew(&server, &request).await.0, 401);
+    }
+
+    #[tokio::test]
+    async fn signed_scope_selects_bases_and_ignores_forged_body_scope() {
+        let (server, svc, _tmp) = start_wired_server().await;
+
         let info = svc.create_base("项目库", "", None, None).await.unwrap();
         let root = svc.data_dir().join("knowledge").join(&info.id);
         std::fs::write(root.join("api.md"), "# API\n接口文档内容\n").unwrap();
+        let other = svc.create_base("无关库", "", None, None).await.unwrap();
+        let other_root = svc.data_dir().join("knowledge").join(&other.id);
+        std::fs::write(other_root.join("secret.md"), "# Secret\n接口隐藏内容\n").unwrap();
 
-        let ws = "/Users/test/myproject";
-        let key = crate::workpath::workpath_key(ws);
-        svc.set_binding(
-            crate::workpath::WORKPATH_BINDING_KIND,
-            &key,
-            crate::service::KnowledgeBinding {
-                enabled: true,
-                kb_ids: vec![info.id.clone()],
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-
-        // Request with cwd (no kb_ids) → uses cwd-resolved scope.
-        let resp = post_tool(port, &token, json!({
+        let child = conversation_child(
+            &server,
+            "17",
+            "/Users/test/myproject",
+            std::slice::from_ref(&info.id),
+            false,
+        );
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, json!({
             "tool": "knowledge_search",
-            "cwd": ws,
+            "cwd": "/forged",
+            "kb_ids": [other.id],
             "args": { "query": "接口" }
         }))
         .await;
+        assert_eq!(status, 200);
         let result = resp.get("result").and_then(Value::as_str)
             .unwrap_or_else(|| panic!("expected result, got {resp}"));
-        assert!(result.contains("api.md"), "cwd scope should find the doc: {result}");
+        assert!(result.contains("api.md"), "signed scope should find the doc: {result}");
+        assert!(!result.contains("secret.md"), "unsigned body scope must be ignored: {result}");
     }
 
     #[tokio::test]
-    async fn tool_request_with_explicit_kb_ids_uses_them_backcompat() {
-        let (_server, svc, port, token, _tmp) = start_wired_server().await;
+    async fn tampered_cross_session_expired_and_write_escalation_fail_closed() {
+        let (server, svc, _tmp) = start_wired_server().await;
+        let info = svc.create_base("库", "", None, None).await.unwrap();
+        let child = conversation_child(
+            &server,
+            "17",
+            "/workspace",
+            std::slice::from_ref(&info.id),
+            false,
+        );
 
-        let info = svc.create_base("手册", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
-        std::fs::write(root.join("ops.md"), "# Ops\n运维流程\n").unwrap();
-
-        // Create another base (not bound to anything).
-        let info2 = svc.create_base("无关库", "", None, None).await.unwrap();
-        let root2 = svc.data_dir().join("knowledge").join(&info2.id);
-        std::fs::write(root2.join("other.md"), "# Other\n别的东西\n").unwrap();
-
-        // Request with explicit kb_ids (old bridge style) → uses those, ignores cwd.
-        let resp = post_tool(port, &token, json!({
-            "tool": "knowledge_search",
-            "kb_ids": [info.id],
-            "cwd": "/some/unbound/path",
-            "args": { "query": "运维" }
-        }))
+        let mut forged = child.bootstrap.access.claims.clone();
+        forged.session = nomifun_common::LoopbackSessionBinding::conversation("99");
+        let (status, _) = post_tool(
+            &server,
+            &child.bootstrap.access.token,
+            &forged,
+            json!({"tool": "knowledge_search", "args": {"query": "x"}}),
+        )
         .await;
-        let result = resp.get("result").and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("expected result, got {resp}"));
-        assert!(result.contains("ops.md"), "explicit kb_ids should be used: {result}");
-        // The other base should NOT be searched (explicit kb_ids narrows scope).
-        assert!(!result.contains("other.md"), "should not search unspecified bases: {result}");
-    }
+        assert_eq!(status, 401);
 
-    #[tokio::test]
-    async fn tool_request_with_empty_cwd_searches_all_bases() {
-        let (_server, svc, port, token, _tmp) = start_wired_server().await;
-
-        let info = svc.create_base("全局库", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
-        std::fs::write(root.join("global.md"), "# Global\n全局知识\n").unwrap();
-
-        // No kb_ids, empty cwd → fallback to all bases.
-        let resp = post_tool(port, &token, json!({
-            "tool": "knowledge_search",
-            "cwd": "",
-            "args": { "query": "全局" }
-        }))
+        let (status, _) = post_tool(
+            &server,
+            &child.bootstrap.access.token,
+            &child.bootstrap.access.claims,
+            json!({"tool": "knowledge_write", "args": {"content": "x"}}),
+        )
         .await;
-        let result = resp.get("result").and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("expected result, got {resp}"));
-        assert!(result.contains("global.md"), "empty cwd should search all: {result}");
+        assert_eq!(status, 403, "read-only child cannot self-enable writes");
+
+        let now = nomifun_common::unix_time_secs();
+        let expired = server
+            .issuer
+            .renew_at::<KnowledgeCapabilityScope>(
+                KNOWLEDGE_CAPABILITY_DOMAIN,
+                &child.bootstrap.renewal,
+                now.saturating_sub(nomifun_common::LOOPBACK_CAPABILITY_TTL_SECS + 1),
+            )
+            .expect("clock-injected renewal should produce an already-expired access");
+        let (status, _) = post_tool(
+            &server,
+            &expired.token,
+            &expired.claims,
+            json!({"tool": "knowledge_search", "args": {"query": "x"}}),
+        )
+        .await;
+        assert_eq!(status, 401);
     }
 
     // ── knowledge_read / knowledge_write (P2) ───────────────────────────
@@ -643,7 +872,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_knowledge_write_routes_through_policy_direct() {
-        let (_server, svc, port, token, _tmp) = start_wired_server().await;
+        let (server, svc, _tmp) = start_wired_server().await;
         let info = svc.create_base("项目库", "", None, None).await.unwrap();
         svc.write_file(&info.id, "notes.md", "OLD").await.unwrap();
         let ws = "/Users/test/wp-write";
@@ -661,12 +890,19 @@ mod tests {
         )
         .await
         .unwrap();
-        let resp = post_tool(port, &token, json!({
+        let child = conversation_child(
+            &server,
+            "conv-write",
+            ws,
+            std::slice::from_ref(&info.id),
+            true,
+        );
+        let (status, resp) = post_tool(&server, &child.bootstrap.access.token, &child.bootstrap.access.claims, json!({
             "tool": "knowledge_write",
-            "cwd": ws,
             "args": { "handle": encode_doc_handle(&info.id, "notes.md"), "content": "NEW" }
         }))
         .await;
+        assert_eq!(status, 200);
         assert!(resp.get("result").is_some(), "expected result, got {resp}");
         assert_eq!(svc.read_file(&info.id, "notes.md").await.unwrap().content, "NEW");
     }

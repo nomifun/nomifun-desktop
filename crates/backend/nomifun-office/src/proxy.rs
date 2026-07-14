@@ -18,7 +18,9 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
     "cookie",
+    "set-cookie",
     "authorization",
+    "x-frame-options",
 ];
 
 const NAVIGATION_GUARD_TEMPLATE: &str = r#"<script>
@@ -59,29 +61,39 @@ impl ProxyService {
 
     pub async fn forward(
         &self,
-        port: u16,
+        capability: &str,
         path: &str,
         doc_type: DocType,
         request_headers: &[(String, String)],
     ) -> Result<ProxyResponse, ProxyError> {
-        if !self.watch_manager.is_active_port(port, doc_type) {
-            return Err(ProxyError::PortNotActive(port));
+        let target = self
+            .watch_manager
+            .resolve_capability(capability)
+            .ok_or(ProxyError::InvalidCapability)?;
+        if target.doc_type != doc_type {
+            return Err(ProxyError::InvalidCapability);
         }
-        let proxy_base = format!("/api/{}/{}", doc_type.proxy_prefix(), port);
-        self.forward_inner(port, path, &proxy_base, request_headers).await
+        let proxy_base = format!("/api/{}/{}", doc_type.proxy_prefix(), capability);
+        self.forward_inner(target.port, path, &proxy_base, request_headers)
+            .await
     }
 
     pub async fn forward_watch(
         &self,
-        port: u16,
+        capability: &str,
         path: &str,
         request_headers: &[(String, String)],
     ) -> Result<ProxyResponse, ProxyError> {
-        if !self.watch_manager.is_active_watch_port(port) {
-            return Err(ProxyError::PortNotActive(port));
+        let target = self
+            .watch_manager
+            .resolve_capability(capability)
+            .ok_or(ProxyError::InvalidCapability)?;
+        if !matches!(target.doc_type, DocType::Word | DocType::Excel) {
+            return Err(ProxyError::InvalidCapability);
         }
-        let proxy_base = format!("/api/office-watch-proxy/{port}");
-        self.forward_inner(port, path, &proxy_base, request_headers).await
+        let proxy_base = format!("/api/office-watch-proxy/{capability}");
+        self.forward_inner(target.port, path, &proxy_base, request_headers)
+            .await
     }
 
     async fn forward_inner(
@@ -164,8 +176,6 @@ impl ProxyService {
             }
         }
 
-        out_headers.push(("x-frame-options".to_owned(), "SAMEORIGIN".to_owned()));
-
         if is_html {
             body_bytes = inject_navigation_guard(&body_bytes, proxy_base);
         }
@@ -180,8 +190,8 @@ impl ProxyService {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
-    #[error("port {0} is not an active preview port")]
-    PortNotActive(u16),
+    #[error("invalid or expired preview capability")]
+    InvalidCapability,
 
     #[error("proxy request timed out")]
     Timeout,
@@ -196,7 +206,7 @@ pub enum ProxyError {
 impl From<ProxyError> for nomifun_common::AppError {
     fn from(err: ProxyError) -> Self {
         match err {
-            ProxyError::PortNotActive(_) => nomifun_common::AppError::Forbidden(err.to_string()),
+            ProxyError::InvalidCapability => nomifun_common::AppError::Forbidden(err.to_string()),
             ProxyError::Timeout => nomifun_common::AppError::Timeout(err.to_string()),
             ProxyError::ConnectionFailed(msg) => nomifun_common::AppError::BadGateway(msg),
             ProxyError::RequestFailed(msg) => nomifun_common::AppError::BadGateway(msg),
@@ -439,8 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn proxy_error_port_not_active_to_forbidden() {
-        let err: nomifun_common::AppError = ProxyError::PortNotActive(8080).into();
+    fn proxy_error_invalid_capability_to_forbidden() {
+        let err: nomifun_common::AppError = ProxyError::InvalidCapability.into();
         assert!(matches!(err, nomifun_common::AppError::Forbidden(_)));
     }
 
@@ -465,8 +475,8 @@ mod tests {
     #[test]
     fn proxy_error_display() {
         assert_eq!(
-            ProxyError::PortNotActive(8080).to_string(),
-            "port 8080 is not an active preview port"
+            ProxyError::InvalidCapability.to_string(),
+            "invalid or expired preview capability"
         );
         assert_eq!(ProxyError::Timeout.to_string(), "proxy request timed out");
         assert_eq!(

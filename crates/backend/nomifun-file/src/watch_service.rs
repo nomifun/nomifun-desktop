@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use tracing::warn;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_common::AppError;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 use crate::types::{FileWatchEvent, OfficeFileAddedEvent};
 
@@ -70,24 +70,29 @@ fn should_emit(debounce: &DashMap<String, Instant>, key: &str) -> bool {
 ///   [`RecursiveMode::Recursive`], filtering for `.pptx`/`.docx`/`.xlsx`
 ///   creation events.
 pub struct FileWatchService {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     /// Shared watcher for all single-file watches.
     file_watcher: Mutex<RecommendedWatcher>,
     /// Set of canonical paths being watched (shared with the event handler).
-    watched_files: Arc<DashMap<String, ()>>,
+    watched_files: Arc<DashMap<String, HashSet<String>>>,
     /// Per-workspace Office watchers, keyed by canonical workspace path.
-    office_watchers: Mutex<HashMap<String, RecommendedWatcher>>,
+    office_watchers: Mutex<HashMap<String, OfficeWatchRegistration>>,
     /// Debounce timestamps shared with watcher callbacks.
     debounce: Arc<DashMap<String, Instant>>,
 }
 
+struct OfficeWatchRegistration {
+    _watcher: RecommendedWatcher,
+    owners: Arc<DashMap<String, ()>>,
+}
+
 impl FileWatchService {
     /// Create a new watch service backed by the platform's recommended watcher.
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>) -> Result<Self, AppError> {
-        let watched_files: Arc<DashMap<String, ()>> = Arc::new(DashMap::new());
+    pub fn new(user_events: Arc<dyn UserEventSink>) -> Result<Self, AppError> {
+        let watched_files: Arc<DashMap<String, HashSet<String>>> = Arc::new(DashMap::new());
         let debounce: Arc<DashMap<String, Instant>> = Arc::new(DashMap::new());
 
-        let bc = broadcaster.clone();
+        let events = user_events.clone();
         let wf = watched_files.clone();
         let db = debounce.clone();
 
@@ -107,9 +112,9 @@ impl FileWatchService {
 
             for path in &event.paths {
                 let path_str = path.to_string_lossy().into_owned();
-                if !wf.contains_key(&path_str) {
-                    continue;
-                }
+                let Some(owners) = wf.get(&path_str) else { continue };
+                let owner_ids: Vec<String> = owners.iter().cloned().collect();
+                drop(owners);
                 if !should_emit(&db, &path_str) {
                     continue;
                 }
@@ -118,13 +123,18 @@ impl FileWatchService {
                     event_type: event_type.to_owned(),
                 };
                 let json = serde_json::to_value(&payload).unwrap_or_default();
-                bc.broadcast(WebSocketMessage::new("fileWatch.fileChanged", json));
+                for owner_id in owner_ids {
+                    events.send_to_user(
+                        &owner_id,
+                        WebSocketMessage::new("fileWatch.fileChanged", json.clone()),
+                    );
+                }
             }
         })
         .map_err(|e| AppError::Internal(format!("failed to create file watcher: {e}")))?;
 
         Ok(Self {
-            broadcaster,
+            user_events,
             file_watcher: Mutex::new(file_watcher),
             watched_files,
             office_watchers: Mutex::new(HashMap::new()),
@@ -135,34 +145,47 @@ impl FileWatchService {
 
 #[async_trait::async_trait]
 impl crate::traits::IFileWatchService for FileWatchService {
-    async fn start_watch(&self, file_path: &str) -> Result<(), AppError> {
+    async fn start_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError> {
+        require_owner(owner_id)?;
         let canonical = std::fs::canonicalize(file_path)
             .map_err(|e| AppError::NotFound(format!("cannot resolve path {file_path}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
-
-        // Idempotent: already watching → no-op.
-        if self.watched_files.contains_key(&key) {
-            return Ok(());
-        }
 
         let mut watcher = self
             .file_watcher
             .lock()
             .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
-        watcher
-            .watch(&canonical, RecursiveMode::NonRecursive)
-            .map_err(|e| AppError::Internal(format!("failed to watch {file_path}: {e}")))?;
-        self.watched_files.insert(key, ());
+        // The watcher lock serializes check/register/insert, so concurrent
+        // owners cannot install duplicate OS watches for the same path.
+        if let Some(mut owners) = self.watched_files.get_mut(&key) {
+            owners.insert(owner_id.to_owned());
+            return Ok(());
+        }
+        self.watched_files
+            .insert(key.clone(), HashSet::from([owner_id.to_owned()]));
+        if let Err(error) = watcher.watch(&canonical, RecursiveMode::NonRecursive) {
+            self.watched_files.remove(&key);
+            return Err(AppError::Internal(format!("failed to watch {file_path}: {error}")));
+        }
         Ok(())
     }
 
-    async fn stop_watch(&self, file_path: &str) -> Result<(), AppError> {
+    async fn stop_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError> {
+        require_owner(owner_id)?;
         let canonical = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.into());
         let key = canonical.to_string_lossy().into_owned();
 
-        if self.watched_files.remove(&key).is_none() {
+        let remove_os_watch = match self.watched_files.get_mut(&key) {
+            Some(mut owners) => {
+                owners.remove(owner_id);
+                owners.is_empty()
+            }
+            None => false,
+        };
+        if !remove_os_watch {
             return Ok(());
         }
+        self.watched_files.remove(&key);
 
         let mut watcher = self
             .file_watcher
@@ -174,40 +197,44 @@ impl crate::traits::IFileWatchService for FileWatchService {
         Ok(())
     }
 
-    async fn stop_all_watches(&self) -> Result<(), AppError> {
-        let mut watcher = self
-            .file_watcher
-            .lock()
-            .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
-
-        for entry in self.watched_files.iter() {
-            let path = std::path::PathBuf::from(entry.key().as_str());
-            let _ = watcher.unwatch(&path);
+    async fn stop_all_watches(&self, owner_id: &str) -> Result<(), AppError> {
+        require_owner(owner_id)?;
+        let paths: Vec<String> = self
+            .watched_files
+            .iter()
+            .filter(|entry| entry.value().contains(owner_id))
+            .map(|entry| entry.key().clone())
+            .collect();
+        for path in paths {
+            self.stop_watch(owner_id, &path).await?;
         }
-        self.watched_files.clear();
-        // Clean file-watch debounce entries only (keep office ones).
-        self.debounce.retain(|k, _| k.starts_with("office:"));
         Ok(())
     }
 
-    async fn start_office_watch(&self, workspace: &str) -> Result<(), AppError> {
+    async fn start_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError> {
+        require_owner(owner_id)?;
         let canonical = std::fs::canonicalize(workspace)
             .map_err(|e| AppError::NotFound(format!("cannot resolve workspace {workspace}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
 
-        {
-            let watchers = self
-                .office_watchers
-                .lock()
-                .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-            if watchers.contains_key(&key) {
-                return Ok(());
-            }
+        // Keep the registration lock through watcher construction and insert.
+        // Otherwise two concurrent callers can replace each other's watcher
+        // and owner set, leaving an orphan callback alive.
+        let mut watchers = self
+            .office_watchers
+            .lock()
+            .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
+        if let Some(registration) = watchers.get(&key) {
+            registration.owners.insert(owner_id.to_owned(), ());
+            return Ok(());
         }
 
-        let bc = self.broadcaster.clone();
+        let events = self.user_events.clone();
         let db = self.debounce.clone();
         let ws = key.clone();
+        let owners = Arc::new(DashMap::new());
+        owners.insert(owner_id.to_owned(), ());
+        let callback_owners = owners.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
             let event = match res {
@@ -236,7 +263,13 @@ impl crate::traits::IFileWatchService for FileWatchService {
                     workspace: ws.clone(),
                 };
                 let json = serde_json::to_value(&payload).unwrap_or_default();
-                bc.broadcast(WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json));
+                let owner_ids: Vec<String> = callback_owners.iter().map(|entry| entry.key().clone()).collect();
+                for owner_id in owner_ids {
+                    events.send_to_user(
+                        &owner_id,
+                        WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json.clone()),
+                    );
+                }
             }
         })
         .map_err(|e| AppError::Internal(format!("failed to create office watcher: {e}")))?;
@@ -245,15 +278,18 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .watch(&canonical, RecursiveMode::Recursive)
             .map_err(|e| AppError::Internal(format!("failed to watch workspace {workspace}: {e}")))?;
 
-        let mut watchers = self
-            .office_watchers
-            .lock()
-            .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        watchers.insert(key, watcher);
+        watchers.insert(
+            key,
+            OfficeWatchRegistration {
+                _watcher: watcher,
+                owners,
+            },
+        );
         Ok(())
     }
 
-    async fn stop_office_watch(&self, workspace: &str) -> Result<(), AppError> {
+    async fn stop_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError> {
+        require_owner(owner_id)?;
         let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.into());
         let key = canonical.to_string_lossy().into_owned();
 
@@ -261,8 +297,25 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .office_watchers
             .lock()
             .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        // Dropping the watcher stops watching.
-        watchers.remove(&key);
+        let remove_registration = watchers
+            .get(&key)
+            .map(|registration| {
+                registration.owners.remove(owner_id);
+                registration.owners.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_registration {
+            // Dropping the last owner's registration stops the OS watcher.
+            watchers.remove(&key);
+        }
+        Ok(())
+    }
+}
+
+fn require_owner(owner_id: &str) -> Result<(), AppError> {
+    if owner_id.trim().is_empty() {
+        Err(AppError::BadRequest("file watch owner is required".into()))
+    } else {
         Ok(())
     }
 }

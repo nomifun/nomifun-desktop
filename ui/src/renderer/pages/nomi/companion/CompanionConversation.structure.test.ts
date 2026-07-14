@@ -12,5 +12,6 @@ describe('CompanionConversation structure', () => {
     const source = readFileSync(new URL('./CompanionConversation.tsx', import.meta.url), 'utf8');
 
     expect(source.includes('selfContainedWorkspaceToggle')).toBe(false);
+    expect(source.includes('ExecutionConversationLayout')).toBe(false);
   });
 });

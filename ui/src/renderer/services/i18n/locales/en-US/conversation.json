@@ -20,13 +20,6 @@
     "skillsMarketDesc": "Search and activate community Skills on demand. Configure once, available for all agents.",
     "skillsMarketDetails": "View More >>"
   },
-  "orchestration": {
-    "panelTitle": "Orchestration",
-    "planning": "Planning…",
-    "collapseCanvas": "Collapse orchestration canvas",
-    "expandCanvas": "Expand orchestration canvas",
-    "resizeCanvas": "Resize canvas"
-  },
   "history": {
     "noHistory": "No chat history",
     "deleteTitle": "Delete",
@@ -588,20 +581,5 @@
     "success": "Context cleared",
     "failed": "Failed to clear context",
     "button": "Clear context"
-  },
-  "cluster": {
-    "stripTitle": "Agent cluster",
-    "progress": "{{done}}/{{total}} nodes delivered",
-    "expand": "Expand cluster progress",
-    "collapse": "Collapse cluster progress",
-    "questionBanner": "Node \"{{title}}\" has a decision question for you",
-    "questionCta": "Answer →",
-    "toggleTitle": "Cluster",
-    "toggleDesc": "Split work across agents when it helps.",
-    "approvalTitle": "Node confirmation",
-    "approvalDesc": "Pause on key decisions and wait for you.",
-    "pillAria": "Agent cluster settings",
-    "pill": "Cluster",
-    "approvalShort": "Approve"
   }
 }

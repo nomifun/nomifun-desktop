@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_office::{DocType, OfficeError, OfficecliWatchManager, ProcessHandle, ProcessSpawner};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 // ---------------------------------------------------------------------------
 // Test doubles
@@ -109,8 +109,8 @@ impl TestBroadcaster {
     }
 }
 
-impl EventBroadcaster for TestBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for TestBroadcaster {
+    fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
     }
 }
@@ -134,10 +134,13 @@ async fn wp2_session_reuse_returns_same_port() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "doc.docx");
 
-    let p1 = mgr.start(&path, DocType::Word).await.unwrap();
-    let p2 = mgr.start(&path, DocType::Word).await.unwrap();
+    let first = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    let second = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
 
-    assert_eq!(p1, p2);
+    assert_eq!(first.port, second.port);
+    assert_ne!(first.capability, second.capability);
+    assert!(mgr.resolve_capability(&first.capability).is_some());
+    assert!(mgr.resolve_capability(&second.capability).is_some());
     assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
 }
 
@@ -154,11 +157,12 @@ async fn wp3_stop_terminates_session() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "doc.docx");
 
-    let port = mgr.start(&path, DocType::Word).await.unwrap();
-    assert!(mgr.is_active_port(port, DocType::Word));
+    let access = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    assert!(mgr.resolve_capability(&access.capability).is_some());
 
-    mgr.stop(&path, DocType::Word).await;
-    assert!(!mgr.is_active_port(port, DocType::Word));
+    mgr.stop("owner-a", DocType::Word, &access.capability)
+        .await;
+    assert!(mgr.resolve_capability(&access.capability).is_none());
     assert_eq!(mgr.active_session_count(), 0);
 }
 
@@ -175,8 +179,8 @@ async fn wp4_auto_install_on_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "doc.docx");
 
-    let port = mgr.start(&path, DocType::Word).await.unwrap();
-    assert!(port > 0);
+    let access = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    assert!(access.port > 0);
     assert_eq!(spawner.install_count.load(Ordering::SeqCst), 1);
 
     let states = broadcaster.event_states();
@@ -198,14 +202,19 @@ async fn ep1_excel_independent_session_pool() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "data.xlsx");
 
-    let word_port = mgr.start(&path, DocType::Word).await.unwrap();
-    let excel_port = mgr.start(&path, DocType::Excel).await.unwrap();
+    let word = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    let excel = mgr.start("owner-a", &path, DocType::Excel).await.unwrap();
 
-    assert_ne!(word_port, excel_port);
+    assert_ne!(word.port, excel.port);
     assert_eq!(mgr.active_session_count(), 2);
-    assert!(mgr.is_active_port(word_port, DocType::Word));
-    assert!(mgr.is_active_port(excel_port, DocType::Excel));
-    assert!(!mgr.is_active_port(word_port, DocType::Excel));
+    assert_eq!(
+        mgr.resolve_capability(&word.capability).unwrap().doc_type,
+        DocType::Word
+    );
+    assert_eq!(
+        mgr.resolve_capability(&excel.capability).unwrap().doc_type,
+        DocType::Excel
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -221,10 +230,12 @@ async fn pp1_ppt_independent_session_pool() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "slides.pptx");
 
-    let port = mgr.start(&path, DocType::Ppt).await.unwrap();
-    assert!(port > 0);
-    assert!(mgr.is_active_port(port, DocType::Ppt));
-    assert!(!mgr.is_active_port(port, DocType::Word));
+    let access = mgr.start("owner-a", &path, DocType::Ppt).await.unwrap();
+    assert!(access.port > 0);
+    assert_eq!(
+        mgr.resolve_capability(&access.capability).unwrap().doc_type,
+        DocType::Ppt
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +251,7 @@ async fn pp3_ppt_background_version_check() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "slides.pptx");
 
-    mgr.start(&path, DocType::Ppt).await.unwrap();
+    mgr.start("owner-a", &path, DocType::Ppt).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     // Version check is fire-and-forget; we just verify it doesn't panic
@@ -262,9 +273,9 @@ async fn status_events_use_correct_prefix() {
     let f2 = create_temp_file(&dir, "b.xlsx");
     let f3 = create_temp_file(&dir, "c.pptx");
 
-    mgr.start(&f1, DocType::Word).await.unwrap();
-    mgr.start(&f2, DocType::Excel).await.unwrap();
-    mgr.start(&f3, DocType::Ppt).await.unwrap();
+    mgr.start("owner-a", &f1, DocType::Word).await.unwrap();
+    mgr.start("owner-a", &f2, DocType::Excel).await.unwrap();
+    mgr.start("owner-a", &f3, DocType::Ppt).await.unwrap();
 
     let names = broadcaster.event_names();
     assert!(names.contains(&"word-preview.status".to_string()));
@@ -287,27 +298,27 @@ async fn stop_all_clears_all_sessions() {
     let f2 = create_temp_file(&dir, "b.xlsx");
     let f3 = create_temp_file(&dir, "c.pptx");
 
-    mgr.start(&f1, DocType::Word).await.unwrap();
-    mgr.start(&f2, DocType::Excel).await.unwrap();
-    mgr.start(&f3, DocType::Ppt).await.unwrap();
+    mgr.start("owner-a", &f1, DocType::Word).await.unwrap();
+    mgr.start("owner-a", &f2, DocType::Excel).await.unwrap();
+    mgr.start("owner-a", &f3, DocType::Ppt).await.unwrap();
     assert_eq!(mgr.active_session_count(), 3);
 
-    mgr.stop_all();
+    mgr.stop_all().await;
     assert_eq!(mgr.active_session_count(), 0);
 }
 
 // ---------------------------------------------------------------------------
-// SSRF defense: is_active_port returns false for non-active ports
+// SSRF defense: guessed and legacy port capabilities fail closed
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rp2_inactive_port_rejected() {
+async fn rp2_guessed_capability_rejected() {
     let spawner = Arc::new(TestSpawner::new(true));
     let broadcaster = Arc::new(TestBroadcaster::new());
     let mgr = OfficecliWatchManager::new(spawner, broadcaster);
 
-    assert!(!mgr.is_active_port(8080, DocType::Word));
-    assert!(!mgr.is_active_port(9999, DocType::Ppt));
+    assert!(mgr.resolve_capability("8080").is_none());
+    assert!(mgr.resolve_capability(&"0".repeat(64)).is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -323,10 +334,12 @@ async fn stop_then_restart_creates_new_session() {
     let dir = tempfile::tempdir().unwrap();
     let path = create_temp_file(&dir, "doc.docx");
 
-    let p1 = mgr.start(&path, DocType::Word).await.unwrap();
-    mgr.stop(&path, DocType::Word).await;
+    let first = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    mgr.stop("owner-a", DocType::Word, &first.capability)
+        .await;
 
-    let p2 = mgr.start(&path, DocType::Word).await.unwrap();
-    assert_ne!(p1, p2);
+    let second = mgr.start("owner-a", &path, DocType::Word).await.unwrap();
+    assert_ne!(first.port, second.port);
+    assert_ne!(first.capability, second.capability);
     assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 2);
 }

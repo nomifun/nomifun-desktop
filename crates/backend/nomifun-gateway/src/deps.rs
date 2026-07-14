@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use nomifun_ai_agent::IWorkerTaskManager;
+use nomifun_ai_agent::AgentRuntimeRegistry;
 use nomifun_preset::PresetService;
 use nomifun_companion::CompanionService;
 use nomifun_conversation::ConversationService;
@@ -10,7 +10,7 @@ use nomifun_cron::service::CronService;
 use nomifun_db::IProviderRepository;
 use nomifun_idmm::IdmmService;
 use nomifun_knowledge::KnowledgeService;
-use nomifun_requirement::{Orchestrator, RequirementService};
+use nomifun_requirement::{AutoWorkRunner, RequirementService};
 use nomifun_system::{ClientPrefService, ModelFetchService, ProviderService, SettingsService};
 use nomifun_terminal::TerminalService;
 
@@ -28,8 +28,11 @@ use nomifun_terminal::TerminalService;
 /// matching `states.*` / `services.*`). The struct is just an Arc bundle —
 /// growth is O(1) pointers, negligible.
 pub struct GatewayDeps {
+    /// Canonical installation owner. Every installation-scoped capability is
+    /// gated against this same immutable identity before its handler runs.
+    pub authoritative_user_id: Arc<str>,
     pub conversation_service: ConversationService,
-    pub task_manager: Arc<dyn IWorkerTaskManager>,
+    pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     pub cron_service: Arc<CronService>,
     /// MUST be the router-state instance (the singleton clone that had
     /// `with_conversation_service` / `with_terminal_driver` attached in
@@ -38,7 +41,7 @@ pub struct GatewayDeps {
     pub requirement_service: Arc<RequirementService>,
     pub companion_service: Arc<CompanionService>,
     /// Singleton terminal service (owns the live PTY map shared with the
-    /// terminal routes + AutoWork orchestrator).
+    /// terminal routes + AutoWork runner).
     pub terminal_service: Arc<TerminalService>,
     /// Main-db provider rows: model listing + the nomi model resolution chain.
     pub provider_repo: Arc<dyn IProviderRepository>,
@@ -64,10 +67,10 @@ pub struct GatewayDeps {
     /// service mounts from at task start).
     pub knowledge_service: Arc<KnowledgeService>,
     /// AutoWork live-loop control. The REST `POST /api/requirements/autowork`
-    /// starts/stops this orchestrator alongside persisting the config; the
+    /// starts/stops this runner alongside persisting the config; the
     /// gateway autowork tools must mirror that or an "enabled" toggle would
     /// only take effect after the next desktop boot (boot-resume).
-    pub autowork_orchestrator: Arc<Orchestrator>,
+    pub auto_work_runner: Arc<AutoWorkRunner>,
     /// System domain services (same instances the `/api/settings`,
     /// `/api/settings/client`, `/api/providers` routes use — so a gateway theme /
     /// toggle / provider change and a UI change act on identical state).
@@ -94,22 +97,10 @@ pub struct GatewayDeps {
     pub remote_agent_service: std::sync::Arc<nomifun_ai_agent::RemoteAgentService>,
     /// Client-preference repo backing the global model-failover config.
     pub client_pref_repo: std::sync::Arc<dyn nomifun_db::IClientPreferenceRepository>,
-    /// 智能编排 Run control-plane: creates/plans/inspects orchestration runs.
-    /// MUST be the router-state instance (`states.orchestrator.run_service` — the
-    /// same `Arc<RunService>` the REST routes + the [`RunEngine`] loop share), so a
-    /// gateway-created run and a UI-created run act on identical state.
-    pub orchestrator_run_service: Arc<nomifun_orchestrator::RunService>,
-    /// 智能编排 Run engine: the serial execution loop driver. MUST be the
-    /// router-state instance (`states.orchestrator.engine` — `RunEngine` is itself
-    /// `Clone` with `Arc` internals, so this `Arc` wraps that one live instance;
-    /// `start()` must register against the SAME in-memory handle map the boot
-    /// resume + REST cancel use, or a gateway-started run would not be cancellable).
-    pub orchestrator_run_engine: Arc<nomifun_orchestrator::RunEngine>,
+    /// One shared persistent collaboration facade. REST, gateway tools, boot
+    /// recovery and scheduling all use this exact instance.
+    pub agent_execution_engine: Arc<nomifun_agent_execution::AgentExecutionEngine>,
     /// Preset service — the same singleton used by `/api/presets`.
-    /// The orchestration layer folds enabled presets into reusable role members
-    /// into an enriched [`nomifun_api_types::FleetMember`] when creating an ad-hoc
-    /// run, so the orchestrator engine/worker can read a self-contained snapshot
-    /// without creating another catalog or resolver.
     pub preset_service: Arc<PresetService>,
     /// **P3-GW1 (route A)**: per-companion browser tool registry, living in the
     /// main process. `Some` only when the `browser-use` feature is on and the
@@ -127,9 +118,8 @@ pub struct GatewayDeps {
     pub computer_registry: Option<crate::computer_registry::ComputerRegistry>,
 }
 
-/// Identity of the calling agent session, forwarded by the stdio bridge from
-/// the env the factory injected (`NOMI_GW_MCP_CONVERSATION_ID` /
-/// `NOMI_GW_MCP_USER_ID` / `NOMI_GW_MCP_COMPANION_ID`).
+/// Identity of the calling Agent session, reconstructed only from the validated
+/// signed Gateway child capability forwarded by the stdio bridge.
 #[derive(Debug, Clone, Default)]
 pub struct CallerCtx {
     /// The conversation the calling agent lives in. Used for self-protection
@@ -143,7 +133,7 @@ pub struct CallerCtx {
     /// deliberately companion-agnostic (memory is shared), so this is attribution
     /// context, not an access scope.
     pub companion_id: Option<String>,
-    /// IM platform when this is a channel master-agent session (e.g. "lark").
+    /// IM platform when this is a Channel Agent session (e.g. "lark").
     /// `None` for plain companion/desktop sessions. Used to resolve the write
     /// surface (channel → write-disabled in P1).
     pub channel_platform: Option<String>,

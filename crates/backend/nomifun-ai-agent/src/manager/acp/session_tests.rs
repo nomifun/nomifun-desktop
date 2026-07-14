@@ -502,7 +502,7 @@ fn model_config_option_populates_switchable_model_state() {
 
 #[test]
 fn pending_model_notice_roundtrip_and_take_once() {
-    use crate::shared_kernel::ModelId;
+    use crate::session::ModelId;
 
     let mut s = AcpSession::new(None, None, HashMap::new());
     assert!(s.take_pending_model_notice().is_none(), "default is None");

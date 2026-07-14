@@ -1,6 +1,6 @@
 //! Black-box integration tests for `PairingService`.
 //!
-//! Uses real SQLite (in-memory) and mock EventBroadcaster.
+//! Uses real SQLite (in-memory) and a mock owner-scoped event sink.
 //! Covers test-plan items: PG-1..PG-3, AP-1..AP-6, RP-1..RP-4,
 //! PP-1..PP-3, EC-1..EC-2, DC-2..DC-3, WS-1, WS-3.
 
@@ -10,7 +10,7 @@ use nomifun_api_types::WebSocketMessage;
 use nomifun_common::{TimestampMs, now_ms};
 use nomifun_db::models::{ChannelPluginRow, ChannelPairingCodeRow};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 use nomifun_channel::constants::{PAIRING_CODE_LENGTH, PAIRING_CODE_TTL};
 use nomifun_channel::error::ChannelError;
@@ -47,8 +47,8 @@ impl MockBroadcaster {
     }
 }
 
-impl EventBroadcaster for MockBroadcaster {
-    fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+impl UserEventSink for MockBroadcaster {
+    fn send_to_user(&self, _user_id: &str, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
     }
 }
@@ -57,7 +57,7 @@ async fn setup() -> (PairingService, Arc<dyn IChannelRepository>, Arc<MockBroadc
     let db = init_database_memory().await.unwrap();
     let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
     let bc = Arc::new(MockBroadcaster::new());
-    let svc = PairingService::new(repo.clone(), bc.clone());
+    let svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
 
     // Seed the bot channels the tests pair against. channel_pairing_codes /
     // channel_users have an FK channel_id → channel_plugins(id), so these
@@ -216,7 +216,7 @@ async fn ap3_approve_nonexistent_code() {
 #[tokio::test]
 async fn ap4_approve_expired_code() {
     let (_svc, repo, bc) = setup().await;
-    let svc = PairingService::new(repo.clone(), bc.clone());
+    let svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
 
     let expired_row = ChannelPairingCodeRow {
         code: "999999".into(),
@@ -306,7 +306,7 @@ async fn rp4_reject_already_approved() {
 #[tokio::test]
 async fn ec1_expired_codes_cleaned_up() {
     let (_svc, repo, bc) = setup().await;
-    let _svc = PairingService::new(repo.clone(), bc.clone());
+    let _svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
 
     let expired_row = ChannelPairingCodeRow {
         code: "111111".into(),

@@ -5,7 +5,7 @@
  */
 
 import { Trigger } from '@arco-design/web-react';
-import { EveryUser, Lightning, Robot } from '@icon-park/react';
+import { Lightning, Robot } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
@@ -25,24 +25,14 @@ export interface ComposerEntryStripProps {
   onFree: () => void;
   activeSkillCount?: number;
   activeSkills?: GuidActiveSkill[];
-  /** 「agent 集群」toggle 是否选中（需求1）。 */
-  clusterActive?: boolean;
-  /** 切换「agent 集群」模式。缺省不渲染该按钮（向后兼容）。 */
-  onToggleCluster?: () => void;
+  collaborationPolicyNode?: React.ReactNode;
 }
 
 /**
  * ComposerEntryStrip — top-edge entry bar inside the chat composer.
  *
- * Two states:
- * - Default (isPresetAgent=false): [agent 集群] [使用设定] [使用 Skills + inline count]
- *   (free play is the implicit default — no dedicated pill needed)
- * - Preset selected (isPresetAgent=true): [agent 集群] [persona token: avatar + label + close]
- *   [使用 Skills + inline count] ... [自由发挥]
- *
- * 「agent 集群」（需求1）是一个 toggle：选中后发送即在新会话 extra 落
- * `agent_cluster_mode=true`——主 agent 对每个任务刻意评估是否开启多 agent 集群
- * 协作，太简单则先在回复里说明使用简单模式的原因。
+ * Both the free-form and preset states begin with the shared collaboration
+ * policy, followed by the preset and Skills controls relevant to that state.
  */
 const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   isPresetAgent,
@@ -53,15 +43,15 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   onFree,
   activeSkillCount,
   activeSkills = [],
-  clusterActive = false,
-  onToggleCluster,
+  collaborationPolicyNode,
 }) => {
   const { t } = useTranslation();
   const [skillsOpen, setSkillsOpen] = useState(false);
   const skillCount = activeSkills.length > 0 ? activeSkills.length : (activeSkillCount ?? 0);
-  const skillsLabel = skillCount > 0
-    ? t('guid.entry.skillsActive', { defaultValue: '使用 Skills · 已启用' })
-    : t('guid.entry.skills', { defaultValue: '使用 Skills' });
+  const skillsLabel =
+    skillCount > 0
+      ? t('guid.entry.skillsActive', { defaultValue: '使用 Skills · 已启用' })
+      : t('guid.entry.skills', { defaultValue: '使用 Skills' });
   const visibleSkills = useMemo(() => activeSkills.slice(0, 4), [activeSkills]);
   const overflowSkillCount = Math.max(0, activeSkills.length - visibleSkills.length);
 
@@ -70,13 +60,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     if (!presetAvatar) return <Robot theme='outline' size={16} fill='currentColor' />;
     switch (presetAvatar.kind) {
       case 'image':
-        return (
-          <img
-            src={presetAvatar.value}
-            alt=''
-            className='w-20px h-20px rounded-6px object-contain'
-          />
-        );
+        return <img src={presetAvatar.value} alt='' className='w-20px h-20px rounded-6px object-contain' />;
       case 'emoji':
         return <span className='text-14px leading-none'>{presetAvatar.value}</span>;
       case 'icon':
@@ -90,7 +74,9 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
       <div className={styles.entrySkillPopover} data-testid='guid-current-skills-popover'>
         <div className={styles.entrySkillPopoverTitleRow}>
           <div className={styles.entrySkillPopoverTitle}>
-            {t('guid.skillsPopover.title', { defaultValue: '本次会话使用的 Skills' })}
+            {t('guid.skillsPopover.title', {
+              defaultValue: '本次会话使用的 Skills',
+            })}
           </div>
           <span className={styles.entrySkillPopoverCount}>
             {t('guid.skillsPopover.enabledCount', {
@@ -118,7 +104,9 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
                   </span>
                   {skill.isAuto && (
                     <span className={styles.entrySkillSource}>
-                      {t('guid.drawer.autoInject', { defaultValue: '自动注入' })}
+                      {t('guid.drawer.autoInject', {
+                        defaultValue: '自动注入',
+                      })}
                     </span>
                   )}
                 </div>
@@ -141,7 +129,9 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         </div>
 
         <div className={styles.entrySkillCompactHint}>
-          {t('guid.skillsPopover.adjustHint', { defaultValue: '点击「使用 Skills」调整本次会话。' })}
+          {t('guid.skillsPopover.adjustHint', {
+            defaultValue: '点击「使用 Skills」调整本次会话。',
+          })}
         </div>
       </div>
     ) : null;
@@ -166,76 +156,59 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </button>
   );
 
-  const skillsEntry =
-    skillsPopover ? (
-      <span className={styles.entrySkillControl}>
-        {skillsButton}
-        <Trigger
-          popup={() => skillsPopover}
-          trigger='click'
-          position='top'
-          popupVisible={skillsOpen}
-          onVisibleChange={setSkillsOpen}
-          clickToClose
+  const skillsEntry = skillsPopover ? (
+    <span className={styles.entrySkillControl}>
+      {skillsButton}
+      <Trigger
+        popup={() => skillsPopover}
+        trigger='click'
+        position='top'
+        popupVisible={skillsOpen}
+        onVisibleChange={setSkillsOpen}
+        clickToClose
+      >
+        <button
+          type='button'
+          className={`${styles.entryCountBadge} ${styles.entrySkillCountTrigger}`}
+          aria-label={t('guid.entry.skillsActiveAria', {
+            count: skillCount,
+            defaultValue: '查看本次会话已启用的 {{count}} 个 Skills',
+          })}
         >
-          <button
-            type='button'
-            className={`${styles.entryCountBadge} ${styles.entrySkillCountTrigger}`}
-            aria-label={t('guid.entry.skillsActiveAria', {
-              count: skillCount,
-              defaultValue: '查看本次会话已启用的 {{count}} 个 Skills',
-            })}
-          >
-            {skillCount}
-          </button>
-        </Trigger>
-      </span>
-    ) : (
-      <span className={styles.entrySkillControl}>
-        {skillsButton}
-        {skillCount > 0 && (
-          <span className={styles.entryCountBadge} aria-label={`${skillCount} skills`}>
-            {skillCount}
-          </span>
-        )}
-      </span>
-    );
-
-  // --- 「agent 集群」toggle（需求1，两种状态都渲染在最左 = 使用设定左边）---
-  const clusterButton = onToggleCluster ? (
-    <button
-      type='button'
-      className={`${styles.entryButton} ${styles.entryButtonInteractive} ${clusterActive ? styles.entryButtonActive : ''}`}
-      onClick={onToggleCluster}
-      aria-pressed={clusterActive}
-      aria-label={t('guid.entry.clusterAria', { defaultValue: '切换 agent 集群模式' })}
-      title={t('guid.entry.clusterHint', {
-        defaultValue: '多 agent 协作：主 agent 刻意评估并拆分任务给多个独立 agent 并行交付；太简单的任务会说明原因后直接作答。',
-      })}
-    >
-      <EveryUser theme='outline' size={15} strokeWidth={3} />
-      <span className={styles.entryButtonText}>{t('guid.entry.cluster', { defaultValue: 'agent 集群' })}</span>
-    </button>
-  ) : null;
+          {skillCount}
+        </button>
+      </Trigger>
+    </span>
+  ) : (
+    <span className={styles.entrySkillControl}>
+      {skillsButton}
+      {skillCount > 0 && (
+        <span className={styles.entryCountBadge} aria-label={`${skillCount} skills`}>
+          {skillCount}
+        </span>
+      )}
+    </span>
+  );
 
   // --- Preset selected state ---
   if (isPresetAgent) {
     return (
       <div className={styles.entryStrip}>
-        {/* agent 集群 toggle（最左） */}
-        {clusterButton}
+        {collaborationPolicyNode}
 
         {/* Persona token */}
         <span className={`${styles.entryButton} ${styles.entryButtonActive} ${styles.entryPersonaButton}`}>
-          <span className={styles.entryAvatar}>
-            {renderAvatar()}
+          <span className={styles.entryAvatar}>{renderAvatar()}</span>
+          <span className={styles.entryButtonText}>
+            {presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' })}
           </span>
-          <span className={styles.entryButtonText}>{presetLabel || t('guid.entry.usePreset', { defaultValue: '使用设定' })}</span>
           <button
             type='button'
             className={styles.entryDismiss}
             onClick={onFree}
-            aria-label={t('guid.entry.backToFree', { defaultValue: '自由发挥' })}
+            aria-label={t('guid.entry.backToFree', {
+              defaultValue: '自由发挥',
+            })}
           >
             ✕
           </button>
@@ -245,11 +218,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
         {skillsEntry}
 
         {/* Right: back to free */}
-        <button
-          type='button'
-          className={styles.entryBackButton}
-          onClick={onFree}
-        >
+        <button type='button' className={styles.entryBackButton} onClick={onFree}>
           <span>↩</span>
           <span>{t('guid.entry.backToFree', { defaultValue: '自由发挥' })}</span>
         </button>
@@ -260,8 +229,7 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
   // --- Default state ---
   return (
     <div className={styles.entryStrip}>
-      {/* agent 集群 toggle（最左 = 使用设定左边） */}
-      {clusterButton}
+      {collaborationPolicyNode}
 
       {/* Choose preset */}
       <button

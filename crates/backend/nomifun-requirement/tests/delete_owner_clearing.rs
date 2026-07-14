@@ -13,7 +13,7 @@ use nomifun_db::{
     CreateTerminalParams, IRequirementRepository, ITerminalRepository, SqliteRequirementRepository,
     SqliteTerminalRepository, init_database_memory,
 };
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::{EventBroadcaster, UserEventSink};
 use nomifun_requirement::{RequirementEventEmitter, RequirementService};
 use nomifun_terminal::{TerminalEventEmitter, TerminalService};
 
@@ -21,6 +21,14 @@ use nomifun_terminal::{TerminalEventEmitter, TerminalService};
 struct NoopBroadcaster;
 impl EventBroadcaster for NoopBroadcaster {
     fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(
+        &self,
+        _user_id: &str,
+        _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+    ) {
+    }
 }
 
 #[tokio::test]
@@ -41,7 +49,10 @@ async fn deleting_terminal_clears_requirement_owner_via_hook() {
     // Requirement service is the hook target.
     let req_service = Arc::new(RequirementService::new(
         req_repo,
-        RequirementEventEmitter::new(Arc::new(NoopBroadcaster)),
+        RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from("system_default_user"),
+        ),
     ));
 
     // Terminal service wired exactly as `nomifun-app::build_terminal_state` does:

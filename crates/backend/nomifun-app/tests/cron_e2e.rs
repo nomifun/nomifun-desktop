@@ -114,6 +114,231 @@ async fn au2_unauthenticated_all_endpoints() {
     }
 }
 
+#[tokio::test]
+async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs() {
+    let (mut app, services) = build_app().await;
+    let (owner_token, owner_csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let create_conversation = json_with_token(
+        "POST",
+        "/api/conversations",
+        json!({
+            "type": "acp",
+            "name": "Owner Cron Conversation",
+            "extra": { "workspace": "/project" }
+        }),
+        &owner_token,
+        &owner_csrf,
+    );
+    let response = app.clone().oneshot(create_conversation).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let conversation_id = body_json(response).await["data"]["id"].as_i64().unwrap();
+
+    let mut body = create_job_body("Private Owner Job");
+    body["conversation_id"] = json!(conversation_id);
+    let created = create_job(&mut app, &owner_token, &owner_csrf, body).await;
+    let job_id = created["id"].as_str().unwrap().to_owned();
+
+    let (foreign_token, foreign_csrf) =
+        setup_and_login(&mut app, &services, "secondary", "An0therStrongP@ss!").await;
+
+    let response = app
+        .clone()
+        .oneshot(get_with_token("/api/cron/jobs", &foreign_token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_json(response).await["data"].as_array().unwrap().is_empty());
+
+    let foreign_requests = [
+        get_with_token(&format!("/api/cron/jobs/{job_id}"), &foreign_token),
+        get_with_token(&format!("/api/cron/jobs/{job_id}/runs"), &foreign_token),
+        get_with_token(
+            &format!("/api/cron/jobs/{job_id}/conversations"),
+            &foreign_token,
+        ),
+        get_with_token(&format!("/api/cron/jobs/{job_id}/skill"), &foreign_token),
+        json_with_token(
+            "PUT",
+            &format!("/api/cron/jobs/{job_id}"),
+            json!({ "name": "Forged" }),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+        json_with_token(
+            "POST",
+            &format!("/api/cron/jobs/{job_id}/run"),
+            json!({}),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+        json_with_token(
+            "POST",
+            &format!("/api/cron/jobs/{job_id}/skill"),
+            json!({ "content": "---\nname: forged\n---\nForeign content" }),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+        delete_with_token(
+            &format!("/api/cron/jobs/{job_id}/skill"),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+        delete_with_token(
+            &format!("/api/cron/jobs/{job_id}"),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+    ];
+    for request in foreign_requests {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // Cron itself is user-scoped rather than installation-owner-only. A
+    // secondary principal may manage its own Nomi model-only schedule; the
+    // service strips every host-capability field before persistence.
+    sqlx::query(
+        "INSERT INTO providers (\
+            id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES ('provider_secondary', 'openai', 'secondary-safe', \
+                   'https://example.invalid', 'encrypted', \
+                   '[\"model-secondary\"]', 1, '[]', 1, 1)",
+    )
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/cron/jobs",
+            json!({
+                "name": "Secondary Model-only Job",
+                "schedule": {
+                    "kind": "every",
+                    "every_ms": 600_000,
+                    "description": "every ten minutes"
+                },
+                "message": "model-only scheduled work",
+                "conversation_id": 0,
+                "agent_type": "nomi",
+                "created_by": "user",
+                "execution_mode": "new_conversation",
+                "agent_config": {
+                    "backend": "provider_secondary",
+                    "name": "Nomi",
+                    "model_id": "model-secondary",
+                    "cli_path": "/bin/sh",
+                    "custom_agent_id": "forged-host-agent",
+                    "mode": "yolo",
+                    "config_options": { "host": "true" },
+                    "workspace": "/unsafe",
+                    "clear_context_each_run": true
+                }
+            }),
+            &foreign_token,
+            &foreign_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let secondary_job = body_json(response).await["data"].clone();
+    let secondary_job_id = secondary_job["id"].as_str().unwrap().to_owned();
+    let config = &secondary_job["metadata"]["agent_config"];
+    assert_eq!(secondary_job["metadata"]["agent_type"], "nomi");
+    assert_eq!(config["backend"], "provider_secondary");
+    assert_eq!(config["model_id"], "model-secondary");
+    for removed in [
+        "cli_path",
+        "custom_agent_id",
+        "mode",
+        "config_options",
+        "workspace",
+    ] {
+        assert!(
+            config.get(removed).is_none(),
+            "model-only cron leaked host field {removed}: {config}"
+        );
+    }
+
+    let response = app
+        .clone()
+        .oneshot(get_with_token("/api/cron/jobs", &foreign_token))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let jobs = body_json(response).await["data"].as_array().unwrap().clone();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0]["id"], secondary_job_id);
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "PUT",
+            &format!("/api/cron/jobs/{secondary_job_id}"),
+            json!({ "name": "Secondary Model-only Job Updated" }),
+            &foreign_token,
+            &foreign_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body_json(response).await["data"]["name"],
+        "Secondary Model-only Job Updated"
+    );
+
+    // Skill files execute on the host and remain installation-owner-only even
+    // for a secondary user's own otherwise-valid model-only Cron aggregate.
+    for request in [
+        get_with_token(
+            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
+            &foreign_token,
+        ),
+        json_with_token(
+            "POST",
+            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
+            json!({ "content": "---\nname: forbidden\n---\nHost work" }),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+        delete_with_token(
+            &format!("/api/cron/jobs/{secondary_job_id}/skill"),
+            &foreign_token,
+            &foreign_csrf,
+        ),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    let response = app
+        .clone()
+        .oneshot(delete_with_token(
+            &format!("/api/cron/jobs/{secondary_job_id}"),
+            &foreign_token,
+            &foreign_csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(get_with_token(
+            &format!("/api/cron/jobs/{job_id}"),
+            &owner_token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let retained = body_json(response).await;
+    assert_eq!(retained["data"]["name"], "Private Owner Job");
+    assert_eq!(retained["data"]["state"]["run_count"], 0);
+}
+
 // ── CJ-1: Create cron job ───────────────────────────────────────────
 
 #[tokio::test]
@@ -129,8 +354,8 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["enabled"], true);
     assert!(data["state"]["next_run_at_ms"].as_i64().is_some());
     assert_eq!(data["state"]["run_count"], 0);
-    assert_eq!(data["target"]["payload"]["kind"], "message");
-    assert_eq!(data["target"]["payload"]["text"], "test message");
+    assert_eq!(data["message"], "test message");
+    assert_eq!(data["execution_mode"], "existing");
     assert_eq!(data["metadata"]["conversation_id"], 1);
     assert_eq!(data["metadata"]["agent_type"], "acp");
     assert_eq!(data["metadata"]["created_by"], "user");
@@ -267,6 +492,7 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
     cron_repo
         .insert(&nomifun_db::models::CronJobRow {
             id: "cron_whitespace_workspace".into(),
+            user_id: nomifun_auth::SYSTEM_USER_ID.into(),
             name: "Legacy Workspace".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -283,6 +509,9 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
                 })
                 .to_string(),
             ),
+            preset_id: None,
+            preset_revision: None,
+            preset_snapshot: None,
             conversation_id: None,
             conversation_title: None,
             agent_type: "acp".into(),
@@ -298,12 +527,6 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
             run_count: 0,
             retry_count: 0,
             max_retries: 3,
-            target_kind: "agent".into(),
-            terminal_mode: None,
-            terminal_session_id: None,
-            terminal_command: None,
-            terminal_args: None,
-            terminal_script: None,
         })
         .await
         .unwrap();

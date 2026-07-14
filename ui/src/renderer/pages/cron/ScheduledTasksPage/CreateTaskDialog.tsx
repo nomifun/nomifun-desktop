@@ -176,7 +176,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       // Only 'existing' execution reuses metadata.conversation_id as its bound
       // target. (new_conversation jobs merely anchor there for UI grouping and
       // spawn a fresh conversation each run — not a reuse bind, so don't hide it.)
-      if (job.target.execution_mode === 'existing' && job.metadata.conversation_id > 0) {
+      if (job.execution_mode === 'existing' && job.metadata.conversation_id > 0) {
         set.add(job.metadata.conversation_id);
       }
     }
@@ -213,14 +213,14 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       setWeekday(parsed.weekday);
       setCustomCronExpr(parsed.frequency === 'custom' ? cronExpr : '');
 
-      setExecutionMode(editJob.target.execution_mode || 'existing');
+      setExecutionMode(editJob.execution_mode);
       setSpecifiedConversationId(undefined);
       const agentKey = getAgentKeyFromJob(editJob, cliAgents);
       setSelectedAgent(agentKey);
       form.setFieldsValue({
         name: editJob.name,
         description: getDescriptionInitialValue(editJob),
-        prompt: editJob.target.payload.text,
+        prompt: editJob.message,
         agent: agentKey,
       });
       setModelId(editJob.metadata.agent_config?.model_id);
@@ -504,7 +504,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           agent_type: specifiedAgentType,
           created_by: 'user',
           execution_mode: 'existing',
-          target_kind: 'agent',
         };
         await ipcBridge.cron.addJob.invoke(params);
         Message.success(t('cron.page.createSuccess'));
@@ -528,12 +527,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             name: values.name,
             description: values.description,
             schedule,
-            target: {
-              ...editJob!.target,
-              payload: { kind: 'message', text: values.prompt },
-              execution_mode: backendExecutionMode,
-              target_kind: 'agent',
-            },
+            message: values.prompt,
+            execution_mode: backendExecutionMode,
             metadata: {
               ...editJob!.metadata,
               agent_type: resolvedAgentType,
@@ -555,7 +550,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           created_by: 'user',
           execution_mode: backendExecutionMode,
           agent_config,
-          target_kind: 'agent',
         };
         await ipcBridge.cron.addJob.invoke(params);
         Message.success(t('cron.page.createSuccess'));
@@ -796,8 +790,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                 onClear={handleWorkspaceClear}
                 placeholder={t('cron.page.form.selectFolder')}
                 input_placeholder={t('cron.page.form.workspacePlaceholder')}
-                recentLabel={t('team.create.recentLabel', { defaultValue: 'Recent' })}
-                chooseDifferentLabel={t('team.create.chooseDifferentFolder', {
+                recentLabel={t('common.filePicker.recent', { defaultValue: 'Recent' })}
+                chooseDifferentLabel={t('common.filePicker.chooseDifferentFolder', {
                   defaultValue: 'Choose a different folder',
                 })}
                 triggerTestId='cron-workspace-trigger'

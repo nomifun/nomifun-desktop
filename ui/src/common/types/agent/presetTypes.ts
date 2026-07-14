@@ -8,7 +8,7 @@
 // Any shape change on either side requires a same-PR update on the other.
 
 export type PresetSource = 'builtin' | 'user' | 'extension';
-export type PresetTarget = 'conversation' | 'cluster_member' | 'companion' | 'public_companion' | 'cron';
+export type PresetTarget = 'conversation' | 'execution_step' | 'companion' | 'public_companion' | 'cron';
 
 export interface AgentPreference {
   agent_id: string;

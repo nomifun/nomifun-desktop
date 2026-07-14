@@ -2,7 +2,20 @@ use nomifun_common::{PaginatedResult, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 use crate::error::DbError;
-use crate::models::{ConversationArtifactRow, ConversationRow, MessageRow};
+use crate::models::{
+    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow, MessageRow,
+};
+
+/// Result of atomically projecting a trusted assistant message into a
+/// Conversation under a stable receiver-side operation identity.
+#[derive(Debug, Clone)]
+pub struct ConversationMessageProjection {
+    /// `true` only for the transaction which inserted the durable message.
+    pub inserted: bool,
+    /// The canonical persisted row. Replays return the original row rather
+    /// than trusting a newly constructed candidate message.
+    pub message: MessageRow,
+}
 
 /// Conversation + message data access abstraction.
 ///
@@ -21,6 +34,86 @@ pub trait IConversationRepository: Send + Sync {
     /// Inserts a new conversation row. The `id` field of `row` is ignored: the
     /// id is allocated by SQLite (INTEGER PK AUTOINCREMENT) and returned.
     async fn create(&self, row: &ConversationRow) -> Result<i64, DbError>;
+
+    /// Trusted internal creation boundary with a stable operation key.  The
+    /// public Conversation API never supplies this value.  Returns
+    /// `(conversation_id, created_now)` so callers do not repeat post-create
+    /// materialization when recovering an already committed operation.
+    async fn create_idempotent(
+        &self,
+        row: &ConversationRow,
+        _creation_key: &str,
+    ) -> Result<(i64, bool), DbError> {
+        let id = self.create(row).await?;
+        Ok((id, true))
+    }
+
+    /// Resolve a trusted internal creation identity.  Public conversation
+    /// reads continue to address rows by their server-allocated integer id.
+    async fn find_by_creation_key(
+        &self,
+        _user_id: &str,
+        _creation_key: &str,
+    ) -> Result<Option<ConversationRow>, DbError> {
+        Ok(None)
+    }
+
+    /// Atomically register or load a receiver-side idempotency receipt.
+    async fn claim_delivery_receipt(
+        &self,
+        _user_id: &str,
+        _conversation_id: i64,
+        _operation_id: &str,
+        _kind: &str,
+        _request_payload: &str,
+        _now: i64,
+    ) -> Result<ConversationDeliveryReceiptRow, DbError> {
+        Err(DbError::Init(
+            "conversation delivery receipts are not supported".to_owned(),
+        ))
+    }
+
+    async fn get_delivery_receipt(
+        &self,
+        _user_id: &str,
+        _conversation_id: i64,
+        _operation_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        Ok(None)
+    }
+
+    async fn complete_delivery_receipt(
+        &self,
+        _user_id: &str,
+        _conversation_id: i64,
+        _operation_id: &str,
+        _result_ok: bool,
+        _result_text: Option<&str>,
+        _result_error: Option<&str>,
+        _completed_at: i64,
+    ) -> Result<bool, DbError> {
+        Ok(false)
+    }
+
+    /// Atomically inserts one trusted assistant message and completes its
+    /// idempotency receipt. A replay with the same owner, Conversation, kind,
+    /// and request payload returns the original persisted message with
+    /// `inserted = false`; reusing the operation identity for any other input
+    /// is a conflict.
+    async fn project_assistant_message_with_receipt(
+        &self,
+        _user_id: &str,
+        _conversation_id: i64,
+        _operation_id: &str,
+        _kind: &str,
+        _request_payload: &str,
+        _message: &MessageRow,
+        _now: i64,
+    ) -> Result<ConversationMessageProjection, DbError> {
+        Err(DbError::Init(
+            "atomic Conversation message projection is not supported".to_owned(),
+        ))
+    }
 
     /// Partially updates a conversation. Returns `DbError::NotFound` if ID is missing.
     async fn update(&self, id: i64, updates: &ConversationRowUpdate) -> Result<(), DbError>;
@@ -54,15 +147,16 @@ pub trait IConversationRepository: Send + Sync {
     /// The conversation identified by `conversation_id` is excluded.
     async fn list_associated(&self, user_id: &str, conversation_id: i64) -> Result<Vec<ConversationRow>, DbError>;
 
-    /// Removes every model reference owned by `provider_id` from persisted
-    /// conversation-native orchestrator ranges. Returns the number of changed
-    /// conversations. Default no-op keeps lightweight test repositories source
-    /// compatible; SQLite provides the durable implementation.
-    async fn remove_provider_from_orchestrator_model_ranges(
+    /// Lists every retained Conversation whose top-level current model is
+    /// bound to `provider_id`. These are hard references: deleting the
+    /// provider would leave the Conversation lead unrunnable.
+    async fn list_conversations_using_model_provider(
         &self,
         _provider_id: &str,
-    ) -> Result<u64, DbError> {
-        Ok(0)
+    ) -> Result<Vec<(i64, String)>, DbError> {
+        Err(DbError::Init(
+            "conversation model-provider usage scan is not supported".to_owned(),
+        ))
     }
 
     // ── conversation_mcp_servers junction ───────────────────────────
@@ -193,9 +287,12 @@ pub trait IConversationRepository: Send + Sync {
         Ok(None)
     }
 
-    /// Marks all skill suggestion artifacts for a cron job as saved.
+    /// Marks this owner's skill suggestion artifacts for a cron job as saved.
+    /// Implementations must scope both the mutation and returned rows before
+    /// changing state; checking ownership after an unscoped UPDATE is unsafe.
     async fn mark_skill_suggest_artifacts_saved(
         &self,
+        _user_id: &str,
         _cron_job_id: &str,
         _updated_at: TimestampMs,
     ) -> Result<Vec<ConversationArtifactRow>, DbError> {
@@ -270,6 +367,10 @@ pub struct ConversationRowUpdate {
     pub pinned_at: Option<Option<TimestampMs>>,
     pub model: Option<Option<String>>,
     pub extra: Option<String>,
+    pub delegation_policy: Option<String>,
+    pub execution_model_pool: Option<Option<String>>,
+    pub decision_policy: Option<String>,
+    pub execution_template_id: Option<Option<String>>,
     pub status: Option<String>,
     /// Set/clear the owning cron job. `Some(Some(id))` sets, `Some(None)` clears
     /// (used by the cron executor's atomic backfill on `new_conversation`).
@@ -303,6 +404,10 @@ pub struct MessageSearchRow {
     pub conversation_name: String,
     pub conversation_type: String,
     pub conversation_extra: String,
+    pub conversation_delegation_policy: String,
+    pub conversation_execution_model_pool: Option<String>,
+    pub conversation_decision_policy: String,
+    pub conversation_execution_template_id: Option<String>,
     pub conversation_model: Option<String>,
     pub conversation_status: Option<String>,
     pub conversation_source: Option<String>,

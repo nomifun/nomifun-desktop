@@ -15,7 +15,7 @@
 //! field built by `build_module_states` in `nomifun_app::router::state`).
 //! `ChannelRouterState` bundles `Arc<ChannelManager>`, `Arc<PairingService>`,
 //! `Arc<SessionManager>`, `Arc<dyn IChannelRepository>`, `Arc<PluginFactory>`,
-//! `Arc<ChannelSettingsService>`, `Option<Arc<dyn MasterAgentProfile>>`, and
+//! `Arc<ChannelSettingsService>`, `Option<Arc<dyn ChannelAgentProfile>>`, and
 //! `ExtensionRegistry`.
 
 use std::sync::Arc;
@@ -211,7 +211,7 @@ async fn enable_plugin(deps: Arc<GatewayDeps>, p: EnablePluginParams) -> Value {
 
     // Validate companion binding if provided.
     if let Some(companion_id) = p.companion_id.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(profile) = &deps.channel_state.master_profile {
+        if let Some(profile) = &deps.channel_state.channel_agent_profile {
             if !profile.companion_exists(companion_id).await {
                 return json!({ "error": format!("companion '{}' not found", companion_id) });
             }
@@ -502,7 +502,7 @@ async fn set_companion(deps: Arc<GatewayDeps>, p: SetCompanionParams) -> Value {
 
     // Validate companion existence if binding (not clearing).
     if let Some(cid) = companion_id {
-        if let Some(profile) = &deps.channel_state.master_profile {
+        if let Some(profile) = &deps.channel_state.channel_agent_profile {
             if !profile.companion_exists(cid).await {
                 return json!({ "error": format!("companion '{}' not found", cid) });
             }
@@ -546,7 +546,7 @@ async fn set_companion(deps: Arc<GatewayDeps>, p: SetCompanionParams) -> Value {
     if let Err(e) = deps
         .channel_state
         .settings_service
-        .set_master_agent_companion_id(platform, companion_id)
+        .set_channel_companion_id(platform, companion_id)
         .await
     {
         return json!({ "error": e.to_string() });

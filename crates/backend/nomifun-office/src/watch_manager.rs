@@ -1,10 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
-use nomifun_api_types::{PreviewState, PreviewStatusEvent, WebSocketMessage};
-use nomifun_realtime::EventBroadcaster;
-use nomifun_runtime::Builder as CmdBuilder;
+use nomifun_api_types::{
+    is_preview_capability, PreviewState, PreviewStatusEvent, WebSocketMessage, PREVIEW_CAPABILITY_BYTES,
+};
+use nomifun_realtime::UserEventSink;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use tokio::sync::Mutex;
 
 use crate::error::OfficeError;
@@ -53,7 +56,34 @@ struct WatchSession {
     process: Box<dyn ProcessHandle>,
     file_path: String,
     doc_type: DocType,
-    aborted: bool,
+    /// Every successful start owns one independently revocable capability.
+    /// The owner is retained only for authenticated stop authorization; proxy
+    /// requests never receive or trust an owner id.
+    capabilities: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewCapabilityBinding {
+    session_key: String,
+    owner_id: String,
+    port: u16,
+    doc_type: DocType,
+}
+
+/// The result of starting one preview lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewAccess {
+    pub port: u16,
+    pub capability: String,
+    pub doc_type: DocType,
+}
+
+/// The only upstream coordinates exposed to the reverse proxy after a
+/// capability has been validated against the live session registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewProxyTarget {
+    pub port: u16,
+    pub doc_type: DocType,
 }
 
 // ---------------------------------------------------------------------------
@@ -62,47 +92,87 @@ struct WatchSession {
 
 pub struct OfficecliWatchManager {
     sessions: DashMap<String, WatchSession>,
+    /// Deliberately memory-only: process exit/restart revokes every bearer
+    /// capability instead of resurrecting access from durable state.
+    capabilities: DashMap<String, PreviewCapabilityBinding>,
+    /// Makes the async check/start/insert and stop/remove lifecycle atomic.
+    session_lifecycle: tokio::sync::Mutex<()>,
     spawner: Arc<dyn ProcessSpawner>,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     last_version_check: Mutex<Option<std::time::Instant>>,
 }
 
 impl OfficecliWatchManager {
-    pub fn new(spawner: Arc<dyn ProcessSpawner>, broadcaster: Arc<dyn EventBroadcaster>) -> Self {
+    pub fn new(spawner: Arc<dyn ProcessSpawner>, user_events: Arc<dyn UserEventSink>) -> Self {
         Self {
             sessions: DashMap::new(),
+            capabilities: DashMap::new(),
+            session_lifecycle: tokio::sync::Mutex::new(()),
             spawner,
-            broadcaster,
+            user_events,
             last_version_check: Mutex::new(None),
         }
     }
 
-    pub async fn start(&self, file_path: &str, doc_type: DocType) -> Result<u16, OfficeError> {
+    pub async fn start(
+        &self,
+        owner_id: &str,
+        file_path: &str,
+        doc_type: DocType,
+    ) -> Result<PreviewAccess, OfficeError> {
+        require_owner(owner_id)?;
         let resolved = resolve_path(file_path)?;
         let key = session_key(&resolved, doc_type);
+        // Startup contains awaits. Serializing this transition prevents two
+        // concurrent callers from spawning duplicate processes and losing an
+        // owner when the later DashMap insert replaces the earlier session.
+        let _lifecycle = self.session_lifecycle.lock().await;
+        let capability = self.mint_capability()?;
 
-        if let Some(entry) = self.sessions.get(&key) {
-            if !entry.aborted && entry.process.is_alive() {
-                return Ok(entry.port);
+        if let Some(mut entry) = self.sessions.get_mut(&key) {
+            if entry.process.is_alive() {
+                let port = entry.port;
+                entry
+                    .capabilities
+                    .insert(capability.clone(), owner_id.to_owned());
+                self.capabilities.insert(
+                    capability.clone(),
+                    PreviewCapabilityBinding {
+                        session_key: key,
+                        owner_id: owner_id.to_owned(),
+                        port,
+                        doc_type,
+                    },
+                );
+                return Ok(PreviewAccess {
+                    port,
+                    capability,
+                    doc_type,
+                });
             }
             drop(entry);
-            self.sessions.remove(&key);
+            if let Some((_, stale)) = self.sessions.remove(&key) {
+                self.revoke_session_capabilities(&stale);
+                stale.process.kill();
+            }
         }
 
-        self.broadcast_status(doc_type, PreviewState::Starting, None);
+        self.send_status(owner_id, doc_type, PreviewState::Starting, None);
 
-        let result = self.try_start(&resolved, doc_type).await;
+        let result = self
+            .try_start(owner_id, &resolved, doc_type, capability)
+            .await;
 
         match &result {
-            Ok(port) => {
-                self.broadcast_status(doc_type, PreviewState::Ready, None);
+            Ok(access) => {
+                self.send_status(owner_id, doc_type, PreviewState::Ready, None);
                 if doc_type == DocType::Ppt {
                     self.maybe_check_update(doc_type).await;
                 }
-                Ok(*port)
+                Ok(access.clone())
             }
             Err(e) => {
-                self.broadcast_status(doc_type, PreviewState::Error, Some(e.to_string()));
+                self.send_status(owner_id, doc_type, PreviewState::Error, Some(e.to_string()));
                 Err(match e {
                     OfficeError::OfficecliNotFound => OfficeError::OfficecliNotFound,
                     OfficeError::InstallFailed(m) => OfficeError::InstallFailed(m.clone()),
@@ -118,7 +188,13 @@ impl OfficecliWatchManager {
         }
     }
 
-    async fn try_start(&self, resolved: &str, doc_type: DocType) -> Result<u16, OfficeError> {
+    async fn try_start(
+        &self,
+        owner_id: &str,
+        resolved: &str,
+        doc_type: DocType,
+        capability: String,
+    ) -> Result<PreviewAccess, OfficeError> {
         let port = allocate_port()?;
 
         let spawn_result = self.spawner.spawn_officecli(resolved, port, doc_type).await;
@@ -126,7 +202,7 @@ impl OfficecliWatchManager {
         let process = match spawn_result {
             Ok(p) => p,
             Err(OfficeError::OfficecliNotFound) => {
-                self.broadcast_status(doc_type, PreviewState::Installing, None);
+                self.send_status(owner_id, doc_type, PreviewState::Installing, None);
                 self.spawner.install_officecli().await?;
                 self.spawner
                     .spawn_officecli(resolved, port, doc_type)
@@ -138,18 +214,32 @@ impl OfficecliWatchManager {
         self.poll_port_ready(port, resolved).await?;
 
         let key = session_key(resolved, doc_type);
+        let capabilities = HashMap::from([(capability.clone(), owner_id.to_owned())]);
         self.sessions.insert(
-            key,
+            key.clone(),
             WatchSession {
                 port,
                 process,
                 file_path: resolved.to_owned(),
                 doc_type,
-                aborted: false,
+                capabilities,
+            },
+        );
+        self.capabilities.insert(
+            capability.clone(),
+            PreviewCapabilityBinding {
+                session_key: key,
+                owner_id: owner_id.to_owned(),
+                port,
+                doc_type,
             },
         );
 
-        Ok(port)
+        Ok(PreviewAccess {
+            port,
+            capability,
+            doc_type,
+        })
     }
 
     async fn poll_port_ready(&self, port: u16, file_path: &str) -> Result<(), OfficeError> {
@@ -162,21 +252,63 @@ impl OfficecliWatchManager {
         Err(OfficeError::PortTimeout(file_path.to_owned()))
     }
 
-    pub async fn stop(&self, file_path: &str, doc_type: DocType) {
-        let resolved = match resolve_path(file_path) {
-            Ok(p) => p,
-            Err(_) => return,
+    pub async fn stop(
+        &self,
+        owner_id: &str,
+        doc_type: DocType,
+        capability: &str,
+    ) {
+        if require_owner(owner_id).is_err() || !is_preview_capability(capability) {
+            return;
+        }
+
+        let session_to_kill = {
+            let _lifecycle = self.session_lifecycle.lock().await;
+            let Some(binding) = self
+                .capabilities
+                .get(capability)
+                .map(|entry| entry.value().clone())
+            else {
+                return;
+            };
+            if binding.owner_id != owner_id || binding.doc_type != doc_type {
+                return;
+            }
+            let key = binding.session_key;
+            let remove_session = self.sessions.get_mut(&key).is_some_and(|mut session| {
+                let session_owns_capability = session
+                    .capabilities
+                    .get(capability)
+                    .is_some_and(|capability_owner| capability_owner == owner_id);
+                let binding_matches = binding.port == session.port && binding.doc_type == session.doc_type;
+
+                if !session_owns_capability || !binding_matches {
+                    return false;
+                }
+
+                // Revoke before any delayed process cleanup. From this point a
+                // concurrent iframe request fails closed immediately.
+                self.capabilities.remove(capability);
+                session.capabilities.remove(capability);
+                session.capabilities.is_empty()
+            });
+
+            if remove_session {
+                self.sessions.remove(&key).map(|(_, session)| session)
+            } else {
+                None
+            }
         };
-        let key = session_key(&resolved, doc_type);
 
-        tokio::time::sleep(Duration::from_millis(STOP_DELAY_MS)).await;
-
-        if let Some((_, session)) = self.sessions.remove(&key) {
+        if let Some(session) = session_to_kill {
+            self.revoke_session_capabilities(&session);
+            tokio::time::sleep(Duration::from_millis(STOP_DELAY_MS)).await;
             session.process.kill();
         }
     }
 
-    pub fn stop_all(&self) {
+    pub async fn stop_all(&self) {
+        let _lifecycle = self.session_lifecycle.lock().await;
         for entry in self.sessions.iter() {
             tracing::debug!(
                 file_path = %entry.value().file_path,
@@ -185,23 +317,59 @@ impl OfficecliWatchManager {
             );
             entry.value().process.kill();
         }
+        self.capabilities.clear();
         self.sessions.clear();
     }
 
-    pub fn is_active_port(&self, port: u16, doc_type: DocType) -> bool {
-        self.sessions
-            .iter()
-            .any(|entry| entry.port == port && entry.doc_type == doc_type)
-    }
+    /// Resolve an untrusted URL capability to an active loopback target. Every
+    /// field is cross-checked against both indexes so stale or partially removed
+    /// state fails closed.
+    pub fn resolve_capability(&self, capability: &str) -> Option<PreviewProxyTarget> {
+        if !is_preview_capability(capability) {
+            return None;
+        }
 
-    pub fn is_active_watch_port(&self, port: u16) -> bool {
-        self.sessions.iter().any(|entry| {
-            entry.port == port && matches!(entry.doc_type, DocType::Word | DocType::Excel)
+        let binding = self.capabilities.get(capability)?;
+        let session = self.sessions.get(&binding.session_key)?;
+        let owner_matches = session
+            .capabilities
+            .get(capability)
+            .is_some_and(|owner_id| owner_id == &binding.owner_id);
+
+        if !owner_matches
+            || !session.process.is_alive()
+            || session.port != binding.port
+            || session.doc_type != binding.doc_type
+        {
+            return None;
+        }
+
+        Some(PreviewProxyTarget {
+            port: binding.port,
+            doc_type: binding.doc_type,
         })
     }
 
     pub fn active_session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    fn mint_capability(&self) -> Result<String, OfficeError> {
+        loop {
+            let mut bytes = [0_u8; PREVIEW_CAPABILITY_BYTES];
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| OfficeError::StartFailed(format!("preview capability RNG failure: {e}")))?;
+            let capability = hex::encode(bytes);
+            if !self.capabilities.contains_key(&capability) {
+                return Ok(capability);
+            }
+        }
+    }
+
+    fn revoke_session_capabilities(&self, session: &WatchSession) {
+        for capability in session.capabilities.keys() {
+            self.capabilities.remove(capability);
+        }
     }
 
     async fn maybe_check_update(&self, doc_type: DocType) {
@@ -222,7 +390,7 @@ impl OfficecliWatchManager {
         }
     }
 
-    fn broadcast_status(&self, doc_type: DocType, state: PreviewState, message: Option<String>) {
+    fn send_status(&self, owner_id: &str, doc_type: DocType, state: PreviewState, message: Option<String>) {
         let event_name = format!("{}.status", doc_type.event_prefix());
         let payload = PreviewStatusEvent { state, message };
         let data = match serde_json::to_value(payload) {
@@ -232,8 +400,8 @@ impl OfficecliWatchManager {
                 return;
             }
         };
-        self.broadcaster
-            .broadcast(WebSocketMessage::new(event_name, data));
+        self.user_events
+            .send_to_user(owner_id, WebSocketMessage::new(event_name, data));
     }
 }
 
@@ -242,6 +410,7 @@ impl Drop for OfficecliWatchManager {
         for entry in self.sessions.iter() {
             entry.value().process.kill();
         }
+        self.capabilities.clear();
         self.sessions.clear();
     }
 }
@@ -367,6 +536,14 @@ fn session_key(resolved_path: &str, doc_type: DocType) -> String {
     format!("{doc_type}:{resolved_path}")
 }
 
+fn require_owner(owner_id: &str) -> Result<(), OfficeError> {
+    if owner_id.trim().is_empty() {
+        Err(OfficeError::StartFailed("preview owner is required".into()))
+    } else {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -468,12 +645,14 @@ mod tests {
 
     struct RecordingBroadcaster {
         events: std::sync::Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+        owners: std::sync::Mutex<Vec<String>>,
     }
 
     impl RecordingBroadcaster {
         fn new() -> Self {
             Self {
                 events: std::sync::Mutex::new(Vec::new()),
+                owners: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -482,8 +661,9 @@ mod tests {
         }
     }
 
-    impl EventBroadcaster for RecordingBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+    impl UserEventSink for RecordingBroadcaster {
+        fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+            self.owners.lock().unwrap().push(user_id.to_owned());
             self.events.lock().unwrap().push(event);
         }
     }
@@ -518,11 +698,20 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+        let access = mgr
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        assert!(port > 0);
+        assert!(access.port > 0);
+        assert!(is_preview_capability(&access.capability));
+        assert_eq!(access.doc_type, DocType::Word);
+        assert_eq!(
+            mgr.resolve_capability(&access.capability),
+            Some(PreviewProxyTarget {
+                port: access.port,
+                doc_type: DocType::Word,
+            })
+        );
         assert_eq!(mgr.active_session_count(), 1);
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
     }
@@ -537,17 +726,30 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let p1 = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+        let first = mgr
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        let p2 = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+        let second = mgr
+            .start("owner-b", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
-        assert_eq!(p1, p2);
+        assert_eq!(first.port, second.port);
+        assert_ne!(first.capability, second.capability);
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 1);
+        assert!(mgr.resolve_capability(&first.capability).is_some());
+        assert!(mgr.resolve_capability(&second.capability).is_some());
+
+        mgr.stop(
+            "owner-a",
+            DocType::Word,
+            &first.capability,
+        )
+        .await;
+        assert!(mgr.resolve_capability(&first.capability).is_none());
+        assert!(mgr.resolve_capability(&second.capability).is_some());
+        assert_eq!(mgr.active_session_count(), 1);
     }
 
     #[tokio::test]
@@ -561,15 +763,15 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let p1 = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         let p2 = mgr
-            .start(file.to_str().unwrap(), DocType::Excel)
+            .start("owner-a", file.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
 
-        assert_ne!(p1, p2);
+        assert_ne!(p1.port, p2.port);
         assert_eq!(mgr.active_session_count(), 2);
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 2);
     }
@@ -585,10 +787,12 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
         let path = file.to_str().unwrap();
 
-        mgr.start(path, DocType::Word).await.unwrap();
+        let access = mgr.start("owner-a", path, DocType::Word).await.unwrap();
         assert_eq!(mgr.active_session_count(), 1);
 
-        mgr.stop(path, DocType::Word).await;
+        mgr.stop("owner-a", DocType::Word, &access.capability)
+            .await;
+        assert!(mgr.resolve_capability(&access.capability).is_none());
         assert_eq!(mgr.active_session_count(), 0);
     }
 
@@ -604,20 +808,24 @@ mod tests {
         std::fs::write(&f1, b"a").unwrap();
         std::fs::write(&f2, b"b").unwrap();
 
-        mgr.start(f1.to_str().unwrap(), DocType::Word)
+        let word = mgr
+            .start("owner-a", f1.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        mgr.start(f2.to_str().unwrap(), DocType::Excel)
+        let excel = mgr
+            .start("owner-a", f2.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
         assert_eq!(mgr.active_session_count(), 2);
 
-        mgr.stop_all();
+        mgr.stop_all().await;
         assert_eq!(mgr.active_session_count(), 0);
+        assert!(mgr.resolve_capability(&word.capability).is_none());
+        assert!(mgr.resolve_capability(&excel.capability).is_none());
     }
 
     #[tokio::test]
-    async fn is_active_port_returns_true_for_active() {
+    async fn capability_resolution_rejects_guesses_and_noncanonical_tokens() {
         let spawner = Arc::new(MockSpawner::new());
         let broadcaster = Arc::new(RecordingBroadcaster::new());
         let mgr = make_manager(Arc::clone(&spawner), Arc::clone(&broadcaster));
@@ -626,17 +834,18 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+        let access = mgr
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        assert!(mgr.is_active_port(port, DocType::Word));
-        assert!(!mgr.is_active_port(port, DocType::Ppt));
-        assert!(!mgr.is_active_port(12345, DocType::Word));
+        assert!(mgr.resolve_capability(&access.capability).is_some());
+        assert!(mgr.resolve_capability("8080").is_none());
+        assert!(mgr.resolve_capability(&"A".repeat(64)).is_none());
+        assert!(mgr.resolve_capability(&"0".repeat(64)).is_none());
     }
 
     #[tokio::test]
-    async fn is_active_watch_port_accepts_word_and_excel() {
+    async fn capability_resolution_preserves_document_type() {
         let spawner = Arc::new(MockSpawner::new());
         let broadcaster = Arc::new(RecordingBroadcaster::new());
         let mgr = make_manager(Arc::clone(&spawner), Arc::clone(&broadcaster));
@@ -649,23 +858,56 @@ mod tests {
         std::fs::write(&excel_file, b"e").unwrap();
         std::fs::write(&ppt_file, b"p").unwrap();
 
-        let word_port = mgr
-            .start(word_file.to_str().unwrap(), DocType::Word)
+        let word = mgr
+            .start("owner-a", word_file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        let excel_port = mgr
-            .start(excel_file.to_str().unwrap(), DocType::Excel)
+        let excel = mgr
+            .start("owner-a", excel_file.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
-        let ppt_port = mgr
-            .start(ppt_file.to_str().unwrap(), DocType::Ppt)
+        let ppt = mgr
+            .start("owner-a", ppt_file.to_str().unwrap(), DocType::Ppt)
             .await
             .unwrap();
 
-        assert!(mgr.is_active_watch_port(word_port));
-        assert!(mgr.is_active_watch_port(excel_port));
-        assert!(!mgr.is_active_watch_port(ppt_port));
-        assert!(!mgr.is_active_watch_port(12345));
+        assert_eq!(
+            mgr.resolve_capability(&word.capability).unwrap().doc_type,
+            DocType::Word
+        );
+        assert_eq!(
+            mgr.resolve_capability(&excel.capability).unwrap().doc_type,
+            DocType::Excel
+        );
+        assert_eq!(
+            mgr.resolve_capability(&ppt.capability).unwrap().doc_type,
+            DocType::Ppt
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_requires_exact_owner_and_capability() {
+        let spawner = Arc::new(MockSpawner::new());
+        let broadcaster = Arc::new(RecordingBroadcaster::new());
+        let mgr = make_manager(Arc::clone(&spawner), Arc::clone(&broadcaster));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.docx");
+        std::fs::write(&file, b"test").unwrap();
+        let path = file.to_str().unwrap();
+        let access = mgr.start("owner-a", path, DocType::Word).await.unwrap();
+
+        mgr.stop("owner-b", DocType::Word, &access.capability)
+            .await;
+        assert!(mgr.resolve_capability(&access.capability).is_some());
+
+        mgr.stop("owner-a", DocType::Word, &"0".repeat(64))
+            .await;
+        assert!(mgr.resolve_capability(&access.capability).is_some());
+
+        mgr.stop("owner-a", DocType::Word, &access.capability)
+            .await;
+        assert!(mgr.resolve_capability(&access.capability).is_none());
     }
 
     #[tokio::test]
@@ -679,11 +921,11 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let port = mgr
-            .start(file.to_str().unwrap(), DocType::Word)
+        let access = mgr
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
-        assert!(port > 0);
+        assert!(access.port > 0);
         assert_eq!(spawner.install_count.load(Ordering::SeqCst), 1);
         // First spawn fails (not installed), then install, then second spawn succeeds
         assert_eq!(spawner.spawn_count.load(Ordering::SeqCst), 2);
@@ -699,11 +941,19 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word)
+        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
         let events = broadcaster.events();
+        assert!(
+            broadcaster
+                .owners
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|owner| owner == "owner-a")
+        );
         assert!(events.len() >= 2);
         assert_eq!(events[0].name, "word-preview.status");
         assert_eq!(events[0].data["state"], "starting");
@@ -722,7 +972,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word)
+        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -747,7 +997,9 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let result = mgr.start(file.to_str().unwrap(), DocType::Word).await;
+        let result = mgr
+            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .await;
         assert!(result.is_err());
 
         let events = broadcaster.events();
@@ -782,7 +1034,7 @@ mod tests {
         let file = dir.path().join("test.pptx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Ppt)
+        mgr.start("owner-a", file.to_str().unwrap(), DocType::Ppt)
             .await
             .unwrap();
 
@@ -801,7 +1053,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start(file.to_str().unwrap(), DocType::Word)
+        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -810,12 +1062,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_nonexistent_is_no_op() {
+    async fn stop_unknown_capability_is_no_op() {
         let spawner = Arc::new(MockSpawner::new());
         let broadcaster = Arc::new(RecordingBroadcaster::new());
         let mgr = make_manager(spawner, broadcaster);
 
-        mgr.stop("/nonexistent/file.docx", DocType::Word).await;
+        mgr.stop("owner-a", DocType::Word, &"0".repeat(64))
+            .await;
         assert_eq!(mgr.active_session_count(), 0);
     }
 

@@ -39,24 +39,6 @@ curl -s "http://$HOST/v1/tools?profile=agent" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-Delegate a task to an autonomous NomiFun agent:
-
-```bash
-curl -s -X POST "http://$HOST/v1/tools/nomi_agent_run" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"goal":"Research competitor pricing and write notes.md","timeout_secs":600}'
-```
-
-Poll a long-running delegated task:
-
-```bash
-curl -s -X POST "http://$HOST/v1/tools/nomi_agent_result" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"conversation_id":123}'
-```
-
 Call any discovered tool:
 
 ```bash
@@ -79,10 +61,10 @@ curl -s -X POST "http://$HOST/v1/tools/<tool_name>" \
 ## SSE Streaming
 
 ```bash
-curl -N -X POST "http://$HOST/v1/tools/nomi_agent_run/stream" \
+curl -N -X POST "http://$HOST/v1/tools/<tool_name>/stream" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"goal":"Summarize this repository"}'
+  -d '{"argument":"value"}'
 ```
 
 The final event is:
@@ -103,9 +85,9 @@ headers = {
 }
 
 response = requests.post(
-    f"{base}/v1/tools/nomi_agent_run",
+    f"{base}/v1/tools/{TOOL_NAME}",
     headers=headers,
-    json={"goal": "Research competitor pricing and write notes.md"},
+    json=arguments,
 )
 print(response.json())
 ```
@@ -126,10 +108,8 @@ async def main():
             await session.initialize()
             tools = await session.list_tools()
             print([tool.name for tool in tools.tools])
-            result = await session.call_tool(
-                "nomi_agent_run",
-                {"goal": "Research competitor pricing and write notes.md"},
-            )
+            # Select a name and arguments from the live tools/list response.
+            result = await session.call_tool(TOOL_NAME, arguments)
             print(result)
 ```
 
@@ -166,3 +146,14 @@ curl -s "http://$HOST/v1/openapi.json?profile=agent" \
 - Tokens can be revoked with
   `DELETE /api/webui/companions/{id}/access-token` from a trusted local
   desktop context.
+
+## Persistent Agent Collaboration
+
+Agent collaboration has one authority-bound contract: `nomi_delegate` creates
+an execution, `nomi_execution_get` reads it, and `nomi_execution_update`
+changes its plan or lifecycle. A trusted local owner may mint an owner-bound
+companion token whose Remote catalog includes these tools. Remote delegation
+records the companion as creator, and later reads or updates are restricted to
+that companion's executions; secondary users receive none of the three tools.
+Always discover the effective catalog and treat the token as a high-privilege
+delegation of installation-owner authority.

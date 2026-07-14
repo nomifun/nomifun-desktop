@@ -20,7 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use nomifun_auth::{CompanionTokenValidator, SYSTEM_USER_ID};
+use nomifun_auth::CompanionTokenValidator;
 use nomifun_gateway::{CallerCtx, GatewayDeps, Registry, Surface, ToolSpec};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -106,7 +106,7 @@ async fn call_tool(
     }
     let ctx = CallerCtx {
         remote: true,
-        user_id: SYSTEM_USER_ID.to_string(),
+        user_id: state.deps.authoritative_user_id.to_string(),
         companion_id: Some(companion_id),
         ..Default::default()
     };
@@ -134,8 +134,8 @@ async fn call_tool(
 }
 
 /// `POST /v1/tools/{name}/stream` — Server-Sent Events stream of a tool call.
-/// Each SSE `data:` frame is a JSON event; streaming tools (e.g.
-/// `nomi_agent_run`) emit incremental `{"type": ..}` deltas as they happen, and
+/// Each SSE `data:` frame is a JSON event; streaming tools emit incremental
+/// `{"type": ..}` deltas as they happen, and
 /// every call ends with one `{"type":"__result__","data": <final>}` frame.
 /// Non-streaming tools emit only that terminal frame.
 async fn stream_tool(
@@ -163,7 +163,7 @@ async fn stream_tool(
         }
         let ctx = CallerCtx {
             remote: true,
-            user_id: SYSTEM_USER_ID.to_string(),
+            user_id: deps.authoritative_user_id.to_string(),
             companion_id: Some(companion_id),
             ..Default::default()
         };

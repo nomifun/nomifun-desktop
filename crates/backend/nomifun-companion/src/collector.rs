@@ -148,7 +148,7 @@ impl Collector {
     /// (`companion: true`, stamped by the conversation domain from
     /// `extra.companionSession`) wins, falling back to the local thread registry
     /// for events that predate the marker. The marker also covers entry
-    /// points the registry never sees (channel master sessions).
+    /// points the registry never sees (Channel Agent sessions).
     async fn is_companion_event(&self, data: &serde_json::Value) -> bool {
         if data.get("companion").and_then(|v| v.as_bool()).unwrap_or(false) {
             return true;
@@ -180,18 +180,38 @@ impl Collector {
         (!default.is_empty()).then_some(default)
     }
 
-    /// Spawn the bus-tap loop. Lagged receivers skip ahead; a closed bus ends
-    /// the task (process shutdown).
+    /// Spawn the bus-tap loop. The collector observes both instance-public and
+    /// owner-scoped events, but never changes either event's delivery audience.
+    /// Lagged receivers skip ahead; closing either half of the shared bus ends
+    /// the task (both senders have the same owner and lifetime).
     pub fn spawn(mut self, bus: Arc<nomifun_realtime::BroadcastEventBus>) {
-        let mut rx = bus.subscribe();
+        let mut public_rx = bus.subscribe();
+        let mut user_rx = bus.subscribe_user();
         tokio::spawn(async move {
             loop {
-                match rx.recv().await {
-                    Ok(msg) => self.handle(&msg).await,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::debug!(skipped, "companion collector lagged behind the event bus");
+                tokio::select! {
+                    result = public_rx.recv() => match result {
+                        Ok(msg) => self.handle(&msg).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::debug!(
+                                skipped,
+                                audience = "public",
+                                "companion collector lagged behind the event bus"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    result = user_rx.recv() => match result {
+                        Ok(envelope) => self.handle(&envelope.event).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::debug!(
+                                skipped,
+                                audience = "user",
+                                "companion collector lagged behind the event bus"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -836,7 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn payload_marker_identifies_companion_without_registry() {
-        // Channel master sessions never register in companion_threads —
+        // Channel Agent sessions never register in companion_threads —
         // the wire markers (companion / companion_id) must be enough.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::CompanionStore::open_memory().await.unwrap();

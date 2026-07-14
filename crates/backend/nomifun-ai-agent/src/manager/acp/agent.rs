@@ -1,4 +1,4 @@
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::capability::PromptCtx;
 use crate::capability::cli_process::CliAgentProcess;
 use crate::capability::prompt_pipeline::PromptPipeline;
@@ -14,7 +14,7 @@ use crate::protocol::error::{AcpError, CloseReason};
 use crate::protocol::events::{AgentStreamEvent, FinishEventData, TurnStopReason};
 use crate::protocol::send_error::AgentSendError;
 use crate::registry::CatalogSender;
-use crate::shared_kernel::{ModeId, ModelId, SessionId as DomainSessionId};
+use crate::session::{ModeId, ModelId, SessionId as DomainSessionId};
 use crate::types::SendMessageData;
 use agent_client_protocol::schema::{
     CancelNotification, SessionId, SessionModelState, SessionNotification, UsageUpdate,
@@ -143,11 +143,11 @@ pub struct AcpAgentManager {
     /// broadcast channel. `pub(super)` so sibling modules (session_flow,
     /// event_tracker) can call `self.runtime.emit(...)` directly.
     ///
-    /// Lifecycle: written by `IAgentTask::send_message` (Running →
+    /// Lifecycle: written by `AgentRuntimeControl::send_message` (Running →
     /// Finished/Error), `stop` (emit_finish), and `kill` (emit_error).
     /// `emit_finish` / `emit_error` are idempotent in the Finished
     /// absorbing state — multiple calls are safe.
-    pub(super) runtime: AgentRuntime,
+    pub(super) runtime: AgentRuntimeState,
 
     /// ACP protocol handle (SDK connection).
     pub(super) protocol: AcpProtocol,
@@ -174,6 +174,12 @@ pub struct AcpAgentManager {
 
     /// Mutex for serializing session operations (new/load/send).
     session_lock: Mutex<()>,
+}
+
+impl Drop for AcpAgentManager {
+    fn drop(&mut self) {
+        self.params.loopback_capability_leases.revoke_all();
+    }
 }
 
 impl AcpAgentManager {
@@ -250,7 +256,7 @@ impl AcpAgentManager {
         let (notification_tx, notification_rx) = mpsc::channel::<SessionNotification>(256);
         let (domain_event_tx, domain_event_rx) = mpsc::channel(256);
         let (permission_tx, permission_rx) = mpsc::channel(32);
-        let runtime = AgentRuntime::new(params.conversation_id.clone(), params.workspace.path.clone(), 256);
+        let runtime = AgentRuntimeState::new(params.conversation_id.clone(), params.workspace.path.clone(), 256);
 
         // Race the handshake against process exit. The SDK's stdout EOF
         // detection can lag (observed: 30s on Windows when the agent dies
@@ -612,7 +618,7 @@ impl AcpAgentManager {
 }
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for AcpAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for AcpAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::Acp
     }
@@ -782,6 +788,7 @@ impl crate::agent_task::IAgentTask for AcpAgentManager {
         });
 
         self.permission_router.cancel_all();
+        self.params.loopback_capability_leases.revoke_all();
 
         // m1 fix: emit error with the kill reason so the status goes to
         // Finished and subscribers see a terminal event. Idempotent.
@@ -802,7 +809,7 @@ impl AcpAgentManager {
         &self,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = crate::agent_task::IAgentTask::kill(self, reason);
+        let _ = crate::runtime_handle::AgentRuntimeControl::kill(self, reason);
         let process = Arc::clone(&self.process);
         let grace = Duration::from_millis(ACP_KILL_GRACE_MS);
         Box::pin(async move {

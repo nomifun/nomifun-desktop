@@ -145,11 +145,8 @@ mod tests {
         assert_eq!(mcp_stdio_subcommand(Some("")), None);
         // `doctor` is a real subcommand but NOT a stdio bridge — must not match.
         assert_eq!(mcp_stdio_subcommand(Some("doctor")), None);
-        // Team MCP is not surfaced in the product, so these hidden bridge names
-        // must not be honored by embedded hosts.
-        assert_eq!(mcp_stdio_subcommand(Some("mcp-bridge")), None);
-        assert_eq!(mcp_stdio_subcommand(Some("mcp-guide-stdio")), None);
-        assert_eq!(mcp_stdio_subcommand(Some("mcp-team-stdio")), None);
+        // Unknown stdio-looking names must not be dispatched.
+        assert_eq!(mcp_stdio_subcommand(Some("unknown-mcp-stdio")), None);
     }
 
     #[test]

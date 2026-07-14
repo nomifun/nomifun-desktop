@@ -1,6 +1,6 @@
 [package]
 name = "nomi-agent"
-description = "Agent engine, session management, output sinks, and orchestration for Nomi"
+description = "Agent engine, session management, output sinks, and tool execution for Nomi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,7 +26,7 @@ nomi-skills.workspace    = true
 nomi-memory.workspace    = true
 nomi-compact.workspace   = true
 nomi-redact.workspace    = true
-nomi-execution.workspace = true
+nomi-process-runtime.workspace = true
 nomi-computer = { workspace = true, optional = true }
 nomi-browser = { workspace = true, optional = true }
 # Used only by the browser-use SessionVisualLocator adapter (base64-encode the
@@ -40,6 +40,7 @@ tokio-util.workspace  = true
 futures.workspace     = true
 serde.workspace       = true
 serde_json.workspace  = true
+schemars               = "1"
 async-trait.workspace = true
 anyhow.workspace      = true
 thiserror.workspace   = true
@@ -48,6 +49,7 @@ chrono.workspace      = true
 dirs.workspace        = true
 crossterm.workspace   = true
 is-terminal.workspace = true
+uuid.workspace        = true
 
 
 [dev-dependencies]

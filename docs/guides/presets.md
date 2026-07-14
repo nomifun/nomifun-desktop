@@ -1,7 +1,7 @@
 # Presets
 
-A **preset** is a reusable launch configuration. It captures how an agent,
-agent-cluster member, companion, or scheduled task should start without turning
+A **preset** is a reusable launch configuration. It captures how an Agent,
+execution step, companion, or scheduled task should start without turning
 that configuration into another identity or executor.
 
 Open the preset library at **`/presets`**. Skills remain an independent
@@ -17,8 +17,8 @@ capability library at **`/skills`**.
 | Skill | One focused capability that can be discovered and loaded | Agent/model selection or a complete persona |
 
 This separation lets the same preset launch a normal conversation, materialize
-an agent-cluster role, configure a companion, or seed a scheduled task. It also
-lets a companion profile or a successful cluster role be copied into a reusable
+an Agent Execution step, configure a companion, or seed a scheduled task. It also
+lets a companion profile or a successful collaboration role be copied into a reusable
 preset without conflating the resulting template with its source.
 
 ## What a preset contains
@@ -27,7 +27,7 @@ The preset model can store:
 
 - display name, avatar, description, and an agent-facing routing description;
 - localized names, descriptions, instructions, and example prompts;
-- one or more targets: conversation, cluster member, companion, public
+- one or more targets: conversation, execution step, companion, public
   companion, or scheduled task;
 - ordered agent preferences and an optional per-user preferred agent;
 - provider-qualified model preferences;
@@ -65,9 +65,9 @@ instructions, combines skill overrides, and materializes knowledge scope. It
 returns a `ResolvedPresetSnapshot` containing the preset id and revision plus
 the exact resolved agent, model, instructions, skills, and knowledge policy.
 
-Conversations, scheduled tasks, and agent-cluster members persist this snapshot.
+Conversations, scheduled tasks, and Agent Execution steps persist this snapshot.
 Later edits to the catalog therefore do not silently change an already-created
-target. Agent clusters can reuse presets marked auto-selectable, while explicit
+target. Agent collaboration can reuse presets marked auto-selectable, while explicit
 selection always remains available for supported targets.
 
 ## API

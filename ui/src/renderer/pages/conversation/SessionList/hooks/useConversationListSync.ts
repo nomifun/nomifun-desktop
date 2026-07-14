@@ -9,6 +9,8 @@ import type { TChatConversation } from '@/common/config/storage';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 
+import { isOrdinaryWorkConversation } from './conversationListFilter';
+
 /**
  * Whitelist of message types that indicate content generation is in progress.
  * Only these types should trigger the sidebar loading spinner.
@@ -119,47 +121,10 @@ const refreshConversations = () => {
           // carve-out that KEPT channel-sourced companion sessions visible here
           // is exactly what leaked IM chats into the work space — it is removed,
           // which also fixes Slack/Discord (source==='nomifun') being mis-bucketed.
-          const extra = conv.extra as
-            | {
-                is_health_check?: boolean;
-                team_id?: string;
-                teamId?: string;
-                companionSession?: boolean;
-                companionId?: string;
-                channelPlatform?: string;
-                orchestrator_run_id?: string;
-                orchestrator_task_id?: string;
-                multi_agent?: { enabled?: boolean };
-              }
-            | undefined;
-          const isCompanionConversation =
-            !!extra?.companionSession || !!extra?.companionId || !!extra?.channelPlatform;
-          // 智能编排 (orchestrator) WORKER conversations are spawned by the Run
-          // engine to execute fleet-member tasks; build_worker_extra stamps them
-          // with BOTH `orchestrator_run_id` AND `orchestrator_task_id`. The LEAD
-          // conversation (nomi_run_create write-back) carries only
-          // `orchestrator_run_id` (no task_id) and must stay visible — it hosts
-          // the DAG rail. So key the hide filter on the worker-only marker
-          // `orchestrator_task_id`. Workers live under the orchestrator Run view,
-          // never in this work conversation list — hide them like companion rows.
-          const isOrchestratorWorkerConversation = !!extra?.orchestrator_task_id;
-          // Multi-agent: the LEAD is the user's own conversation (it carries the
-          // frontend-only `multi_agent` config the user toggled on); the backend
-          // never writes `multi_agent` into a teammate's extra. So hide only
-          // teammate conversations (teamId but no enabled multi_agent), keeping
-          // the lead visible in the sidebar.
-          const inTeam = !!extra?.team_id || !!extra?.teamId;
-          const isMultiAgentLead = inTeam && extra?.multi_agent?.enabled === true;
-          const hideAsTeammate = inTeam && !isMultiAgentLead;
-          return (
-            extra?.is_health_check !== true &&
-            !hideAsTeammate &&
-            !isCompanionConversation &&
-            !isOrchestratorWorkerConversation
-          );
+          return isOrdinaryWorkConversation(conv);
         });
         conversationsState = filteredData;
-        // Use ALL conversation IDs (including team/legacy health-check rows) so the
+        // Use ALL conversation IDs (including legacy health-check rows) so the
         // responseStream listener recognises them as known and doesn't
         // trigger an infinite refreshConversations loop.
         conversation_idsState = new Set(items.map((conversation) => conversation.id));

@@ -30,4 +30,13 @@ pub use router::{PublicMcpState, public_mcp_router};
 /// permissions — dispatch is still gated by the Remote surface, not the profile.
 /// (`computer` lights up when the computer-use caps land.)
 pub const AGENT_PROFILE_DOMAINS: &[&str] =
-    &["agent", "conversation", "browser", "computer", "knowledge", "files", "memory"];
+    &[
+        "agent_execution",
+        "agent",
+        "conversation",
+        "browser",
+        "computer",
+        "knowledge",
+        "files",
+        "memory",
+    ];

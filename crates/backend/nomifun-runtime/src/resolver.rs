@@ -68,7 +68,7 @@ fn resolve_with<E: EmbeddedBun>(embed: &E) -> Result<PathBuf, ResolveError> {
         return Ok(p);
     }
     if !embed.has() {
-        return which::which("bun").map_err(|_| ResolveError::NotFound);
+        return nomi_process_runtime::resolve_command_path("bun").ok_or(ResolveError::NotFound);
     }
     let dir = cache::bun_dir(embed.version(), embed.sha256()).ok_or(ResolveError::NotFound)?;
     let bun_path = dir.join(extract::bun_filename());
@@ -131,9 +131,9 @@ fn env_override() -> Option<PathBuf> {
 
 /// Resolve a command name to an absolute path.
 ///
-/// For `bun` / `bunx` we go through `nomifun_runtime` so the bundled
-/// runtime is used when present; everything else falls back to the
-/// user's `$PATH` via `which::which`.
+/// For `bun` / `bunx` this crate resolves the bundled toolchain first;
+/// everything else delegates to `nomi-process-runtime`'s platform-neutral
+/// `PATH` resolver.
 ///
 /// On Windows, if a bare name lookup fails we retry with the common
 /// shim suffixes (`.cmd`, `.ps1`, `.bat`). Tools installed via npm
@@ -141,7 +141,9 @@ fn env_override() -> Option<PathBuf> {
 /// trimmed `PATHEXT` would otherwise see them as missing.
 pub fn resolve_command_path(cmd: &str) -> Option<PathBuf> {
     match cmd {
-        "bun" => resolve_bun().ok().or_else(|| which::which("bun").ok()),
+        "bun" => resolve_bun()
+            .ok()
+            .or_else(|| nomi_process_runtime::resolve_command_path("bun")),
         "bunx" => {
             let bunx_name = if cfg!(windows) { "bunx.exe" } else { "bunx" };
             if let Some(dir) = bun_bin_dir() {
@@ -150,29 +152,10 @@ pub fn resolve_command_path(cmd: &str) -> Option<PathBuf> {
                     return Some(p);
                 }
             }
-            which::which("bunx").ok()
+            nomi_process_runtime::resolve_command_path("bunx")
         }
-        other => which::which(other).ok().or_else(|| windows_shim_fallback(other)),
+        other => nomi_process_runtime::resolve_command_path(other),
     }
-}
-
-#[cfg(windows)]
-fn windows_shim_fallback(cmd: &str) -> Option<PathBuf> {
-    // If the caller already passed an extension, no point retrying.
-    if Path::new(cmd).extension().is_some() {
-        return None;
-    }
-    for ext in ["cmd", "ps1", "bat"] {
-        if let Ok(p) = which::which(format!("{cmd}.{ext}")) {
-            return Some(p);
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn windows_shim_fallback(_cmd: &str) -> Option<PathBuf> {
-    None
 }
 
 /// Resolve `cmd` to an absolute path **within `dir` only** — does not walk
@@ -180,42 +163,13 @@ fn windows_shim_fallback(_cmd: &str) -> Option<PathBuf> {
 /// Windows additionally tries `.cmd`, `.ps1`, `.bat` shim suffixes for
 /// npm-/pnpm-installed CLIs whose extension `PATHEXT` may not list.
 ///
-/// `dir` is wrapped via `std::env::join_paths` before being handed to
-/// `which::which_in`, so a `dir` that itself contains the OS PATH
-/// separator (`:` on Unix, `;` on Windows) cannot be misinterpreted as
-/// two directories. If `dir` cannot be expressed as a single PATH
-/// entry, we return `None` rather than searching a phantom location.
+/// The shared process resolver treats `dir` as one exact PATH entry, so a
+/// directory containing the OS separator (`:` on Unix, `;` on Windows)
+/// cannot be misinterpreted as multiple directories.
 ///
 /// Returns `None` if the command cannot be resolved inside the directory.
 pub fn resolve_command_in(cmd: &str, dir: &Path) -> Option<PathBuf> {
-    let paths = std::env::join_paths([dir]).ok()?;
-    if let Ok(p) = which::which_in(cmd, Some(&paths), dir) {
-        return Some(p);
-    }
-    windows_shim_fallback_in(cmd, dir)
-}
-
-/// Try `cmd` plus the common Windows shim suffixes (`.cmd`, `.ps1`, `.bat`)
-/// inside a single directory. Used by `resolve_command_in` for callers that
-/// want a directory-scoped lookup (the global `windows_shim_fallback` below
-/// goes through `which::which`, which walks the entire `PATH`).
-#[cfg(windows)]
-fn windows_shim_fallback_in(cmd: &str, dir: &Path) -> Option<PathBuf> {
-    if Path::new(cmd).extension().is_some() {
-        return None;
-    }
-    for ext in ["cmd", "ps1", "bat"] {
-        let candidate = dir.join(format!("{cmd}.{ext}"));
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn windows_shim_fallback_in(_cmd: &str, _dir: &Path) -> Option<PathBuf> {
-    None
+    nomi_process_runtime::resolve_command_in(cmd, dir)
 }
 
 #[cfg(test)]

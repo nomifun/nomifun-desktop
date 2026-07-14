@@ -43,11 +43,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function usePendingConfirmationsRecovery(conversation_id: number) {
+export function usePendingConfirmationsRecovery(conversation_id: number, options?: { enabled?: boolean }) {
   const updateMessageList = useUpdateMessageList();
+  const enabled = options?.enabled ?? true;
 
   useEffect(() => {
-    if (!conversation_id) return;
+    if (!enabled || !conversation_id) return;
     let cancelled = false;
 
     void ipcBridge.conversation.confirmation.list
@@ -79,5 +80,5 @@ export function usePendingConfirmationsRecovery(conversation_id: number) {
       cancelled = true;
       off();
     };
-  }, [conversation_id, updateMessageList]);
+  }, [conversation_id, enabled, updateMessageList]);
 }

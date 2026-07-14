@@ -1,6 +1,19 @@
 /// The fixed filename agents write skill suggestions to in the workspace root.
 pub const SKILL_SUGGEST_FILENAME: &str = "SKILL_SUGGEST.md";
 
+/// New-conversation mode for a model-only schedule. It keeps the recurring
+/// task framing but never asks the Agent to create a host file it is not
+/// authorized to write.
+pub fn build_new_conversation_prompt(
+    task_name: &str,
+    schedule_desc: &str,
+    user_prompt: &str,
+) -> String {
+    format!(
+        "[Scheduled Task Context]\nTask: {task_name}\nSchedule: {schedule_desc}\n\nRules:\n1. Execute the task directly — do NOT ask clarifying questions.\n2. Focus on producing useful, actionable output.\n[/Scheduled Task Context]\n\n{user_prompt}"
+    )
+}
+
 /// New-conversation mode without a saved skill for agents that need the
 /// `SKILL_SUGGEST.md` request inline.
 pub fn build_new_conversation_prompt_with_skill_suggest(

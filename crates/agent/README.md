@@ -15,7 +15,7 @@ Current crates:
 | `nomi-mcp` | MCP client, config, transports, and tool proxying. |
 | `nomi-skills` | Skill discovery, loading, and execution support. |
 | `nomi-memory` | Long-term project/user memory. |
-| `nomi-agent` | Core session engine and orchestration. |
+| `nomi-agent` | Core session engine, tool execution, and Agent delegation. |
 | `nomi-cli` | Standalone `nomi` CLI. |
 | `nomi-computer` | Desktop computer-use tool implementation. |
 | `nomi-a11y` | Accessibility helpers used by computer-use flows. |

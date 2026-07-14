@@ -59,7 +59,7 @@ external IM ──▶ plugin (long-poll / WebSocket)
 - **SessionManager** maps `(platform_user, chat_id)` to an agent
   conversation, so each external chat is a stable session and follow-up
   messages land in the same agent.
-- **Orchestrator** plumbs incoming messages into the agent stream and
+- **Message loop** plumbs incoming messages into the agent stream and
   the agent's replies back out as edits to the same IM message
   (everything except WeChat supports message editing — WeChat falls
   back to sending follow-up replies).
@@ -136,14 +136,22 @@ re-pairs from scratch.
 
 ![Pairing approval](../images/channels-02-pairing.png)
 
-## Master Agent mode
+## Channel Agent integration
 
-By default, every channel conversation runs in **Master Agent mode**:
-the remote message is greeted by the Nomi companion itself. The conversation
-inherits the companion's personality and memories, and the agent is wired to
-the **Desktop Gateway** tools, so from your phone you're not talking
-to an isolated chat bot — you're talking to the agent that runs your
-desktop.
+Channel messaging uses the same Agent and Conversation runtime as the desktop;
+it is not a separate Agent type or a switchable mode. When a bot is bound to a
+desktop companion and uses Nomi, inbound turns are routed into that companion's
+single persistent Conversation. The channel Agent context supplies the
+companion persona and memory context and wires the **platform Gateway** tools,
+so the desktop and IM surfaces share one transcript and one runtime identity.
+That authority is never stored in Conversation metadata: after validating the
+local instance owner, the Agent factory injects a scoped, expiring claim signed
+by a process-private root.
+
+The obsolete per-platform on/off preference has been removed; there is no
+legacy off-state. A bot bound to a public agent follows the public-agent policy
+instead: it uses an isolated per-chat Conversation and never receives the
+platform Gateway claim; the factory's public-agent clamp fails closed.
 
 What the gateway tools (all prefixed `nomi_*`, 32 of them today) let the
 remote agent do on your behalf:
@@ -186,17 +194,6 @@ remote agent do on your behalf:
 So *"move my daily-report cron to 9 am and tell me what's running
 right now"* is a single Lark message.
 
-**Turning it off.** Each platform panel has a **Master Agent mode**
-switch next to the default-model selector. It's on by default; the
-preference is stored per platform as `channels.<platform>.masterAgent`
-in the client preferences (missing value = on). Switching it off
-reverts that platform to the legacy behavior — each remote chat gets a
-plain standalone conversation, with no companion persona and no gateway
-tools. Like the model selector, toggling the switch calls
-`POST /api/channel/settings/sync` and clears the platform's active
-sessions, so the next inbound message starts a conversation in the new
-mode.
-
 **Choosing which companion greets the channel.** With [multiple companions](./companions.md),
 bots are bound to companions **per channel row**: each row of
 `channel_plugins` is one bot (the same platform can host several —
@@ -210,36 +207,23 @@ one step — the next inbound message is greeted by the new companion's persona,
 model, and knowledge mounts (the conversation carries `extra.companionId`).
 Connecting a bot from a companion's **Remote** tab creates the channel row and
 binds it to that companion in one go. A row without a companion binding falls back
-to the per-platform preference `channels.<platform>.companionId`, then
-to the **default companion**; if the bound companion is later deleted, the channel
-falls back to the default companion and the sessions are likewise reset.
-Memory is shared across the whole companion family: no matter how many bots
-and channels you connect, their conversations flow into the same single
-memory pipeline, so switching companions never loses memories.
+to the per-platform preference `channels.<platform>.companionId`. There is no
+implicit default-companion fallback: if neither binding resolves to a live
+companion, the channel remains unbound and receives no companion persona. A
+binding change resets the affected sessions so the next turn resolves the new
+owner cleanly.
 
-**How it relates to the agent / model pickers.** The per-platform
-**Default agent** still decides which engine answers; the gateway
-tools are injected for any agent type, while the companion persona and
-memory ride on the Nomi engine. Model resolution in master mode:
-the platform's **Default model** (if set) wins, otherwise the
-conversation falls back to the bound companion's own model.
-
-## Picking the agent and model
-
-Each platform has a **Default agent** and **Default model** selector
-in its config form. The platform stores them as
-`channels.<platform>.defaultModel` in the client config, so:
-
-- a message from Telegram routes to whatever agent / model you picked
-  for Telegram;
-- a message from Lark can route to a different agent;
-- changing the selector calls `POST /api/channel/settings/sync`, which
-  clears any active sessions for that platform — the next inbound
-  message re-creates them with the new defaults.
-
-The model selector is the same Gemini-flavoured component the desktop
-uses, so any provider you've configured (Anthropic, OpenAI-compatible
-custom URL, Gemini-with-Google-auth, Bedrock, …) is available here.
+**Agent and model resolution.** Channel connection forms configure transport
+credentials and owner bindings; they do not introduce another Agent or model
+picker. A companion-bound Nomi bot uses the companion profile's model as the
+authoritative value, with a provisioned `channels.<platform>.defaultModel` only
+as fallback. A public-agent bot uses that public agent's resolved model under
+the public capability clamp. An unbound channel defaults to Nomi; deployments
+that explicitly provision `channels.<platform>.agent` can select another engine,
+and ACP continues to consume its provisioned backend/model configuration.
+After changing a platform-level provisioning preference, calling
+`POST /api/channel/settings/sync` clears that platform's sessions so the next
+turn resolves the new configuration.
 
 ## What works from the IM side
 
@@ -275,8 +259,8 @@ What you don't get from the IM side (yet):
 | Authorised users                | `GET /api/channel/users`, `POST .../users/revoke`       |
 | Active sessions                 | `GET /api/channel/sessions`                             |
 | Sync (clear sessions on change) | `POST /api/channel/settings/sync`                       |
-| Bind master-agent companion           | `POST /api/channel/settings/companion`                        |
-| WeChat QR login SSE             | `POST /api/channel/weixin/login/start`                         |
+| Bind channel companion          | `POST /api/channel/settings/companion`                  |
+| WeChat QR login SSE             | `POST /api/channel/weixin/login/start`                  |
 
 ## Notes
 

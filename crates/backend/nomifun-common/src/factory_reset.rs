@@ -3,7 +3,7 @@
 //!
 //! Why arm-then-reboot instead of wiping in place: the `SqlitePool` is cloned
 //! across every service, many background loops (AutoWork persistent loop, cron,
-//! channel orchestrator, knowledge resume, companion service, IDMM …) write to the DB
+//! channel message loop, knowledge resume, companion service, IDMM …) write to the DB
 //! continuously and there is no global "pause all" switch, and on Windows an
 //! open connection handle blocks deleting the `.db` file. Doing the wipe at the
 //! very start of boot — after `acquire_server_lock` but before `init_database`

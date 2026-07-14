@@ -9,13 +9,18 @@ use async_trait::async_trait;
 use nomifun_api_types::{CreateRequirementRequest, RequirementStatus};
 use nomifun_db::models::RequirementRow;
 use nomifun_db::{IRequirementRepository, SqliteRequirementRepository, init_database_memory};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use nomifun_requirement::{CompletionNotifier, RequirementEventEmitter, RequirementService};
 
 #[derive(Default)]
 struct NoopBroadcaster;
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(
+        &self,
+        _user_id: &str,
+        _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+    ) {
+    }
 }
 
 #[derive(Default)]
@@ -33,7 +38,10 @@ impl CompletionNotifier for RecordingNotifier {
 async fn svc(notifier: Arc<RecordingNotifier>) -> RequirementService {
     let db = init_database_memory().await.unwrap();
     let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-    let emitter = RequirementEventEmitter::new(Arc::new(NoopBroadcaster));
+    let emitter = RequirementEventEmitter::new(
+        Arc::new(NoopBroadcaster),
+        Arc::from("system_default_user"),
+    );
     Box::leak(Box::new(db));
     RequirementService::new(repo, emitter).with_completion_notifier(notifier)
 }

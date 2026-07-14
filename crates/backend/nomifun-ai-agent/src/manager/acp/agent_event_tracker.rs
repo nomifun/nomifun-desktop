@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use std::collections::HashMap;
 
-use crate::shared_kernel::{ConfigKey, ConfigValue, ModeId, ModelId, SessionId};
+use crate::session::{ConfigKey, ConfigValue, ModeId, ModelId, SessionId};
 
 /// Domain events emitted by the `AcpSession` aggregate.
 ///
@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::manager::acp::agent_event_tracker::AcpSessionEvent;
     use crate::manager::acp::session::AcpSession;
-    use crate::shared_kernel::{ModeId, ModelId};
+    use crate::session::{ModeId, ModelId};
     use agent_client_protocol::schema::SessionModeState;
 
     #[test]

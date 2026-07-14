@@ -133,8 +133,8 @@ const isModelEnabled = (platform: IProvider, model: string): boolean => {
 
 /**
  * 每模型描述编辑浮层 / Per-model description editor popover.
- * 描述用于自动编排选用模型；空态显示占位提示。
- * The description drives orchestration model auto-selection; empty shows placeholder.
+ * 描述用于智能协作自动选择模型；空态显示占位提示。
+ * The description drives automatic model selection for collaboration.
  */
 const ModelDescriptionEditor: React.FC<{
   description: string;
@@ -145,7 +145,7 @@ const ModelDescriptionEditor: React.FC<{
   const [draft, setDraft] = useState(description);
 
   const placeholder = t('settings.modelDescriptionPlaceholder', {
-    defaultValue: '描述该模型擅长什么，用于自动编排选用',
+    defaultValue: '描述该模型擅长什么，用于协作任务自动选择',
   });
 
   // 每次打开时同步最新描述，避免外部更新后草稿陈旧
@@ -172,7 +172,7 @@ const ModelDescriptionEditor: React.FC<{
       content={
         <div className='flex flex-col gap-8px w-280px' onClick={(e) => e.stopPropagation()}>
           <div className='text-12px text-t-secondary'>
-            {t('settings.modelDescriptionTitle', { defaultValue: '模型描述（用于自动编排）' })}
+            {t('settings.modelDescriptionTitle', { defaultValue: '模型描述（用于智能协作）' })}
           </div>
           <Input.TextArea
             autoFocus
@@ -551,7 +551,8 @@ const ModelModalContent: React.FC = () => {
             desktopCompanion: t('settings.providerInUse.desktopCompanion'),
             publicCompanion: t('settings.providerInUse.publicCompanion'),
             smartDecision: t('settings.providerInUse.smartDecision'),
-            orchestrator: t('settings.providerInUse.orchestrator'),
+            conversation: t('settings.providerInUse.conversation'),
+            agentExecution: t('settings.providerInUse.agentExecution'),
           };
           Modal.confirm({
             title: t('settings.providerInUse.title'),
@@ -1186,7 +1187,7 @@ const ModelModalContent: React.FC = () => {
                                   onChange={(checked) => toggleModelEnabled(platform, model, checked)}
                                 />
 
-                                {/* 每模型描述编辑（驱动自动编排选用）/ Per-model description editor */}
+                                {/* 每模型描述编辑（驱动智能协作选择）/ Per-model collaboration description */}
                                 <ModelDescriptionEditor
                                   description={modelDescription}
                                   onSave={(text) => {

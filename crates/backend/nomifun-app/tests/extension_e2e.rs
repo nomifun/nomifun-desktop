@@ -172,6 +172,13 @@ async fn build_app_with_extension_root(ext_root: &std::path::Path) -> (axum::Rou
     (router, services)
 }
 
+async fn setup_owner(
+    app: &mut axum::Router,
+    services: &AppServices,
+) -> (String, String) {
+    setup_and_login(app, services, "admin", "StrongP@ss1").await
+}
+
 // ---------------------------------------------------------------------------
 // EQ — Extension query (unauthenticated → rejected)
 // ---------------------------------------------------------------------------
@@ -190,7 +197,7 @@ async fn eq_unauthenticated_access_rejected() {
 #[tokio::test]
 async fn eq1_get_loaded_extensions_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app.oneshot(get_with_token("/api/extensions", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -203,7 +210,7 @@ async fn eq1_get_loaded_extensions_empty() {
 #[tokio::test]
 async fn eq3_get_themes_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/themes", &token))
@@ -218,7 +225,7 @@ async fn eq3_get_themes_empty() {
 #[tokio::test]
 async fn eq4_get_presets_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/presets", &token))
@@ -233,7 +240,7 @@ async fn eq4_get_presets_empty() {
 #[tokio::test]
 async fn eq5_get_acp_adapters_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/acp-adapters", &token))
@@ -245,7 +252,7 @@ async fn eq5_get_acp_adapters_empty() {
 #[tokio::test]
 async fn eq6_get_agents_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/agents", &token))
@@ -257,7 +264,7 @@ async fn eq6_get_agents_empty() {
 #[tokio::test]
 async fn eq7_get_mcp_servers_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/mcp-servers", &token))
@@ -269,7 +276,7 @@ async fn eq7_get_mcp_servers_empty() {
 #[tokio::test]
 async fn eq8_get_skills_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/skills", &token))
@@ -281,7 +288,7 @@ async fn eq8_get_skills_empty() {
 #[tokio::test]
 async fn eq8b_get_channel_plugins_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/channel-plugins", &token))
@@ -297,7 +304,7 @@ async fn eq8b_get_channel_plugins_empty() {
 #[tokio::test]
 async fn eq9_get_settings_tabs_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/settings-tabs", &token))
@@ -309,7 +316,7 @@ async fn eq9_get_settings_tabs_empty() {
 #[tokio::test]
 async fn eq10_get_webui_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/webui", &token))
@@ -321,7 +328,7 @@ async fn eq10_get_webui_empty() {
 #[tokio::test]
 async fn eq11_get_agent_activity() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/agent-activity", &token))
@@ -340,7 +347,7 @@ async fn eq11_get_agent_activity() {
 #[tokio::test]
 async fn eq12_get_i18n_for_locale() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -367,7 +374,7 @@ async fn eq12_get_i18n_for_locale() {
 #[tokio::test]
 async fn eq13_permissions_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -385,7 +392,7 @@ async fn eq13_permissions_not_found() {
 #[tokio::test]
 async fn eq14_risk_level_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -405,7 +412,7 @@ async fn eq15_legacy_acp_skill_and_mcp_endpoints_preserve_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let skills_resp = app
         .clone()
@@ -461,7 +468,7 @@ async fn eq16_legacy_preset_agent_and_theme_endpoints_preserve_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let preset_resp = app
         .clone()
@@ -527,7 +534,7 @@ async fn eq17_legacy_channel_plugin_endpoint_preserves_contract() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/extensions/channel-plugins", &token))
@@ -575,7 +582,7 @@ async fn eq18_channel_status_lists_builtin_and_extension_placeholders() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/channel/plugins", &token))
@@ -628,7 +635,7 @@ async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
     .await
     .unwrap();
 
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
     let resp = app
         .oneshot(get_with_token("/api/channel/plugins", &token))
         .await
@@ -659,7 +666,7 @@ async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
     let repo = SqliteChannelRepository::new(services.database.pool().clone());
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let enable_resp = app
         .clone()
@@ -715,7 +722,7 @@ async fn eq21_disable_extension_channel_updates_status() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let _ = app
         .clone()
@@ -774,7 +781,7 @@ async fn eq21_disable_extension_channel_updates_status() {
 #[tokio::test]
 async fn em3_enable_nonexistent_returns_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -792,7 +799,7 @@ async fn em3_enable_nonexistent_returns_not_found() {
 #[tokio::test]
 async fn em4_disable_nonexistent_returns_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -814,7 +821,7 @@ async fn em4_disable_nonexistent_returns_not_found() {
 #[tokio::test]
 async fn hm1_get_hub_extensions() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/hub/extensions", &token))
@@ -831,7 +838,7 @@ async fn hm1_get_hub_extensions() {
 #[tokio::test]
 async fn hm3_install_nonexistent_returns_error() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -855,7 +862,7 @@ async fn hm3_install_nonexistent_returns_error() {
 #[tokio::test]
 async fn hm5_check_updates_empty() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -881,7 +888,7 @@ async fn hm5_check_updates_empty() {
 #[tokio::test]
 async fn sm11_get_skill_paths() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app.oneshot(get_with_token("/api/skills/paths", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -896,7 +903,7 @@ async fn sm11_get_skill_paths() {
 #[tokio::test]
 async fn sm9_detect_paths() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/skills/detect-paths", &token))
@@ -916,7 +923,7 @@ async fn sm9_detect_paths() {
 #[tokio::test]
 async fn cp1_get_external_paths_empty() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/skills/external-paths", &token))
@@ -955,7 +962,7 @@ async fn auth_skills_unauthenticated() {
 #[tokio::test]
 async fn rm1_read_builtin_rule_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -979,7 +986,7 @@ async fn rm1_read_builtin_rule_not_found() {
 async fn rm2_read_builtin_rule_happy_path_returns_file_content() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     std::fs::write(
         paths.builtin_rules_dir.join("code-review.md"),
@@ -1007,7 +1014,7 @@ async fn rm2_read_builtin_rule_happy_path_returns_file_content() {
 #[tokio::test]
 async fn rm3_read_builtin_rule_rejects_path_traversal() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -1032,7 +1039,7 @@ async fn rm3_read_builtin_rule_rejects_path_traversal() {
 #[tokio::test]
 async fn sk1_read_builtin_skill_not_found() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(json_with_token(
@@ -1055,7 +1062,7 @@ async fn sk1_read_builtin_skill_not_found() {
 async fn sk2_read_builtin_skill_happy_path_returns_file_content() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     std::fs::write(
         paths.builtin_skills_dir.join("cowork-skills.md"),
@@ -1083,7 +1090,7 @@ async fn sk2_read_builtin_skill_happy_path_returns_file_content() {
 #[tokio::test]
 async fn sk3_read_builtin_skill_rejects_path_traversal() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     // Path traversal / absolute-path attempts must be rejected. Relative
     // paths with `/` are now legitimate (e.g. `auto-inject/cron/SKILL.md`)
@@ -1116,7 +1123,7 @@ async fn sk3_read_builtin_skill_rejects_path_traversal() {
 async fn si1_read_skill_info_from_directory_path() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let skill_dir = tmp.path().join("my-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1148,7 +1155,7 @@ async fn si1_read_skill_info_from_directory_path() {
 async fn si2_read_skill_info_falls_back_to_directory_name_when_name_empty() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let skill_dir = tmp.path().join("fallback-dir");
     std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1180,7 +1187,7 @@ async fn si2_read_skill_info_falls_back_to_directory_name_when_name_empty() {
 async fn si3_read_skill_info_returns_not_found_for_missing_path() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let missing = tmp.path().join("no-such-skill");
 
@@ -1215,7 +1222,7 @@ fn write_skill(dir: &std::path::Path, name: &str, description: &str) {
 async fn sl1_list_skills_tags_builtin_and_custom_with_source_field() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let builtin_dir = paths.builtin_skills_dir.clone();
     write_skill(&builtin_dir, "review", "Built-in review skill");
@@ -1251,7 +1258,7 @@ async fn sl1_list_skills_tags_builtin_and_custom_with_source_field() {
 async fn sl2_list_skills_user_custom_overrides_builtin() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let builtin_dir = paths.builtin_skills_dir.clone();
     write_skill(&builtin_dir, "review", "Built-in review");
@@ -1271,7 +1278,7 @@ async fn sl2_list_skills_user_custom_overrides_builtin() {
 async fn sl3_list_skills_returns_empty_array_when_no_skills() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app.oneshot(get_with_token("/api/skills", &token)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1289,7 +1296,7 @@ async fn sl3_list_skills_returns_empty_array_when_no_skills() {
 async fn ba1_auto_skills_lists_underscore_builtin_entries() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let builtin_dir = paths.builtin_skills_dir.clone();
     let auto_dir = builtin_dir.join("auto-inject");
@@ -1325,7 +1332,7 @@ async fn ba1_auto_skills_lists_underscore_builtin_entries() {
 async fn ba2_auto_skills_returns_empty_array_when_subdir_missing() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, _csrf) = setup_owner(&mut app, &services).await;
 
     let resp = app
         .oneshot(get_with_token("/api/skills/builtin-auto", &token))
@@ -1360,7 +1367,7 @@ async fn de1_detect_external_populates_custom_source_slug() {
     // in `tests/e2e/features/settings/skills/edge-cases.e2e.ts`.
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let ext_dir = tmp.path().join("external-skills");
     let skill_dir = ext_dir.join("my-ext-skill");
@@ -1412,7 +1419,7 @@ async fn de1_detect_external_populates_custom_source_slug() {
 async fn de2_detect_external_source_slugs_are_unique() {
     let tmp = TempDir::new().unwrap();
     let (mut app, services, _paths) = build_app_with_skill_paths(tmp.path()).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass1").await;
+    let (token, csrf) = setup_owner(&mut app, &services).await;
 
     let mk = |p: &std::path::Path, skill: &str| {
         let dir = p.join(skill);

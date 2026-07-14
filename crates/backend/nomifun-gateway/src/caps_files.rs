@@ -147,15 +147,18 @@ async fn read_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadFileParams) ->
 }
 
 async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
+    if ctx.user_id.trim().is_empty() {
+        return json!({ "error": "missing caller user identity" });
+    }
     let result = match file_authority(&ctx) {
         Some(auth) => {
             deps.file_service
-                .write_file_scoped(&p.path, p.content.as_bytes(), &p.workspace, &auth)
+                .write_file_scoped(&ctx.user_id, &p.path, p.content.as_bytes(), &p.workspace, &auth)
                 .await
         }
         None => {
             deps.file_service
-                .write_file(&p.path, p.content.as_bytes(), &p.workspace)
+                .write_file(&ctx.user_id, &p.path, p.content.as_bytes(), &p.workspace)
                 .await
         }
     };
@@ -235,9 +238,20 @@ async fn get_metadata(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetMetadataPara
 }
 
 async fn remove(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RemoveParams) -> Value {
+    if ctx.user_id.trim().is_empty() {
+        return json!({ "error": "missing caller user identity" });
+    }
     let result = match file_authority(&ctx) {
-        Some(auth) => deps.file_service.remove_entry_scoped(&p.path, &p.workspace, &auth).await,
-        None => deps.file_service.remove_entry(&p.path, &p.workspace).await,
+        Some(auth) => {
+            deps.file_service
+                .remove_entry_scoped(&ctx.user_id, &p.path, &p.workspace, &auth)
+                .await
+        }
+        None => {
+            deps.file_service
+                .remove_entry(&ctx.user_id, &p.path, &p.workspace)
+                .await
+        }
     };
     match result {
         Ok(()) => ok(json!({ "removed": true, "path": p.path })),

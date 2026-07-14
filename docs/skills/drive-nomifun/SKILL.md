@@ -2,18 +2,18 @@
 name: drive-nomifun
 description: >-
   Use to connect to and drive a NomiFun instance from an external agent
-  (Claude Code / Cursor / any MCP client). Delegate goals to NomiFun's
-  autonomous agent, drive its browser / computer / knowledge base / files, and
-  manage the platform — over MCP or REST, with a per-companion access token (you
-  run AS the bound companion). Use this whenever the user asks to control,
+  (Claude Code / Cursor / any MCP client). Drive its browser / computer /
+  knowledge base / files and manage the platform over MCP or REST, with a
+  per-companion access token (you run AS the bound companion). Use this whenever
+  the user asks to control,
   automate, or hand work off to "NomiFun", "their NomiFun", "the desktop
   companion", or a running NomiFun server.
 ---
 
 # Drive NomiFun (external companion)
 
-NomiFun exposes its full platform capability set — an autonomous agent, browser
-automation, computer control, knowledge bases, files, terminals, and platform
+NomiFun exposes its Remote-safe platform capability set — browser automation,
+computer control, knowledge bases, files, terminals, conversations, and platform
 management — to external callers through one **MCP** endpoint and an equivalent
 **REST** API, authenticated by a **per-companion access token**. Each token is
 bound to one specific companion: calling with it runs you **as that companion**,
@@ -40,15 +40,14 @@ Configure NomiFun as a Streamable-HTTP MCP server:
 - `<host>` is the machine running NomiFun (`127.0.0.1` locally, or its LAN/public
   address with WebUI remote access enabled).
 - **`/mcp-agent`** advertises a tight, curated tool set for getting work done
-  (agent delegation, browser, computer, knowledge, files). Use **`/mcp`** instead
+  (browser, computer, knowledge, files, conversations). Use **`/mcp`** instead
   for the full platform-control surface (~140 tools incl. channels, companions,
   cron, providers, …).
 - `<token>` is a **per-companion access token** — it binds you to one companion.
   Get it from the NomiFun operator: in the desktop WebUI/remote panel, or by
-  minting one (see "Minting a token" below). The companion you bind to **must
-  have a configured model** for `nomi_agent_run` (and other model-backed caps) to
-  work — otherwise minting returns a `warning` and those calls fail until a model
-  is set in Model Management.
+  minting one (see "Minting a token" below). Model-backed capabilities require
+  the bound companion to have a configured model; otherwise minting returns a
+  `warning` and those calls fail until a model is set in Model Management.
 
 REST equivalent (for scripts): `POST http://<host>:25808/v1/tools/<name>` with the
 same Bearer token; `GET /v1/tools?profile=agent` lists tools; `GET
@@ -65,8 +64,8 @@ companion id you want the token bound to:
 curl -X POST http://127.0.0.1:<port>/api/webui/companions/<id>/access-token
 # => { "token": "<64-hex token>", "companion_id": "<id>" }
 #    If that companion has no usable model yet, the body also carries
-#    "warning": "…" (the token is still minted, but nomi_agent_run etc. will fail
-#    until you configure a model).
+#    "warning": "…" (the token is still minted, but model-backed capabilities
+#    will fail until you configure a model).
 
 # Query whether one is configured (does NOT return the token):
 curl http://127.0.0.1:<port>/api/webui/companions/<id>/access-token
@@ -84,19 +83,20 @@ if no token is configured yet; it won't overwrite an existing one):
 NOMIFUN_COMPANION_TOKEN="$(openssl rand -hex 32)" nomicore   # or nomifun-web
 ```
 
-## 2. Delegate a goal (the headline move)
+## 2. Respect the Agent collaboration boundary
 
-To hand a whole task to NomiFun's own autonomous agent, call **`nomi_agent_run`**:
+Persistent Agent collaboration uses one contract: `nomi_delegate` creates an
+execution, `nomi_execution_get` reads it, and `nomi_execution_update` changes
+its plan or lifecycle. Desktop and Channel callers derive execution ownership
+from the active calling Conversation. An owner-bound companion token can also
+receive the three tools on the Remote surface: delegation records that
+companion as creator, and later reads or updates are restricted to that
+companion's executions. Secondary users receive none of the three tools.
 
-```json
-{ "goal": "Research X and write a summary to notes.md", "timeout_secs": 600 }
-```
-
-It spins up a fresh autonomous NomiFun agent (full tools, using the **bound
-companion's** profile model — which must be configured), runs the goal to
-completion, and returns `{ "status": "completed", "text": "<final answer>", "conversation_id": <id> }`.
-For long tasks it returns `{ "status": "running", "conversation_id": <id> }` —
-poll **`nomi_agent_result`** with that `conversation_id` until completed.
+Use the three tools only when they are advertised by the live catalog. A Remote
+client must call the capabilities returned by `tools/list` directly and protect
+its token as a high-privilege delegation of installation-owner authority;
+never invent execution ids or try to access another companion's execution.
 
 ## 3. Or drive capabilities directly
 

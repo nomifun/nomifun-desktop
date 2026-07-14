@@ -4,7 +4,7 @@ use nomifun_api_types::{PairingRequestedPayload, UserAuthorizedPayload, WebSocke
 use nomifun_common::{TimestampMs, generate_prefixed_id, now_ms};
 use nomifun_db::IChannelRepository;
 use nomifun_db::models::{ChannelUserRow, ChannelPairingCodeRow};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -32,12 +32,21 @@ pub fn generate_pairing_code() -> Result<String, ChannelError> {
 /// - Event broadcasting to WebSocket clients
 pub struct PairingService {
     repo: Arc<dyn IChannelRepository>,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    owner_id: Arc<str>,
+    user_events: Arc<dyn UserEventSink>,
 }
 
 impl PairingService {
-    pub fn new(repo: Arc<dyn IChannelRepository>, broadcaster: Arc<dyn EventBroadcaster>) -> Self {
-        Self { repo, broadcaster }
+    pub fn new(
+        repo: Arc<dyn IChannelRepository>,
+        user_events: Arc<dyn UserEventSink>,
+        owner_id: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            repo,
+            owner_id: owner_id.into(),
+            user_events,
+        }
     }
 
     /// Creates a pairing request for an IM user.
@@ -94,8 +103,10 @@ impl PairingService {
             expires_at,
         };
         let value = serde_json::to_value(payload)?;
-        self.broadcaster
-            .broadcast(WebSocketMessage::new("channel.pairing-requested", value));
+        self.user_events.send_to_user(
+            &self.owner_id,
+            WebSocketMessage::new("channel.pairing-requested", value),
+        );
 
         Ok(code)
     }
@@ -147,8 +158,10 @@ impl PairingService {
             display_name: row.display_name,
         };
         let value = serde_json::to_value(payload)?;
-        self.broadcaster
-            .broadcast(WebSocketMessage::new("channel.user-authorized", value));
+        self.user_events.send_to_user(
+            &self.owner_id,
+            WebSocketMessage::new("channel.user-authorized", value),
+        );
 
         Ok(())
     }
@@ -332,16 +345,18 @@ mod tests {
     use nomifun_db::{DbError, IChannelRepository, UpdatePluginStatusParams};
     use std::sync::Mutex;
 
-    // ── Mock EventBroadcaster ──────────────────────────────────────────
+    // ── Mock owner-scoped event sink ───────────────────────────────────
 
     struct MockBroadcaster {
         events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+        owners: Mutex<Vec<String>>,
     }
 
     impl MockBroadcaster {
         fn new() -> Self {
             Self {
                 events: Mutex::new(Vec::new()),
+                owners: Mutex::new(Vec::new()),
             }
         }
 
@@ -349,10 +364,16 @@ mod tests {
             let mut guard = self.events.lock().unwrap();
             std::mem::take(&mut *guard)
         }
+
+        fn take_owners(&self) -> Vec<String> {
+            let mut guard = self.owners.lock().unwrap();
+            std::mem::take(&mut *guard)
+        }
     }
 
-    impl EventBroadcaster for MockBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
+    impl UserEventSink for MockBroadcaster {
+        fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+            self.owners.lock().unwrap().push(user_id.to_owned());
             self.events.lock().unwrap().push(event);
         }
     }
@@ -557,7 +578,7 @@ mod tests {
     fn make_service() -> (PairingService, Arc<MockRepo>, Arc<MockBroadcaster>) {
         let repo = Arc::new(MockRepo::new());
         let broadcaster = Arc::new(MockBroadcaster::new());
-        let svc = PairingService::new(repo.clone(), broadcaster.clone());
+        let svc = PairingService::new(repo.clone(), broadcaster.clone(), "owner-a");
         (svc, repo, broadcaster)
     }
 
@@ -616,6 +637,7 @@ mod tests {
         svc.request_pairing("tg_42", "telegram", "chn_1", Some("Alice")).await.unwrap();
 
         let events = bc.take_events();
+        assert_eq!(bc.take_owners(), vec!["owner-a"]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "channel.pairing-requested");
         assert_eq!(events[0].data["platform_user_id"], "tg_42");
@@ -688,10 +710,12 @@ mod tests {
         let (svc, _repo, bc) = make_service();
         let code = svc.request_pairing("tg_42", "telegram", "chn_1", Some("Alice")).await.unwrap();
         bc.take_events(); // clear request event
+        bc.take_owners();
 
         svc.approve_pairing(&code).await.unwrap();
 
         let events = bc.take_events();
+        assert_eq!(bc.take_owners(), vec!["owner-a"]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "channel.user-authorized");
         assert_eq!(events[0].data["platform_user_id"], "tg_42");

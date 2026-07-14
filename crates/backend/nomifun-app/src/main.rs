@@ -54,12 +54,6 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
             url,
             token,
         }) => Ok(commands::run_call(&name, args.as_deref(), url, token).await),
-        Some(Command::Agent {
-            goal,
-            timeout_secs,
-            url,
-            token,
-        }) => Ok(commands::run_agent(&goal, timeout_secs, url, token).await),
         None => {
             let env = bootstrap::init_environment(&cli, &merged_path)?;
             let database = bootstrap::init_data_layer(&env.config).await?;

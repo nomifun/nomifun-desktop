@@ -1864,24 +1864,28 @@ mod tests {
     /// block in the reasoning channel → recovered as a structured call.
     #[test]
     fn recovers_qwen_xml_tool_call_from_text() {
-        let text = "I will now spawn two sub-agents.<tool_call>\n<function=nomi_spawn>\n<parameter=tasks>\n[{\"name\": \"北京天气\", \"prompt\": \"查北京天气\"}, {\"name\": \"广州天气\", \"prompt\": \"查广州天气\"}]\n</parameter>\n</function>\n</tool_call>";
+        let text = "I will now delegate two Agent steps.<tool_call>\n<function=nomi_delegate>\n<parameter=strategy>\n\"parallel\"\n</parameter>\n<parameter=steps>\n[{\"name\": \"北京天气\", \"prompt\": \"查北京天气\"}, {\"name\": \"广州天气\", \"prompt\": \"查广州天气\"}]\n</parameter>\n</function>\n</tool_call>";
         let calls = parse_text_tool_calls(text);
         assert_eq!(calls.len(), 1, "one tool call recovered");
         let (name, input) = &calls[0];
-        assert_eq!(name, "nomi_spawn");
-        let tasks = input.get("tasks").and_then(|v| v.as_array()).expect("tasks array parsed as JSON");
-        assert_eq!(tasks.len(), 2, "both tasks parsed");
-        assert_eq!(tasks[0]["name"], json!("北京天气"));
+        assert_eq!(name, "nomi_delegate");
+        assert_eq!(input["strategy"], json!("parallel"));
+        let steps = input
+            .get("steps")
+            .and_then(|value| value.as_array())
+            .expect("steps array parsed as JSON");
+        assert_eq!(steps.len(), 2, "both steps parsed");
+        assert_eq!(steps[0]["name"], json!("北京天气"));
     }
 
     /// Hermes JSON form: `<tool_call>{"name":..,"arguments":{..}}</tool_call>`.
     #[test]
     fn recovers_hermes_json_tool_call_from_text() {
-        let text = "<tool_call>{\"name\": \"nomi_run_status\", \"arguments\": {\"run_id\": \"run_x\"}}</tool_call>";
+        let text = "<tool_call>{\"name\": \"nomi_process_runtime_get\", \"arguments\": {\"execution_id\": \"exec_x\"}}</tool_call>";
         let calls = parse_text_tool_calls(text);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "nomi_run_status");
-        assert_eq!(calls[0].1["run_id"], json!("run_x"));
+        assert_eq!(calls[0].0, "nomi_process_runtime_get");
+        assert_eq!(calls[0].1["execution_id"], json!("exec_x"));
     }
 
     /// Multiple blocks recovered; plain text with no block yields nothing (no false
@@ -2583,8 +2587,8 @@ mod tests {
                 deferred: false,
             },
             ToolDef {
-                name: "SpawnTool".into(),
-                description: "Spawn sub-agents".into(),
+                name: "DelegateTool".into(),
+                description: "Delegate tasks to Agents".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
             },

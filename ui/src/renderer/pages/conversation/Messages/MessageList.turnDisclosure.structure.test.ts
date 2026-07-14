@@ -114,10 +114,4 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("from './planToolVisibility'")).toBe(true);
     expect(source.includes('isSupersededPlanToolFailure(message, list.slice(i + 1))')).toBe(true);
   });
-
-  test('keeps the implementation scoped to the message content area', () => {
-    expect(source.includes('PreviewPanel')).toBe(false);
-    expect(source.includes('OrchestrationTopPanel')).toBe(false);
-    expect(source.includes('ProjectedWorkerView')).toBe(false);
-  });
 });

@@ -12,6 +12,7 @@ import {
   mergeAcpToolCallContent,
   mergeTextMessageContent,
   normalizeKnowledgeWritebackState,
+  normalizeWireAgentMessageMetadata,
   normalizeAgentStreamError,
   preferTextMessageVersion,
   transformKnowledgeWritebackEvent,
@@ -270,8 +271,8 @@ function composeMessageWithIndex(message: TMessage | undefined, list: TMessage[]
         if (message.position === 'right') {
           return list;
         }
-        // Complete teammate messages are not streaming chunks — skip if already exists
-        if ((message.content as { teammateMessage?: boolean })?.teammateMessage) {
+        // Complete inter-Agent messages are not streaming chunks — skip if already present.
+        if ((message.content as { agentMessage?: boolean })?.agentMessage) {
           return list;
         }
       }
@@ -693,10 +694,7 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
       content: {
         content: parsed.content as string,
         ...(knowledgeWriteback ? { knowledge_writeback: knowledgeWriteback } : {}),
-        ...(parsed.teammate_message ? { teammateMessage: true } : {}),
-        ...(parsed.sender_name ? { senderName: parsed.sender_name as string } : {}),
-        ...(parsed.sender_backend ? { senderAgentType: parsed.sender_backend as string } : {}),
-        ...(parsed.sender_conversation_id ? { senderConversationId: parsed.sender_conversation_id as number } : {}),
+        ...normalizeWireAgentMessageMetadata(parsed),
       },
     };
   } catch {

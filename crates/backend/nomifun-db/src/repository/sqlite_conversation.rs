@@ -3,10 +3,13 @@ use sqlx::SqlitePool;
 use nomifun_common::PaginatedResult;
 
 use crate::error::DbError;
-use crate::models::{ConversationArtifactRow, ConversationRow, MessageRow};
+use crate::models::{
+    ConversationArtifactRow, ConversationDeliveryReceiptRow, ConversationRow, MessageRow,
+};
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
 use crate::repository::conversation::{
-    ConversationFilters, ConversationRowUpdate, IConversationRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
+    ConversationFilters, ConversationMessageProjection, ConversationRowUpdate,
+    IConversationRepository, MessageRowUpdate, MessageSearchRow, SortOrder,
 };
 
 /// SQLite-backed implementation of [`IConversationRepository`].
@@ -19,6 +22,66 @@ impl SqliteConversationRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+}
+
+async fn validate_execution_template_selection(
+    pool: &SqlitePool,
+    user_id: &str,
+    template_id: &str,
+    model: Option<&str>,
+) -> Result<(), DbError> {
+    let (provider_id, model) = model
+        .and_then(effective_conversation_model_binding)
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "Conversation execution template requires a concrete lead model".to_owned(),
+            )
+        })?;
+    let selectable: i64 = sqlx::query_scalar(
+        "SELECT EXISTS( \
+             SELECT 1 FROM agent_execution_templates template \
+             JOIN agent_execution_template_participants participant \
+               ON participant.template_id = template.id \
+             WHERE template.id = ? AND template.user_id = ? \
+               AND participant.provider_id = ? AND participant.model = ? \
+         )",
+    )
+    .bind(template_id)
+    .bind(user_id)
+    .bind(provider_id)
+    .bind(model)
+    .fetch_one(pool)
+    .await?;
+    if selectable == 0 {
+        return Err(DbError::Conflict(
+            "Conversation execution template must be executable, owner-scoped, and contain the lead model"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn effective_conversation_model_binding(encoded: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(encoded).ok()?;
+    let provider_id = value
+        .get("provider_id")
+        .or_else(|| value.get("providerId"))
+        .or_else(|| value.get("id"))
+        .and_then(serde_json::Value::as_str)?;
+    let explicit = value
+        .get("use_model")
+        .or_else(|| value.get("useModel"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let model = explicit.or_else(|| value.get("model").and_then(serde_json::Value::as_str))?;
+    if provider_id.trim().is_empty()
+        || provider_id.trim() != provider_id
+        || model.trim().is_empty()
+        || model.trim() != model
+    {
+        return None;
+    }
+    Some((provider_id.to_owned(), model.to_owned()))
 }
 
 #[async_trait::async_trait]
@@ -35,19 +98,33 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn create(&self, row: &ConversationRow) -> Result<i64, DbError> {
+        if let Some(template_id) = row.execution_template_id.as_deref() {
+            validate_execution_template_selection(
+                &self.pool,
+                &row.user_id,
+                template_id,
+                row.model.as_deref(),
+            )
+            .await?;
+        }
         // `id` is allocated by SQLite (INTEGER PK AUTOINCREMENT) and never bound;
         // the caller receives the assigned id via last_insert_rowid().
         let result = sqlx::query(
             "INSERT INTO conversations \
-                (user_id, name, type, extra, model, status, source, \
+                (user_id, name, type, extra, delegation_policy, execution_model_pool, \
+                 decision_policy, execution_template_id, model, status, source, \
                  channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
                  preset_snapshot, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.user_id)
         .bind(&row.name)
         .bind(&row.r#type)
         .bind(&row.extra)
+        .bind(&row.delegation_policy)
+        .bind(&row.execution_model_pool)
+        .bind(&row.decision_policy)
+        .bind(&row.execution_template_id)
         .bind(&row.model)
         .bind(&row.status)
         .bind(&row.source)
@@ -66,7 +143,412 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(result.last_insert_rowid())
     }
 
+    async fn create_idempotent(
+        &self,
+        row: &ConversationRow,
+        creation_key: &str,
+    ) -> Result<(i64, bool), DbError> {
+        let creation_key = creation_key.trim();
+        if creation_key.is_empty() {
+            return Err(DbError::Conflict(
+                "conversation creation key must not be empty".to_owned(),
+            ));
+        }
+        if let Some(template_id) = row.execution_template_id.as_deref() {
+            validate_execution_template_selection(
+                &self.pool,
+                &row.user_id,
+                template_id,
+                row.model.as_deref(),
+            )
+            .await?;
+        }
+        if let Some((conversation_id, existing_user_id)) = sqlx::query_as::<_, (i64, String)>(
+            "SELECT conversation_id, user_id FROM conversation_creation_keys \
+             WHERE creation_key = ?",
+        )
+        .bind(creation_key)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            if existing_user_id != row.user_id {
+                return Err(DbError::Conflict(
+                    "conversation creation key belongs to another owner".to_owned(),
+                ));
+            }
+            return Ok((conversation_id, false));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            "INSERT INTO conversations \
+                (user_id, name, type, extra, delegation_policy, execution_model_pool, \
+                 decision_policy, execution_template_id, model, status, source, \
+                 channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
+                 preset_snapshot, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.user_id)
+        .bind(&row.name)
+        .bind(&row.r#type)
+        .bind(&row.extra)
+        .bind(&row.delegation_policy)
+        .bind(&row.execution_model_pool)
+        .bind(&row.decision_policy)
+        .bind(&row.execution_template_id)
+        .bind(&row.model)
+        .bind(&row.status)
+        .bind(&row.source)
+        .bind(&row.channel_chat_id)
+        .bind(row.pinned)
+        .bind(row.pinned_at)
+        .bind(&row.cron_job_id)
+        .bind(&row.preset_id)
+        .bind(row.preset_revision)
+        .bind(&row.preset_snapshot)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        let candidate_id = result.last_insert_rowid();
+        let key_result = sqlx::query(
+            "INSERT INTO conversation_creation_keys \
+                (creation_key, user_id, conversation_id, created_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT(creation_key) DO NOTHING",
+        )
+        .bind(creation_key)
+        .bind(&row.user_id)
+        .bind(candidate_id)
+        .bind(row.created_at)
+        .execute(&mut *tx)
+        .await?;
+        if key_result.rows_affected() == 1 {
+            tx.commit().await?;
+            return Ok((candidate_id, true));
+        }
+
+        // A concurrent creator committed the same operation while this writer
+        // was waiting for SQLite's write lock.  Remove the unobservable
+        // candidate inside this transaction and return the committed identity.
+        sqlx::query("DELETE FROM conversations WHERE id = ?")
+            .bind(candidate_id)
+            .execute(&mut *tx)
+            .await?;
+        let (conversation_id, existing_user_id): (i64, String) = sqlx::query_as(
+            "SELECT conversation_id, user_id FROM conversation_creation_keys \
+             WHERE creation_key = ?",
+        )
+        .bind(creation_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        if existing_user_id != row.user_id {
+            return Err(DbError::Conflict(
+                "conversation creation key belongs to another owner".to_owned(),
+            ));
+        }
+        tx.commit().await?;
+        Ok((conversation_id, false))
+    }
+
+    async fn find_by_creation_key(
+        &self,
+        user_id: &str,
+        creation_key: &str,
+    ) -> Result<Option<ConversationRow>, DbError> {
+        Ok(sqlx::query_as::<_, ConversationRow>(
+            "SELECT conversation.* FROM conversations conversation \
+             JOIN conversation_creation_keys operation \
+               ON operation.conversation_id = conversation.id \
+             WHERE operation.creation_key = ? AND operation.user_id = ? \
+               AND conversation.user_id = ?",
+        )
+        .bind(creation_key)
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn claim_delivery_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+        operation_id: &str,
+        kind: &str,
+        request_payload: &str,
+        now: i64,
+    ) -> Result<ConversationDeliveryReceiptRow, DbError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO conversation_delivery_receipts (\
+                operation_id, conversation_id, user_id, kind, request_payload, status, \
+                created_at, updated_at\
+             ) SELECT ?, conversation.id, ?, ?, ?, 'accepted', ?, ? \
+               FROM conversations conversation \
+              WHERE conversation.id = ? AND conversation.user_id = ? \
+             ON CONFLICT(operation_id) DO NOTHING",
+        )
+        .bind(operation_id)
+        .bind(user_id)
+        .bind(kind)
+        .bind(request_payload)
+        .bind(now)
+        .bind(now)
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| DbError::NotFound("conversation delivery owner".to_owned()))?;
+        if receipt.user_id != user_id
+            || receipt.conversation_id != conversation_id
+            || receipt.kind != kind
+            || receipt.request_payload != request_payload
+        {
+            return Err(DbError::Conflict(
+                "conversation delivery operation identity was reused".to_owned(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(receipt)
+    }
+
+    async fn get_delivery_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+        operation_id: &str,
+    ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
+        Ok(sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts \
+             WHERE operation_id = ? AND conversation_id = ? AND user_id = ?",
+        )
+        .bind(operation_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    async fn complete_delivery_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+        operation_id: &str,
+        result_ok: bool,
+        result_text: Option<&str>,
+        result_error: Option<&str>,
+        completed_at: i64,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE conversation_delivery_receipts \
+             SET status = 'completed', result_ok = ?, result_text = ?, result_error = ?, \
+                 completed_at = MAX(created_at, updated_at, ?), \
+                 updated_at = MAX(created_at, updated_at, ?) \
+             WHERE operation_id = ? AND conversation_id = ? AND user_id = ? \
+               AND status = 'accepted'",
+        )
+        .bind(result_ok)
+        .bind(result_text)
+        .bind(result_error)
+        .bind(completed_at)
+        .bind(completed_at)
+        .bind(operation_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            return Ok(true);
+        }
+        let existing = self
+            .get_delivery_receipt(user_id, conversation_id, operation_id)
+            .await?;
+        Ok(existing.is_some_and(|receipt| {
+            receipt.status == "completed"
+                && receipt.result_ok == Some(result_ok)
+                && receipt.result_text.as_deref() == result_text
+                && receipt.result_error.as_deref() == result_error
+        }))
+    }
+
+    async fn project_assistant_message_with_receipt(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+        operation_id: &str,
+        kind: &str,
+        request_payload: &str,
+        message: &MessageRow,
+        now: i64,
+    ) -> Result<ConversationMessageProjection, DbError> {
+        let valid_content = serde_json::from_str::<serde_json::Value>(&message.content)
+            .is_ok_and(|value| value.is_object());
+        if operation_id.trim().is_empty()
+            || kind != "projection"
+            || request_payload.trim().is_empty()
+            || message.id.trim().is_empty()
+            || message.content.trim().is_empty()
+            || !valid_content
+            || message.r#type != "text"
+            || message.position.as_deref() != Some("left")
+            || message.status.as_deref() != Some("finish")
+            || message.hidden
+            || message.msg_id.as_deref() != Some(message.id.as_str())
+        {
+            return Err(DbError::Conflict(
+                "assistant message projection requires one stable finished left-side text message"
+                    .to_owned(),
+            ));
+        }
+        if message.conversation_id != conversation_id {
+            return Err(DbError::Conflict(
+                "projected message does not belong to the target Conversation".to_owned(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let owned: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ? AND user_id = ?)",
+        )
+        .bind(conversation_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if owned == 0 {
+            return Err(DbError::NotFound("conversation".to_owned()));
+        }
+
+        // Claim the operation directly in its terminal state. The message is
+        // inserted later in this same transaction, so either both facts commit
+        // or neither one is externally visible.
+        let claim = sqlx::query(
+            "INSERT INTO conversation_delivery_receipts (\
+                operation_id, conversation_id, user_id, kind, request_payload, status, \
+                result_ok, result_text, result_error, created_at, updated_at, completed_at\
+             ) VALUES (?, ?, ?, ?, ?, 'completed', 1, ?, NULL, ?, ?, ?) \
+             ON CONFLICT(operation_id) DO NOTHING",
+        )
+        .bind(operation_id)
+        .bind(conversation_id)
+        .bind(user_id)
+        .bind(kind)
+        .bind(request_payload)
+        .bind(&message.id)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        if claim.rows_affected() == 1 {
+            sqlx::query(
+                "INSERT INTO messages \
+                    (id, conversation_id, msg_id, type, content, position, \
+                     status, hidden, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&message.id)
+            .bind(message.conversation_id)
+            .bind(&message.msg_id)
+            .bind(&message.r#type)
+            .bind(&message.content)
+            .bind(&message.position)
+            .bind(&message.status)
+            .bind(message.hidden)
+            .bind(message.created_at)
+            .execute(&mut *tx)
+            .await?;
+            let persisted = sqlx::query_as::<_, MessageRow>(
+                "SELECT * FROM messages WHERE id = ? AND conversation_id = ?",
+            )
+            .bind(&message.id)
+            .bind(conversation_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(ConversationMessageProjection {
+                inserted: true,
+                message: persisted,
+            });
+        }
+
+        let receipt = sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
+            "SELECT * FROM conversation_delivery_receipts WHERE operation_id = ?",
+        )
+        .bind(operation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if receipt.user_id != user_id
+            || receipt.conversation_id != conversation_id
+            || receipt.kind != kind
+            || receipt.request_payload != request_payload
+        {
+            return Err(DbError::Conflict(
+                "conversation projection operation identity was reused".to_owned(),
+            ));
+        }
+        let message_id = receipt.result_text.as_deref().filter(|_| {
+            receipt.status == "completed"
+                && receipt.result_ok == Some(true)
+                && receipt.result_error.is_none()
+        });
+        let Some(message_id) = message_id else {
+            return Err(DbError::Conflict(
+                "conversation projection operation is not a completed message projection"
+                    .to_owned(),
+            ));
+        };
+        let persisted = sqlx::query_as::<_, MessageRow>(
+            "SELECT * FROM messages WHERE id = ? AND conversation_id = ?",
+        )
+        .bind(message_id)
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Conflict(
+                "conversation projection receipt has no durable message".to_owned(),
+            )
+        })?;
+        tx.commit().await?;
+        Ok(ConversationMessageProjection {
+            inserted: false,
+            message: persisted,
+        })
+    }
+
     async fn update(&self, id: i64, updates: &ConversationRowUpdate) -> Result<(), DbError> {
+        if updates.execution_template_id.is_some() || updates.model.is_some() {
+            let current: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+                "SELECT user_id, execution_template_id, model FROM conversations WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if let Some((user_id, current_template_id, current_model)) = current {
+                let template_id = updates
+                    .execution_template_id
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(current_template_id);
+                let model = updates.model.as_ref().cloned().unwrap_or(current_model);
+                if let Some(template_id) = template_id.as_deref() {
+                    validate_execution_template_selection(
+                        &self.pool,
+                        &user_id,
+                        template_id,
+                        model.as_deref(),
+                    )
+                    .await?;
+                }
+            }
+        }
         // Build dynamic SET clause
         let mut set_parts: Vec<String> = Vec::new();
         let mut binds: Vec<BindValue> = Vec::new();
@@ -90,6 +572,22 @@ impl IConversationRepository for SqliteConversationRepository {
         if let Some(ref extra) = updates.extra {
             set_parts.push("extra = ?".to_string());
             binds.push(BindValue::Str(extra.clone()));
+        }
+        if let Some(ref delegation_policy) = updates.delegation_policy {
+            set_parts.push("delegation_policy = ?".to_string());
+            binds.push(BindValue::Str(delegation_policy.clone()));
+        }
+        if let Some(ref execution_model_pool) = updates.execution_model_pool {
+            set_parts.push("execution_model_pool = ?".to_string());
+            binds.push(BindValue::OptStr(execution_model_pool.clone()));
+        }
+        if let Some(ref decision_policy) = updates.decision_policy {
+            set_parts.push("decision_policy = ?".to_string());
+            binds.push(BindValue::Str(decision_policy.clone()));
+        }
+        if let Some(ref execution_template_id) = updates.execution_template_id {
+            set_parts.push("execution_template_id = ?".to_string());
+            binds.push(BindValue::OptStr(execution_template_id.clone()));
         }
         if let Some(ref status) = updates.status {
             set_parts.push("status = ?".to_string());
@@ -290,38 +788,23 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
-    async fn remove_provider_from_orchestrator_model_ranges(
+    async fn list_conversations_using_model_provider(
         &self,
         provider_id: &str,
-    ) -> Result<u64, DbError> {
-        let result = sqlx::query(
-            "UPDATE conversations AS c \
-             SET extra = json_set( \
-                 c.extra, \
-                 '$.orchestrator_model_range.models', \
-                 COALESCE( \
-                     (SELECT json_group_array(json(item.value)) \
-                      FROM json_each(c.extra, '$.orchestrator_model_range.models') AS item \
-                      WHERE json_extract(item.value, '$.provider_id') IS NULL \
-                         OR json_extract(item.value, '$.provider_id') != ?), \
-                     json('[]') \
-                 ) \
-             ) \
-             WHERE json_valid(c.extra) \
-               AND json_extract(c.extra, '$.orchestrator_model_range.mode') = 'range' \
-               AND json_type(c.extra, '$.orchestrator_model_range.models') = 'array' \
-               AND EXISTS ( \
-                   SELECT 1 \
-                   FROM json_each(c.extra, '$.orchestrator_model_range.models') AS target \
-                   WHERE json_extract(target.value, '$.provider_id') = ? \
-               )",
+    ) -> Result<Vec<(i64, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT id, name FROM conversations \
+             WHERE model IS NOT NULL AND json_valid(model) \
+               AND COALESCE( \
+                   json_extract(model, '$.provider_id'), \
+                   json_extract(model, '$.providerId'), \
+                   json_extract(model, '$.id') \
+               ) = ? \
+             ORDER BY updated_at DESC, id",
         )
         .bind(provider_id)
-        .bind(provider_id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected())
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     // ── Message operations ──────────────────────────────────────────
@@ -592,6 +1075,10 @@ impl IConversationRepository for SqliteConversationRepository {
                 c.name AS conversation_name, \
                 c.type AS conversation_type, \
                 c.extra AS conversation_extra, \
+                c.delegation_policy AS conversation_delegation_policy, \
+                c.execution_model_pool AS conversation_execution_model_pool, \
+                c.decision_policy AS conversation_decision_policy, \
+                c.execution_template_id AS conversation_execution_template_id, \
                 c.model AS conversation_model, \
                 c.status AS conversation_status, \
                 c.source AS conversation_source, \
@@ -732,25 +1219,46 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn mark_skill_suggest_artifacts_saved(
         &self,
+        user_id: &str,
         cron_job_id: &str,
         updated_at: i64,
     ) -> Result<Vec<ConversationArtifactRow>, DbError> {
         sqlx::query(
-            "UPDATE conversation_artifacts \
+            "UPDATE conversation_artifacts AS artifact \
              SET status = 'saved', updated_at = ? \
-             WHERE kind = 'skill_suggest' AND cron_job_id = ? AND status != 'saved'",
+             WHERE artifact.kind = 'skill_suggest' \
+               AND artifact.cron_job_id = ? \
+               AND artifact.status != 'saved' \
+               AND EXISTS (\
+                   SELECT 1 \
+                   FROM conversations AS conversation \
+                   JOIN cron_jobs AS job ON job.id = artifact.cron_job_id \
+                   WHERE conversation.id = artifact.conversation_id \
+                     AND conversation.user_id = ? \
+                     AND job.user_id = ?\
+               )",
         )
         .bind(updated_at)
         .bind(cron_job_id)
+        .bind(user_id)
+        .bind(user_id)
         .execute(&self.pool)
         .await?;
 
         let rows = sqlx::query_as::<_, ConversationArtifactRow>(
-            "SELECT * FROM conversation_artifacts \
-             WHERE kind = 'skill_suggest' AND cron_job_id = ? \
-             ORDER BY created_at ASC, id ASC",
+            "SELECT artifact.* \
+             FROM conversation_artifacts AS artifact \
+             JOIN conversations AS conversation ON conversation.id = artifact.conversation_id \
+             JOIN cron_jobs AS job ON job.id = artifact.cron_job_id \
+             WHERE artifact.kind = 'skill_suggest' \
+               AND artifact.cron_job_id = ? \
+               AND conversation.user_id = ? \
+               AND job.user_id = ? \
+             ORDER BY artifact.created_at ASC, artifact.id ASC",
         )
         .bind(cron_job_id)
+        .bind(user_id)
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 
@@ -843,15 +1351,15 @@ fn append_filter_conditions(filters: &ConversationFilters, where_parts: &mut Vec
     if filters.exclude_companion_companion {
         where_parts.push("json_extract(c.extra, '$.companionSession') IS NOT 1".to_string());
     }
-    // 智能编排 (orchestrator) WORKER 会话由 Run 引擎为执行编队任务而创建,
-    // 带有 `extra.orchestrator_task_id` 标记 (build_worker_extra 写入 run_id+task_id)。
-    // 它们只属于编排 Run 视图,绝不出现在普通会话列表中。与 companion 不同,这一
-    // 排除是无条件的:没有任何 ConversationService::list 的消费者需要看到 worker
-    // 会话(编排器按 id 经 get/list_messages 读取各 worker)。键在 worker 专属的
-    // `orchestrator_task_id`(而非 run_id):lead 会话(nomi_run_create 写回)只带
-    // `orchestrator_run_id`、无 task_id,必须保持可见以承载 DAG 右栏。`IS NULL`
-    // 同时覆盖缺失键的普通/lead 会话(json_extract 缺失时返回 NULL → 保留)。
-    where_parts.push("json_extract(c.extra, '$.orchestrator_task_id') IS NULL".to_string());
+    // Attempt conversations are aggregate-internal execution surfaces.  The
+    // explicit execution link is the only source of truth; legacy JSON-extra
+    // identity markers are deliberately ignored after migration 037.
+    where_parts.push(
+        "NOT EXISTS (SELECT 1 FROM conversation_execution_links execution_link \
+         WHERE execution_link.conversation_id = c.id \
+           AND execution_link.relation = 'attempt')"
+            .to_string(),
+    );
 }
 
 /// Builds a count query and bind values for the total (ignoring cursor).
@@ -884,8 +1392,24 @@ mod tests {
     use super::*;
     use crate::init_database_memory;
 
+    async fn insert_fixture_provider(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO providers (\
+                id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                capabilities, created_at, updated_at\
+             ) VALUES (?, 'openai', ?, 'https://example.invalid', \
+                       'encrypted', '[]', 1, '[]', 0, 0)",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     async fn setup() -> (SqliteConversationRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
+        insert_fixture_provider(db.pool(), "prov_1").await;
         let repo = SqliteConversationRepository::new(db.pool().clone());
         (repo, db)
     }
@@ -899,6 +1423,10 @@ mod tests {
             name: "Test Conversation".to_string(),
             r#type: "gemini".to_string(),
             extra: r#"{"workspace":"/home/user/project"}"#.to_string(),
+            delegation_policy: "automatic".to_string(),
+            execution_model_pool: None,
+            decision_policy: "automatic".to_string(),
+            execution_template_id: None,
             model: Some(r#"{"providerId":"prov_1","model":"claude-sonnet-4-20250514"}"#.to_string()),
             status: Some("pending".to_string()),
             source: Some("nomifun".to_string()),
@@ -937,10 +1465,11 @@ mod tests {
         let now = nomifun_common::now_ms();
         sqlx::query(
             "INSERT INTO cron_jobs \
-                (id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
-             VALUES (?, ?, 'every', '60', '', 'gemini', 'user', ?, ?)",
+                (id, user_id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
+             VALUES (?, ?, ?, 'every', '60', '', 'gemini', 'user', ?, ?)",
         )
         .bind(id)
+        .bind(SYSTEM_USER_ID)
         .bind(format!("job {id}"))
         .bind(now)
         .bind(now)
@@ -982,6 +1511,111 @@ mod tests {
         }
     }
 
+    async fn link_lead_and_attempt_conversations(
+        pool: &SqlitePool,
+        lead_conversation_id: i64,
+        attempt_conversation_id: i64,
+    ) {
+        let now = nomifun_common::now_ms();
+        let execution_id = nomifun_common::generate_prefixed_id("exec");
+        let participant_id = nomifun_common::generate_prefixed_id("participant");
+        let step_id = nomifun_common::generate_prefixed_id("step");
+        let attempt_id = nomifun_common::generate_prefixed_id("attempt");
+
+        sqlx::query(
+             "INSERT INTO agent_executions \
+             (id, user_id, goal, status, plan_gate, adaptation_policy, decision_policy, \
+              delegation_policy, max_parallel, initial_plan_input, created_at, updated_at) \
+             VALUES (?, ?, 'test execution', 'running', 'automatic', 'fixed', \
+                     'automatic', 'automatic', 4, '{\"mode\":\"automatic\"}', ?, ?)",
+        )
+        .bind(&execution_id)
+        .bind(SYSTEM_USER_ID)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agent_execution_participants \
+             (id, execution_id, source_agent_id, provider_id, model, \
+              introduced_in_revision, created_at) \
+             VALUES (?, ?, 'test-agent', 'prov_1', 'fixture-model', 0, ?)",
+        )
+        .bind(&participant_id)
+        .bind(&execution_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agent_execution_steps \
+             (id, execution_id, title, spec, kind, agent_mode, status, \
+              assigned_participant_id, assignment_source, introduced_in_revision, \
+              created_at, updated_at) \
+             VALUES (?, ?, 'test step', 'test step', 'agent', 'normal', 'running', \
+                     ?, 'manual', 0, ?, ?)",
+        )
+        .bind(&step_id)
+        .bind(&execution_id)
+        .bind(&participant_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO agent_execution_attempts \
+             (id, execution_id, step_id, attempt_no, participant_id, status, \
+              trigger_reason, started_at, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, ?, 'running', 'initial', ?, ?, ?)",
+        )
+        .bind(&attempt_id)
+        .bind(&execution_id)
+        .bind(&step_id)
+        .bind(&participant_id)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO conversation_execution_links \
+             (id, conversation_id, execution_id, relation, active, created_at, updated_at) \
+             VALUES (?, ?, ?, 'lead', 1, ?, ?)",
+        )
+        .bind(nomifun_common::generate_prefixed_id("link"))
+        .bind(lead_conversation_id)
+        .bind(&execution_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO conversation_execution_links \
+             (id, conversation_id, execution_id, relation, step_id, attempt_id, \
+              active, created_at, updated_at) \
+             VALUES (?, ?, ?, 'attempt', ?, ?, 1, ?, ?)",
+        )
+        .bind(nomifun_common::generate_prefixed_id("link"))
+        .bind(attempt_conversation_id)
+        .bind(&execution_id)
+        .bind(&step_id)
+        .bind(&attempt_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     // ── Conversation CRUD tests ─────────────────────────────────────
 
     #[tokio::test]
@@ -998,64 +1632,6 @@ mod tests {
         assert_eq!(found.r#type, "gemini");
         assert_eq!(found.status.as_deref(), Some("pending"));
         assert!(!found.pinned);
-    }
-
-    #[tokio::test]
-    async fn remove_provider_from_orchestrator_model_ranges_preserves_other_extra_and_order() {
-        let (repo, _db) = setup().await;
-
-        let mut target = sample_conversation(SYSTEM_USER_ID);
-        target.extra = serde_json::json!({
-            "workspace": "/keep",
-            "unrelated": { "enabled": true },
-            "orchestrator_model_range": {
-                "mode": "range",
-                "models": [
-                    { "provider_id": "gone", "model": "g1" },
-                    { "provider_id": "keep", "model": "k2" },
-                    { "provider_id": "gone", "model": "g2" },
-                    { "provider_id": "keep", "model": "k1" }
-                ]
-            }
-        })
-        .to_string();
-        let target_id = repo.create(&target).await.unwrap();
-
-        let mut unrelated = sample_conversation(SYSTEM_USER_ID);
-        unrelated.extra = serde_json::json!({
-            "workspace": "/untouched",
-            "orchestrator_model_range": {
-                "mode": "range",
-                "models": [{ "provider_id": "keep", "model": "k3" }]
-            }
-        })
-        .to_string();
-        let unrelated_extra = unrelated.extra.clone();
-        let unrelated_id = repo.create(&unrelated).await.unwrap();
-
-        let mut malformed = sample_conversation(SYSTEM_USER_ID);
-        malformed.extra = "{not-json".to_string();
-        let malformed_id = repo.create(&malformed).await.unwrap();
-
-        let changed = repo
-            .remove_provider_from_orchestrator_model_ranges("gone")
-            .await
-            .unwrap();
-        assert_eq!(changed, 1);
-
-        let cleaned: serde_json::Value =
-            serde_json::from_str(&repo.get(target_id).await.unwrap().unwrap().extra).unwrap();
-        assert_eq!(cleaned["workspace"], "/keep");
-        assert_eq!(cleaned["unrelated"], serde_json::json!({ "enabled": true }));
-        assert_eq!(
-            cleaned["orchestrator_model_range"]["models"],
-            serde_json::json!([
-                { "provider_id": "keep", "model": "k2" },
-                { "provider_id": "keep", "model": "k1" }
-            ])
-        );
-        assert_eq!(repo.get(unrelated_id).await.unwrap().unwrap().extra, unrelated_extra);
-        assert_eq!(repo.get(malformed_id).await.unwrap().unwrap().extra, "{not-json");
     }
 
     #[tokio::test]
@@ -1385,66 +1961,22 @@ mod tests {
         assert!(result.items[0].pinned);
     }
 
-    /// 智能编排 worker 会话 (extra.orchestrator_run_id 非空) 无条件从普通列表排除;
-    /// 不带该标记的普通会话保留。镜像 companion 排除机制 (json_extract WHERE)。
     #[tokio::test]
-    async fn list_excludes_orchestrator_worker_conversations() {
-        let (repo, _db) = setup().await;
+    async fn list_keeps_lead_and_excludes_attempt_conversation() {
+        let (repo, db) = setup().await;
 
-        // Worker conversation — stamped with orchestrator_run_id (build_worker_extra).
-        let mut worker = sample_conversation(SYSTEM_USER_ID);
-        worker.extra = r#"{"orchestrator_run_id":"run_abc","orchestrator_task_id":"task_1"}"#.to_string();
-        let worker_id = repo.create(&worker).await.unwrap();
-
-        // Normal conversation — no orchestrator marker.
-        let mut normal = sample_conversation(SYSTEM_USER_ID);
-        normal.extra = r#"{"workspace":"/project"}"#.to_string();
-        let normal_id = repo.create(&normal).await.unwrap();
-
-        let result = repo
-            .list_paginated(
-                SYSTEM_USER_ID,
-                &ConversationFilters {
-                    limit: 20,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-
-        // Only the normal conversation is returned; the worker is filtered from
-        // both the page and the total count.
-        assert_eq!(result.items.len(), 1);
-        assert_eq!(result.total, 1);
-        assert_eq!(result.items[0].id, normal_id);
-        assert!(result.items.iter().all(|c| c.id != worker_id));
-    }
-
-    /// LEAD 会话与 WORKER 会话的区分:lead (P1 `nomi_run_create` 写回) 的 extra
-    /// 只带 `orchestrator_run_id`,worker (`build_worker_extra`) 同时带
-    /// `orchestrator_run_id` + `orchestrator_task_id`。隐藏过滤器键在 worker 专属的
-    /// `orchestrator_task_id`,因此 lead 必须保持可见(它是承载 DAG 右栏的主会话),
-    /// 只有 worker 被排除。普通会话(无任何标记)同样保留。
-    #[tokio::test]
-    async fn list_keeps_lead_and_excludes_only_worker() {
-        let (repo, _db) = setup().await;
-
-        // (a) Plain conversation — no orchestrator extra at all.
         let mut plain = sample_conversation(SYSTEM_USER_ID);
         plain.extra = r#"{"workspace":"/project"}"#.to_string();
         let plain_id = repo.create(&plain).await.unwrap();
 
-        // (b) LEAD conversation — only orchestrator_run_id (nomi_run_create write-back),
-        //     NO orchestrator_task_id. Must stay visible.
-        let mut lead = sample_conversation(SYSTEM_USER_ID);
-        lead.extra = r#"{"orchestrator_run_id":"run_lead"}"#.to_string();
+        let lead = sample_conversation(SYSTEM_USER_ID);
         let lead_id = repo.create(&lead).await.unwrap();
 
-        // (c) WORKER conversation — both run_id AND task_id (build_worker_extra).
-        //     Must be excluded.
-        let mut worker = sample_conversation(SYSTEM_USER_ID);
-        worker.extra = r#"{"orchestrator_run_id":"run_lead","orchestrator_task_id":"task_1"}"#.to_string();
-        let worker_id = repo.create(&worker).await.unwrap();
+        let attempt_id = repo
+            .create(&sample_conversation(SYSTEM_USER_ID))
+            .await
+            .unwrap();
+        link_lead_and_attempt_conversations(db.pool(), lead_id, attempt_id).await;
 
         let result = repo
             .list_paginated(
@@ -1457,8 +1989,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Plain + lead are returned (count 2); the worker is filtered from both
-        // the page and the total count.
         assert_eq!(result.total, 2);
         assert_eq!(result.items.len(), 2);
         assert!(
@@ -1467,11 +1997,11 @@ mod tests {
         );
         assert!(
             result.items.iter().any(|c| c.id == lead_id),
-            "lead conversation must remain visible (hosts the DAG rail)"
+            "lead conversation must remain visible"
         );
         assert!(
-            result.items.iter().all(|c| c.id != worker_id),
-            "worker conversation must be excluded"
+            result.items.iter().all(|c| c.id != attempt_id),
+            "attempt conversation must be excluded"
         );
     }
 

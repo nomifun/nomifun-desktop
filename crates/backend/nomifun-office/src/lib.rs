@@ -18,4 +18,6 @@ pub use snapshot::SnapshotService;
 pub use star_office::StarOfficeDetector;
 pub use state::OfficeRouterState;
 pub use types::{DocType, OfficecliStatus};
-pub use watch_manager::{DefaultProcessSpawner, OfficecliWatchManager, ProcessHandle, ProcessSpawner};
+pub use watch_manager::{
+    DefaultProcessSpawner, OfficecliWatchManager, PreviewAccess, PreviewProxyTarget, ProcessHandle, ProcessSpawner,
+};

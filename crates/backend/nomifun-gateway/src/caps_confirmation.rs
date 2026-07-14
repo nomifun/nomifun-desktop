@@ -1,7 +1,7 @@
 //! Confirmation-domain capabilities (registry form): list pending decisions of
 //! a driven conversation and resolve one by picking an option.
 //!
-//! These let a channel "master" agent relay a blocking decision in a worker
+//! These let a channel-facing Agent relay a blocking decision from an Agent-attempt
 //! conversation to the channel user as numbered text and submit the user's
 //! pick — the gateway otherwise only exposes a `pending_confirmations` count
 //! (`nomi_conversation_status`) with no way to read the options or answer.
@@ -50,7 +50,7 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConfirmationsParams
     let id = p.conversation_id.to_string();
     let confs = match deps
         .conversation_service
-        .list_confirmations(&ctx.user_id, &id, &deps.task_manager)
+        .list_confirmations(&ctx.user_id, &id, &deps.runtime_registry)
         .await
     {
         Ok(c) => c,
@@ -94,7 +94,7 @@ async fn resolve(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResolveConfirmationP
     };
     match deps
         .conversation_service
-        .confirm(&ctx.user_id, &id, &p.call_id, req, &deps.task_manager)
+        .confirm(&ctx.user_id, &id, &p.call_id, req, &deps.runtime_registry)
         .await
     {
         Ok(()) => ok(json!({"resolved": p.call_id})),
@@ -133,7 +133,7 @@ mod tests {
         // REGRESSION: the gateway previously sent ConfirmRequest.data as a bare
         // Value::String(option). The nomi agent's confirm reads data.get("value")
         // and defaults to "cancel" when absent → every relayed approval on a Nomi
-        // worker was silently DENIED. The payload must carry the option under
+        // Agent attempt was silently DENIED. The payload must carry the option under
         // BOTH keys (nomi reads `value`; ACP's confirm_option_id reads
         // `option_id`, falling back to `value`).
         let d = confirm_data("proceed_once");
