@@ -70,3 +70,20 @@ describe('fromApiConversation 置顶镜像（DB 顶层 pinned 列 → extra）',
     expect(extra?.remoteAgentId).toBe(42);
   });
 });
+
+describe('fromApiConversation 协作方案顶层契约', () => {
+  test('保留顶层 execution_template_id，不从旧 extra 回填', () => {
+    const topLevel = fromApiConversation(
+      apiConv({
+        execution_template_id: 'template-current',
+        extra: { execution_template_id: 'template-stale' },
+      }),
+    ) as { execution_template_id?: string };
+    expect(topLevel.execution_template_id).toBe('template-current');
+
+    const legacyExtraOnly = fromApiConversation(
+      apiConv({ extra: { execution_template_id: 'template-stale' } }),
+    ) as { execution_template_id?: string };
+    expect(legacyExtraOnly.execution_template_id).toBeUndefined();
+  });
+});

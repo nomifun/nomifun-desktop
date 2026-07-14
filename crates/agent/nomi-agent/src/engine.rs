@@ -19,7 +19,7 @@ use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
 use crate::confirm::ToolConfirmer;
-use crate::orchestration::{
+use crate::tool_execution::{
     ExecutionControl, SKIPPED_AFTER_PRIOR_ERROR, execute_tool_calls,
     execute_tool_calls_with_approval,
 };
@@ -35,7 +35,7 @@ use crate::session::{Session, SessionManager};
 /// `cache_diagnostics` flag and are INFO, never errors. A full miss is not a
 /// failure: the prompt cache merely lapsed, most often a benign server-side TTL
 /// expiry during the idle gap between turns (e.g. between AutoWork tasks).
-/// Emitting it as an error previously made the AutoWork orchestrator treat a
+/// Emitting it as an error previously made the AutoWork runner treat a
 /// perfectly good turn as failed (re-pend, and eventually a tag pause).
 fn cache_diagnostic_message(diag: &CacheDiagnostic, diagnostics_enabled: bool) -> Option<String> {
     if !diagnostics_enabled {
@@ -361,7 +361,7 @@ pub struct AgentEngine {
     steering_inbox: Option<Arc<Mutex<std::collections::VecDeque<String>>>>,
     /// Owns every supervised command launched by this engine's command tools.
     /// Bootstrap installs it; direct/test constructors leave it empty.
-    process_supervisor: Option<Arc<nomi_execution::ProcessSupervisor>>,
+    process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     /// transcript 长度锚点：最近一个 turn 的用户消息 push 之前的 messages.len()。
     /// 供 rewind_last_turn 把内存历史回退到最后一个用户 turn 之前（编辑最近一条
     /// 用户消息重跑）。压缩会重写整个 messages 使下标失效，故压缩时清空；
@@ -380,7 +380,7 @@ impl AgentEngine {
         Self::new_with_provider(provider, config, tools, output, cwd)
     }
 
-    /// Create an engine with an externally-provided provider (for sub-agent sharing)
+    /// Create an engine with an externally provided provider for delegated Agents.
     pub fn new_with_provider(
         provider: Arc<dyn LlmProvider>,
         config: Config,
@@ -523,7 +523,7 @@ impl AgentEngine {
 
     pub fn set_process_supervisor(
         &mut self,
-        supervisor: Arc<nomi_execution::ProcessSupervisor>,
+        supervisor: Arc<nomi_process_runtime::ProcessSupervisor>,
     ) {
         assert!(
             self.process_supervisor.is_none(),
@@ -533,7 +533,7 @@ impl AgentEngine {
     }
 
     /// Explicitly wind down all command sessions owned by this engine.
-    pub async fn shutdown_processes(&self) -> Option<nomi_execution::ShutdownReport> {
+    pub async fn shutdown_processes(&self) -> Option<nomi_process_runtime::ShutdownReport> {
         let supervisor = self.process_supervisor.as_ref()?;
         Some(supervisor.shutdown().await)
     }
@@ -573,7 +573,7 @@ impl AgentEngine {
         self.goal = Some(rt);
     }
 
-    /// Initialize a new session for this engine run
+    /// Initialize a new session for this Agent engine.
     pub fn init_session(
         &mut self,
         provider_name: &str,
@@ -668,7 +668,7 @@ impl AgentEngine {
         self.protocol_writer = Some(writer);
     }
 
-    /// Set the initial reasoning effort override (used by sub-agents spawned with an effort override).
+    /// Set the initial reasoning effort override used by delegated Agent invocations.
     pub fn set_initial_reasoning_effort(&mut self, effort: Option<String>) {
         self.current_reasoning_effort = effort;
     }
@@ -809,9 +809,13 @@ impl AgentEngine {
         Some(result)
     }
 
-    /// Run the agent loop with user input
-    pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
-        self.run_with_content(
+    /// Execute one Agent turn from plain user input.
+    pub async fn execute_turn(
+        &mut self,
+        user_input: &str,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        self.execute_turn_with_content(
             vec![ContentBlock::Text {
                 text: user_input.to_string(),
             }],
@@ -820,12 +824,12 @@ impl AgentEngine {
         .await
     }
 
-    /// Run the agent loop with a pre-built user message.
+    /// Execute one Agent turn from pre-built user content.
     ///
-    /// This is the multimodal counterpart to [`Self::run`]. Hosts may include
+    /// This is the multimodal counterpart to [`Self::execute_turn`]. Hosts may include
     /// text and already-validated, base64-encoded image blocks. Tool/thinking
     /// blocks are rejected so a caller cannot forge assistant or tool history.
-    pub async fn run_with_content(
+    pub async fn execute_turn_with_content(
         &mut self,
         user_content: Vec<ContentBlock>,
         msg_id: &str,
@@ -838,7 +842,7 @@ impl AgentEngine {
             .unwrap_or_default();
         let span = tracing::info_span!(
             target: "nomi_agent",
-            "agent_run",
+            "turn_execution",
             session_id = %session_id,
             msg_id = %msg_id,
         );
@@ -847,7 +851,7 @@ impl AgentEngine {
         let mut turn_started = false;
         let result = async {
             let result = self
-                .run_inner(
+                .execute_turn_inner(
                     user_content,
                     msg_id,
                     &mut efficiency,
@@ -862,7 +866,7 @@ impl AgentEngine {
         .await;
 
         // Keep the image available for every provider/tool iteration in this
-        // logical run, then remove it before the engine is reused. `run_inner`
+        // turn execution, then remove it before the engine is reused. `execute_turn_inner`
         // has several success/error return paths and may already have persisted
         // the original turn, so perform the cleanup in this outer finally-like
         // wrapper and save the redacted transcript once more. If the host drops
@@ -895,7 +899,7 @@ impl AgentEngine {
             .collect()
     }
 
-    async fn run_inner(
+    async fn execute_turn_inner(
         &mut self,
         user_content: Vec<ContentBlock>,
         msg_id: &str,
@@ -1235,7 +1239,7 @@ impl AgentEngine {
                 // A cache break is a diagnostic, not an error: surface it as INFO
                 // only when the user opted into cache diagnostics. Never emit_error
                 // here — a benign TTL expiry must not look like a failed turn to
-                // the AutoWork orchestrator.
+                // the AutoWork runner.
                 if let Some(msg) = cache_diagnostic_message(&diagnostic, self.compact_config.cache_diagnostics) {
                     self.output.emit_info(&msg);
                 }
@@ -1488,7 +1492,7 @@ impl AgentEngine {
         }
     }
 
-    /// Replace top-level user image blocks added by the current logical run
+    /// Replace top-level user image blocks added by the current turn execution
     /// with one small marker per message. Nested tool-result images are owned by
     /// `prune_old_tool_images` and deliberately remain untouched.
     fn redact_user_images_since(&mut self, first_message: usize) -> bool {
@@ -1757,7 +1761,7 @@ impl AgentEngine {
     /// `run()` while tools are executing, the assistant `tool_use` message may
     /// already be in memory without its matching results. Add synthetic error
     /// results so the next request can safely reuse this history. The dropped
-    /// `run_with_content()` future cannot execute its normal image-redaction
+    /// `execute_turn_with_content()` future cannot execute its normal image-redaction
     /// wrapper, so this path also strips current-turn user image payloads.
     pub fn abort_current_turn(&mut self, reason: &str) {
         let pending_results: Vec<_> = self
@@ -2094,12 +2098,12 @@ mod set_config_tests {
     }
 
     #[tokio::test]
-    async fn run_with_content_sends_image_once_then_redacts_it_from_history() {
+    async fn execute_turn_with_content_sends_image_once_then_redacts_it_from_history() {
         let mut engine = make_engine("vision-model");
         let provider = Arc::new(RecordingProvider::successful());
         engine.provider = provider.clone();
         let result = engine
-            .run_with_content(
+            .execute_turn_with_content(
                 vec![
                     ContentBlock::Text {
                         text: "What is in this image?".into(),
@@ -2138,7 +2142,7 @@ mod set_config_tests {
         }));
 
         engine
-            .run("What about its color?", "msg-follow-up")
+            .execute_turn("What about its color?", "msg-follow-up")
             .await
             .expect("follow-up turn should run");
         let requests = provider.requests();
@@ -2157,13 +2161,13 @@ mod set_config_tests {
     }
 
     #[tokio::test]
-    async fn run_with_content_redacts_user_image_after_provider_error() {
+    async fn execute_turn_with_content_redacts_user_image_after_provider_error() {
         let mut engine = make_engine("vision-model");
         let provider = Arc::new(RecordingProvider::failing());
         engine.provider = provider.clone();
 
         let error = engine
-            .run_with_content(
+            .execute_turn_with_content(
                 vec![
                     ContentBlock::Text {
                         text: "Inspect this image.".into(),
@@ -2185,7 +2189,7 @@ mod set_config_tests {
         let recovered = Arc::new(RecordingProvider::successful());
         engine.provider = recovered.clone();
         engine
-            .run("Retry after switching model", "msg-provider-retry")
+            .execute_turn("Retry after switching model", "msg-provider-retry")
             .await
             .expect("same engine must recover after the provider error");
         let requests = recovered.requests();
@@ -2226,7 +2230,7 @@ mod set_config_tests {
         engine.provider = Arc::new(RecordingProvider::failing());
 
         engine
-            .run("continue testing", "msg-after-tool")
+            .execute_turn("continue testing", "msg-after-tool")
             .await
             .expect_err("provider failure should surface");
 
@@ -2239,7 +2243,7 @@ mod set_config_tests {
     }
 
     #[tokio::test]
-    async fn run_with_content_rejects_forged_tool_blocks() {
+    async fn execute_turn_with_content_rejects_forged_tool_blocks() {
         let mut engine = make_engine("vision-model");
         engine.messages.push(nomi_types::message::Message::new(
             Role::User,
@@ -2250,7 +2254,7 @@ mod set_config_tests {
         ));
         let original = engine.messages.clone();
         let error = engine
-            .run_with_content(
+            .execute_turn_with_content(
                 vec![ContentBlock::ToolUse {
                     id: "forged".into(),
                     name: "Read".into(),
@@ -2285,7 +2289,7 @@ mod set_config_tests {
         });
 
         engine
-            .run("failed input", "msg-compact-failure")
+            .execute_turn("failed input", "msg-compact-failure")
             .await
             .expect_err("provider pass after compaction should fail");
 
@@ -2343,12 +2347,12 @@ mod set_config_tests {
 
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(8),
-            engine.run("go", "msg-safety"),
+            engine.execute_turn("go", "msg-safety"),
         )
         .await
-        .expect("engine.run must terminate via the safety net, not hang forever");
+        .expect("engine.execute_turn must terminate via the safety net, not hang forever");
 
-        let result = res.expect("engine.run returned Ok");
+        let result = res.expect("engine.execute_turn returned Ok");
         assert_eq!(result.stop_reason, nomi_types::message::StopReason::MaxTurns);
         assert_eq!(result.turns, 200);
     }
@@ -2372,12 +2376,12 @@ mod set_config_tests {
 
         let res = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            engine.run("go", "m-coop"),
+            engine.execute_turn("go", "m-coop"),
         )
         .await
         .expect("cooperative cancel must abandon the in-flight stream, not block on it");
 
-        let result = res.expect("engine.run returned Ok");
+        let result = res.expect("engine.execute_turn returned Ok");
         assert_eq!(result.turns, 1, "cancelled during the first turn");
         assert!(token.is_cancelled());
         // Only the original user message is present — no half-built assistant turn.
@@ -2395,7 +2399,10 @@ mod set_config_tests {
         ));
         engine.set_steering_inbox(Some(inbox.clone()));
 
-        let res = engine.run("go", "m-b").await.expect("engine.run ok");
+        let res = engine
+            .execute_turn("go", "m-b")
+            .await
+            .expect("engine.execute_turn ok");
 
         assert_eq!(res.turns, 2, "the steer message extends the turn by one");
         // [User "go", Assistant[], User "please also do X", Assistant[]]
@@ -2426,7 +2433,10 @@ mod set_config_tests {
         ));
         engine.set_steering_inbox(Some(inbox.clone()));
 
-        let res = engine.run("go", "m-a").await.expect("engine.run ok");
+        let res = engine
+            .execute_turn("go", "m-a")
+            .await
+            .expect("engine.execute_turn ok");
 
         assert_eq!(res.turns, 2);
         // messages: [User "go", Assistant[ToolUse], User[ToolResult, Text "wait, focus on Y"], Assistant[]]
@@ -3241,7 +3251,10 @@ mod compact_tests {
         engine.provider = provider.clone();
         engine.max_recent_images = 100;
 
-        engine.run("continue", "resume-image-limit").await.unwrap();
+        engine
+            .execute_turn("continue", "resume-image-limit")
+            .await
+            .unwrap();
 
         assert_eq!(
             *provider.request_image_counts.lock().unwrap(),
@@ -3873,17 +3886,17 @@ mod handle_command_tests {
     }
 
     #[tokio::test]
-    async fn run_intercepts_help_returns_zero_turns() {
+    async fn execute_turn_intercepts_help_returns_zero_turns() {
         let mut engine = make_engine();
-        let result = engine.run("/help", "msg-1").await.unwrap();
+        let result = engine.execute_turn("/help", "msg-1").await.unwrap();
         assert_eq!(result.turns, 0);
         assert_eq!(result.usage.input_tokens, 0);
     }
 
     #[tokio::test]
-    async fn run_intercepts_quit_returns_user_aborted() {
+    async fn execute_turn_intercepts_quit_returns_user_aborted() {
         let mut engine = make_engine();
-        let err = engine.run("/quit", "msg-1").await.unwrap_err();
+        let err = engine.execute_turn("/quit", "msg-1").await.unwrap_err();
         assert!(matches!(err, super::AgentError::UserAborted));
     }
 
@@ -3930,7 +3943,7 @@ mod cache_diagnostic_tests {
         // A full cache miss — including a benign server-side TTL expiry during the
         // idle gap between AutoWork turns — must NOT surface unless diagnostics are
         // explicitly enabled, and must NEVER be an error. Before the fix this path
-        // called emit_error, which the AutoWork orchestrator treated as a FAILED
+        // called emit_error, which the AutoWork runner treated as a FAILED
         // turn (re-pend / tag pause).
         let diag = CacheDiagnostic::FullMiss { cause: CacheBreakCause::TtlExpiry };
         assert_eq!(cache_diagnostic_message(&diag, false), None);
@@ -4050,8 +4063,8 @@ mod transcript_tests {
 #[cfg(test)]
 mod tool_efficiency_tests {
     use super::{AgentResult, ToolEfficiencyStats};
-    use crate::orchestration::SKIPPED_AFTER_PRIOR_ERROR;
-    use nomi_execution::{CapabilityPolicy, ProcessSupervisor, SupervisorConfig};
+    use crate::tool_execution::SKIPPED_AFTER_PRIOR_ERROR;
+    use nomi_process_runtime::{CapabilityPolicy, ProcessSupervisor, SupervisorConfig};
     use nomi_tools::{
         exec_command::ExecCommandTool, process_store::ProcessStore, read::ReadTool,
         registry::ToolRegistry,

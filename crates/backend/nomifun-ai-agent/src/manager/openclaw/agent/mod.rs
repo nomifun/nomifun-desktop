@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use tracing::{debug, error, info, warn};
 
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::capability::cli_process::CliAgentProcess;
 use crate::manager::process_registry::register_session_process;
 use crate::protocol::events::AgentStreamEvent;
@@ -46,7 +46,7 @@ pub(super) struct OpenClawState {
 }
 
 pub struct OpenClawAgentManager {
-    runtime: AgentRuntime,
+    runtime: AgentRuntimeState,
     config: OpenClawBuildExtra,
     gateway_process: Option<Arc<CliAgentProcess>>,
     pub(super) connection: Arc<OpenClawConnection>,
@@ -175,7 +175,7 @@ impl OpenClawAgentManager {
             );
         }
 
-        let runtime = AgentRuntime::new(conversation_id, workspace, 256);
+        let runtime = AgentRuntimeState::new(conversation_id, workspace, 256);
 
         let manager = Self {
             runtime,
@@ -436,7 +436,7 @@ impl OpenClawAgentManager {
 }
 
 #[async_trait::async_trait]
-impl crate::agent_task::IAgentTask for OpenClawAgentManager {
+impl crate::runtime_handle::AgentRuntimeControl for OpenClawAgentManager {
     fn agent_type(&self) -> AgentType {
         AgentType::OpenclawGateway
     }

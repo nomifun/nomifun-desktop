@@ -76,7 +76,10 @@ async fn client_prefs_empty_then_write_with_auth() {
 
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/settings/client", &token))
+        .oneshot(get_with_token(
+            "/api/settings/client?keys=theme,companion.size,system.closeToTray",
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

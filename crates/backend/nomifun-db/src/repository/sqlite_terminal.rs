@@ -275,8 +275,9 @@ mod tests {
     /// the `terminal_sessions.user_id → users(id)` FK is satisfied.
     const SYSTEM_USER_ID: &str = "system_default_user";
 
-    /// Inserts a real `users` row so a distinct `user_id` can own terminal
-    /// sessions (or be queried as an empty owner) without tripping the FK.
+    /// Inserts a real secondary `users` row so list isolation and rejected
+    /// host-execution attempts use an authenticated principal rather than a
+    /// missing foreign-key target.
     /// `username` is unique, so we derive it from the id.
     async fn seed_user(pool: &SqlitePool, id: &str) {
         sqlx::query(
@@ -309,9 +310,8 @@ mod tests {
     async fn create_get_list_roundtrip() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteTerminalRepository::new(db.pool().clone());
-        seed_user(db.pool(), "user_a").await;
 
-        let created = repo.create(&params("user_a")).await.unwrap();
+        let created = repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
         assert!(created.id > 0);
         assert_eq!(created.last_status, "running");
 
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(got.id, created.id);
         assert_eq!(got.command, "$SHELL");
 
-        let list = repo.list_by_user("user_a").await.unwrap();
+        let list = repo.list_by_user(SYSTEM_USER_ID).await.unwrap();
         assert_eq!(list.len(), 1);
     }
 
@@ -327,18 +327,22 @@ mod tests {
     async fn list_is_user_isolated() {
         let db = init_database_memory().await.unwrap();
         let repo = SqliteTerminalRepository::new(db.pool().clone());
-        // Distinct owners must be real `users` rows for the FK to hold. `user_c`
-        // is seeded too so the "empty owner returns nothing" check queries a
-        // genuine, distinct user rather than a non-existent id.
+        // Terminal execution is installation-owned. Secondary users remain
+        // valid list principals, but cannot create a host process.
         seed_user(db.pool(), "user_a").await;
         seed_user(db.pool(), "user_b").await;
-        seed_user(db.pool(), "user_c").await;
-        repo.create(&params("user_a")).await.unwrap();
-        repo.create(&params("user_b")).await.unwrap();
+        repo.create(&params(SYSTEM_USER_ID)).await.unwrap();
 
-        assert_eq!(repo.list_by_user("user_a").await.unwrap().len(), 1);
-        assert_eq!(repo.list_by_user("user_b").await.unwrap().len(), 1);
-        assert_eq!(repo.list_by_user("user_c").await.unwrap().len(), 0);
+        let err = repo.create(&params("user_a")).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("terminal execution requires the installation owner"),
+            "unexpected authority error: {err}"
+        );
+
+        assert_eq!(repo.list_by_user(SYSTEM_USER_ID).await.unwrap().len(), 1);
+        assert_eq!(repo.list_by_user("user_a").await.unwrap().len(), 0);
+        assert_eq!(repo.list_by_user("user_b").await.unwrap().len(), 0);
     }
 
     #[tokio::test]

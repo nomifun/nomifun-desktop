@@ -15,8 +15,8 @@ use nomifun_ai_agent::manager::acp::{
     AcpSession, KnowledgeContextHook, ModelIdentityReminderHook, SessionNewPreludeHook,
 };
 use nomifun_ai_agent::registry::AgentRegistry;
-use nomifun_ai_agent::shared_kernel::ModelId;
-use nomifun_ai_agent::{AcpBuildExtra, AcpSkillManager, AgentRuntime};
+use nomifun_ai_agent::session::ModelId;
+use nomifun_ai_agent::{AcpBuildExtra, AcpSkillManager, AgentRuntimeState};
 use nomifun_db::{SqliteAgentMetadataRepository, init_database_memory};
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -37,8 +37,8 @@ async fn fixture_params(
         .expect("seeded backend row must exist");
 
     let config = AcpBuildExtra {
-        desktop_gateway: false,
         gateway_mcp_config: None,
+        gateway_excluded_tools: Vec::new(),
         open_mcp_config: None,
         computer_mcp_config: None,
         browser_mcp_config: None,
@@ -53,7 +53,6 @@ async fn fixture_params(
         session_mode: None,
         current_model_id: None,
         cron_job_id: None,
-        guide_mcp_config: None,
         requirement_mcp_config: None,
         knowledge_mcp_config: None,
         mcp_server_ids: None,
@@ -149,8 +148,8 @@ fn fixture_skill_manager() -> Arc<AcpSkillManager> {
     AcpSkillManager::new(paths)
 }
 
-fn fixture_runtime() -> AgentRuntime {
-    AgentRuntime::new("conv-pp-test", "/tmp", 64)
+fn fixture_runtime() -> AgentRuntimeState {
+    AgentRuntimeState::new("conv-pp-test", "/tmp", 64)
 }
 
 fn make_pipeline() -> PromptPipeline {

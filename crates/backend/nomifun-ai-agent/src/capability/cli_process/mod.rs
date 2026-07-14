@@ -10,7 +10,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, broadcast, watch};
 use tracing::{debug, error, warn};
 
-mod spawn_legacy;
+mod spawn_json_lines;
 mod spawn_sdk;
 mod stderr_monitor;
 
@@ -60,7 +60,7 @@ pub(super) fn prepare_command_cwd(cwd: &str) -> Result<PathBuf, AppError> {
 ///
 /// Supports two modes:
 ///
-/// 1. **Legacy mode** (Gemini, OpenClaw, Nanobot): stdout is read as line-delimited
+/// 1. **JSON-lines mode** (Gemini, OpenClaw, Nanobot): stdout is read as line-delimited
 ///    JSON and broadcast via `subscribe()`. Messages are sent via `send()`.
 ///
 /// 2. **SDK mode** (ACP): call [`take_stdio`](Self::take_stdio) to hand raw
@@ -78,18 +78,18 @@ pub struct CliAgentProcess {
     /// Process group ID captured at spawn time so teardown can still target
     /// the whole tree after the direct child exits.
     process_group_id: Option<u32>,
-    /// Broadcast sender for parsed stdout events (legacy mode only).
-    #[allow(dead_code)] // Part of the complete CliProcess API; used in legacy mode via subscribe()
+    /// Broadcast sender for parsed stdout events (JSON-lines mode only).
+    #[allow(dead_code)] // Part of the complete CliProcess API; used in JSON-lines mode via subscribe()
     event_tx: broadcast::Sender<serde_json::Value>,
     /// Watch channel that transitions from `None` → `Some(ExitStatus)` on exit.
     exit_rx: watch::Receiver<Option<ExitStatus>>,
-    /// Pre-subscribed receiver created before background tasks start (legacy mode).
+    /// Pre-subscribed receiver created before background tasks start (JSON-lines mode).
     /// Take this via [`take_initial_receiver`] to guarantee no events are lost.
     initial_rx: InitialReceiver,
     /// Stderr ring buffer for diagnostics.
     #[allow(dead_code)] // Read via take_stderr(); part of diagnostics API for startup crash reporting
     stderr_buffer: Arc<Mutex<String>>,
-    /// Handle to the stdout reader task (legacy mode, for cleanup).
+    /// Handle to the stdout reader task (JSON-lines mode, for cleanup).
     _stdout_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     /// Handle to the stderr reader task (for cleanup).
     _stderr_handle: Arc<tokio::task::JoinHandle<()>>,
@@ -102,14 +102,14 @@ impl CliAgentProcess {
     ///
     /// Only available in SDK mode (after [`spawn_for_sdk`](Self::spawn_for_sdk)).
     /// Can only be called once. Returns `None` on subsequent calls or if
-    /// spawned in legacy mode.
+    /// spawned in JSON-lines mode.
     pub async fn take_stdio(&self) -> Option<(ChildStdin, ChildStdout)> {
         let stdin = self.stdin.lock().await.take()?;
         let stdout = self.stdout.lock().await.take()?;
         Some((stdin, stdout))
     }
 
-    /// Send a JSON message to the subprocess via stdin (legacy mode).
+    /// Send a JSON message to the subprocess via stdin (JSON-lines mode).
     ///
     /// The message is serialized as a single line followed by a newline.
     /// Returns an error if stdin has been closed (process exited) or taken
@@ -137,17 +137,17 @@ impl CliAgentProcess {
         Ok(())
     }
 
-    /// Subscribe to the event stream from stdout (legacy mode).
+    /// Subscribe to the event stream from stdout (JSON-lines mode).
     ///
     /// Returns a broadcast receiver that yields raw `serde_json::Value` events
     /// as they are parsed from the subprocess stdout.
-    #[allow(dead_code)] // Complete CliProcess API for legacy-mode event subscription
+    #[allow(dead_code)] // Complete CliProcess API for JSON-lines-mode event subscription
     pub fn subscribe(&self) -> broadcast::Receiver<serde_json::Value> {
         self.event_tx.subscribe()
     }
 
     /// Take the pre-subscribed receiver created before background tasks started
-    /// (legacy mode).
+    /// (JSON-lines mode).
     ///
     /// This receiver captures all events from the very first output line.
     /// Can only be called once; subsequent calls return `None`.

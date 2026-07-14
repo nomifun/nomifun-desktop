@@ -8,7 +8,7 @@ import type { IChannelPluginStatus } from '@/common/types/channel/channel';
 import { channel } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import NomiModal from '@/renderer/components/base/NomiModal';
-import type { MasterAgentPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
+import type { ChannelPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 import {
   CHANNEL_PLATFORMS,
   CREDENTIALS_REQUIRED_KEY,
@@ -44,7 +44,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
   const [busyRowId, setBusyRowId] = useState<string | null>(null);
   // Config modal target: with channelId = edit that row; without = create mode
   // (the form's first save creates a row bound to this companion).
-  const [configTarget, setConfigTarget] = useState<{ platform: MasterAgentPlatform; channelId?: string } | null>(null);
+  const [configTarget, setConfigTarget] = useState<{ platform: ChannelPlatform; channelId?: string } | null>(null);
 
   // ── Channel plugin statuses (REST snapshot + WS live updates) ──
   const refreshStatuses = useCallback(async () => {
@@ -116,7 +116,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
 
   // ── Row actions ──
   const handleToggleEnabled = useCallback(
-    async (row: IChannelPluginStatus, platform: MasterAgentPlatform, enabled: boolean) => {
+    async (row: IChannelPluginStatus, platform: ChannelPlatform, enabled: boolean) => {
       setBusyRowId(row.id);
       try {
         if (enabled) {
@@ -155,7 +155,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
       try {
         // Backend contract: empty companion_id clears the binding. The call atomically
         // persists the binding AND resets only this channel row's sessions.
-        await channel.setMasterAgentCompanion.invoke({ plugin_id: rowId, companion_id: bind ? companionId : null });
+        await channel.setChannelCompanion.invoke({ plugin_id: rowId, companion_id: bind ? companionId : null });
         Message.success(
           bind ? t('nomi.settings.remoteBindSuccess', { companionName }) : t('nomi.settings.remoteUnbindSuccess')
         );
@@ -200,7 +200,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
 
   // Move (rebind) a bot that currently belongs to ANOTHER owner onto this
   // companion. A bot serves exactly one owner at a time, but moving is free —
-  // this reuses the same setMasterAgentCompanion rebind as bind (clears the
+  // this reuses the same setChannelCompanion rebind as bind (clears the
   // channel's old sessions server-side).
   const confirmMove = useCallback(
     (row: IChannelPluginStatus) => {

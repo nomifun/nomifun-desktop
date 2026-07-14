@@ -238,7 +238,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
 
   const targetOptions: Array<{ value: PresetTarget; label: string }> = [
     { value: 'conversation', label: t('settings.presetTargetConversation', { defaultValue: 'Agent conversation' }) },
-    { value: 'cluster_member', label: t('settings.presetTargetCluster', { defaultValue: 'Agent cluster' }) },
+    { value: 'execution_step', label: t('settings.presetTargetExecutionStep', { defaultValue: '协作任务' }) },
     { value: 'companion', label: t('settings.presetTargetCompanion', { defaultValue: 'Companion' }) },
     { value: 'public_companion', label: t('settings.presetTargetPublicCompanion', { defaultValue: 'Public companion' }) },
     { value: 'cron', label: t('settings.presetTargetCron', { defaultValue: 'Scheduled task' }) },
@@ -449,7 +449,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               disabled={readOnly}
               autoSize={{ minRows: 2, maxRows: 4 }}
               placeholder={t('settings.presetRoutingDescriptionPlaceholder', {
-                defaultValue: 'Describe when an agent or cluster should reuse this preset.',
+                defaultValue: 'Describe when an Agent or collaboration task should reuse this preset.',
               })}
             />
           </div>
@@ -508,7 +508,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
               allowClear
               showSearch
               placeholder={t('settings.presetPreferredModelsPlaceholder', {
-                defaultValue: '该角色编排时优先在范围内选用的模型',
+                defaultValue: '该角色参与协作任务时优先选用的模型',
               })}
               notFoundContent={
                 <div className='text-center text-t-secondary text-12px py-8px'>
@@ -555,7 +555,7 @@ const PresetEditDrawer: React.FC<PresetEditDrawerProps> = ({
                 {t('settings.presetAllowFallback', { defaultValue: 'Allow fallback when a preference is unavailable' })}
               </Checkbox>
               <Checkbox checked={autoSelectable} disabled={readOnly} onChange={setAutoSelectable}>
-                {t('settings.presetAutoSelectable', { defaultValue: 'Allow agent clusters to select automatically' })}
+                {t('settings.presetAutoSelectable', { defaultValue: '允许协作任务自动选择' })}
               </Checkbox>
             </div>
           </div>

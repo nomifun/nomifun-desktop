@@ -41,6 +41,12 @@ The SPA bridge in `ui/src/common/adapter/httpBridge.ts` selects:
 conversation, terminal, cron/requirement, channel, companion, and other events
 into the WebSocket manager.
 
+Persistent Agent collaboration has exactly two realtime projections:
+`agentExecution.changed { execution_id, sequence, change_kind }` invalidates
+committed state, while `agentExecution.leadThinking` carries transient lead
+thinking. Clients deduplicate the first by sequence and refill detail/events
+over HTTP; no parallel execution-event family exists.
+
 ## Tauri IPC
 
 Rust commands currently registered by the desktop shell include:
@@ -70,19 +76,22 @@ The current `nomicore` CLI subcommands include:
 - `doctor`
 - `tools`
 - `call`
-- `agent`
-
-Older docs that mention `mcp-bridge`, `mcp-guide-stdio`, or `mcp-team-stdio`
-are historical and predate the current bridge set.
 
 MCP injection differs by runtime:
 
 - user MCP rows and OAuth-backed HTTP servers come from `nomifun-mcp`,
 - requirement and knowledge servers are scoped internal MCP servers,
-- Desktop Gateway tools are exposed through `nomifun-gateway`,
+- platform Gateway tools are transported through `nomifun-gateway`,
 - browser/computer bridges are feature-gated,
 - public `/mcp` and `/mcp-agent` are companion-token authenticated fronts from
   `nomifun-public`.
+
+Internal stdio bridges do not trust caller-supplied user ids or persisted
+Conversation flags. The host derives an exact server-side scope and gives a
+child process only a scoped, expiring, signed capability claim. Claim roots stay
+inside the parent process; they are not serialized into runtime DTOs, database
+rows, or child configuration. Public capability fronts use their own
+companion-token boundary and do not inherit the internal host claim.
 
 ## Public Capability Fronts
 
@@ -102,9 +111,13 @@ associated profile, model/persona choices, and scoped capabilities.
 | --- | --- |
 | Login/setup | HTTP `/api/auth/*` |
 | Conversation send | HTTP `/api/conversations/*` plus streamed `/ws` events |
+| Persistent Agent collaboration | HTTP `/api/agent-executions/*`; invalidation/thinking over `/ws` |
 | Terminal input | HTTP terminal route; output over `/ws` |
 | Desktop keep-awake | Tauri command |
 | Remote MCP tool call | `/mcp` or `/mcp-agent` |
 | Remote REST capability call | `/v1` |
-| Agent CLI conversation | child process stdio managed by `nomifun-ai-agent` |
+| ACP Agent conversation | child process stdio managed by `nomifun-ai-agent` |
 | Internal knowledge search for ACP session | `mcp-knowledge-stdio` bridge |
+
+See [`agent-execution.zh.md`](agent-execution.zh.md) for the collaboration
+aggregate, state transitions, event ordering, and three model-facing tools.

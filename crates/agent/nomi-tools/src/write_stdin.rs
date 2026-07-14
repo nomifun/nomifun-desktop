@@ -1,4 +1,4 @@
-//! Legacy `write_stdin` schema backed by the shared process supervisor.
+//! `write_stdin` numeric-session schema backed by the shared process supervisor.
 
 use std::{
     sync::Arc,
@@ -6,8 +6,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use nomi_execution::{
-    ExecutionError, ExecutionOutcome, PollResult, ProcessSupervisor,
+use nomi_process_runtime::{
+    ProcessError, ProcessOutcome, PollResult, ProcessSupervisor,
 };
 use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
@@ -167,8 +167,8 @@ impl Tool for WriteStdinTool {
             Err(error) => {
                 if matches!(
                     error,
-                    ExecutionError::SessionNotFound { .. }
-                        | ExecutionError::OwnerMismatch { .. }
+                    ProcessError::SessionNotFound { .. }
+                        | ProcessError::OwnerMismatch { .. }
                 ) {
                     drop(state);
                     self.store.remove_if_same(id, &entry);
@@ -209,27 +209,27 @@ fn requested_yield_ms(input: &Value, empty: bool) -> u64 {
     }
 }
 
-fn outcome_output(outcome: &ExecutionOutcome) -> Option<&nomi_execution::OutputSnapshot> {
+fn outcome_output(outcome: &ProcessOutcome) -> Option<&nomi_process_runtime::OutputSnapshot> {
     match outcome {
-        ExecutionOutcome::Exited { output, .. }
-        | ExecutionOutcome::Cancelled { output, .. }
-        | ExecutionOutcome::TimedOut { output, .. }
-        | ExecutionOutcome::Lost { output, .. } => Some(output),
-        ExecutionOutcome::SpawnFailed(_) => None,
+        ProcessOutcome::Exited { output, .. }
+        | ProcessOutcome::Cancelled { output, .. }
+        | ProcessOutcome::TimedOut { output, .. }
+        | ProcessOutcome::Lost { output, .. } => Some(output),
+        ProcessOutcome::SpawnFailed(_) => None,
     }
 }
 
-fn session_error(operation: &str, id: u64, error: ExecutionError) -> ToolResult {
+fn session_error(operation: &str, id: u64, error: ProcessError) -> ToolResult {
     ToolResult::error(format!(
         "write_stdin: {operation} failed for session_id={id}: {error} ({})",
         error.code()
     ))
 }
 
-fn identity_error(error: &ExecutionError) -> bool {
+fn identity_error(error: &ProcessError) -> bool {
     matches!(
         error,
-        ExecutionError::SessionNotFound { .. } | ExecutionError::OwnerMismatch { .. }
+        ProcessError::SessionNotFound { .. } | ProcessError::OwnerMismatch { .. }
     )
 }
 
@@ -237,10 +237,10 @@ async fn recover_action_error(
     supervisor: &ProcessSupervisor,
     store: &ProcessStore,
     id: u64,
-    entry: &Arc<crate::process_store::LegacySessionEntry>,
-    mut state: tokio::sync::MutexGuard<'_, crate::process_store::LegacySessionState>,
+    entry: &Arc<crate::process_store::NumericSessionEntry>,
+    mut state: tokio::sync::MutexGuard<'_, crate::process_store::NumericSessionState>,
     operation: &str,
-    error: ExecutionError,
+    error: ProcessError,
 ) -> ToolResult {
     if identity_error(&error) {
         drop(state);
@@ -299,11 +299,11 @@ mod tests {
     use super::*;
     use crate::{
         exec_command::ExecCommandTool,
-        process_store::LegacySessionBinding,
+        process_store::NumericSessionBinding,
         test_support::pty_test_helper_shell_cmd,
     };
-    use nomi_execution::{
-        CapabilityPolicy, ExecutionOwner, OutputCursor, SupervisorConfig, Transport,
+    use nomi_process_runtime::{
+        CapabilityPolicy, ProcessOwner, OutputCursor, SupervisorConfig, Transport,
     };
     use uuid::Uuid;
 
@@ -512,7 +512,7 @@ mod tests {
                     .status(entry.owner(), &entry.session_id())
                     .await
                     .expect("session status");
-                if snapshot.state == nomi_execution::ProcessState::Exited {
+                if snapshot.state == nomi_process_runtime::ProcessState::Exited {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -542,29 +542,29 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
         let store = Arc::new(ProcessStore::new());
-        let owner = ExecutionOwner::new(Uuid::now_v7(), Uuid::now_v7());
-        let request = nomi_execution::ExecutionRequest {
+        let owner = ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7());
+        let request = nomi_process_runtime::ProcessRequest {
             owner: owner.clone(),
-            command: nomi_execution::CommandSpec::Shell {
+            command: nomi_process_runtime::CommandSpec::Shell {
                 shell: if cfg!(windows) {
-                    nomi_execution::ShellKind::PowerShell
+                    nomi_process_runtime::ShellKind::PowerShell
                 } else {
-                    nomi_execution::ShellKind::Posix
+                    nomi_process_runtime::ShellKind::Posix
                 },
                 script: pty_test_helper_shell_cmd("sleep 60000"),
             },
             cwd: cwd.clone(),
             env: Default::default(),
             transport: Transport::Pipe,
-            policy: nomi_execution::ExecutionPolicy::default(),
+            policy: nomi_process_runtime::ProcessPolicy::default(),
             capability: CapabilityPolicy::local_owner(cwd.clone()),
         };
-        let request = nomi_execution::normalize_request(request, &cwd).unwrap();
+        let request = nomi_process_runtime::normalize_request(request, &cwd).unwrap();
         let handle = supervisor.start(request).await.unwrap();
         let writer = WriteStdinTool::new(Arc::clone(&supervisor), Arc::clone(&store));
         let id = store
-            .insert(LegacySessionBinding::new(
-                ExecutionOwner::new(Uuid::now_v7(), Uuid::now_v7()),
+            .insert(NumericSessionBinding::new(
+                ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7()),
                 handle.session_id,
                 OutputCursor::START,
                 0,
@@ -588,30 +588,30 @@ mod tests {
             reaper_interval: Duration::from_millis(10),
         });
         let store = Arc::new(ProcessStore::new());
-        let owner = ExecutionOwner::new(Uuid::now_v7(), Uuid::now_v7());
-        let request = nomi_execution::ExecutionRequest {
+        let owner = ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7());
+        let request = nomi_process_runtime::ProcessRequest {
             owner,
-            command: nomi_execution::CommandSpec::Shell {
+            command: nomi_process_runtime::CommandSpec::Shell {
                 shell: if cfg!(windows) {
-                    nomi_execution::ShellKind::PowerShell
+                    nomi_process_runtime::ShellKind::PowerShell
                 } else {
-                    nomi_execution::ShellKind::Posix
+                    nomi_process_runtime::ShellKind::Posix
                 },
                 script: pty_test_helper_shell_cmd("sleep 60000"),
             },
             cwd: cwd.clone(),
             env: Default::default(),
             transport: Transport::Pipe,
-            policy: nomi_execution::ExecutionPolicy {
+            policy: nomi_process_runtime::ProcessPolicy {
                 lease: Duration::from_millis(120),
-                ..nomi_execution::ExecutionPolicy::default()
+                ..nomi_process_runtime::ProcessPolicy::default()
             },
             capability: CapabilityPolicy::local_owner(cwd.clone()),
         };
-        let request = nomi_execution::normalize_request(request, &cwd).unwrap();
+        let request = nomi_process_runtime::normalize_request(request, &cwd).unwrap();
         let handle = supervisor.start(request).await.unwrap();
         let id = store
-            .insert(LegacySessionBinding::new(
+            .insert(NumericSessionBinding::new(
                 handle.owner.clone(),
                 handle.session_id,
                 OutputCursor::START,
@@ -678,7 +678,7 @@ mod tests {
             .expect("terminate after ignored interrupt");
         assert!(matches!(
             outcome,
-            ExecutionOutcome::Cancelled { .. } | ExecutionOutcome::Exited { .. }
+            ProcessOutcome::Cancelled { .. } | ProcessOutcome::Exited { .. }
         ));
         store.remove_if_same(id, &entry);
     }

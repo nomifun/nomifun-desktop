@@ -47,7 +47,7 @@ pub fn session_has_requirement_tools(agent_type: AgentType, requirement_mcp_enab
 /// it into agent terminals), so a clean turn where the agent did NOT call those
 /// tools → `needs_review` (not silently done).
 ///
-/// Used by the orchestrator's terminal branch to set `expects_verdict = true`
+/// Used by the AutoWork runner's terminal branch to set `expects_verdict = true`
 /// when finalizing a terminal turn.
 pub fn terminal_expects_verdict(requirement_mcp_enabled: bool) -> bool {
     requirement_mcp_enabled

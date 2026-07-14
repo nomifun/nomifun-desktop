@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Button, Checkbox, Tabs } from '@arco-design/web-react';
+import { Button, Checkbox, Message, Tabs } from '@arco-design/web-react';
 import { ApiApp, Terminal, WebPage } from '@icon-park/react';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -15,6 +15,11 @@ import WebuiControlPanel from '@/renderer/components/layout/Sider/WebuiControlPa
 import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
 import { useWebuiServer } from '@/renderer/hooks/context/WebuiServerContext';
 import RegisterKnowledgeButton from '@/renderer/pages/terminal/RegisterKnowledgeButton';
+import { ipcBridge } from '@/common';
+import type {
+  IKnowledgeGlobalRegistrationStatus,
+  KnowledgeCliFamily,
+} from '@/common/adapter/ipcBridge';
 import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
 
 const formatJson = (value: unknown) => JSON.stringify(value, null, 2);
@@ -378,10 +383,12 @@ const OpenCapabilitiesPage: React.FC = () => {
             <section className='rd-12px border border-border-2 bg-fill-0 p-16px'>
               <SectionHeader
                 icon={<Terminal theme='outline' size='18' fill='currentColor' />}
-                title={t('settings.openCapabilities.projectRegisterTitle', { defaultValue: '项目级 MCP 注册' })}
+                title={t('settings.openCapabilities.projectRegisterTitle', {
+                  defaultValue: '本地知识库 MCP 注册',
+                })}
                 description={t('settings.openCapabilities.projectRegisterDesc', {
                   defaultValue:
-                    '当前可一键写入的是平台知识库 MCP：Claude / Gemini 写入指定项目配置，Codex 由于没有项目级配置，只能写入全局配置。',
+                    '配置只保存启动命令，不保存端口或凭据。外部 CLI 启动时由当前系统用户专属的本地安全通道按工作目录授权。',
                 })}
               />
               <div className='mt-14px grid grid-cols-1 gap-12px lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end'>
@@ -398,41 +405,90 @@ const OpenCapabilitiesPage: React.FC = () => {
                     chooseDifferentLabel={t('terminal.create.chooseFolder')}
                   />
                 </div>
-                <div className='lg:pb-1px'>
-                  <RegisterKnowledgeButton cwd={cwd} command='claude' />
-                </div>
+                <RegisterKnowledgeButton cwd={cwd} command='claude' />
               </div>
-              <div className='mt-12px grid grid-cols-1 gap-8px md:grid-cols-3'>
-                <CapabilityNote
-                  title='Claude'
-                  body={t('settings.openCapabilities.projectRegisterClaude', {
-                    defaultValue: '写入项目 .mcp.json，适合随项目启动 Claude Code。',
-                  })}
-                />
-                <CapabilityNote
-                  title='Gemini'
-                  body={t('settings.openCapabilities.projectRegisterGemini', {
-                    defaultValue: '写入项目 .gemini/settings.json，保留已有 mcpServers。',
-                  })}
-                />
-                <CapabilityNote
-                  title='Codex'
-                  body={t('settings.openCapabilities.projectRegisterCodex', {
-                    defaultValue: '当前只能调用 codex mcp add 写入全局 ~/.codex/config.toml。',
-                  })}
-                />
-              </div>
-              <div className='mt-12px rd-10px border border-[rgba(var(--primary-6),0.22)] bg-[rgba(var(--primary-6),0.06)] px-12px py-10px text-12px leading-18px text-t-secondary'>
-                {t('settings.openCapabilities.oneClickPlan', {
-                  defaultValue:
-                    '完整 Remote MCP 的一键项目注册可以沿用这个模式：选择项目与客户端，NomiFun 生成或复用伙伴令牌，再写入项目级 MCP 配置。由于 Remote MCP 需要 Bearer token，落地前应让用户明确确认是否把令牌写进项目文件，或改为写入环境变量引用。',
-                })}
+              <div className='mt-14px'>
+                <GlobalKnowledgeRegistrationPanel />
               </div>
             </section>
+
           </div>
         </Tabs.TabPane>
       </Tabs>
     </HubPageShell>
+  );
+};
+
+const KNOWLEDGE_FAMILIES: KnowledgeCliFamily[] = ['claude', 'codex', 'gemini'];
+
+const GlobalKnowledgeRegistrationPanel: React.FC = () => {
+  const { t } = useTranslation();
+  const [status, setStatus] = useState<IKnowledgeGlobalRegistrationStatus | null>(null);
+  const [pending, setPending] = useState<KnowledgeCliFamily | null>(null);
+  const refresh = useCallback(() => {
+    ipcBridge.terminal.knowledgeGlobalStatus
+      .invoke()
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+  useEffect(refresh, [refresh]);
+
+  const mutate = async (family: KnowledgeCliFamily, register: boolean) => {
+    setPending(family);
+    try {
+      if (register) {
+        await ipcBridge.terminal.registerKnowledgeGlobal.invoke({ family });
+      } else {
+        await ipcBridge.terminal.unregisterKnowledgeGlobal.invoke({ family });
+      }
+      Message.success(
+        register
+          ? t('settings.openCapabilities.globalRegisterSuccess', { defaultValue: '用户级配置已接入' })
+          : t('settings.openCapabilities.globalUnregisterSuccess', { defaultValue: '用户级配置已移除' })
+      );
+      refresh();
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return (
+    <div className='rd-10px border border-border-2 bg-fill-1 px-12px py-10px'>
+      <div className='mb-8px text-13px font-600 text-t-primary'>
+        {t('settings.openCapabilities.globalRegisterTitle', { defaultValue: '用户级注册（所有目录）' })}
+      </div>
+      <div className='grid grid-cols-1 gap-8px md:grid-cols-3'>
+        {KNOWLEDGE_FAMILIES.map((family) => {
+          const registered = status?.[family] ?? null;
+          return (
+            <div key={family} className='flex items-center justify-between gap-8px rd-8px bg-fill-0 px-10px py-8px'>
+              <div>
+                <div className='text-13px font-500 capitalize text-t-primary'>{family}</div>
+                <div className='text-11px text-t-tertiary'>
+                  {registered === true
+                    ? t('settings.openCapabilities.registered', { defaultValue: '已接入' })
+                    : registered === false
+                      ? t('settings.openCapabilities.notRegistered', { defaultValue: '未接入' })
+                      : t('settings.openCapabilities.statusUnknown', { defaultValue: '状态未知' })}
+                </div>
+              </div>
+              <Button
+                size='mini'
+                loading={pending === family}
+                disabled={pending !== null && pending !== family}
+                onClick={() => mutate(family, registered !== true)}
+              >
+                {registered === true
+                  ? t('settings.openCapabilities.unregister', { defaultValue: '移除' })
+                  : t('settings.openCapabilities.register', { defaultValue: '接入' })}
+              </Button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 };
 

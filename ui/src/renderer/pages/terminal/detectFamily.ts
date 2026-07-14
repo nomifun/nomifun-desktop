@@ -85,7 +85,7 @@ export function detectFamily(command: string): AgentFamily | null {
  * lifecycle-hook renderer on the backend (Stop → TurnEnd). Mirrors the Rust
  * `AgentCli::supports_lifecycle_hooks` (`nomifun-terminal/src/enhance.rs`).
  * Gemini is intentionally excluded — it has no launch-time hook injection, so
- * the orchestrator cannot detect turn-end and the backend gate rejects it.
+ * automatic execution cannot detect turn-end and the backend gate rejects it.
  */
 const AUTOWORK_CAPABLE_FAMILIES: AgentFamily[] = ['claude', 'codex'];
 

@@ -19,7 +19,7 @@ use crate::events::RequirementEventEmitter;
 use crate::notifier::CompletionNotifier;
 use crate::order_key::to_sort_seq;
 
-/// Default claim lease (ms). The orchestrator renews well within this window.
+/// Default claim lease (ms). The AutoWork runner renews well within this window.
 pub const DEFAULT_LEASE_MS: i64 = 120_000;
 /// Max claim attempts before a requirement is left `failed` (poison-pill guard).
 pub const MAX_ATTEMPTS: i64 = 3;
@@ -57,7 +57,7 @@ pub struct RequirementService {
     completion_notifier: Option<Arc<dyn CompletionNotifier>>,
     /// Notified whenever a requirement becomes claimable (created or re-pended),
     /// so idle AutoWork loops wake immediately instead of waiting for their poll
-    /// fallback. Attached during assembly to the same `Notify` the orchestrator
+    /// fallback. Attached during assembly to the same `Notify` the AutoWork runner
     /// loops await on. `None` on instances that never drive AutoWork (the sink).
     autowork_waker: Option<Arc<tokio::sync::Notify>>,
     /// Attached for persistent image attachments (bind/copy/delete + AutoWork
@@ -118,7 +118,7 @@ impl RequirementService {
         self
     }
 
-    /// Attach the AutoWork waker. Shared with the orchestrator: transitions that
+    /// Attach the AutoWork waker. Shared with the runner: transitions that
     /// make a requirement claimable (`create`, re-pend) notify it so idle loops
     /// pick up new work without waiting for their poll fallback.
     pub fn with_autowork_waker(mut self, waker: Arc<tokio::sync::Notify>) -> Self {
@@ -145,7 +145,7 @@ impl RequirementService {
         }
     }
 
-    /// Staging entry point for the orchestrator: copy the requirement's
+    /// Staging entry point for the AutoWork runner: copy the requirement's
     /// attachments into the session workspace (when given) and return prompt
     /// entries. Empty when no store is attached.
     pub async fn stage_attachments_for_prompt(
@@ -167,7 +167,7 @@ impl RequirementService {
         }
     }
 
-    /// Expose the repo for the orchestrator / sweeper (Phase C).
+    /// Expose the repo for the AutoWork runner / sweeper (Phase C).
     pub fn repo(&self) -> &Arc<dyn IRequirementRepository> {
         &self.repo
     }
@@ -200,7 +200,7 @@ impl RequirementService {
             completion_note: None,
             owner_session_id: None,
             owner_kind: None,
-            claimed_at: None,
+            active_turn_started_at: None,
             lease_expires_at: None,
             started_at: None,
             completed_at: None,
@@ -507,7 +507,7 @@ impl RequirementService {
             status: Some("pending".to_string()),
             owner_session_id: Some(None),
             owner_kind: Some(None),
-            claimed_at: Some(None),
+            active_turn_started_at: Some(None),
             lease_expires_at: Some(None),
             ..Default::default()
         };
@@ -781,7 +781,7 @@ impl RequirementService {
         Ok(())
     }
 
-    /// Called by the orchestrator after a turn ends. If the agent already moved
+    /// Called by the AutoWork runner after a turn ends. If the agent already moved
     /// the row to a terminal state (via its completion tool / terminal marker),
     /// respect it. Otherwise:
     /// - clean turn + `expects_verdict` → mark `needs_review` (the agent had a
@@ -833,7 +833,7 @@ impl RequirementService {
                 status: Some("pending".to_string()),
                 owner_session_id: Some(None),
                 owner_kind: Some(None),
-                claimed_at: Some(None),
+                active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 ..Default::default()
             };
@@ -851,7 +851,7 @@ impl RequirementService {
             .set_status(id, RequirementStatus::Failed, Some("exhausted retries".into()))
             .await?;
         // A requirement exhausted its retries → PAUSE the whole tag so the
-        // orchestrator stops claiming the tag's remaining requirements until a
+        // AutoWork runner stops claiming the tag's remaining requirements until a
         // human resumes it. This is the fix for "a failed predecessor lets every
         // successor barge in instantly". Best-effort: a pause-write failure must
         // not mask the failed-status transition that already succeeded.
@@ -897,7 +897,7 @@ impl RequirementService {
                 completion_note: Some(None),
                 owner_session_id: Some(None),
                 owner_kind: Some(None),
-                claimed_at: Some(None),
+                active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 attempt_count: Some(0),
                 ..Default::default()
@@ -937,7 +937,7 @@ impl RequirementService {
                 completion_note: Some(None),
                 owner_session_id: Some(None),
                 owner_kind: Some(None),
-                claimed_at: Some(None),
+                active_turn_started_at: Some(None),
                 lease_expires_at: Some(None),
                 attempt_count: Some(0),
                 ..Default::default()
@@ -1018,7 +1018,7 @@ impl RequirementService {
                 };
                 if re_pend {
                     update.status = Some("pending".to_string());
-                    update.claimed_at = Some(None);
+                    update.active_turn_started_at = Some(None);
                     update.lease_expires_at = Some(None);
                     woke = true;
                 }
@@ -1046,7 +1046,7 @@ impl RequirementService {
     /// A "binding" is a conversation or terminal whose persisted AutoWork config
     /// is `enabled`, pointing at a tag. The `run_state` returned here reflects the
     /// persisted config only (`Idle` for every enabled binding); the routes layer
-    /// upgrades it to `Active` for targets the orchestrator is currently driving
+    /// upgrades it to `Active` for targets the AutoWork runner is currently driving
     /// (it owns the live progress map). Used by the AutoWork admin 标签会话管理 tab.
     pub async fn tag_bindings(&self, user_id: &str) -> Result<Vec<TagBindings>, AppError> {
         // (tag, binding) accumulator, grouped at the end.
@@ -1133,7 +1133,7 @@ impl RequirementService {
 /// `ConversationService::with_delete_hook`.
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for RequirementService {
-    async fn on_conversation_deleted(&self, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
         if let Err(e) = self
             .clear_owner_for_session(conversation_id, AutoWorkTargetKind::Conversation)
             .await
@@ -1152,7 +1152,7 @@ impl nomifun_common::OnConversationDelete for RequirementService {
 /// `TerminalService::with_delete_hook`.
 #[async_trait::async_trait]
 impl nomifun_common::OnTerminalDelete for RequirementService {
-    async fn on_terminal_deleted(&self, terminal_id: i64) {
+    async fn on_terminal_deleted(&self, _user_id: &str, terminal_id: i64) {
         if let Err(e) = self
             .clear_owner_for_session(terminal_id, AutoWorkTargetKind::Terminal)
             .await
@@ -1171,31 +1171,41 @@ mod tests {
     use super::*;
     use nomifun_db::SqliteRequirementRepository;
     use nomifun_db::init_database_memory;
-    use nomifun_realtime::EventBroadcaster;
+    use nomifun_realtime::UserEventSink;
+
+    const INSTALLATION_OWNER: &str = "system_default_user";
 
     #[derive(Default)]
     struct NoopBroadcaster;
-    impl EventBroadcaster for NoopBroadcaster {
-        fn broadcast(&self, _event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    impl UserEventSink for NoopBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
     }
 
     async fn svc() -> RequirementService {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(Arc::new(NoopBroadcaster));
-        // Seed a user + conversation so the conversation_id FK that `claim_next`
-        // sets is satisfiable.
+        let emitter = RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from(INSTALLATION_OWNER),
+        );
+        // Seed an installation-owner conversation so both the conversation FK
+        // and the execution-authority boundary exercised by `claim_next` are
+        // satisfiable. Secondary-user isolation has dedicated tests below.
         sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-             VALUES ('user_1', 'tester', 'hash', 0, 0)",
+            "INSERT INTO conversations \
+             (id, user_id, name, type, delegation_policy, execution_model_pool, \
+              execution_template_id, channel_chat_id, preset_id, preset_revision, \
+              preset_snapshot, created_at, updated_at) \
+             VALUES \
+             (1, ?1, 'Test Conv', 'nomi', 'disabled', NULL, NULL, NULL, \
+              NULL, NULL, NULL, 0, 0)",
         )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (1, 'user_1', 'Test Conv', 'nomi', 0, 0)",
-        )
+        .bind(INSTALLATION_OWNER)
         .execute(db.pool())
         .await
         .unwrap();
@@ -1209,7 +1219,10 @@ mod tests {
         let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
         let att_repo: Arc<dyn nomifun_db::IAttachmentRepository> =
             Arc::new(nomifun_db::SqliteAttachmentRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(Arc::new(NoopBroadcaster));
+        let emitter = RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from("system_default_user"),
+        );
         Box::leak(Box::new(db));
         let data_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
@@ -1611,7 +1624,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_success_records_agent_note_when_supplied() {
         // Tool-free engines (ACP/codex/gemini) have no native completion tool, so
-        // the orchestrator passes the agent's final plain-text message as the note.
+        // the AutoWork runner passes the agent's final plain-text message as the note.
         let s = svc().await;
         let r = s
             .create(CreateRequirementRequest {
@@ -2173,7 +2186,10 @@ mod tests {
     async fn svc_with_driver(driver: Arc<dyn TerminalDriver>) -> RequirementService {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(Arc::new(NoopBroadcaster));
+        let emitter = RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from("system_default_user"),
+        );
         Box::leak(Box::new(db));
         RequirementService::new(repo, emitter).with_terminal_driver(driver)
     }
@@ -2338,19 +2354,17 @@ mod tests {
     async fn svc_with_conv5_and_term5() -> RequirementService {
         let db = init_database_memory().await.unwrap();
         let repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(Arc::new(NoopBroadcaster));
-        sqlx::query(
-            "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-             VALUES ('user_1', 'tester', 'hash', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
+        let emitter = RequirementEventEmitter::new(
+            Arc::new(NoopBroadcaster),
+            Arc::from(INSTALLATION_OWNER),
+        );
         // Force a conversation with id == 5.
         sqlx::query(
-            "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (5, 'user_1', 'Conv Five', 'nomi', 0, 0)",
+            "INSERT INTO conversations \
+             (id, user_id, name, type, delegation_policy, execution_model_pool, created_at, updated_at) \
+             VALUES (5, ?1, 'Conv Five', 'nomi', 'disabled', NULL, 0, 0)",
         )
+        .bind(INSTALLATION_OWNER)
         .execute(db.pool())
         .await
         .unwrap();
@@ -2358,8 +2372,9 @@ mod tests {
         sqlx::query(
             "INSERT INTO terminal_sessions \
                  (id, user_id, name, cwd, command, args, cols, rows, last_status, created_at, updated_at) \
-             VALUES (5, 'user_1', 'Term Five', '/tmp', 'bash', '[]', 80, 24, 'running', 0, 0)",
+             VALUES (5, ?1, 'Term Five', '/tmp', 'bash', '[]', 80, 24, 'running', 0, 0)",
         )
+        .bind(INSTALLATION_OWNER)
         .execute(db.pool())
         .await
         .unwrap();

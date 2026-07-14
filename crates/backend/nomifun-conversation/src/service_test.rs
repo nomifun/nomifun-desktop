@@ -6,12 +6,12 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use nomifun_ai_agent::agent_task::{AgentInstance, IAgentTask, IMockAgent};
+use nomifun_ai_agent::runtime_handle::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime};
 use nomifun_ai_agent::protocol::events::{
     AgentStreamEvent, ErrorEventData, FinishEventData, TextEventData, ThinkingEventData,
 };
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
-use nomifun_ai_agent::{AgentSendError, IWorkerTaskManager};
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
+use nomifun_ai_agent::{AgentSendError, AgentRuntimeRegistry};
 
 use crate::response_middleware::{CronCommandResult, CronCreateParams, CronUpdateParams, ICronService};
 use nomifun_api_types::{AgentErrorCode, ConversationArtifactKind};
@@ -20,23 +20,34 @@ use nomifun_api_types::{
     SendMessageRequest, UpdateConversationRequest, WebSocketMessage,
 };
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, Confirmation, ConversationSource, ConversationStatus, PaginatedResult,
-    TimestampMs,
+    AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentKillReason,
+    AgentStepMode, AgentToolPolicy, AgentType, AppError, Confirmation, ConversationSource,
+    ConversationStatus,
+    DecisionPolicy, DelegationPolicy, ExecutionAttemptStatus, ExecutionStepKind,
+    ExecutionStepStatus, PaginatedResult, ParticipantAssignmentSource, PlanGate,
+    StepFailurePolicy, TimestampMs, now_ms,
 };
 use nomifun_db::models::{
     AcpSessionRow, AgentMetadataRow, ConversationArtifactRow, ConversationRow, MessageRow, UpdateAgentHandshakeParams,
     UpsertAgentMetadataParams,
 };
 use nomifun_db::{
-    ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, DbError, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, MessageRowUpdate, MessageSearchRow, PersistedSessionState,
-    SaveRuntimeStateParams, SortOrder,
+    AttemptConversationEffectParams, ConversationFilters, ConversationRowUpdate,
+    CreateAcpSessionParams,
+    CreateAgentExecutionAttemptParams, CreateAgentExecutionParams, DbError,
+    IAcpSessionRepository, IAgentExecutionRepository, IAgentMetadataRepository,
+    IConversationRepository, MessageRowUpdate, MessageSearchRow, NewAgentExecutionEvent,
+    NewAgentExecutionParticipant, NewAgentExecutionStep, PersistedSessionState,
+    ReconcileAgentExecutionPlanParams, SaveRuntimeStateParams,
+    SettleAgentExecutionAttemptParams, SortOrder, SqliteAgentExecutionRepository,
+    SqliteConversationRepository, init_database_memory,
 };
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::{EventBroadcaster, UserEventSink};
 use serde_json::json;
 use tokio::sync::{Notify, broadcast};
 
 use crate::service::ConversationService;
+use crate::RepositoryExecutionConversationBoundary;
 use crate::skill_resolver::{FixedSkillResolver, ResolvedAgentSkill, SkillResolver};
 use nomifun_knowledge::{KnowledgeBinding, KnowledgeCompleter, KnowledgeEventEmitter, KnowledgeService};
 
@@ -107,23 +118,39 @@ impl SkillResolver for RecordingSkillResolver {
 
 struct MockBroadcaster {
     events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+    deliveries: Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>,
 }
 
 impl MockBroadcaster {
     fn new() -> Self {
         Self {
             events: Mutex::new(vec![]),
+            deliveries: Mutex::new(vec![]),
         }
     }
 
     fn take_events(&self) -> Vec<WebSocketMessage<serde_json::Value>> {
         std::mem::take(&mut self.events.lock().unwrap())
     }
+
+    fn take_deliveries(&self) -> Vec<(String, WebSocketMessage<serde_json::Value>)> {
+        std::mem::take(&mut self.deliveries.lock().unwrap())
+    }
 }
 
 impl EventBroadcaster for MockBroadcaster {
     fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
         self.events.lock().unwrap().push(event);
+    }
+}
+
+impl UserEventSink for MockBroadcaster {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        self.events.lock().unwrap().push(event.clone());
+        self.deliveries
+            .lock()
+            .unwrap()
+            .push((user_id.to_owned(), event));
     }
 }
 
@@ -435,6 +462,7 @@ impl IConversationRepository for MockRepo {
 
     async fn mark_skill_suggest_artifacts_saved(
         &self,
+        _user_id: &str,
         cron_job_id: &str,
         updated_at: TimestampMs,
     ) -> Result<Vec<ConversationArtifactRow>, nomifun_db::DbError> {
@@ -585,7 +613,7 @@ fn make_service() -> (
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<dyn IWorkerTaskManager>,
+    Arc<dyn AgentRuntimeRegistry>,
 ) {
     make_service_with_resolver(Arc::new(FixedSkillResolver { names: vec![] }))
 }
@@ -596,7 +624,7 @@ fn make_service_with_resolver(
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<dyn IWorkerTaskManager>,
+    Arc<dyn AgentRuntimeRegistry>,
 ) {
     make_service_with_resolver_and_acp_session_repo(skill_resolver, Arc::new(StubAcpSessionRepo::default()))
 }
@@ -608,22 +636,24 @@ fn make_service_with_resolver_and_acp_session_repo(
     ConversationService,
     Arc<MockBroadcaster>,
     Arc<MockRepo>,
-    Arc<dyn IWorkerTaskManager>,
+    Arc<dyn AgentRuntimeRegistry>,
 ) {
     let repo = Arc::new(MockRepo::new());
     let broadcaster = Arc::new(MockBroadcaster::new());
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(StubAgentMetadataRepo);
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
     let svc = ConversationService::new(
+        Arc::<str>::from("user_1"),
         std::env::temp_dir(),
         broadcaster.clone(),
         skill_resolver,
-        task_mgr.clone(),
+        runtime_registry.clone(),
         repo.clone(),
         agent_metadata_repo,
         acp_session_repo,
+        Arc::new(crate::NoExecutionConversationBoundary),
     );
-    (svc, broadcaster, repo, task_mgr)
+    (svc, broadcaster, repo, runtime_registry)
 }
 
 fn make_create_req() -> CreateConversationRequest {
@@ -638,7 +668,7 @@ fn make_create_req() -> CreateConversationRequest {
 
 #[tokio::test]
 async fn create_returns_conversation_with_defaults() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
 
     let resp = svc.create("user_1", make_create_req()).await.unwrap();
 
@@ -715,7 +745,7 @@ async fn create_rejects_non_string_or_integer_session_mcp_ids() {
 
 #[tokio::test]
 async fn create_rejects_workspace_with_trailing_whitespace_in_request() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let dir = std::env::temp_dir().join(format!("nomifun-test-{}", nomifun_common::generate_id()));
     std::fs::create_dir(&dir).unwrap();
     let workspace = dir.join("workspace");
@@ -739,7 +769,7 @@ async fn create_rejects_workspace_with_trailing_whitespace_in_request() {
 
 #[tokio::test]
 async fn create_accepts_workspace_with_interior_whitespace_segment() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let dir = std::env::temp_dir().join(format!("nomifun-test-{}", nomifun_common::generate_id()));
     // Mirrors the macOS per-user data dir layout ("Application Support"):
     // interior whitespace in a directory name is a normal, supported path.
@@ -759,7 +789,7 @@ async fn create_accepts_workspace_with_interior_whitespace_segment() {
 
 #[tokio::test]
 async fn create_with_custom_name_and_source() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -780,7 +810,7 @@ async fn create_with_custom_name_and_source() {
 
 #[tokio::test]
 async fn create_stores_model_as_json() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     // Top-level model is only valid for nomi conversations.
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -800,7 +830,7 @@ async fn create_stores_model_as_json() {
 
 #[tokio::test]
 async fn get_existing_conversation() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let created = svc.create("user_1", make_create_req()).await.unwrap();
 
     let fetched = svc.get("user_1", &created.id.to_string()).await.unwrap();
@@ -811,7 +841,7 @@ async fn get_existing_conversation() {
 
 #[tokio::test]
 async fn get_reports_idle_runtime_when_only_persisted_status_is_running() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
     let created = svc.create("user_1", make_create_req()).await.unwrap();
     repo.update(
         created.id,
@@ -833,7 +863,7 @@ async fn get_reports_idle_runtime_when_only_persisted_status_is_running() {
 
 #[tokio::test]
 async fn get_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let err = svc.get("user_1", "non-existent").await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
@@ -842,7 +872,7 @@ async fn get_not_found() {
 
 #[tokio::test]
 async fn list_empty() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let result = svc.list("user_1", ListConversationsQuery::default(), false).await.unwrap();
     assert!(result.items.is_empty());
     assert_eq!(result.total, 0);
@@ -851,7 +881,7 @@ async fn list_empty() {
 
 #[tokio::test]
 async fn list_returns_created_conversations() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     svc.create("user_1", make_create_req()).await.unwrap();
     svc.create("user_1", make_create_req()).await.unwrap();
 
@@ -862,9 +892,14 @@ async fn list_returns_created_conversations() {
 
 #[tokio::test]
 async fn list_filters_by_user() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     svc.create("user_1", make_create_req()).await.unwrap();
-    svc.create("user_2", make_create_req()).await.unwrap();
+    let secondary_model_only_req = serde_json::from_value(json!({
+        "type": "nomi",
+        "extra": {}
+    }))
+    .unwrap();
+    svc.create("user_2", secondary_model_only_req).await.unwrap();
 
     let result = svc.list("user_1", ListConversationsQuery::default(), false).await.unwrap();
     assert_eq!(result.items.len(), 1);
@@ -872,7 +907,7 @@ async fn list_filters_by_user() {
 
 #[tokio::test]
 async fn list_with_source_filter() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     svc.create("user_1", make_create_req()).await.unwrap();
 
     let telegram_req: CreateConversationRequest = serde_json::from_value(json!({
@@ -894,13 +929,13 @@ async fn list_with_source_filter() {
 
 #[tokio::test]
 async fn list_with_pinned_filter() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     svc.create("user_1", make_create_req()).await.unwrap();
 
     // Pin the first one
     let update_req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    svc.update("user_1", &conv.id.to_string(), update_req, &task_mgr).await.unwrap();
+    svc.update("user_1", &conv.id.to_string(), update_req, &runtime_registry).await.unwrap();
 
     let query = ListConversationsQuery {
         pinned: Some(true),
@@ -915,12 +950,12 @@ async fn list_with_pinned_filter() {
 
 #[tokio::test]
 async fn update_name() {
-    let (svc, broadcaster, _repo, task_mgr) = make_service();
+    let (svc, broadcaster, _repo, runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events(); // clear create event
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "New Name" })).unwrap();
-    let updated = svc.update("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     assert_eq!(updated.name, "New Name");
     assert!(updated.modified_at >= conv.modified_at);
@@ -932,37 +967,37 @@ async fn update_name() {
 
 #[tokio::test]
 async fn update_pin() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     assert!(!conv.pinned);
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let updated = svc.update("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let updated = svc.update("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
     assert!(updated.pinned);
     assert!(updated.pinned_at.is_some());
 }
 
 #[tokio::test]
 async fn update_unpin_clears_pinned_at() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     // Pin first
     let pin_req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": true })).unwrap();
-    let pinned = svc.update("user_1", &conv.id.to_string(), pin_req, &task_mgr).await.unwrap();
+    let pinned = svc.update("user_1", &conv.id.to_string(), pin_req, &runtime_registry).await.unwrap();
     assert!(pinned.pinned);
     assert!(pinned.pinned_at.is_some());
 
     // Unpin
     let unpin_req: UpdateConversationRequest = serde_json::from_value(json!({ "pinned": false })).unwrap();
-    let unpinned = svc.update("user_1", &conv.id.to_string(), unpin_req, &task_mgr).await.unwrap();
+    let unpinned = svc.update("user_1", &conv.id.to_string(), unpin_req, &runtime_registry).await.unwrap();
     assert!(!unpinned.pinned);
     assert!(unpinned.pinned_at.is_none());
 }
 
 #[tokio::test]
 async fn update_extra_merge() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -974,7 +1009,7 @@ async fn update_extra_merge() {
     // Update only workspace — contextFileName should be preserved
     let update_req: UpdateConversationRequest =
         serde_json::from_value(json!({ "extra": { "workspace": "/new" } })).unwrap();
-    let updated = svc.update("user_1", &conv.id.to_string(), update_req, &task_mgr).await.unwrap();
+    let updated = svc.update("user_1", &conv.id.to_string(), update_req, &runtime_registry).await.unwrap();
 
     assert_eq!(updated.extra["workspace"], "/new");
     assert_eq!(updated.extra["contextFileName"], "ctx.md");
@@ -982,7 +1017,7 @@ async fn update_extra_merge() {
 
 #[tokio::test]
 async fn update_model() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     // Top-level model updates are only valid on nomi conversations
     // (Task 8 enforces the nomi-only rule in update).
@@ -998,15 +1033,15 @@ async fn update_model() {
         "model": { "provider_id": "p2", "model": "new-model" }
     }))
     .unwrap();
-    let mock = Arc::new(MockTaskManager::new());
-    let task_mgr: Arc<dyn IWorkerTaskManager> = mock.clone();
-    let updated = svc.update("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    let mock = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = mock.clone();
+    let updated = svc.update("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     let model = updated.model.unwrap();
     assert_eq!(model.provider_id, "p2");
     assert_eq!(model.model, "new-model");
     assert_eq!(
-        mock.kill_and_wait_count(),
+        mock.termination_wait_count(),
         1,
         "model update must await old agent teardown"
     );
@@ -1018,7 +1053,7 @@ async fn update_workspace_change_recycles_agent() {
     // cached agent so the new cwd (and its surface-scoped file authority) takes
     // effect on the next message — same rationale as the model-change recycle.
     // A no-op workspace update must NOT recycle.
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
@@ -1028,10 +1063,10 @@ async fn update_workspace_change_recycles_agent() {
     .unwrap();
     let conv = svc.create("user_1", create_req).await.unwrap();
 
-    // A fresh mock passed to `update` receives the kill (update uses the passed
-    // task manager, not the service's internal one).
-    let mock = Arc::new(MockTaskManager::new());
-    let mgr: Arc<dyn IWorkerTaskManager> = mock.clone();
+    // A fresh mock passed to `update` receives the termination (update uses the passed
+    // runtime registry, not the service's internal one).
+    let mock = Arc::new(MockAgentRuntimeRegistry::new());
+    let mgr: Arc<dyn AgentRuntimeRegistry> = mock.clone();
 
     let repoint: UpdateConversationRequest = serde_json::from_value(json!({
         "extra": { "workspace": "/other/project" }
@@ -1039,7 +1074,7 @@ async fn update_workspace_change_recycles_agent() {
     .unwrap();
     let updated = svc.update("user_1", &conv.id.to_string(), repoint, &mgr).await.unwrap();
     assert_eq!(updated.extra["workspace"], "/other/project");
-    assert_eq!(mock.kill_count(), 1, "workspace change must recycle the agent");
+    assert_eq!(mock.termination_count(), 1, "workspace change must recycle the agent");
 
     // Re-applying the SAME workspace is a no-op → no further recycle.
     let same: UpdateConversationRequest = serde_json::from_value(json!({
@@ -1047,7 +1082,7 @@ async fn update_workspace_change_recycles_agent() {
     }))
     .unwrap();
     svc.update("user_1", &conv.id.to_string(), same, &mgr).await.unwrap();
-    assert_eq!(mock.kill_count(), 1, "no-op workspace update must not recycle");
+    assert_eq!(mock.termination_count(), 1, "no-op workspace update must not recycle");
 
     // A non-workspace extra change must also not recycle.
     let other: UpdateConversationRequest = serde_json::from_value(json!({
@@ -1055,14 +1090,14 @@ async fn update_workspace_change_recycles_agent() {
     }))
     .unwrap();
     svc.update("user_1", &conv.id.to_string(), other, &mgr).await.unwrap();
-    assert_eq!(mock.kill_count(), 1, "non-workspace extra change must not recycle");
+    assert_eq!(mock.termination_count(), 1, "non-workspace extra change must not recycle");
 }
 
 #[tokio::test]
 async fn update_not_found() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    let err = svc.update("user_1", "non-existent", req, &task_mgr).await.unwrap_err();
+    let err = svc.update("user_1", "non-existent", req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
@@ -1070,7 +1105,7 @@ async fn update_not_found() {
 
 #[tokio::test]
 async fn delete_conversation() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
 
@@ -1089,7 +1124,7 @@ async fn delete_conversation() {
 
 #[tokio::test]
 async fn delete_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let err = svc.delete("user_1", "non-existent").await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
@@ -1098,15 +1133,18 @@ async fn delete_not_found() {
 async fn delete_invokes_registered_hook() {
     use nomifun_common::OnConversationDelete;
 
-    struct RecordingHook(Mutex<Vec<i64>>);
+    struct RecordingHook(Mutex<Vec<(String, i64)>>);
     #[async_trait::async_trait]
     impl OnConversationDelete for RecordingHook {
-        async fn on_conversation_deleted(&self, conversation_id: i64) {
-            self.0.lock().unwrap().push(conversation_id);
+        async fn on_conversation_deleted(&self, user_id: &str, conversation_id: i64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((user_id.to_owned(), conversation_id));
         }
     }
 
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let hook = Arc::new(RecordingHook(Mutex::new(vec![])));
     svc.with_delete_hook(hook.clone());
 
@@ -1114,14 +1152,747 @@ async fn delete_invokes_registered_hook() {
     svc.delete("user_1", &conv.id.to_string()).await.unwrap();
 
     let calls = hook.0.lock().unwrap();
-    assert_eq!(calls.as_slice(), &[conv.id]);
+    assert_eq!(calls.as_slice(), &[("user_1".to_owned(), conv.id)]);
+}
+
+async fn make_sqlite_projection_service() -> (
+    ConversationService,
+    Arc<MockBroadcaster>,
+    Arc<SqliteConversationRepository>,
+    nomifun_db::Database,
+) {
+    let database = init_database_memory().await.unwrap();
+    let repository = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
+        Arc::new(MockAgentRuntimeRegistry::new());
+    let service = ConversationService::new(
+        Arc::<str>::from("system_default_user"),
+        std::env::temp_dir(),
+        broadcaster.clone(),
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry,
+        repository.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+    (service, broadcaster, repository, database)
+}
+
+const PROJECTION_OWNER: &str = "system_default_user";
+
+#[tokio::test]
+async fn assistant_projection_is_one_durable_row_and_rebroadcasts_stable_final_content() {
+    let (service, broadcaster, repository, _database) = make_sqlite_projection_service().await;
+    let conversation = service
+        .create(
+            PROJECTION_OWNER,
+            serde_json::from_value(json!({
+                "type": "nomi",
+                "name": "lead",
+                "extra": { "workspace": "/project" }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    broadcaster.take_events();
+
+    let operation_id = "exec-lead-report:exec_1:event:7";
+    let first = service
+        .project_assistant_message_idempotent(
+            PROJECTION_OWNER,
+            &conversation.id.to_string(),
+            operation_id,
+            "final synthesis",
+            "agent_execution_report",
+        )
+        .await
+        .unwrap();
+    let replay = service
+        .project_assistant_message_idempotent(
+            PROJECTION_OWNER,
+            &conversation.id.to_string(),
+            operation_id,
+            "final synthesis",
+            "agent_execution_report",
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, replay);
+
+    let messages = repository
+        .get_messages(conversation.id, 1, 20, SortOrder::Asc)
+        .await
+        .unwrap();
+    assert_eq!(messages.items.len(), 1);
+    assert_eq!(messages.items[0].id, first);
+    assert_eq!(messages.items[0].position.as_deref(), Some("left"));
+    assert_eq!(messages.items[0].status.as_deref(), Some("finish"));
+
+    // Replays rebroadcast after the durable transaction so a crash between
+    // commit and the first WebSocket publish is healed with the same msg_id.
+    let events = broadcaster.take_events();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.name == "message.stream"));
+    assert!(events.iter().all(|event| event.data["msg_id"] == first));
+    assert!(events.iter().all(|event| event.data["type"] == "content"));
+    assert!(events.iter().all(|event| event.data["replace"] == true));
+    assert!(events.iter().all(|event| event.data["stream_complete"] == true));
+    assert!(!events.iter().any(|event| {
+        matches!(event.name.as_str(), "turn.started" | "turn.completed")
+    }));
+
+    assert!(service
+        .project_assistant_message_idempotent(
+            PROJECTION_OWNER,
+            &conversation.id.to_string(),
+            operation_id,
+            "different content",
+            "agent_execution_report",
+        )
+        .await
+        .is_err());
+    assert!(service
+        .project_assistant_message_idempotent(
+            "other-owner",
+            &conversation.id.to_string(),
+            "other-op",
+            "content",
+            "agent_execution_report",
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn assistant_projection_reuses_companion_and_channel_wire_markers() {
+    let (service, broadcaster, _repository, _database) = make_sqlite_projection_service().await;
+    let conversation = service
+        .create(
+            PROJECTION_OWNER,
+            serde_json::from_value(json!({
+                "type": "nomi",
+                "name": "companion lead",
+                "extra": {
+                    "workspace": "/project",
+                    "companionSession": true,
+                    "companionId": "companion_1",
+                    "channelPlatform": "telegram"
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    broadcaster.take_events();
+
+    service
+        .project_assistant_message_idempotent(
+            PROJECTION_OWNER,
+            &conversation.id.to_string(),
+            "exec-lead-report:exec_2:event:9",
+            "companion synthesis",
+            "agent_execution_report",
+        )
+        .await
+        .unwrap();
+    let events = broadcaster.take_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].data["companion"], true);
+    assert_eq!(events[0].data["companion_id"], "companion_1");
+    assert_eq!(events[0].data["channel_platform"], "telegram");
+}
+
+#[tokio::test]
+async fn two_user_private_events_are_owner_scoped() {
+    use nomifun_db::IUserRepository;
+
+    let (service, user_events, _repository, database) = make_sqlite_projection_service().await;
+    let owner_b = nomifun_db::SqliteUserRepository::new(database.pool().clone())
+        .create_user("owner-b", "test-password-hash")
+        .await
+        .unwrap()
+        .id;
+    let request = || {
+        serde_json::from_value(json!({
+            "type": "nomi",
+            "name": "private conversation",
+            "extra": { "workspace": "/project" }
+        }))
+        .unwrap()
+    };
+
+    let owner_a_conversation = service.create(PROJECTION_OWNER, request()).await.unwrap();
+    user_events.take_events();
+    user_events.take_deliveries();
+
+    let owner_b_conversation = service.create(&owner_b, request()).await.unwrap();
+    let owner_b_deliveries = user_events.take_deliveries();
+    assert_eq!(owner_b_deliveries.len(), 1);
+    assert_eq!(owner_b_deliveries[0].0, owner_b);
+    assert_eq!(owner_b_deliveries[0].1.name, "conversation.listChanged");
+    assert_eq!(
+        owner_b_deliveries[0].1.data["conversation_id"],
+        owner_b_conversation.id
+    );
+    assert!(
+        owner_b_deliveries
+            .iter()
+            .all(|(owner, _)| owner != PROJECTION_OWNER)
+    );
+    user_events.take_events();
+
+    service
+        .project_assistant_message_idempotent(
+            PROJECTION_OWNER,
+            &owner_a_conversation.id.to_string(),
+            "exec-lead-report:owner-a:event:1",
+            "owner A terminal report",
+            "agent_execution_report",
+        )
+        .await
+        .unwrap();
+
+    let owner_a_deliveries = user_events.take_deliveries();
+    assert_eq!(owner_a_deliveries.len(), 1);
+    assert_eq!(owner_a_deliveries[0].0, PROJECTION_OWNER);
+    assert_eq!(owner_a_deliveries[0].1.name, "message.stream");
+    assert_eq!(
+        owner_a_deliveries[0].1.data["conversation_id"],
+        owner_a_conversation.id
+    );
+    assert_eq!(owner_a_deliveries[0].1.data["replace"], true);
+    assert!(
+        owner_a_deliveries
+            .iter()
+            .all(|(owner, _)| owner != &owner_b)
+    );
+}
+
+#[tokio::test]
+async fn delete_rejects_soft_deleted_execution_attempt_transcript() {
+    const USER_ID: &str = "system_default_user";
+
+    let database = init_database_memory().await.unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers (\
+            id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES ('provider_test', 'openai', 'test', 'https://example.invalid', \
+                   'encrypted', '[\"model_test\"]', 1, '[]', 1, 1)",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let conversation_repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let execution_repo = Arc::new(SqliteAgentExecutionRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let runtime_registry_impl = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = runtime_registry_impl.clone();
+    let svc = ConversationService::new(
+        Arc::<str>::from(USER_ID),
+        std::env::temp_dir(),
+        broadcaster,
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry.clone(),
+        conversation_repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(RepositoryExecutionConversationBoundary::new(
+            execution_repo.clone(),
+        )),
+    );
+
+    let request = |name: &str| {
+        serde_json::from_value(json!({
+            "type": "nomi",
+            "name": name,
+            "extra": { "workspace": "/project" }
+        }))
+        .unwrap()
+    };
+    let lead = svc.create(USER_ID, request("lead")).await.unwrap();
+    let attempt_conversation = svc.create(USER_ID, request("attempt")).await.unwrap();
+    let event = |event_type: AgentExecutionEventKind| NewAgentExecutionEvent {
+        event_type,
+        step_id: None,
+        attempt_id: None,
+        actor: nomifun_common::AgentExecutionActor::system(),
+        payload: "{}".to_owned(),
+    };
+    let participant = NewAgentExecutionParticipant {
+        id: "participant_1".to_owned(),
+        source_agent_id: "agent_nomi".to_owned(),
+        preset_id: None,
+        preset_revision: None,
+        preset_snapshot: None,
+        provider_id: Some("provider_test".to_owned()),
+        model: Some("model_test".to_owned()),
+        role: Some("builder".to_owned()),
+        capability: Some(r#"{"coding":true}"#.to_owned()),
+        constraints: Some("{}".to_owned()),
+        description: None,
+        system_prompt: None,
+        enabled_skills: "[]".to_owned(),
+        disabled_builtin_skills: "[]".to_owned(),
+        sort_order: 0,
+    };
+    let execution = execution_repo
+        .create_execution_with_participants(
+            USER_ID,
+            &CreateAgentExecutionParams {
+                goal: "retain attempt transcript".to_owned(),
+                status: AgentExecutionStatus::Planning,
+                plan_gate: PlanGate::Automatic,
+                adaptation_policy: AdaptationPolicy::Fixed,
+                decision_policy: DecisionPolicy::Automatic,
+                delegation_policy: DelegationPolicy::Automatic,
+                max_parallel: 1,
+                work_dir: None,
+                lead_conversation_id: Some(lead.id),
+                initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
+            },
+            &[participant],
+            &event(AgentExecutionEventKind::Created),
+        )
+        .await
+        .unwrap();
+    execution_repo
+        .reconcile_plan(
+            USER_ID,
+            &execution.id,
+            0,
+            &ReconcileAgentExecutionPlanParams {
+                goal: None,
+                plan_gate: None,
+                adaptation_policy: None,
+                decision_policy: None,
+                delegation_policy: None,
+                keep_step_ids: Vec::new(),
+                new_participants: Vec::new(),
+                retire_participant_ids: Vec::new(),
+                new_steps: vec![NewAgentExecutionStep {
+                    id: "step_1".to_owned(),
+                    title: "attempt".to_owned(),
+                    spec: "execute attempt".to_owned(),
+                    role: Some("builder".to_owned()),
+                    tool_policy: AgentToolPolicy::Full,
+                    kind: ExecutionStepKind::Agent,
+                    agent_mode: Some(AgentStepMode::Normal),
+                    profile: Some("{}".to_owned()),
+                    fanout_group: None,
+                    control_policy: None,
+                    status: ExecutionStepStatus::Pending,
+                    assigned_participant_id: Some("participant_1".to_owned()),
+                    assignment_score: Some(1.0),
+                    assignment_rationale: Some("test".to_owned()),
+                    assignment_source: Some(ParticipantAssignmentSource::Planner),
+                    assignment_locked: false,
+                    failure_policy: StepFailurePolicy::FailExecution,
+                    preset_prompt: None,
+                    graph_x: None,
+                    graph_y: None,
+                }],
+                new_dependencies: Vec::new(),
+                execution_status: AgentExecutionStatus::Running,
+            },
+            &event(AgentExecutionEventKind::PlanChanged),
+        )
+        .await
+        .unwrap();
+    let queued = execution_repo
+        .create_attempt(
+            USER_ID,
+            &execution.id,
+            "step_1",
+            0,
+            None,
+            &CreateAgentExecutionAttemptParams {
+                participant_id: Some("participant_1".to_owned()),
+                start_immediately: false,
+                trigger_reason: "initial".to_owned(),
+                effective_config: "{}".to_owned(),
+                retry_after: None,
+                runtime_state: None,
+            },
+            &event(AgentExecutionEventKind::AttemptChanged),
+        )
+        .await
+        .unwrap();
+    let attempt_id = queued.current_attempt.unwrap().attempt.id;
+    execution_repo
+        .start_attempt(
+            USER_ID,
+            &execution.id,
+            "step_1",
+            1,
+            &attempt_id,
+            0,
+            attempt_conversation.id,
+            None,
+            &event(AgentExecutionEventKind::AttemptChanged),
+        )
+        .await
+        .unwrap();
+
+    let ordinary_send = svc
+        .send_message(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ordinary_send, AppError::Conflict(_)));
+    let ordinary_update = svc
+        .update(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            serde_json::from_value(json!({ "name": "must not mutate" })).unwrap(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ordinary_update, AppError::Conflict(_)));
+    let ordinary_cancel = svc
+        .cancel(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ordinary_cancel, AppError::Conflict(_)));
+    assert!(!svc.user_cancelled_since(&attempt_conversation.id.to_string(), 0));
+    let ordinary_warmup = svc
+        .warmup(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(ordinary_warmup, AppError::Conflict(_)));
+    assert_eq!(runtime_registry_impl.active_runtime_count(), 0);
+    assert_eq!(runtime_registry_impl.termination_count(), 0);
+    assert!(
+        conversation_repo
+            .get_messages(attempt_conversation.id, 1, 20, SortOrder::Asc)
+            .await
+            .unwrap()
+            .items
+            .is_empty(),
+        "public rejection happens before transcript or runtime side effects"
+    );
+
+    let execution_port = svc.agent_execution_port(runtime_registry.clone());
+    let delivery = execution_port
+        .deliver_turn(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            "execution:test:initial",
+            make_send_req(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delivery.message_id, "execution:test:initial:user");
+    wait_for_turn_released(&svc, &attempt_conversation.id.to_string()).await;
+    assert_eq!(
+        conversation_repo
+            .get_messages(attempt_conversation.id, 1, 20, SortOrder::Asc)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1,
+        "only the trusted Agent Execution port may deliver an Attempt turn"
+    );
+    assert!(
+        svc.list_confirmations(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "read-only confirmation inspection remains available"
+    );
+    let projected_lead = svc.get(USER_ID, &lead.id.to_string()).await.unwrap();
+    assert_eq!(projected_lead.linked_execution_id.as_deref(), Some(execution.id.as_str()));
+    assert!(projected_lead.execution_step_id.is_none());
+    assert!(projected_lead.execution_attempt_id.is_none());
+
+    let projected_attempt = svc
+        .get(USER_ID, &attempt_conversation.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(projected_attempt.linked_execution_id.as_deref(), Some(execution.id.as_str()));
+    assert_eq!(projected_attempt.execution_step_id.as_deref(), Some("step_1"));
+    assert_eq!(
+        projected_attempt.execution_attempt_id.as_deref(),
+        Some(attempt_id.as_str())
+    );
+    execution_repo
+        .settle_attempt(
+            USER_ID,
+            &execution.id,
+            "step_1",
+            2,
+            &attempt_id,
+            1,
+            None,
+            &SettleAgentExecutionAttemptParams {
+                attempt_status: ExecutionAttemptStatus::WaitingInput,
+                step_status: ExecutionStepStatus::WaitingInput,
+                execution_status: Some(AgentExecutionStatus::WaitingInput),
+                question: Some(Some("choose a continuation".to_owned())),
+                error: None,
+                output_summary: None,
+                output_files: None,
+                tokens: None,
+                retry_after: None,
+                runtime_state: None,
+                started_at: None,
+                finished_at: None,
+                loop_repeat_reset: None,
+            },
+            &event(AgentExecutionEventKind::StatusChanged),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        svc.send_message(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    let continuation = execution_port
+        .deliver_turn(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            "execution:test:continuation",
+            serde_json::from_value(json!({ "content": "continue" })).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        continuation.message_id,
+        "execution:test:continuation:user"
+    );
+    wait_for_turn_released(&svc, &attempt_conversation.id.to_string()).await;
+    execution_repo
+        .resume_waiting_attempt(
+            USER_ID,
+            &execution.id,
+            4,
+            "step_1",
+            3,
+            &attempt_id,
+            2,
+            &AttemptConversationEffectParams {
+                runtime_state: None,
+            },
+            &event(AgentExecutionEventKind::DecisionAnswered),
+        )
+        .await
+        .unwrap();
+    execution_repo
+        .settle_attempt(
+            USER_ID,
+            &execution.id,
+            "step_1",
+            4,
+            &attempt_id,
+            3,
+            None,
+            &SettleAgentExecutionAttemptParams {
+                attempt_status: ExecutionAttemptStatus::Completed,
+                step_status: ExecutionStepStatus::Completed,
+                execution_status: Some(AgentExecutionStatus::Completed),
+                question: None,
+                error: None,
+                output_summary: Some(Some("done".to_owned())),
+                output_files: Some("[]".to_owned()),
+                tokens: None,
+                retry_after: None,
+                runtime_state: None,
+                started_at: None,
+                finished_at: None,
+                loop_repeat_reset: None,
+            },
+            &event(AgentExecutionEventKind::StatusChanged),
+        )
+        .await
+        .unwrap();
+
+    let settled_attempt = svc
+        .get(USER_ID, &attempt_conversation.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        settled_attempt.linked_execution_id.as_deref(),
+        Some(execution.id.as_str())
+    );
+    assert_eq!(settled_attempt.execution_step_id.as_deref(), Some("step_1"));
+    assert_eq!(
+        settled_attempt.execution_attempt_id.as_deref(),
+        Some(attempt_id.as_str())
+    );
+    assert!(matches!(
+        svc.send_message(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    svc.update_extra(
+        &attempt_conversation.id.to_string(),
+        json!({ "execution_cleanup_state": "retained" }),
+    )
+    .await
+    .unwrap();
+    svc.cancel_for_execution(
+        USER_ID,
+        &attempt_conversation.id.to_string(),
+        &runtime_registry,
+    )
+    .await
+    .unwrap();
+
+    let cleanup = execution_repo
+        .list_pending_conversation_cleanups(Some(&execution.id), 10)
+        .await
+        .unwrap();
+    assert_eq!(cleanup.len(), 1);
+    assert!(
+        execution_repo
+            .mark_conversation_cleanup_completed(&cleanup[0].link_id, now_ms())
+            .await
+            .unwrap()
+    );
+    let cleaned_attempt = svc
+        .get(USER_ID, &attempt_conversation.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(cleaned_attempt.execution_step_id.as_deref(), Some("step_1"));
+    assert_eq!(
+        cleaned_attempt.execution_attempt_id.as_deref(),
+        Some(attempt_id.as_str())
+    );
+    assert!(
+        execution_repo
+            .delete_execution(
+                USER_ID,
+                &execution.id,
+                6,
+                &event(AgentExecutionEventKind::Deleted),
+            )
+            .await
+            .unwrap()
+    );
+
+    let tombstoned_attempt = svc
+        .get(USER_ID, &attempt_conversation.id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        tombstoned_attempt.linked_execution_id, None,
+        "a retained transcript must not expose a soft-deleted execution route"
+    );
+    assert_eq!(
+        tombstoned_attempt.execution_step_id.as_deref(),
+        Some("step_1")
+    );
+    assert_eq!(
+        tombstoned_attempt.execution_attempt_id.as_deref(),
+        Some(attempt_id.as_str())
+    );
+    assert!(matches!(
+        svc.send_message(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    assert!(matches!(
+        svc.update(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            serde_json::from_value(json!({ "name": "still immutable" })).unwrap(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    assert!(matches!(
+        svc.cancel(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    assert!(matches!(
+        svc.warmup(
+            USER_ID,
+            &attempt_conversation.id.to_string(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap_err(),
+        AppError::Conflict(_)
+    ));
+    assert_eq!(
+        conversation_repo
+            .get_messages(attempt_conversation.id, 1, 20, SortOrder::Asc)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+
+    let error = svc
+        .delete(USER_ID, &attempt_conversation.id.to_string())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Conflict(_)));
+    assert!(
+        conversation_repo
+            .get(attempt_conversation.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the attempt transcript must remain physically present"
+    );
 }
 
 // ── Broadcast payload tests ────────────────────────────────────────
 
 #[tokio::test]
 async fn broadcast_includes_source_on_delete() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -1139,7 +1910,7 @@ async fn broadcast_includes_source_on_delete() {
 
 #[tokio::test]
 async fn all_crud_operations_broadcast() {
-    let (svc, broadcaster, _repo, task_mgr) = make_service();
+    let (svc, broadcaster, _repo, runtime_registry) = make_service();
 
     // Create
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
@@ -1148,7 +1919,7 @@ async fn all_crud_operations_broadcast() {
 
     // Update
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    svc.update("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    svc.update("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
     let events = broadcaster.take_events();
     assert_eq!(events[0].data["action"], "updated");
 
@@ -1162,7 +1933,7 @@ async fn all_crud_operations_broadcast() {
 
 #[tokio::test]
 async fn get_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let err = svc.get("user_2", &conv.id.to_string()).await.unwrap_err();
@@ -1171,11 +1942,11 @@ async fn get_wrong_user_returns_not_found() {
 
 #[tokio::test]
 async fn update_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "hacked" })).unwrap();
-    let err = svc.update("user_2", &conv.id.to_string(), req, &task_mgr).await.unwrap_err();
+    let err = svc.update("user_2", &conv.id.to_string(), req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 
     // Original should be unchanged
@@ -1185,7 +1956,7 @@ async fn update_wrong_user_returns_not_found() {
 
 #[tokio::test]
 async fn delete_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let err = svc.delete("user_2", &conv.id.to_string()).await.unwrap_err();
@@ -1200,7 +1971,7 @@ async fn delete_wrong_user_returns_not_found() {
 
 #[tokio::test]
 async fn clone_without_source_creates_new() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
 
     let req: CloneConversationRequest = serde_json::from_value(json!({
         "conversation": {
@@ -1224,7 +1995,7 @@ async fn clone_without_source_creates_new() {
 
 #[tokio::test]
 async fn reset_sets_status_to_pending() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     svc.reset("user_1", &conv.id.to_string()).await.unwrap();
@@ -1235,7 +2006,7 @@ async fn reset_sets_status_to_pending() {
 
 #[tokio::test]
 async fn reset_clears_conversation_artifacts() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     repo.upsert_artifact(&ConversationArtifactRow {
         id: 0,
@@ -1258,7 +2029,7 @@ async fn reset_clears_conversation_artifacts() {
 
 #[tokio::test]
 async fn list_artifacts_includes_legacy_cron_trigger_messages() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     repo.insert_message(&MessageRow {
         id: "legacy-msg-1".into(),
@@ -1289,14 +2060,14 @@ async fn list_artifacts_includes_legacy_cron_trigger_messages() {
 
 #[tokio::test]
 async fn reset_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let err = svc.reset("user_1", "no-such-id").await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
 async fn reset_wrong_user() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let err = svc.reset("user_2", &conv.id.to_string()).await.unwrap_err();
@@ -1307,7 +2078,7 @@ async fn reset_wrong_user() {
 
 #[tokio::test]
 async fn search_messages_empty_keyword_returns_bad_request() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     let query = SearchMessagesQuery {
         keyword: "".into(),
@@ -1320,7 +2091,7 @@ async fn search_messages_empty_keyword_returns_bad_request() {
 
 #[tokio::test]
 async fn search_messages_whitespace_keyword_returns_bad_request() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
 
     let query = SearchMessagesQuery {
         keyword: "   ".into(),
@@ -1386,7 +2157,7 @@ impl MockAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for MockAgent {
+impl AgentRuntimeControl for MockAgent {
     fn agent_type(&self) -> AgentType {
         AgentType::Acp
     }
@@ -1422,7 +2193,7 @@ impl IAgentTask for MockAgent {
 }
 
 #[async_trait::async_trait]
-impl IMockAgent for MockAgent {
+impl MockAgentRuntime for MockAgent {
     fn get_confirmations(&self) -> Vec<Confirmation> {
         self.confirmations.lock().unwrap().clone()
     }
@@ -1458,71 +2229,71 @@ impl IMockAgent for MockAgent {
     }
 }
 
-// ── Mock WorkerTaskManager ──────────────────────────────────────
+// ── Mock AgentRuntimeRegistry ──────────────────────────────────────
 
-struct MockTaskManager {
-    agents: Mutex<std::collections::HashMap<String, AgentInstance>>,
-    kill_records: Mutex<Vec<(String, Option<AgentKillReason>)>>,
-    kill_count: AtomicUsize,
-    kill_and_wait_count: AtomicUsize,
+struct MockAgentRuntimeRegistry {
+    agents: Mutex<std::collections::HashMap<String, AgentRuntimeHandle>>,
+    termination_records: Mutex<Vec<(String, Option<AgentKillReason>)>>,
+    termination_count: AtomicUsize,
+    termination_wait_count: AtomicUsize,
 }
 
-impl MockTaskManager {
+impl MockAgentRuntimeRegistry {
     fn new() -> Self {
         Self {
             agents: Mutex::new(std::collections::HashMap::new()),
-            kill_records: Mutex::new(Vec::new()),
-            kill_count: AtomicUsize::new(0),
-            kill_and_wait_count: AtomicUsize::new(0),
+            termination_records: Mutex::new(Vec::new()),
+            termination_count: AtomicUsize::new(0),
+            termination_wait_count: AtomicUsize::new(0),
         }
     }
 
-    fn insert_agent(&self, conversation_id: &str, agent: AgentInstance) {
+    fn insert_agent(&self, conversation_id: &str, agent: AgentRuntimeHandle) {
         self.agents.lock().unwrap().insert(conversation_id.to_owned(), agent);
     }
 
-    fn kill_count(&self) -> usize {
-        self.kill_count.load(Ordering::SeqCst)
+    fn termination_count(&self) -> usize {
+        self.termination_count.load(Ordering::SeqCst)
     }
 
-    fn kill_and_wait_count(&self) -> usize {
-        self.kill_and_wait_count.load(Ordering::SeqCst)
+    fn termination_wait_count(&self) -> usize {
+        self.termination_wait_count.load(Ordering::SeqCst)
     }
 
-    fn kill_records(&self) -> Vec<(String, Option<AgentKillReason>)> {
-        self.kill_records.lock().unwrap().clone()
+    fn termination_records(&self) -> Vec<(String, Option<AgentKillReason>)> {
+        self.termination_records.lock().unwrap().clone()
     }
 }
 
-struct FailingBuildTaskManager {
+struct FailingAgentRuntimeRegistry {
     error: String,
 }
 
-impl FailingBuildTaskManager {
+impl FailingAgentRuntimeRegistry {
     fn new(error: impl Into<String>) -> Self {
         Self { error: error.into() }
     }
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for FailingBuildTaskManager {
-    fn get_task(&self, _conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for FailingAgentRuntimeRegistry {
+    fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
         None
     }
 
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         _conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
         Err(AppError::BadGateway(self.error.clone()))
     }
 
-    fn kill(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
 
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         _conversation_id: &str,
         _reason: Option<AgentKillReason>,
@@ -1530,40 +2301,40 @@ impl IWorkerTaskManager for FailingBuildTaskManager {
         Box::pin(std::future::ready(()))
     }
 
-    fn clear(&self) {}
+    fn terminate_all(&self) {}
 
-    fn active_count(&self) -> usize {
+    fn active_runtime_count(&self) -> usize {
         0
     }
 
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for MockTaskManager {
-    fn get_task(&self, conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for MockAgentRuntimeRegistry {
+    fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
 
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
             return Ok(existing.clone());
         }
-        let instance = AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id)));
+        let instance = AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(conversation_id)));
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
 
-    fn kill(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
-        self.kill_count.fetch_add(1, Ordering::SeqCst);
-        self.kill_records
+    fn terminate(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+        self.termination_count.fetch_add(1, Ordering::SeqCst);
+        self.termination_records
             .lock()
             .unwrap()
             .push((conversation_id.to_owned(), _reason));
@@ -1571,68 +2342,75 @@ impl IWorkerTaskManager for MockTaskManager {
         Ok(())
     }
 
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         conversation_id: &str,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.kill_and_wait_count.fetch_add(1, Ordering::SeqCst);
-        let _ = self.kill(conversation_id, reason);
+        self.termination_wait_count.fetch_add(1, Ordering::SeqCst);
+        let _ = self.terminate(conversation_id, reason);
         Box::pin(std::future::ready(()))
     }
 
-    fn clear(&self) {
+    fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
     }
 
-    fn active_count(&self) -> usize {
+    fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
 
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
 
-struct SlowBuildTaskManager {
+struct SlowAgentRuntimeRegistry {
     delay: Duration,
     built: AtomicBool,
+    build_calls: AtomicUsize,
 }
 
-impl SlowBuildTaskManager {
+impl SlowAgentRuntimeRegistry {
     fn new(delay: Duration) -> Self {
         Self {
             delay,
             built: AtomicBool::new(false),
+            build_calls: AtomicUsize::new(0),
         }
     }
 
     fn was_built(&self) -> bool {
         self.built.load(Ordering::SeqCst)
     }
+
+    fn build_calls(&self) -> usize {
+        self.build_calls.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for SlowBuildTaskManager {
-    fn get_task(&self, _conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for SlowAgentRuntimeRegistry {
+    fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
         None
     }
 
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
+        self.build_calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         self.built.store(true, Ordering::SeqCst);
-        Ok(AgentInstance::Mock(Arc::new(MockAgent::new(conversation_id))))
+        Ok(AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(conversation_id))))
     }
 
-    fn kill(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
 
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         _conversation_id: &str,
         _reason: Option<AgentKillReason>,
@@ -1640,24 +2418,24 @@ impl IWorkerTaskManager for SlowBuildTaskManager {
         Box::pin(std::future::ready(()))
     }
 
-    fn clear(&self) {}
+    fn terminate_all(&self) {}
 
-    fn active_count(&self) -> usize {
+    fn active_runtime_count(&self) -> usize {
         usize::from(self.was_built())
     }
 
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
 
-/// A variant of MockTaskManager that always builds agents with a specific workspace.
-struct MockTaskManagerWithWorkspace {
+/// A variant of MockAgentRuntimeRegistry that always builds agents with a specific workspace.
+struct MockAgentRuntimeRegistryWithWorkspace {
     workspace: String,
-    agents: Mutex<std::collections::HashMap<String, AgentInstance>>,
+    agents: Mutex<std::collections::HashMap<String, AgentRuntimeHandle>>,
 }
 
-impl MockTaskManagerWithWorkspace {
+impl MockAgentRuntimeRegistryWithWorkspace {
     fn new(workspace: &str) -> Self {
         Self {
             workspace: workspace.to_owned(),
@@ -1667,16 +2445,16 @@ impl MockTaskManagerWithWorkspace {
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for MockTaskManagerWithWorkspace {
-    fn get_task(&self, conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for MockAgentRuntimeRegistryWithWorkspace {
+    fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.agents.lock().unwrap().get(conversation_id).cloned()
     }
 
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
         let workspace = self.workspace.clone();
         let mut agents = self.agents.lock().unwrap();
         if let Some(existing) = agents.get(conversation_id) {
@@ -1684,34 +2462,34 @@ impl IWorkerTaskManager for MockTaskManagerWithWorkspace {
         }
         let mut agent = MockAgent::new(conversation_id);
         agent.workspace_override = Some(workspace);
-        let instance = AgentInstance::Mock(Arc::new(agent));
+        let instance = AgentRuntimeHandle::Mock(Arc::new(agent));
         agents.insert(conversation_id.to_owned(), instance.clone());
         Ok(instance)
     }
 
-    fn kill(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         self.agents.lock().unwrap().remove(conversation_id);
         Ok(())
     }
 
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         conversation_id: &str,
         reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let _ = self.kill(conversation_id, reason);
+        let _ = self.terminate(conversation_id, reason);
         Box::pin(std::future::ready(()))
     }
 
-    fn clear(&self) {
+    fn terminate_all(&self) {
         self.agents.lock().unwrap().clear();
     }
 
-    fn active_count(&self) -> usize {
+    fn active_runtime_count(&self) -> usize {
         self.agents.lock().unwrap().len()
     }
 
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
@@ -1747,7 +2525,7 @@ impl ScriptedAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for ScriptedAgent {
+impl AgentRuntimeControl for ScriptedAgent {
     fn agent_type(&self) -> AgentType {
         self.agent_type
     }
@@ -1795,7 +2573,7 @@ impl IAgentTask for ScriptedAgent {
     }
 }
 
-impl IMockAgent for ScriptedAgent {}
+impl MockAgentRuntime for ScriptedAgent {}
 
 /// A mock that models a LIVE, steerable turn for `steer_message` tests.
 ///
@@ -1850,7 +2628,7 @@ impl SteerableAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for SteerableAgent {
+impl AgentRuntimeControl for SteerableAgent {
     fn agent_type(&self) -> AgentType {
         AgentType::Nomi
     }
@@ -1885,7 +2663,7 @@ impl IAgentTask for SteerableAgent {
 }
 
 #[async_trait::async_trait]
-impl IMockAgent for SteerableAgent {
+impl MockAgentRuntime for SteerableAgent {
     fn steer(&self, text: String) -> Result<bool, AppError> {
         self.steered.lock().unwrap().push(text);
         if self.steer_err {
@@ -2019,24 +2797,24 @@ fn make_send_req() -> SendMessageRequest {
 async fn wait_for_turn_released(svc: &ConversationService, conversation_id: &str) {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if !svc.runtime_state().is_claimed(conversation_id) {
+            if !svc.runtime_state().has_active_turn(conversation_id) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("turn should release runtime claim");
+    .expect("turn should release its runtime handle");
 }
 
 #[tokio::test]
 async fn send_message_returns_accepted() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let msg_id = svc
-        .send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
 
@@ -2046,8 +2824,8 @@ async fn send_message_returns_accepted() {
 
 #[tokio::test]
 async fn send_message_rejects_pathological_workspace_with_runtime_error_code() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let legacy_workspace = "/tmp/my project ".to_owned();
@@ -2062,7 +2840,7 @@ async fn send_message_rejects_pathological_workspace_with_runtime_error_code() {
     .unwrap();
 
     let err = svc
-        .send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -2101,15 +2879,15 @@ async fn send_message_rejects_pathological_workspace_with_runtime_error_code() {
 
 #[tokio::test]
 async fn send_message_broadcasts_user_created_event() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     // Clear events from create
     broadcaster.take_events();
 
     let msg_id = svc
-        .send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
 
@@ -2131,13 +2909,13 @@ async fn send_message_broadcasts_user_created_event() {
 
 #[tokio::test]
 async fn send_message_broadcasts_turn_started_with_processing_runtime() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
 
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
 
@@ -2145,7 +2923,7 @@ async fn send_message_broadcasts_turn_started_with_processing_runtime() {
     let turn_started = events
         .iter()
         .find(|e| e.name == "turn.started")
-        .expect("should broadcast turn.started event as soon as a turn is claimed");
+        .expect("should broadcast turn.started event as soon as a turn is acquired");
 
     assert_eq!(turn_started.data["conversation_id"], conv.id);
     assert_eq!(turn_started.data["session_id"], conv.id);
@@ -2161,8 +2939,8 @@ async fn send_message_broadcasts_turn_started_with_processing_runtime() {
 
 #[tokio::test]
 async fn send_message_broadcasts_companion_markers_for_companion_conversation() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -2172,7 +2950,7 @@ async fn send_message_broadcasts_companion_markers_for_companion_conversation() 
     let conv = svc.create("user_1", create_req).await.unwrap();
     broadcaster.take_events();
 
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
@@ -2194,11 +2972,11 @@ async fn send_message_broadcasts_companion_markers_for_companion_conversation() 
 }
 
 #[tokio::test]
-async fn send_message_stamps_channel_platform_for_channel_master_conversation() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+async fn send_message_stamps_channel_platform_for_channel_agent_conversation() {
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
-    // A channel master-agent conversation (see nomifun-channel's
+    // A Channel Agent conversation (see nomifun-channel's
     // apply_master_agent_extra): companionSession + companionId + channelPlatform.
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -2208,7 +2986,7 @@ async fn send_message_stamps_channel_platform_for_channel_master_conversation() 
     let conv = svc.create("user_1", create_req).await.unwrap();
     broadcaster.take_events();
 
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
@@ -2231,8 +3009,8 @@ async fn send_message_stamps_channel_platform_for_channel_master_conversation() 
 
 #[tokio::test]
 async fn send_message_with_origin_stamps_origin_on_turn_events() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
@@ -2242,7 +3020,7 @@ async fn send_message_with_origin_stamps_origin_on_turn_events() {
         "origin": "companion"
     }))
     .unwrap();
-    svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
 
     let events = broadcaster.take_events();
@@ -2263,13 +3041,13 @@ async fn send_message_with_origin_stamps_origin_on_turn_events() {
 
 #[tokio::test]
 async fn send_message_without_origin_keeps_turn_events_unmarked() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
 
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
@@ -2289,14 +3067,14 @@ async fn send_message_without_origin_keeps_turn_events_unmarked() {
 
 #[tokio::test]
 async fn send_message_returns_before_cold_agent_build_completes() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let slow_task_mgr = Arc::new(SlowBuildTaskManager::new(Duration::from_millis(500)));
-    let task_mgr: Arc<dyn IWorkerTaskManager> = slow_task_mgr.clone();
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let slow_runtime_registry = Arc::new(SlowAgentRuntimeRegistry::new(Duration::from_millis(500)));
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = slow_runtime_registry.clone();
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let msg_id = tokio::time::timeout(
         Duration::from_millis(50),
-        svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr),
+        svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry),
     )
     .await
     .expect("send_message should return before cold agent build finishes")
@@ -2304,22 +3082,105 @@ async fn send_message_returns_before_cold_agent_build_completes() {
 
     assert!(!msg_id.is_empty(), "msg_id must be non-empty");
     assert!(
-        !slow_task_mgr.was_built(),
+        !slow_runtime_registry.was_built(),
         "cold agent build should continue in the background after send_message returns"
     );
 
     let updated = repo.get(conv.id).await.unwrap().unwrap();
     assert_ne!(updated.status.as_deref(), Some("running"));
     assert!(
-        svc.runtime_state().is_claimed(&conv.id.to_string()),
-        "runtime claim must cover the cold agent build window"
+        svc.runtime_state().has_active_turn(&conv.id.to_string()),
+        "turn handle must cover the cold Agent build window"
     );
 }
 
 #[tokio::test]
+async fn idempotent_send_replay_reuses_pending_turn_and_completed_receipt() {
+    const USER_ID: &str = "system_default_user";
+
+    let database = init_database_memory().await.unwrap();
+    let repo = Arc::new(SqliteConversationRepository::new(database.pool().clone()));
+    let broadcaster = Arc::new(MockBroadcaster::new());
+    let slow_registry = Arc::new(SlowAgentRuntimeRegistry::new(Duration::from_millis(250)));
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = slow_registry.clone();
+    let svc = ConversationService::new(
+        Arc::<str>::from(USER_ID),
+        std::env::temp_dir(),
+        broadcaster,
+        Arc::new(FixedSkillResolver { names: vec![] }),
+        runtime_registry.clone(),
+        repo.clone(),
+        Arc::new(StubAgentMetadataRepo),
+        Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
+    );
+    let request: CreateConversationRequest = serde_json::from_value(json!({
+        "type": "acp",
+        "extra": { "workspace": "/project" }
+    }))
+    .unwrap();
+    let conversation = svc.create(USER_ID, request).await.unwrap();
+    let operation_id = "execution:decision:stable";
+
+    let first = svc
+        .send_message_idempotent(
+            USER_ID,
+            &conversation.id.to_string(),
+            operation_id,
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap();
+    assert!(!first.completed);
+    let replay_while_pending = svc
+        .send_message_idempotent(
+            USER_ID,
+            &conversation.id.to_string(),
+            operation_id,
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay_while_pending.message_id, first.message_id);
+    assert!(!replay_while_pending.completed);
+
+    wait_for_turn_released(&svc, &conversation.id.to_string()).await;
+    assert_eq!(
+        slow_registry.build_calls(),
+        1,
+        "a replay while the stable user transcript is processing must not start another model turn"
+    );
+    let completed_replay = svc
+        .send_message_idempotent(
+            USER_ID,
+            &conversation.id.to_string(),
+            operation_id,
+            make_send_req(),
+            &runtime_registry,
+        )
+        .await
+        .unwrap();
+    assert!(completed_replay.completed);
+    assert_eq!(slow_registry.build_calls(), 1);
+
+    let user_messages = repo
+        .get_messages(conversation.id, 1, 20, SortOrder::Asc)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|message| message.position.as_deref() == Some("right"))
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages.len(), 1);
+    assert_eq!(user_messages[0].id, format!("{operation_id}:user"));
+}
+
+#[tokio::test]
 async fn send_message_persists_hidden_user_message_when_requested() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let req: SendMessageRequest = serde_json::from_value(json!({
@@ -2328,7 +3189,7 @@ async fn send_message_persists_hidden_user_message_when_requested() {
     }))
     .unwrap();
 
-    svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap();
+    svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     let messages = repo.get_messages(conv.id, 1, 20, SortOrder::Asc).await.unwrap().items;
     // The user message is the only hidden text row written by the service.
@@ -2343,15 +3204,15 @@ async fn send_message_persists_hidden_user_message_when_requested() {
 
 #[tokio::test]
 async fn send_message_persists_error_tip_when_agent_build_fails() {
-    let (svc, broadcaster, repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> =
-        Arc::new(FailingBuildTaskManager::new("ACP init failed: config file is invalid"));
+    let (svc, broadcaster, repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
+        Arc::new(FailingAgentRuntimeRegistry::new("ACP init failed: config file is invalid"));
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
 
     let msg_id = svc
-        .send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
 
@@ -2394,8 +3255,8 @@ async fn send_message_persists_error_tip_when_agent_build_fails() {
     let updated = repo.get(conv.id).await.unwrap().unwrap();
     assert_eq!(updated.status.as_deref(), Some("finished"));
     assert!(
-        !svc.runtime_state().is_claimed(&conv.id.to_string()),
-        "runtime claim must be released after failed turn"
+        !svc.runtime_state().has_active_turn(&conv.id.to_string()),
+        "turn handle must be released after a failed turn"
     );
 
     let events = broadcaster.take_events();
@@ -2409,8 +3270,8 @@ async fn send_message_persists_error_tip_when_agent_build_fails() {
 
 #[tokio::test]
 async fn send_message_empty_content_returns_bad_request() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let req: SendMessageRequest = serde_json::from_value(json!({
@@ -2418,14 +3279,14 @@ async fn send_message_empty_content_returns_bad_request() {
     }))
     .unwrap();
 
-    let err = svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap_err();
+    let err = svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::BadRequest(_)));
 }
 
 #[tokio::test]
 async fn send_message_whitespace_content_returns_bad_request() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let req: SendMessageRequest = serde_json::from_value(json!({
@@ -2433,17 +3294,17 @@ async fn send_message_whitespace_content_returns_bad_request() {
     }))
     .unwrap();
 
-    let err = svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr).await.unwrap_err();
+    let err = svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::BadRequest(_)));
 }
 
 #[tokio::test]
 async fn send_message_conversation_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let err = svc
-        .send_message("user_1", "no-such-id", make_send_req(), &task_mgr)
+        .send_message("user_1", "no-such-id", make_send_req(), &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
@@ -2451,21 +3312,21 @@ async fn send_message_conversation_not_found() {
 
 #[tokio::test]
 async fn send_message_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let err = svc
-        .send_message("user_2", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_2", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
-async fn send_message_allows_stale_db_running_without_runtime_claim() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+async fn send_message_allows_stale_db_running_without_active_turn() {
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
@@ -2476,23 +3337,23 @@ async fn send_message_allows_stale_db_running_without_runtime_claim() {
     };
     repo.update(conv.id, &update).await.unwrap();
 
-    let result = svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr).await;
+    let result = svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry).await;
     assert!(result.is_ok(), "stale DB running must not block sending");
 }
 
 #[tokio::test]
-async fn send_message_rejects_active_runtime_claim() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+async fn send_message_rejects_active_turn() {
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    let _claim = svc
+    let _turn_handle = svc
         .runtime_state()
-        .try_claim_turn(&conv.id.to_string())
-        .expect("test claim should be created");
+        .try_acquire_turn(&conv.id.to_string())
+        .expect("test turn handle should be acquired");
 
     let err = svc
-        .send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+        .send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Conflict(_)));
@@ -2504,9 +3365,9 @@ async fn send_message_persists_factory_resolved_workspace() {
     // Factory resolves a *different* temp dir (simulating legacy-conv fallback).
     // After send_message, conversation.extra.workspace must match what the
     // agent reports.
-    let (svc, _broadcaster, repo, _default_task_mgr) = make_service();
+    let (svc, _broadcaster, repo, _default_runtime_registry) = make_service();
     let auto_workspace = "/tmp/factory-resolved";
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManagerWithWorkspace::new(auto_workspace));
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistryWithWorkspace::new(auto_workspace));
 
     // Create a conversation with an empty workspace to simulate legacy case.
     let req: CreateConversationRequest = serde_json::from_value(json!({
@@ -2523,7 +3384,7 @@ async fn send_message_persists_factory_resolved_workspace() {
     };
     repo.update(conv.id, &empty_ws_update).await.unwrap();
 
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr)
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry)
         .await
         .unwrap();
 
@@ -2544,8 +3405,8 @@ async fn send_message_persists_factory_resolved_workspace() {
 
 #[tokio::test]
 async fn send_message_continues_cron_system_responses() {
-    let (svc, broadcaster, _repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let scripted_agent = Arc::new(ScriptedAgent::new(
@@ -2577,16 +3438,16 @@ async fn send_message_continues_cron_system_responses() {
             ],
         ],
     ));
-    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent.clone()));
+    runtime_registry.insert_agent(&conv.id.to_string(), AgentRuntimeHandle::Mock(scripted_agent.clone()));
     svc.with_cron_service(Some(Arc::new(MockCronContinuationService)));
 
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
     let req: SendMessageRequest = serde_json::from_value(json!({
         "content": "Create the task now"
     }))
     .unwrap();
 
-    svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr_dyn).await.unwrap();
+    svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry_dyn).await.unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -2617,8 +3478,8 @@ async fn send_message_continues_cron_system_responses() {
 
 #[tokio::test]
 async fn send_message_turn_writeback_runs_after_system_continuation_final_answer() {
-    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let workspace = unique_test_dir("conv-knowledge-workspace");
     tokio::fs::create_dir_all(&workspace).await.unwrap();
     let data_dir = unique_test_dir("conv-knowledge-data");
@@ -2630,7 +3491,7 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
     let knowledge = Arc::new(KnowledgeService::new(
         knowledge_repo,
         &data_dir,
-        KnowledgeEventEmitter::new(broadcaster.clone()),
+        KnowledgeEventEmitter::new(broadcaster.clone(), Arc::from("user_1")),
     ));
     svc.with_knowledge_service(knowledge.clone());
 
@@ -2694,17 +3555,17 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
             ],
         ],
     ));
-    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent.clone()));
+    runtime_registry.insert_agent(&conv.id.to_string(), AgentRuntimeHandle::Mock(scripted_agent.clone()));
     svc.with_cron_service(Some(Arc::new(MockCronContinuationService)));
     broadcaster.take_events();
 
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
     let req: SendMessageRequest = serde_json::from_value(json!({
         "content": "Create the task now"
     }))
     .unwrap();
 
-    svc.send_message("user_1", &conv.id.to_string(), req, &task_mgr_dyn).await.unwrap();
+    svc.send_message("user_1", &conv.id.to_string(), req, &runtime_registry_dyn).await.unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
 
     let mut events = Vec::new();
@@ -2734,7 +3595,7 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
         .expect("knowledge.writeback should be broadcast");
     assert!(
         turn_idx < first_writeback_idx,
-        "turn completion must be visible only after the turn claim has been released, before writeback post-processing"
+        "turn completion must be visible only after the turn handle has been released, before writeback post-processing"
     );
     let final_writeback_idx = events
         .iter()
@@ -2802,8 +3663,8 @@ async fn send_message_turn_writeback_runs_after_system_continuation_final_answer
 
 #[tokio::test]
 async fn send_message_releases_turn_before_slow_turn_writeback_finishes() {
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let workspace = unique_test_dir("conv-knowledge-workspace-slow-writeback");
     tokio::fs::create_dir_all(&workspace).await.unwrap();
     let data_dir = unique_test_dir("conv-knowledge-data-slow-writeback");
@@ -2815,7 +3676,10 @@ async fn send_message_releases_turn_before_slow_turn_writeback_finishes() {
     let knowledge = Arc::new(KnowledgeService::new(
         knowledge_repo,
         &data_dir,
-        KnowledgeEventEmitter::new(Arc::new(MockBroadcaster::new())),
+        KnowledgeEventEmitter::new(
+            Arc::new(MockBroadcaster::new()),
+            Arc::from("user_1"),
+        ),
     ));
     svc.with_knowledge_service(knowledge.clone());
 
@@ -2869,11 +3733,11 @@ async fn send_message_releases_turn_before_slow_turn_writeback_finishes() {
             ],
         ],
     ));
-    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    runtime_registry.insert_agent(&conv.id.to_string(), AgentRuntimeHandle::Mock(scripted_agent));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let first_req: SendMessageRequest = serde_json::from_value(json!({ "content": "first" })).unwrap();
-    svc.send_message("user_1", &conv.id.to_string(), first_req, &task_mgr_dyn)
+    svc.send_message("user_1", &conv.id.to_string(), first_req, &runtime_registry_dyn)
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), completer.wait_started())
@@ -2882,7 +3746,7 @@ async fn send_message_releases_turn_before_slow_turn_writeback_finishes() {
 
     let second_req: SendMessageRequest = serde_json::from_value(json!({ "content": "second" })).unwrap();
     let second = svc
-        .send_message("user_1", &conv.id.to_string(), second_req, &task_mgr_dyn)
+        .send_message("user_1", &conv.id.to_string(), second_req, &runtime_registry_dyn)
         .await;
     completer.release();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
@@ -2899,25 +3763,25 @@ async fn send_message_releases_turn_before_slow_turn_writeback_finishes() {
 // ── steer_message tests ─────────────────────────────────────────
 
 /// Happy path: a live, steerable turn → `steer_message` injects mid-turn and
-/// does NOT take the normal send path (no fresh turn claimed, no `send_message`
+/// does NOT take the normal send path (no fresh turn acquired, no `send_message`
 /// on the agent), while still persisting the interjection as a right-bubble
 /// user message and broadcasting `message.userCreated`.
 #[tokio::test]
 async fn steer_message_injects_into_running_turn() {
-    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
     // A live turn: status Running, steer accepts (Ok(true)).
     let agent = Arc::new(SteerableAgent::new(&conv_id, Some(ConversationStatus::Running), true));
-    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(agent.clone()));
 
     let req: SendMessageRequest = serde_json::from_value(json!({ "content": "actually, focus on the tests" })).unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let msg_id = svc
-        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .unwrap();
 
@@ -2931,10 +3795,10 @@ async fn steer_message_injects_into_running_turn() {
         agent.sent_contents().is_empty(),
         "steering must not invoke the agent's send_message (no new turn)"
     );
-    // No turn was claimed in runtime state (mid-turn injection, not a new turn).
+    // No turn was acquired in runtime state (mid-turn injection, not a new turn).
     assert!(
-        !svc.runtime_state().is_claimed(&conv_id),
-        "steering must not claim a fresh turn"
+        !svc.runtime_state().has_active_turn(&conv_id),
+        "steering must not acquire a fresh turn"
     );
 
     // Persisted as a right-bubble user message.
@@ -2954,35 +3818,35 @@ async fn steer_message_injects_into_running_turn() {
     assert_eq!(created[0].data["content"], "actually, focus on the tests");
 }
 
-/// Fallback: no live turn (`get_task` returns None) → `steer_message` routes
-/// through the normal `send_message` path (a fresh turn is claimed + run, the
-/// MockTaskManager builds an agent), so it behaves exactly like `send_message`.
+/// Fallback: no live turn (`get_runtime` returns None) → `steer_message` routes
+/// through the normal `send_message` path (a fresh turn is acquired + run, the
+/// MockAgentRuntimeRegistry builds an agent), so it behaves exactly like `send_message`.
 #[tokio::test]
 async fn steer_message_without_live_turn_falls_back_to_send() {
-    let (svc, _broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
-    // No agent registered → get_task() returns None → fall back to send_message.
+    // No agent registered → get_runtime() returns None → fall back to send_message.
     let req: SendMessageRequest = serde_json::from_value(json!({ "content": "start working" })).unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let msg_id = svc
-        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .unwrap();
     assert!(msg_id.starts_with("msg_"), "fallback must return a real msg_ id");
 
-    // The fallback's spawned turn claims then releases the runtime claim — proof
-    // we went through send_message (steering never claims a turn). Wait for it to
+    // The fallback's spawned turn acquires then releases its turn handle — proof
+    // we went through send_message (steering never acquires a turn). Wait for it to
     // run to completion so the build below has finished.
     wait_for_turn_released(&svc, &conv_id).await;
 
-    // The send path builds an agent for the conversation (MockTaskManager's
-    // get_or_build_task) — further proof we took send_message, not steering.
+    // The send path builds an agent for the conversation (MockAgentRuntimeRegistry's
+    // get_or_create_runtime) — further proof we took send_message, not steering.
     assert!(
-        task_mgr.get_task(&conv_id).is_some(),
+        runtime_registry.get_runtime(&conv_id).is_some(),
         "fallback must run the normal send path (agent built for the turn)"
     );
 
@@ -2998,19 +3862,19 @@ async fn steer_message_without_live_turn_falls_back_to_send() {
 /// NOT attempt to steer and instead fall back to `send_message`.
 #[tokio::test]
 async fn steer_message_with_non_running_agent_falls_back_to_send() {
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
     // Live agent but status is Finished (turn already over) → no steering.
     let agent = Arc::new(SteerableAgent::new(&conv_id, Some(ConversationStatus::Finished), true));
-    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(agent.clone()));
 
     let req: SendMessageRequest = serde_json::from_value(json!({ "content": "anything" })).unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+    svc.steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .unwrap();
 
@@ -3035,21 +3899,21 @@ async fn steer_message_with_non_running_agent_falls_back_to_send() {
 /// ordering) double-wrote. This test fails against persist-first ordering.
 #[tokio::test]
 async fn steer_message_race_tail_falls_back_and_persists_once() {
-    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
     // Running at the status check, but steer() reports the turn already ended.
     let agent = Arc::new(SteerableAgent::new(&conv_id, Some(ConversationStatus::Running), false));
-    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(agent.clone()));
 
     let req: SendMessageRequest =
         serde_json::from_value(json!({ "content": "race-tail interjection" })).unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let msg_id = svc
-        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .unwrap();
     assert!(msg_id.starts_with("msg_"), "fallback must return a real msg_ id");
@@ -3102,21 +3966,21 @@ async fn steer_message_race_tail_falls_back_and_persists_once() {
 /// duplicates.
 #[tokio::test]
 async fn steer_message_unsupported_propagates_and_persists_nothing() {
-    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
     // Live Running turn whose engine cannot be steered (Err path).
     let agent = Arc::new(SteerableAgent::new_steer_err(&conv_id));
-    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(agent.clone()));
 
     let req: SendMessageRequest =
         serde_json::from_value(json!({ "content": "unsupported interjection" })).unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let err = svc
-        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .expect_err("a non-steerable engine must surface an error (steer_unsupported)");
     assert!(
@@ -3132,8 +3996,8 @@ async fn steer_message_unsupported_propagates_and_persists_nothing() {
         "the Err path must not send through the agent"
     );
     assert!(
-        !svc.runtime_state().is_claimed(&conv_id),
-        "the Err path must not claim a fresh turn"
+        !svc.runtime_state().has_active_turn(&conv_id),
+        "the Err path must not acquire a fresh turn"
     );
 
     // Persisted NOTHING — the row only exists if/when the caller later sends.
@@ -3153,8 +4017,8 @@ async fn steer_message_unsupported_propagates_and_persists_nothing() {
 
 #[tokio::test]
 async fn steer_message_with_attachments_is_queued_by_the_client_instead_of_dropped() {
-    let (svc, broadcaster, repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
     let agent = Arc::new(SteerableAgent::new(
@@ -3162,16 +4026,16 @@ async fn steer_message_with_attachments_is_queued_by_the_client_instead_of_dropp
         Some(ConversationStatus::Running),
         true,
     ));
-    task_mgr.insert_agent(&conv_id, AgentInstance::Mock(agent.clone()));
+    runtime_registry.insert_agent(&conv_id, AgentRuntimeHandle::Mock(agent.clone()));
 
     let req: SendMessageRequest = serde_json::from_value(json!({
         "content": "look at this",
         "files": ["C:\\images\\sample.png"]
     }))
     .unwrap();
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr;
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry;
     let err = svc
-        .steer_message("user_1", &conv_id, req, &task_mgr_dyn)
+        .steer_message("user_1", &conv_id, req, &runtime_registry_dyn)
         .await
         .expect_err("live steering must not silently discard attachments");
 
@@ -3192,30 +4056,30 @@ async fn steer_message_with_attachments_is_queued_by_the_client_instead_of_dropp
 
 #[tokio::test]
 async fn send_message_keeps_acp_task_after_normal_finish() {
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let scripted_agent = Arc::new(ScriptedAgent::new(
         &conv.id.to_string(),
         vec![vec![AgentStreamEvent::Finish(FinishEventData::default())]],
     ));
-    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent));
+    runtime_registry.insert_agent(&conv.id.to_string(), AgentRuntimeHandle::Mock(scripted_agent));
 
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr_dyn)
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
 
-    assert_eq!(task_mgr.kill_count(), 0);
-    assert_eq!(task_mgr.active_count(), 1);
+    assert_eq!(runtime_registry.termination_count(), 0);
+    assert_eq!(runtime_registry.active_runtime_count(), 1);
 }
 
 #[tokio::test]
 async fn send_message_does_not_evict_non_acp_task_after_terminal_error() {
-    let (svc, _broadcaster, _repo, _default_task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _default_runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let scripted_agent = Arc::new(
@@ -3228,24 +4092,24 @@ async fn send_message_does_not_evict_non_acp_task_after_terminal_error() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    task_mgr.insert_agent(&conv.id.to_string(), AgentInstance::Mock(scripted_agent));
+    runtime_registry.insert_agent(&conv.id.to_string(), AgentRuntimeHandle::Mock(scripted_agent));
 
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
-    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &task_mgr_dyn)
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+    svc.send_message("user_1", &conv.id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv.id.to_string()).await;
 
-    assert_eq!(task_mgr.kill_count(), 0);
-    assert_eq!(task_mgr.active_count(), 1);
+    assert_eq!(runtime_registry.termination_count(), 0);
+    assert_eq!(runtime_registry.active_runtime_count(), 1);
 }
 
 // ── stop_stream tests ───────────────────────────────────────────
 
 #[tokio::test]
 async fn stop_stream_with_active_agent() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
@@ -3254,89 +4118,107 @@ async fn stop_stream_with_active_agent() {
         "user_1",
         &conv.id.to_string(),
         make_send_req(),
-        &(task_mgr.clone() as Arc<dyn IWorkerTaskManager>),
+        &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>),
     )
     .await
     .unwrap();
 
     // Stop should succeed since agent exists
     let result = svc
-        .cancel("user_1", &conv.id.to_string(), &(task_mgr as Arc<dyn IWorkerTaskManager>))
+        .cancel("user_1", &conv.id.to_string(), &(runtime_registry as Arc<dyn AgentRuntimeRegistry>))
         .await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
 async fn stop_stream_conversation_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
-    let err = svc.cancel("user_1", "no-such-id", &task_mgr).await.unwrap_err();
+    let err = svc.cancel("user_1", "no-such-id", &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
 async fn stop_stream_no_active_agent_is_idempotent() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let result = svc.cancel("user_1", &conv.id.to_string(), &task_mgr).await;
+    let result = svc.cancel("user_1", &conv.id.to_string(), &runtime_registry).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
+async fn execution_cleanup_does_not_record_a_user_cancel_stamp() {
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
+    let conv = svc.create("user_1", make_create_req()).await.unwrap();
+    let since = nomifun_common::now_ms();
+
+    svc.cancel_for_execution(
+        "user_1",
+        &conv.id.to_string(),
+        &runtime_registry,
+    )
+    .await
+    .unwrap();
+
+    assert!(!svc.user_cancelled_since(&conv.id.to_string(), since));
+}
+
+#[tokio::test]
 async fn stop_stream_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    let err = svc.cancel("user_2", &conv.id.to_string(), &task_mgr).await.unwrap_err();
+    let err = svc.cancel("user_2", &conv.id.to_string(), &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 // ── warmup tests ────────────────────────────────────────────────
 
 #[tokio::test]
-async fn warmup_creates_agent_task() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+async fn warmup_creates_agent_runtime() {
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let result = svc
-        .warmup("user_1", &conv.id.to_string(), &(task_mgr.clone() as Arc<dyn IWorkerTaskManager>))
+        .warmup("user_1", &conv.id.to_string(), &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>))
         .await;
     assert!(result.is_ok());
 
     // Agent should now exist
-    assert!(task_mgr.get_task(&conv.id.to_string()).is_some());
+    assert!(runtime_registry.get_runtime(&conv.id.to_string()).is_some());
 }
 
 #[tokio::test]
 async fn warmup_conversation_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
-    let err = svc.warmup("user_1", "no-such-id", &task_mgr).await.unwrap_err();
+    let err = svc.warmup("user_1", "no-such-id", &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
 async fn warmup_wrong_user_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    let err = svc.warmup("user_2", &conv.id.to_string(), &task_mgr).await.unwrap_err();
+    let err = svc.warmup("user_2", &conv.id.to_string(), &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
 async fn warmup_rejects_pathological_workspace_with_runtime_error_code() {
-    let (svc, _broadcaster, repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let legacy_workspace = "/tmp/my project ".to_owned();
@@ -3350,7 +4232,7 @@ async fn warmup_rejects_pathological_workspace_with_runtime_error_code() {
     .await
     .unwrap();
 
-    let err = svc.warmup("user_1", &conv.id.to_string(), &task_mgr).await.unwrap_err();
+    let err = svc.warmup("user_1", &conv.id.to_string(), &runtime_registry).await.unwrap_err();
     assert!(matches!(
         err,
         AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(message) if message == "/tmp/my project "
@@ -3386,29 +4268,29 @@ fn make_test_confirmations() -> Vec<Confirmation> {
 
 #[tokio::test]
 async fn list_confirmations_empty_when_no_agent() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    let result = svc.list_confirmations("user_1", &conv.id.to_string(), &task_mgr).await.unwrap();
+    let result = svc.list_confirmations("user_1", &conv.id.to_string(), &runtime_registry).await.unwrap();
     assert!(result.is_empty());
 }
 
 #[tokio::test]
 async fn list_confirmations_returns_items() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_confirmations(
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
         &conv.id.to_string(),
         make_test_confirmations(),
     )));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let result = svc
-        .list_confirmations("user_1", &conv.id.to_string(), &(task_mgr as Arc<dyn IWorkerTaskManager>))
+        .list_confirmations("user_1", &conv.id.to_string(), &(runtime_registry as Arc<dyn AgentRuntimeRegistry>))
         .await
         .unwrap();
     assert_eq!(result.len(), 2);
@@ -3418,11 +4300,11 @@ async fn list_confirmations_returns_items() {
 
 #[tokio::test]
 async fn list_confirmations_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let err = svc
-        .list_confirmations("user_1", "no-such-id", &task_mgr)
+        .list_confirmations("user_1", "no-such-id", &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
@@ -3430,27 +4312,27 @@ async fn list_confirmations_not_found() {
 
 #[tokio::test]
 async fn list_confirmations_wrong_user() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    let err = svc.list_confirmations("user_2", &conv.id.to_string(), &task_mgr).await.unwrap_err();
+    let err = svc.list_confirmations("user_2", &conv.id.to_string(), &runtime_registry).await.unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
 }
 
 #[tokio::test]
 async fn confirm_removes_confirmation_and_broadcasts() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events(); // clear create event
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_confirmations(
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
         &conv.id.to_string(),
         make_test_confirmations(),
     )));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let req = nomifun_api_types::ConfirmRequest {
         msg_id: "msg-1".into(),
@@ -3462,13 +4344,13 @@ async fn confirm_removes_confirmation_and_broadcasts() {
         &conv.id.to_string(),
         "call-1",
         req,
-        &(task_mgr.clone() as Arc<dyn IWorkerTaskManager>),
+        &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>),
     )
     .await
     .unwrap();
 
     // Confirmation should be removed from the agent
-    let remaining = task_mgr.get_task(&conv.id.to_string()).unwrap().get_confirmations();
+    let remaining = runtime_registry.get_runtime(&conv.id.to_string()).unwrap().get_confirmations();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].call_id, "call-2");
 
@@ -3482,45 +4364,45 @@ async fn confirm_removes_confirmation_and_broadcasts() {
 
 #[tokio::test]
 async fn confirm_with_always_allow_stores_approval() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_confirmations(
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
         &conv.id.to_string(),
         make_test_confirmations(),
     )));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let req = nomifun_api_types::ConfirmRequest {
         msg_id: "msg-1".into(),
         data: json!({ "value": "allow" }),
         always_allow: true,
     };
-    let task_mgr_arc: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
-    svc.confirm("user_1", &conv.id.to_string(), "call-1", req, &task_mgr_arc)
+    let runtime_registry_arc: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+    svc.confirm("user_1", &conv.id.to_string(), "call-1", req, &runtime_registry_arc)
         .await
         .unwrap();
 
     // check_approval should now return true for edit_file:bash
-    let agent = task_mgr.get_task(&conv.id.to_string()).unwrap();
+    let agent = runtime_registry.get_runtime(&conv.id.to_string()).unwrap();
     assert!(agent.check_approval("edit_file", Some("bash")));
     assert!(!agent.check_approval("delete_file", None));
 }
 
 #[tokio::test]
 async fn confirm_nonexistent_call_id_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_confirmations(
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
         &conv.id.to_string(),
         make_test_confirmations(),
     )));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let req = nomifun_api_types::ConfirmRequest {
         msg_id: "msg-1".into(),
@@ -3533,7 +4415,7 @@ async fn confirm_nonexistent_call_id_returns_not_found() {
             &conv.id.to_string(),
             "nonexistent-call",
             req,
-            &(task_mgr as Arc<dyn IWorkerTaskManager>),
+            &(runtime_registry as Arc<dyn AgentRuntimeRegistry>),
         )
         .await
         .unwrap_err();
@@ -3542,14 +4424,14 @@ async fn confirm_nonexistent_call_id_returns_not_found() {
 
 #[tokio::test]
 async fn confirm_without_confirmation_state_still_calls_agent() {
-    let (svc, broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     broadcaster.take_events();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_direct_confirm(&conv.id.to_string())));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_direct_confirm(&conv.id.to_string())));
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let req = nomifun_api_types::ConfirmRequest {
         msg_id: "msg-1".into(),
@@ -3561,7 +4443,7 @@ async fn confirm_without_confirmation_state_still_calls_agent() {
         &conv.id.to_string(),
         "call-1",
         req,
-        &(task_mgr.clone() as Arc<dyn IWorkerTaskManager>),
+        &(runtime_registry.clone() as Arc<dyn AgentRuntimeRegistry>),
     )
     .await
     .unwrap();
@@ -3571,8 +4453,8 @@ async fn confirm_without_confirmation_state_still_calls_agent() {
 
 #[tokio::test]
 async fn confirm_no_agent_returns_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
@@ -3582,7 +4464,7 @@ async fn confirm_no_agent_returns_not_found() {
         always_allow: false,
     };
     let err = svc
-        .confirm("user_1", &conv.id.to_string(), "call-1", req, &task_mgr)
+        .confirm("user_1", &conv.id.to_string(), "call-1", req, &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
@@ -3590,13 +4472,13 @@ async fn confirm_no_agent_returns_not_found() {
 
 #[tokio::test]
 async fn check_approval_returns_false_when_not_set() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::new(&conv.id.to_string())));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::new(&conv.id.to_string())));
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     let result = svc
         .check_approval(
@@ -3604,7 +4486,7 @@ async fn check_approval_returns_false_when_not_set() {
             &conv.id.to_string(),
             "edit_file",
             None,
-            &(task_mgr as Arc<dyn IWorkerTaskManager>),
+            &(runtime_registry as Arc<dyn AgentRuntimeRegistry>),
         )
         .await
         .unwrap();
@@ -3613,16 +4495,16 @@ async fn check_approval_returns_false_when_not_set() {
 
 #[tokio::test]
 async fn check_approval_returns_true_after_always_allow() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
-    let agent = AgentInstance::Mock(Arc::new(MockAgent::with_confirmations(
+    let agent = AgentRuntimeHandle::Mock(Arc::new(MockAgent::with_confirmations(
         &conv.id.to_string(),
         make_test_confirmations(),
     )));
-    task_mgr.insert_agent(&conv.id.to_string(), agent);
+    runtime_registry.insert_agent(&conv.id.to_string(), agent);
 
     // Confirm with always_allow
     let req = nomifun_api_types::ConfirmRequest {
@@ -3630,14 +4512,14 @@ async fn check_approval_returns_true_after_always_allow() {
         data: json!({ "value": "allow" }),
         always_allow: true,
     };
-    let task_mgr_arc: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
-    svc.confirm("user_1", &conv.id.to_string(), "call-1", req, &task_mgr_arc)
+    let runtime_registry_arc: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
+    svc.confirm("user_1", &conv.id.to_string(), "call-1", req, &runtime_registry_arc)
         .await
         .unwrap();
 
     // Now check_approval should return true
     let result = svc
-        .check_approval("user_1", &conv.id.to_string(), "edit_file", Some("bash"), &task_mgr_arc)
+        .check_approval("user_1", &conv.id.to_string(), "edit_file", Some("bash"), &runtime_registry_arc)
         .await
         .unwrap();
     assert!(result.approved);
@@ -3645,13 +4527,13 @@ async fn check_approval_returns_true_after_always_allow() {
 
 #[tokio::test]
 async fn check_approval_returns_false_when_no_agent() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
 
     let result = svc
-        .check_approval("user_1", &conv.id.to_string(), "edit_file", None, &task_mgr)
+        .check_approval("user_1", &conv.id.to_string(), "edit_file", None, &runtime_registry)
         .await
         .unwrap();
     assert!(!result.approved);
@@ -3659,11 +4541,11 @@ async fn check_approval_returns_false_when_no_agent() {
 
 #[tokio::test]
 async fn check_approval_not_found() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
 
     let err = svc
-        .check_approval("user_1", "no-such-id", "edit_file", None, &task_mgr)
+        .check_approval("user_1", "no-such-id", "edit_file", None, &runtime_registry)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::NotFound(_)));
@@ -3676,7 +4558,7 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
@@ -3689,7 +4571,7 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
         },
     }))
     .unwrap();
-    let resp = svc.create("user-1", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
 
     assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
     assert!(resp.extra.get("preset_enabled_skills").is_none());
@@ -3699,14 +4581,14 @@ async fn create_writes_extra_skills_from_auto_inject_and_preset() {
 #[tokio::test]
 async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
     let resolver = Arc::new(FixedSkillResolver { names: vec![] });
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
         "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
-    let resp = svc.create("user-1", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
 
     assert_eq!(resp.extra["skills"], json!([]));
 }
@@ -3715,14 +4597,14 @@ async fn create_writes_empty_skills_when_no_auto_inject_and_no_preset() {
 async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
     let resolver = Arc::new(RecordingSkillResolver::new(vec!["cron".into()]));
     let links = resolver.links.clone();
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
         "extra": {},
     }))
     .unwrap();
-    let resp = svc.create("user-1", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
     let workspace = PathBuf::from(resp.extra["workspace"].as_str().unwrap());
     assert!(workspace.join(".nomi/skills/cron").is_dir());
 
@@ -3730,9 +4612,9 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
     assert!(!workspace.exists());
     links.lock().unwrap().clear();
 
-    let task_mgr: Arc<dyn IWorkerTaskManager> =
-        Arc::new(MockTaskManagerWithWorkspace::new(workspace.to_str().unwrap()));
-    svc.warmup("user-1", &resp.id.to_string(), &task_mgr).await.unwrap();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
+        Arc::new(MockAgentRuntimeRegistryWithWorkspace::new(workspace.to_str().unwrap()));
+    svc.warmup("user_1", &resp.id.to_string(), &runtime_registry).await.unwrap();
 
     assert!(workspace.join(".nomi/skills/cron").is_dir());
     let calls = links.lock().unwrap();
@@ -3744,20 +4626,23 @@ async fn warmup_restores_skill_links_for_recreated_auto_workspace() {
 
 #[tokio::test]
 async fn update_rejects_extra_skills() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
         "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
-    let resp = svc.create("u", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
 
     let update_req: UpdateConversationRequest = serde_json::from_value(json!({
         "extra": { "skills": ["cron"] },
     }))
     .unwrap();
-    let err = svc.update("u", &resp.id.to_string(), update_req, &task_mgr).await.unwrap_err();
+    let err = svc
+        .update("user_1", &resp.id.to_string(), update_req, &runtime_registry)
+        .await
+        .unwrap_err();
 
     match err {
         AppError::BadRequest(msg) => assert!(msg.contains("skills"), "msg = {msg:?}"),
@@ -3767,20 +4652,23 @@ async fn update_rejects_extra_skills() {
 
 #[tokio::test]
 async fn update_allows_other_extra_fields() {
-    let (svc, _broadcaster, _repo, task_mgr) = make_service();
+    let (svc, _broadcaster, _repo, runtime_registry) = make_service();
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
         "extra": { "workspace": "/project", "backend": "claude" },
     }))
     .unwrap();
-    let resp = svc.create("u", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
 
     let update_req: UpdateConversationRequest = serde_json::from_value(json!({
         "extra": { "current_model_id": "claude-3-5-sonnet" },
     }))
     .unwrap();
-    let updated = svc.update("u", &resp.id.to_string(), update_req, &task_mgr).await.unwrap();
+    let updated = svc
+        .update("user_1", &resp.id.to_string(), update_req, &runtime_registry)
+        .await
+        .unwrap();
 
     assert_eq!(updated.extra["current_model_id"], "claude-3-5-sonnet");
 }
@@ -3790,7 +4678,7 @@ async fn get_backfills_legacy_row_and_persists() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into(), "todo-tracker".into()],
     });
-    let (svc, _broadcaster, repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     // Seed a legacy row directly via the repo — simulates a pre-migration
     // conversation that the service has never touched.
@@ -3800,7 +4688,7 @@ async fn get_backfills_legacy_row_and_persists() {
         preset_revision: None,
         preset_snapshot: None,
         id: 1,
-        user_id: "user-1".into(),
+        user_id: "user_1".into(),
         name: "legacy".into(),
         r#type: "acp".into(),
         extra: serde_json::to_string(&json!({
@@ -3810,6 +4698,10 @@ async fn get_backfills_legacy_row_and_persists() {
             "loaded_skills": [{"name": "cron", "description": "stale"}],
         }))
         .unwrap(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: None,
         status: Some("finished".into()),
         source: Some("nomifun".into()),
@@ -3821,14 +4713,14 @@ async fn get_backfills_legacy_row_and_persists() {
     };
     let legacy_id = repo.create(&legacy_row).await.unwrap();
 
-    let resp = svc.get("user-1", &legacy_id.to_string()).await.unwrap();
+    let resp = svc.get("user_1", &legacy_id.to_string()).await.unwrap();
     assert_eq!(resp.extra["skills"], json!(["cron", "pdf"]));
     assert!(resp.extra.get("enabled_skills").is_none());
     assert!(resp.extra.get("exclude_builtin_skills").is_none());
     assert!(resp.extra.get("loaded_skills").is_none());
 
     // Second read returns the same result.
-    let resp2 = svc.get("user-1", &legacy_id.to_string()).await.unwrap();
+    let resp2 = svc.get("user_1", &legacy_id.to_string()).await.unwrap();
     assert_eq!(resp2.extra["skills"], json!(["cron", "pdf"]));
 
     // Verify the row on disk was persisted with the new shape.
@@ -3845,7 +4737,7 @@ async fn list_backfills_mixed_rows() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into()],
     });
-    let (svc, _broadcaster, repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     // Row 1: legacy (needs backfill).
     let legacy = ConversationRow {
@@ -3862,6 +4754,10 @@ async fn list_backfills_mixed_rows() {
             "enabled_skills": ["pdf"],
         }))
         .unwrap(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: None,
         status: None,
         source: None,
@@ -3886,6 +4782,10 @@ async fn list_backfills_mixed_rows() {
             "skills": ["cron", "pdf"],
         }))
         .unwrap(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: None,
         status: None,
         source: None,
@@ -3908,7 +4808,7 @@ async fn create_honors_legacy_alias_fields_from_clone_merge() {
     let resolver = Arc::new(FixedSkillResolver {
         names: vec!["cron".into()],
     });
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service_with_resolver(resolver);
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service_with_resolver(resolver);
 
     // Legacy-shaped extra — what clone_create might merge in from an
     // unmigrated source conversation.
@@ -3923,7 +4823,7 @@ async fn create_honors_legacy_alias_fields_from_clone_merge() {
         },
     }))
     .unwrap();
-    let resp = svc.create("u", req).await.unwrap();
+    let resp = svc.create("user_1", req).await.unwrap();
 
     // Legacy enabled_skills ["pdf"] surfaces as preset; legacy exclude drops
     // cron; snapshot = {} ∪ ["pdf"] = ["pdf"].
@@ -3933,53 +4833,6 @@ async fn create_honors_legacy_alias_fields_from_clone_merge() {
     assert!(resp.extra.get("loaded_skills").is_none());
 }
 
-// ── insert_raw_message ────────────────────────────────────────────
-// Exercised by the team wake path (mirroring non-user mailbox rows into
-// the target agent's conversation so the UI shows who spoke). Covers both
-// the DB write and the live `message.stream` broadcast.
-
-#[tokio::test]
-async fn insert_raw_message_persists_row_and_broadcasts_stream() {
-    let (svc, broadcaster, repo, _task_mgr) = make_service();
-    let conv = svc.create("user_1", make_create_req()).await.unwrap();
-    // Clear the create event so our assertion sees only the insert broadcast.
-    let _ = broadcaster.take_events();
-
-    let row = MessageRow {
-        id: "msg-mirror-1".into(),
-        conversation_id: conv.id.clone(),
-        msg_id: Some("msg-mirror-1".into()),
-        r#type: "text".into(),
-        content: serde_json::json!({
-            "content": "from teammate",
-            "teammate_message": true,
-            "sender_name": "Lead",
-        })
-        .to_string(),
-        position: Some("left".into()),
-        status: Some("finish".into()),
-        hidden: false,
-        created_at: 1234,
-    };
-
-    svc.insert_raw_message(&row).await.unwrap();
-
-    let stored = repo.messages.lock().unwrap().clone();
-    assert_eq!(stored.len(), 1, "row must be persisted via repo.insert_message");
-    assert_eq!(stored[0].id, "msg-mirror-1");
-    assert_eq!(stored[0].position.as_deref(), Some("left"));
-
-    let events = broadcaster.take_events();
-    let stream_events: Vec<_> = events.iter().filter(|e| e.name == "message.stream").collect();
-    assert_eq!(stream_events.len(), 1, "expected exactly one message.stream event");
-    let data = &stream_events[0].data;
-    assert_eq!(data["conversation_id"], conv.id);
-    assert_eq!(data["msg_id"], "msg-mirror-1");
-    assert_eq!(data["type"], "text");
-    assert_eq!(data["position"], "left");
-    assert_eq!(data["data"]["content"], "from teammate");
-    assert_eq!(data["data"]["teammate_message"], true);
-}
 
 // ── Phase 3 model failover (plan D3) integration tests ──────────────
 //
@@ -3987,7 +4840,7 @@ async fn insert_raw_message_persists_row_and_broadcasts_stream() {
 // emits a (pre-response) provider-fault terminal error, the seam picks the next
 // queued model, rebuilds, and resends the SAME content. We assert on the
 // `sent_contents` of a PERSISTENT scripted agent (returned across rebuilds), the
-// model column written to the row, the kill count, and the provider repo's
+// model column written to the row, the termination count, and the provider repo's
 // recorded health stamp.
 
 use nomifun_common::ProviderWithModel;
@@ -4089,26 +4942,26 @@ impl IClientPreferenceRepository for StubClientPrefRepo {
     }
 }
 
-/// Task manager that returns ONE persistent scripted agent across rebuilds, so a
-/// failover (kill + rebuild) keeps driving the same script queue and records
+/// Runtime registry that returns ONE persistent scripted Agent across rebuilds, so a
+/// failover (termination + recreation) keeps driving the same script queue and records
 /// every resend. Counts `kill_and_wait` calls so tests can bound the switches.
-struct PersistentScriptedTaskManager {
-    agent: AgentInstance,
+struct PersistentScriptedRuntimeRegistry {
+    agent: AgentRuntimeHandle,
     scripted: Arc<ScriptedAgent>,
-    kill_count: AtomicUsize,
+    termination_count: AtomicUsize,
 }
 
-impl PersistentScriptedTaskManager {
+impl PersistentScriptedRuntimeRegistry {
     fn new(scripted: Arc<ScriptedAgent>) -> Self {
         Self {
-            agent: AgentInstance::Mock(scripted.clone()),
+            agent: AgentRuntimeHandle::Mock(scripted.clone()),
             scripted,
-            kill_count: AtomicUsize::new(0),
+            termination_count: AtomicUsize::new(0),
         }
     }
 
-    fn kill_count(&self) -> usize {
-        self.kill_count.load(Ordering::SeqCst)
+    fn termination_count(&self) -> usize {
+        self.termination_count.load(Ordering::SeqCst)
     }
 
     fn sent_contents(&self) -> Vec<String> {
@@ -4117,33 +4970,33 @@ impl PersistentScriptedTaskManager {
 }
 
 #[async_trait::async_trait]
-impl IWorkerTaskManager for PersistentScriptedTaskManager {
-    fn get_task(&self, _conversation_id: &str) -> Option<AgentInstance> {
+impl AgentRuntimeRegistry for PersistentScriptedRuntimeRegistry {
+    fn get_runtime(&self, _conversation_id: &str) -> Option<AgentRuntimeHandle> {
         Some(self.agent.clone())
     }
-    async fn get_or_build_task(
+    async fn get_or_create_runtime(
         &self,
         _conversation_id: &str,
-        _options: BuildTaskOptions,
-    ) -> Result<AgentInstance, AppError> {
+        _options: AgentRuntimeBuildOptions,
+    ) -> Result<AgentRuntimeHandle, AppError> {
         Ok(self.agent.clone())
     }
-    fn kill(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
+    fn terminate(&self, _conversation_id: &str, _reason: Option<AgentKillReason>) -> Result<(), AppError> {
         Ok(())
     }
-    fn kill_and_wait(
+    fn terminate_and_wait(
         &self,
         _conversation_id: &str,
         _reason: Option<AgentKillReason>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.kill_count.fetch_add(1, Ordering::SeqCst);
+        self.termination_count.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(()))
     }
-    fn clear(&self) {}
-    fn active_count(&self) -> usize {
+    fn terminate_all(&self) {}
+    fn active_runtime_count(&self) -> usize {
         1
     }
-    fn collect_idle(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
+    fn collect_idle_runtimes(&self, _idle_threshold_ms: TimestampMs) -> Vec<String> {
         vec![]
     }
 }
@@ -4170,6 +5023,10 @@ async fn seed_nomi_failover_conversation(
             "model_failover": failover,
         }))
         .unwrap(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: Some(serde_json::to_string(&failed).unwrap()),
         status: Some("pending".into()),
         source: Some("nomifun".into()),
@@ -4206,16 +5063,18 @@ fn make_failover_service(
     let repo = Arc::new(MockRepo::new());
     let broadcaster = Arc::new(MockBroadcaster::new());
     let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> = Arc::new(StubAgentMetadataRepo);
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
     let provider_repo = Arc::new(StubProviderRepo::new(providers));
     let svc = ConversationService::new(
+        Arc::<str>::from("user_1"),
         std::env::temp_dir(),
         broadcaster.clone(),
         Arc::new(FixedSkillResolver { names: vec![] }),
-        task_mgr,
+        runtime_registry,
         repo.clone(),
         agent_metadata_repo,
         Arc::new(StubAcpSessionRepo::default()),
+        Arc::new(crate::NoExecutionConversationBoundary),
     );
     svc.with_failover_deps(provider_repo.clone(), Arc::new(StubClientPrefRepo));
     (svc, broadcaster, repo, provider_repo)
@@ -4256,22 +5115,22 @@ async fn failover_pre_response_fault_rebuilds_with_next_model_and_resends() {
     .await;
 
     let scripted = provider_fault_then_finish_agent(&conv_id.to_string());
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
     // The same content was resent to the backup model: two sends, identical body.
-    let sends = task_mgr.sent_contents();
+    let sends = runtime_registry.sent_contents();
     assert_eq!(sends.len(), 2, "expected original send + one resend after failover");
     assert_eq!(sends[0], "Hello");
     assert_eq!(sends[1], "Hello", "failover must resend the SAME content");
 
     // Exactly one failover kill_and_wait.
-    assert_eq!(task_mgr.kill_count(), 1);
+    assert_eq!(runtime_registry.termination_count(), 1);
 
     // The conversation.model was rewritten to the next queued candidate.
     let row = repo.get(conv_id).await.unwrap().unwrap();
@@ -4307,17 +5166,17 @@ async fn failover_successful_pre_response_recovery_surfaces_no_error_to_user() {
     .await;
 
     let scripted = provider_fault_then_finish_agent(&conv_id.to_string());
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
     // (c) The same content was resent to the backup model, and the model column
     // was rewritten to the next queued candidate.
-    let sends = task_mgr.sent_contents();
+    let sends = runtime_registry.sent_contents();
     assert_eq!(sends.len(), 2, "expected original send + one resend after failover");
     assert_eq!(sends[1], "Hello", "failover must resend the SAME content on the backup model");
     let row = repo.get(conv_id).await.unwrap().unwrap();
@@ -4381,17 +5240,17 @@ async fn failover_mid_response_fault_does_not_switch_and_surfaces_error() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
-    // No resend, no kill, no model change: the original error is surfaced as-is.
-    assert_eq!(task_mgr.sent_contents().len(), 1);
-    assert_eq!(task_mgr.kill_count(), 0);
+    // No resend, no termination, no model change: the original error is surfaced as-is.
+    assert_eq!(runtime_registry.sent_contents().len(), 1);
+    assert_eq!(runtime_registry.termination_count(), 0);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1", "model must be unchanged on mid-response fault");
@@ -4437,21 +5296,21 @@ async fn failover_post_toolcall_fault_does_not_switch_and_surfaces_error() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
-    // No resend, no kill, no model change: the original error is surfaced as-is.
+    // No resend, no termination, no model change: the original error is surfaced as-is.
     assert_eq!(
-        task_mgr.sent_contents().len(),
+        runtime_registry.sent_contents().len(),
         1,
         "a post-ToolCall fault must not resend (would re-run the tool side effect)"
     );
-    assert_eq!(task_mgr.kill_count(), 0);
+    assert_eq!(runtime_registry.termination_count(), 0);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1", "model must be unchanged on a post-ToolCall fault");
@@ -4484,16 +5343,16 @@ async fn failover_queue_exhausted_surfaces_original_error() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
-    assert_eq!(task_mgr.sent_contents().len(), 1, "no resend when queue is exhausted");
-    assert_eq!(task_mgr.kill_count(), 0);
+    assert_eq!(runtime_registry.sent_contents().len(), 1, "no resend when queue is exhausted");
+    assert_eq!(runtime_registry.termination_count(), 0);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1");
@@ -4520,16 +5379,16 @@ async fn failover_non_provider_error_does_not_switch() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
-    assert_eq!(task_mgr.sent_contents().len(), 1);
-    assert_eq!(task_mgr.kill_count(), 0);
+    assert_eq!(runtime_registry.sent_contents().len(), 1);
+    assert_eq!(runtime_registry.termination_count(), 0);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1");
@@ -4580,17 +5439,17 @@ async fn failover_is_bounded_by_max_switches() {
         )
         .with_agent_type(AgentType::Nomi),
     );
-    let task_mgr = Arc::new(PersistentScriptedTaskManager::new(scripted));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(PersistentScriptedRuntimeRegistry::new(scripted));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
 
     // Original send + exactly one resend; one kill_and_wait. Never reaches p3.
-    assert_eq!(task_mgr.sent_contents().len(), 2, "max_switches=1 caps at one resend");
-    assert_eq!(task_mgr.kill_count(), 1);
+    assert_eq!(runtime_registry.sent_contents().len(), 2, "max_switches=1 caps at one resend");
+    assert_eq!(runtime_registry.termination_count(), 1);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p2", "stopped at the first switch, not p3");
@@ -4619,6 +5478,10 @@ async fn seed_acp_failover_conversation(
             "model_failover": failover,
         }))
         .unwrap(),
+        delegation_policy: "automatic".into(),
+        execution_model_pool: None,
+        decision_policy: "automatic".into(),
+        execution_template_id: None,
         model: Some(serde_json::to_string(&model).unwrap()),
         status: Some("pending".into()),
         source: Some("nomifun".into()),
@@ -4638,8 +5501,8 @@ async fn failover_send_loop_excludes_acp_conversation() {
     // failover deps wired + an enabled queue, the seam still stands down because
     // the conversation is ACP-typed: no resend (one send only), no model write,
     // and no unhealthy stamp. (The ACP terminal-error eviction path legitimately
-    // kills+rebuilds the task; that is unrelated to the failover seam, so we
-    // assert the failover-specific facts rather than kill_count.)
+    // terminates and recreates the runtime; that is unrelated to the failover seam, so we
+    // assert the failover-specific facts rather than termination_count.)
     let (svc, _broadcaster, repo, provider_repo) =
         make_failover_service(vec![test_provider("p1", &["m1"]), test_provider("p2", &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
@@ -4657,11 +5520,11 @@ async fn failover_send_loop_excludes_acp_conversation() {
             Some(AgentErrorCode::UserLlmProviderRateLimited),
         ))]],
     )); // default agent_type = Acp
-    let task_mgr = Arc::new(MockTaskManager::new());
-    task_mgr.insert_agent(&conv_id.to_string(), AgentInstance::Mock(scripted.clone()));
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
+    runtime_registry.insert_agent(&conv_id.to_string(), AgentRuntimeHandle::Mock(scripted.clone()));
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
-    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &task_mgr_dyn)
+    svc.send_message("user_1", &conv_id.to_string(), make_send_req(), &runtime_registry_dyn)
         .await
         .unwrap();
     wait_for_turn_released(&svc, &conv_id.to_string()).await;
@@ -4688,7 +5551,7 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
     // review #11(2): the SHARED bottleneck `perform_model_failover` (review #9)
     // gates on AgentType::Nomi AFTER loading the row, so the IDMM path
     // (`idmm_failover_conversation`) reports `Ok(false)` for an ACP conversation
-    // even with deps wired + an enabled queue — and performs NO kill / model write.
+    // even with deps wired + an enabled queue — and performs NO termination / model write.
     let (svc, _broadcaster, repo, provider_repo) =
         make_failover_service(vec![test_provider("p1", &["m1"]), test_provider("p2", &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
@@ -4698,15 +5561,15 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
     )
     .await;
 
-    let task_mgr = Arc::new(MockTaskManager::new());
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let switched = svc
-        .idmm_failover_conversation("user_1", &conv_id.to_string(), &task_mgr_dyn)
+        .idmm_failover_conversation("user_1", &conv_id.to_string(), &runtime_registry_dyn)
         .await
         .unwrap();
     assert!(!switched, "IDMM failover must report false for an ACP conversation");
-    assert_eq!(task_mgr.kill_count(), 0, "no kill on a rejected ACP failover");
+    assert_eq!(runtime_registry.termination_count(), 0, "no termination on a rejected ACP failover");
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1", "ACP model must be untouched");
@@ -4716,7 +5579,7 @@ async fn idmm_failover_conversation_returns_false_for_acp_conversation() {
 #[tokio::test]
 async fn perform_model_failover_returns_none_for_acp_conversation() {
     // review #11(2): calling the bottleneck directly on a non-nomi conversation
-    // returns None (the review #9 ACP gate), with no kill and no model write.
+    // returns None (the review #9 ACP gate), with no termination and no model write.
     let (svc, _broadcaster, repo, provider_repo) =
         make_failover_service(vec![test_provider("p1", &["m1"]), test_provider("p2", &["m2"])]);
     let conv_id = seed_acp_failover_conversation(
@@ -4726,8 +5589,8 @@ async fn perform_model_failover_returns_none_for_acp_conversation() {
     )
     .await;
 
-    let task_mgr = Arc::new(MockTaskManager::new());
-    let task_mgr_dyn: Arc<dyn IWorkerTaskManager> = task_mgr.clone();
+    let runtime_registry = Arc::new(MockAgentRuntimeRegistry::new());
+    let runtime_registry_dyn: Arc<dyn AgentRuntimeRegistry> = runtime_registry.clone();
 
     let config = nomifun_api_types::ModelFailoverConfig {
         enabled: true,
@@ -4735,10 +5598,10 @@ async fn perform_model_failover_returns_none_for_acp_conversation() {
         ..Default::default()
     };
     let result = svc
-        .perform_model_failover(&conv_id.to_string(), &config, &[], &task_mgr_dyn)
+        .perform_model_failover(&conv_id.to_string(), &config, &[], &runtime_registry_dyn)
         .await;
     assert!(result.is_none(), "perform_model_failover must reject a non-nomi conversation");
-    assert_eq!(task_mgr.kill_count(), 0);
+    assert_eq!(runtime_registry.termination_count(), 0);
     let row = repo.get(conv_id).await.unwrap().unwrap();
     let model: ProviderWithModel = serde_json::from_str(row.model.as_deref().unwrap()).unwrap();
     assert_eq!(model.provider_id, "p1");
@@ -4750,15 +5613,15 @@ async fn perform_model_failover_returns_none_for_acp_conversation() {
 /// 非 Nomi 会话调用 edit_and_resubmit → BadRequest（Nomi 门禁在取 agent/查消息之前）。
 #[tokio::test]
 async fn edit_and_resubmit_rejects_non_nomi() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
     // make_create_req() 建的是 acp 会话
     let conv = svc.create("user_1", make_create_req()).await.unwrap();
     let conv_id = conv.id.to_string();
 
     let req: SendMessageRequest = serde_json::from_value(json!({ "content": "edited" })).unwrap();
     let err = svc
-        .edit_and_resubmit("user_1", &conv_id, "msg_whatever", req, &task_mgr)
+        .edit_and_resubmit("user_1", &conv_id, "msg_whatever", req, &runtime_registry)
         .await
         .unwrap_err();
 
@@ -4769,8 +5632,8 @@ async fn edit_and_resubmit_rejects_non_nomi() {
 /// Nomi 会话但没有可编辑的用户消息 → BadRequest（消息查找守卫，在取 agent 之前）。
 #[tokio::test]
 async fn edit_and_resubmit_rejects_when_no_editable_message() {
-    let (svc, _broadcaster, _repo, _task_mgr) = make_service();
-    let task_mgr: Arc<dyn IWorkerTaskManager> = Arc::new(MockTaskManager::new());
+    let (svc, _broadcaster, _repo, _runtime_registry) = make_service();
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(MockAgentRuntimeRegistry::new());
     let nomi_req: CreateConversationRequest =
         serde_json::from_value(json!({ "type": "nomi", "extra": { "workspace": "/project" } })).unwrap();
     let conv = svc.create("user_1", nomi_req).await.unwrap();
@@ -4778,7 +5641,7 @@ async fn edit_and_resubmit_rejects_when_no_editable_message() {
 
     let req: SendMessageRequest = serde_json::from_value(json!({ "content": "edited" })).unwrap();
     let err = svc
-        .edit_and_resubmit("user_1", &conv_id, "msg_missing", req, &task_mgr)
+        .edit_and_resubmit("user_1", &conv_id, "msg_missing", req, &runtime_registry)
         .await
         .unwrap_err();
 

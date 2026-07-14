@@ -7,6 +7,7 @@
 import type { IMessageAcpPermission } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { conversation } from '@/common/adapter/ipcBridge';
+import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { Button, Card, Radio, Typography } from '@arco-design/web-react';
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -20,6 +21,7 @@ interface MessageAcpPermissionProps {
 const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({ message }) => {
   const { options = [], tool_call } = message.content || {};
   const { t } = useTranslation();
+  const readOnly = useConversationContextSafe()?.readOnly === true;
 
   // 基于实际数据生成显示信息
   const getToolInfo = () => {
@@ -55,7 +57,7 @@ const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({ 
   const [hasResponded, setHasResponded] = useState(false);
 
   const handleConfirm = async () => {
-    if (hasResponded || !selected) return;
+    if (readOnly || hasResponded || !selected) return;
 
     setIsResponding(true);
     try {
@@ -101,7 +103,7 @@ const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({ 
             </code>
           </div>
         )}
-        {!hasResponded && (
+        {!readOnly && !hasResponded && (
           <>
             <div className='mt-10px'>{t('messages.chooseAction')}</div>
             <Radio.Group direction='vertical' size='mini' value={selected} onChange={setSelected}>

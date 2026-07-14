@@ -1,11 +1,11 @@
 # AutoWork & Requirements
 
-AutoWork is Nomi's flagship automation: a **requirements board** plus an
-**orchestrator** that drives an AI agent (or an agent CLI in a terminal) to
+AutoWork is Nomi's flagship automation: a **requirements board** plus a
+**per-target execution loop** that drives an AI agent (or an agent CLI in a terminal) to
 work through those requirements one at a time, without you holding its hand.
 
 You file requirements, group them by tag, bind a tag to a session
-(conversation or terminal), and the orchestrator claims, executes, and
+(conversation or terminal), and the AutoWork loop claims, executes, and
 finalises them in order. When a requirement reaches a terminal state it can
 fire a **completion notifier** (Lark/飞书 webhook) so your team hears about
 it the moment it lands.
@@ -22,9 +22,9 @@ boot and runs whether or not you have the UI open.
 | **Requirement**       | A unit of work: title, content (the actual instructions), tag, an `order_key` (string compared lexicographically), and a status. Stored in SQLite.           |
 | **Tag**               | A free-form string used to group requirements into a queue. Bindings, kanban columns, and webhook routing all key off the tag.                               |
 | **Status**            | `pending` → `in_progress` → `done` (or `failed` / `cancelled`). The kanban view has one column per status.                                                   |
-| **Claim & lease**     | The orchestrator atomically transitions the lowest-`order_key` `pending` requirement in a tag to `in_progress` and writes a lease that expires.              |
+| **Claim & lease**     | The AutoWork loop atomically transitions the lowest-`order_key` `pending` requirement in a tag to `in_progress` and writes a lease that expires.              |
 | **Lease sweeper**     | A background task (every 60 s) that re-pends `in_progress` rows whose lease expired and whose owning session is no longer live — so a crash never orphans work. |
-| **Orchestrator**      | The per-target loop that claims → injects → waits → finalises → repeats. One loop per bound session. Persistent: it idles when the queue drains, it does not exit. |
+| **AutoWork loop**     | The per-target loop that claims → injects → waits → finalises → repeats. One loop per bound session. Persistent: it idles when the queue drains, it does not exit. |
 | **Target**            | The thing executing the work. Two kinds: a **conversation** (an AI agent), or a **terminal** (a real CLI agent over a PTY).                                  |
 | **Turn completion** | How a turn signals "done." For agent targets, the agent ends its turn (or calls a Nomi-only tool); for terminal targets, the terminal simply goes quiescent — a clean end-of-turn.       |
 | **Completion notifier** | A Lark/飞书 webhook fired when a requirement reaches `done`/`failed`/`cancelled`. Bound per tag.                                                            |
@@ -45,7 +45,7 @@ pending  ──claim_next()──▶  in_progress (lease)  ──injection──
                                                        CompletionNotifier fires (best-effort)
 ```
 
-The orchestrator does **not** exit when the tag is empty. It awaits a wake
+The AutoWork loop does **not** exit when the tag is empty. It awaits a wake
 notification (with a 10 s safety-net poll) and keeps claiming forever, so a
 new requirement filed against a bound tag is picked up almost instantly.
 
@@ -74,7 +74,7 @@ selected rows. Open a row to see its detail drawer; **Edit** lives at
 
 One column per status for a chosen tag. Drag-and-drop is intentionally not
 the way to change status here; use the detail drawer. The board re-fetches
-on every `requirements.*` realtime event so it tracks the orchestrator
+on every `requirements.*` realtime event so it tracks the AutoWork loop
 live.
 
 ![Requirements kanban](../images/autowork-03-kanban.png)
@@ -87,7 +87,7 @@ tag), and the live run-state for each binding (`Idle`, `Active` while a
 turn is in flight). The per-tag completion webhook now lives one tab over,
 in **通知** (see [Completion notifications](#completion-notifications--lark--http--slack)).
 
-This is where you watch the fleet. To **start** AutoWork on a binding, open
+This is where you watch active bindings. To **start** AutoWork on a binding, open
 the session itself and toggle AutoWork there — that is the canonical place
 to bind a tag, set `max_requirements`, and persist the configuration.
 
@@ -125,7 +125,7 @@ optionally set a completion cap, and enable.
 
 What happens per turn:
 
-1. The orchestrator claims the next `pending` requirement in that tag.
+1. The AutoWork loop claims the next `pending` requirement in that tag.
 2. It builds an injection prompt that names the requirement and tells the
    agent how to signal completion. The exact contract is **engine-aware**:
    - On Nomi-engine sessions only, the agent has the
@@ -139,7 +139,7 @@ What happens per turn:
      plain text (the prompt asks the model to start the final line with
      `Requirement failed:` followed by the reason).
 3. The injected message is hidden from the user-visible transcript.
-4. The orchestrator subscribes to the agent's stream and waits for a
+4. The AutoWork loop subscribes to the agent's stream and waits for a
    `Finish` (clean) or `Error`/timeout (re-pend or fail). It also captures
    the agent's prose into a tail-bounded **completion note** that is stored
    on the requirement and, on tool-free engines, becomes the report sent
@@ -152,12 +152,12 @@ What happens per turn:
 Open a terminal whose preset is `claude` or `codex` (a plain shell is not
 eligible). Gemini terminals can be run manually, but the backend does not
 accept them as terminal AutoWork targets yet because the turn lifecycle and
-completion contract are not wired into the orchestrator. The header has the
+completion contract are not wired into the AutoWork loop. The header has the
 same **AutoWork** control for eligible terminals. Bind a tag and enable.
 
 What happens per turn:
 
-1. The orchestrator subscribes to the terminal's live output stream
+1. The AutoWork loop subscribes to the terminal's live output stream
    **before** injecting (so nothing is missed).
 2. It writes the requirement prompt into the PTY wrapped in bracketed-paste
    markers (`ESC [200~ … ESC [201~`) followed by `CR`, so the multi-line
@@ -187,7 +187,7 @@ where it left off — no need to toggle the bind off and on.
 
 ## Boot resume — it runs without you
 
-The orchestrator's running set is in-memory, but every binding's `enabled`,
+The AutoWork loop's active set is in-memory, but every binding's `enabled`,
 `tag`, and `max_requirements` are persisted (in conversation `extra.autowork`
 or the terminal's `autowork` column). On process start the backend lists
 every user, walks every tag binding, and **spawns the loops itself**. You do
@@ -195,7 +195,7 @@ not need to open the session page for AutoWork to work; the UI just shows
 you what is already running.
 
 This is why "AutoWork only worked while I had the tab open" is a bug, not a
-feature. If you observe it, check the orchestrator logs for resume failures
+feature. If you observe it, check the AutoWork loop logs for resume failures
 on that user / target.
 
 ## Completion notifications (Lark / HTTP / Slack)
@@ -294,7 +294,7 @@ intervention log API.
   conversations as it gets re-pended; tying it to a single conversation
   with referential integrity made cleanups awkward and added no real
   safety. Treat the column as advisory.
-- The orchestrator's `wake` Notify is shared with `RequirementService`;
+- The AutoWork loop's `wake` Notify is shared with `RequirementService`;
   every state transition that re-pends or creates work fires it, and the
   loop is armed-then-awaited around each `claim_next()` call so a wake
   arriving between "claim returned None" and "await" is never lost.

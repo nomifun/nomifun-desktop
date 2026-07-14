@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use wiremock::MockServer;
 
-use nomifun_ai_agent::{AgentInstance, IAgentTask, IMockAgent, WorkerTaskManagerImpl};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeControl, MockAgentRuntime, InMemoryAgentRuntimeRegistry};
 use nomifun_app::{AppConfig, AppServices, build_module_states, create_router, create_router_with_states};
 use nomifun_extension::{ExternalPathsManager, SkillPaths, SkillRouterState};
 use nomifun_file::FileService;
@@ -56,7 +56,7 @@ pub async fn build_app_with_skill_paths(root: &std::path::Path) -> (axum::Router
     states.skill = SkillRouterState {
         skill_paths: paths.clone(),
         external_paths_manager: ext_paths_mgr,
-        assistant_dispatcher: states.skill.assistant_dispatcher.clone(),
+        preset_dispatcher: states.skill.preset_dispatcher.clone(),
         skill_tag_repo: std::sync::Arc::new(nomifun_db::SqliteSkillTagRepository::new(
             services.database.pool().clone(),
         )),
@@ -101,31 +101,31 @@ pub async fn build_app_with_mock_version(
     (router, services)
 }
 
-/// Build app with a mock worker task manager that returns noop agents.
+/// Build app with a mock Agent runtime registry that returns noop agents.
 ///
-/// Use for tests that exercise session/warmup paths (team ensure_session,
-/// send_message) where spawning a real CLI process is not feasible.
+/// Use for tests that exercise session warmup and send-message paths where
+/// spawning a real CLI process is not feasible.
 pub async fn build_app_with_mock_agents() -> (axum::Router, AppServices) {
     let db = nomifun_db::init_database_memory().await.unwrap();
     let factory: std::sync::Arc<
         dyn Fn(
-                nomifun_ai_agent::types::BuildTaskOptions,
-            ) -> futures_util::future::BoxFuture<'static, Result<AgentInstance, nomifun_common::AppError>>
+                nomifun_ai_agent::types::AgentRuntimeBuildOptions,
+            ) -> futures_util::future::BoxFuture<'static, Result<AgentRuntimeHandle, nomifun_common::AppError>>
             + Send
             + Sync,
     > = std::sync::Arc::new(|opts| {
         Box::pin(async move {
-            Ok(AgentInstance::Mock(std::sync::Arc::new(NoopMockAgent {
+            Ok(AgentRuntimeHandle::Mock(std::sync::Arc::new(NoopMockAgent {
                 conversation_id: opts.conversation_id,
             })))
         })
     });
-    let wtm: std::sync::Arc<dyn nomifun_ai_agent::IWorkerTaskManager> =
-        std::sync::Arc::new(WorkerTaskManagerImpl::new(factory));
+    let runtime_registry: std::sync::Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry> =
+        std::sync::Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
     let services = AppServices::from_config(db, &AppConfig::default())
         .await
         .unwrap()
-        .with_worker_task_manager(wtm);
+        .with_agent_runtime_registry(runtime_registry);
     let router = create_router(&services).await;
     (router, services)
 }
@@ -135,7 +135,7 @@ struct NoopMockAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for NoopMockAgent {
+impl AgentRuntimeControl for NoopMockAgent {
     fn agent_type(&self) -> nomifun_common::AgentType {
         nomifun_common::AgentType::Acp
     }
@@ -170,7 +170,7 @@ impl IAgentTask for NoopMockAgent {
 }
 
 #[async_trait::async_trait]
-impl IMockAgent for NoopMockAgent {}
+impl MockAgentRuntime for NoopMockAgent {}
 
 pub async fn body_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();

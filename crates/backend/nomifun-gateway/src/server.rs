@@ -1,4 +1,4 @@
-//! In-process HTTP half of the Desktop Gateway MCP.
+//! In-process HTTP half of the Platform Gateway MCP.
 //!
 //! ACP CLIs and the nomi engine spawn a SEPARATE stdio process
 //! (`nomicore mcp-gateway-stdio`) that cannot share this process's services;
@@ -11,7 +11,15 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
-use nomifun_common::generate_id;
+use nomifun_api_types::{
+    GATEWAY_CALL_TOOL_OPERATION, GATEWAY_CAPABILITY_DOMAIN,
+    GatewayCapabilityClaims, GatewayCapabilityScope, GatewayMcpConfig,
+};
+use nomifun_common::{
+    LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
+    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
+    LoopbackSessionKind,
+};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
@@ -30,24 +38,24 @@ type DepsSlot = Arc<RwLock<Option<Arc<GatewayDeps>>>>;
 
 #[derive(Clone)]
 struct GatewayState {
-    auth_token: String,
+    issuer: Arc<LoopbackCapabilityIssuer>,
     deps: DepsSlot,
 }
 
-/// In-process HTTP MCP server for the desktop gateway tools.
+/// In-process HTTP MCP server for the Platform Gateway tools.
 pub struct GatewayMcpServer {
     http_addr: SocketAddr,
-    auth_token: String,
+    issuer: Arc<LoopbackCapabilityIssuer>,
     shutdown_handle: Option<tokio::task::JoinHandle<()>>,
     deps_slot: DepsSlot,
 }
 
 impl GatewayMcpServer {
-    /// Bind a fresh `127.0.0.1:0` listener, mint a random bearer token, and
+    /// Bind a fresh `127.0.0.1:0` listener, mint a root issuer secret, and
     /// start serving `POST /tool`. Deps must be wired separately via
     /// [`set_deps`](Self::set_deps) before the first tool call arrives.
     pub async fn start() -> Result<Self, String> {
-        let auth_token = generate_id();
+        let issuer = Arc::new(LoopbackCapabilityIssuer::random()?);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("Failed to bind gateway MCP HTTP listener: {e}"))?;
@@ -58,12 +66,20 @@ impl GatewayMcpServer {
         let deps_slot: DepsSlot = Arc::new(RwLock::new(None));
 
         let state = GatewayState {
-            auth_token: auth_token.clone(),
+            issuer: issuer.clone(),
             deps: deps_slot.clone(),
         };
 
         let app = axum::Router::new()
             .route("/tool", axum::routing::post(handle_tool_request))
+            .route(
+                LOOPBACK_CAPABILITY_RENEW_PATH,
+                axum::routing::post(handle_capability_renew),
+            )
+            .route(
+                LOOPBACK_CAPABILITY_REVOKE_PATH,
+                axum::routing::post(handle_capability_revoke),
+            )
             .with_state(state);
 
         let handle = tokio::spawn(async move {
@@ -79,7 +95,7 @@ impl GatewayMcpServer {
 
         Ok(Self {
             http_addr,
-            auth_token,
+            issuer,
             shutdown_handle: Some(handle),
             deps_slot,
         })
@@ -95,8 +111,19 @@ impl GatewayMcpServer {
         self.http_addr.port()
     }
 
-    pub fn auth_token(&self) -> &str {
-        &self.auth_token
+    /// Build the process-private issuer consumed by Agent assemblers. The root
+    /// secret remains private and the returned type cannot be serialized.
+    pub fn issuer_config(
+        &self,
+        binary_path: String,
+        authoritative_user_id: impl Into<Arc<str>>,
+    ) -> GatewayMcpConfig {
+        GatewayMcpConfig::from_issuer(
+            self.http_addr.port(),
+            self.issuer.clone(),
+            binary_path,
+            authoritative_user_id,
+        )
     }
 
     pub fn stop(&mut self) {
@@ -131,11 +158,33 @@ async fn handle_tool_request(
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
 
-    if provided_token != state.auth_token {
-        warn!("Gateway MCP: unauthorized request");
+    let claims = match body
+        .get("session")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<GatewayCapabilityClaims>(value).ok())
+    {
+        Some(claims)
+            if claims.scope.validate().is_ok()
+                && claims.session.kind == LoopbackSessionKind::Conversation
+                && state
+                    .issuer
+                    .verify_access(GATEWAY_CAPABILITY_DOMAIN, &claims, provided_token)
+                    .is_ok() => claims,
+        _ => {
+            warn!("Gateway MCP: invalid or unbound session authorization");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !claims.allows(GATEWAY_CALL_TOOL_OPERATION) {
+        warn!("Gateway MCP: tools/call is outside signed capability scope");
         return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "unauthorized"})),
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "forbidden"})),
         )
             .into_response();
     }
@@ -147,37 +196,11 @@ async fn handle_tool_request(
         .to_owned();
     let args = body.get("args").cloned().unwrap_or(Value::Null);
     let ctx = CallerCtx {
-        conversation_id: body
-            .get("conversation_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        user_id: body
-            .get("user_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        // Optional: only master-agent / companion sessions with a companion binding
-        // carry it; empty is normalized to None.
-        companion_id: body
-            .get("companion_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        // Optional: only channel master-agent sessions carry it.
-        channel_platform: body
-            .get("channel_platform")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
-        session_mode: body
-            .get("session_mode")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
+        conversation_id: claims.session.session_id.clone(),
+        user_id: claims.user_id.clone(),
+        companion_id: claims.scope.companion_id.clone(),
+        channel_platform: claims.scope.channel_platform.clone(),
+        session_mode: claims.scope.session_mode.clone(),
         // This in-process server is the INWARD path (bundled agents on loopback);
         // never the external Remote surface.
         ..Default::default()
@@ -191,12 +214,37 @@ async fn handle_tool_request(
         }
     };
 
+    let is_instance_owner = claims.user_id == deps.authoritative_user_id.as_ref();
+    if claims.scope.instance_owner != is_instance_owner {
+        warn!(user_id = %claims.user_id, "Gateway MCP: signed owner classification disagrees with runtime authority");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response();
+    }
+
+    let registry = Registry::global();
+    if !registry.contains(&tool) {
+        return finish(json!({ "error": format!("Unknown tool: {tool}") }));
+    }
+    let domains = GatewayMcpConfig::domains_for_profile(&claims.scope.profile);
+    if claims.scope.excludes(&tool)
+        || !registry.tool_visible_for_caller(ctx.surface(), domains, is_instance_owner, &tool)
+    {
+        return finish(json!({
+            "error": "session_capability_denied",
+            "tool": tool,
+            "profile": claims.scope.profile,
+        }));
+    }
+
     info!(tool, caller = %ctx.conversation_id, "Gateway MCP: dispatching tool");
 
     // The capability registry is the single authority: it owns every tool,
     // generates its schema, and enforces the danger-tier × surface permission
     // gate. An unknown name returns a structured error the agent can recover from.
-    let response_body = match Registry::global()
+    let response_body = match registry
         .dispatch_opt(deps.clone(), ctx.clone(), &tool, &args)
         .await
     {
@@ -208,6 +256,48 @@ async fn handle_tool_request(
     };
 
     finish(response_body)
+}
+
+async fn handle_capability_renew(
+    State(state): State<GatewayState>,
+    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+) -> impl IntoResponse {
+    match state
+        .issuer
+        .renew::<GatewayCapabilityScope>(GATEWAY_CAPABILITY_DOMAIN, &request)
+    {
+        Ok(access)
+            if access.claims.scope.validate().is_ok()
+                && access.claims.session.kind == LoopbackSessionKind::Conversation =>
+        {
+            (StatusCode::OK, Json(json!(access))).into_response()
+        }
+        Ok(_) | Err(_) => {
+            warn!("Gateway MCP: invalid capability renewal");
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "unauthorized"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_capability_revoke(
+    State(state): State<GatewayState>,
+    Json(request): Json<LoopbackCapabilityRenewalRequest>,
+) -> impl IntoResponse {
+    match state
+        .issuer
+        .revoke(GATEWAY_CAPABILITY_DOMAIN, &request)
+    {
+        Ok(()) => (StatusCode::NO_CONTENT, Json(Value::Null)).into_response(),
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "unauthorized"})),
+        )
+            .into_response(),
+    }
 }
 
 /// Wrap a JSON body as a response and ask the client to close the connection
@@ -227,7 +317,7 @@ fn finish(body: Value) -> axum::response::Response {
 /// data access; refuse to operate without one.
 pub(crate) fn require_user(ctx: &CallerCtx) -> Result<&str, Value> {
     if ctx.user_id.is_empty() {
-        Err(json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"}))
+        Err(json!({"error": "missing caller user identity in signed gateway session"}))
     } else {
         Ok(&ctx.user_id)
     }
@@ -245,6 +335,17 @@ pub(crate) fn ok<T: serde::Serialize>(payload: T) -> Value {
 mod tests {
     use super::*;
 
+    fn child(
+        server: &GatewayMcpServer,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> nomifun_api_types::GatewayMcpChildConfig {
+        server
+            .issuer_config("/bin/nomicore".into(), "system_default_user")
+            .issue_for_conversation(user_id, conversation_id, None, None, None, &[])
+            .unwrap()
+    }
+
     async fn post_tool(port: u16, token: Option<&str>, body: Value) -> (u16, Value) {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut req = client
@@ -259,18 +360,53 @@ mod tests {
         (status, json)
     }
 
-    #[tokio::test]
-    async fn start_returns_positive_port_and_token() {
-        let server = GatewayMcpServer::start().await.unwrap();
-        assert!(server.http_port() > 0);
-        assert!(!server.auth_token().is_empty());
+    async fn post_capability(
+        port: u16,
+        path: &str,
+        request: &LoopbackCapabilityRenewalRequest,
+    ) -> (u16, Value) {
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://127.0.0.1:{port}{path}"))
+            .json(request)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = response.json().await.unwrap_or(Value::Null);
+        (status, body)
     }
 
     #[tokio::test]
-    async fn each_start_uses_a_fresh_auth_token() {
+    async fn start_returns_positive_port_and_redacted_issuer() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        assert!(server.http_port() > 0);
+        let debug = format!(
+            "{:?}",
+            server.issuer_config("/bin/nomicore".into(), "system_default_user")
+        );
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn each_start_uses_a_fresh_issuer_secret() {
         let a = GatewayMcpServer::start().await.unwrap();
         let b = GatewayMcpServer::start().await.unwrap();
-        assert_ne!(a.auth_token(), b.auth_token());
+        let child_a = child(&a, "system_default_user", "1");
+        let child_b = child(&b, "system_default_user", "1");
+        assert_ne!(
+            child_a.bootstrap.renewal.renewal_proof,
+            child_b.bootstrap.renewal.renewal_proof
+        );
+        assert!(a
+            .issuer
+            .renew::<GatewayCapabilityScope>(
+                GATEWAY_CAPABILITY_DOMAIN,
+                &child_b.bootstrap.renewal,
+            )
+            .is_err());
     }
 
     #[tokio::test]
@@ -286,13 +422,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renewal_restores_server_scope_and_revoke_ends_the_lease() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let child = child(&server, "system_default_user", "1");
+        let original = &child.bootstrap.access.claims;
+
+        let (status, body) = post_capability(
+            server.http_port(),
+            LOOPBACK_CAPABILITY_RENEW_PATH,
+            &child.bootstrap.renewal,
+        )
+        .await;
+        assert_eq!(status, 200);
+        let renewed: nomifun_common::LoopbackCapabilityAccess<GatewayCapabilityClaims> =
+            serde_json::from_value(body).unwrap();
+        assert_eq!(renewed.claims.version, original.version);
+        assert_eq!(renewed.claims.lease_id, original.lease_id);
+        assert_eq!(renewed.claims.user_id, original.user_id);
+        assert_eq!(renewed.claims.session, original.session);
+        assert_eq!(renewed.claims.allowed_tools, original.allowed_tools);
+        assert_eq!(renewed.claims.scope, original.scope);
+        assert_ne!(renewed.claims.nonce, original.nonce);
+
+        let (status, _) = post_capability(
+            server.http_port(),
+            LOOPBACK_CAPABILITY_REVOKE_PATH,
+            &child.bootstrap.renewal,
+        )
+        .await;
+        assert_eq!(status, 204);
+        let (status, _) = post_capability(
+            server.http_port(),
+            LOOPBACK_CAPABILITY_RENEW_PATH,
+            &child.bootstrap.renewal,
+        )
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
     async fn missing_deps_returns_unavailable() {
         // Server started but set_deps never called.
         let server = GatewayMcpServer::start().await.unwrap();
+        let child = child(&server, "system_default_user", "1");
+        let access = &child.bootstrap.access;
         let (status, body) = post_tool(
             server.http_port(),
-            Some(server.auth_token()),
-            json!({"tool": "nomi_list_conversations", "args": {}}),
+            Some(&access.token),
+            json!({"tool": "nomi_list_conversations", "args": {}, "session": access.claims}),
         )
         .await;
         assert_eq!(status, 200);
@@ -300,6 +477,87 @@ mod tests {
             body.get("error").and_then(Value::as_str),
             Some("service_unavailable")
         );
+    }
+
+    #[tokio::test]
+    async fn tampered_cross_conversation_and_expired_claims_are_unauthorized() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let child = child(&server, "system_default_user", "1");
+        let access = &child.bootstrap.access;
+
+        let mut forged = access.claims.clone();
+        forged.session = nomifun_common::LoopbackSessionBinding::conversation("2");
+        let (status, _) = post_tool(
+            server.http_port(),
+            Some(&access.token),
+            json!({"tool": "nomi_list_conversations", "args": {}, "session": forged}),
+        )
+        .await;
+        assert_eq!(status, 401);
+
+        let now = nomifun_common::unix_time_secs();
+        let expired = server
+            .issuer
+            .renew_at::<GatewayCapabilityScope>(
+                GATEWAY_CAPABILITY_DOMAIN,
+                &child.bootstrap.renewal,
+                now.saturating_sub(nomifun_common::LOOPBACK_CAPABILITY_TTL_SECS + 1),
+            )
+            .unwrap();
+        let (status, _) = post_tool(
+            server.http_port(),
+            Some(&expired.token),
+            json!({"tool": "nomi_list_conversations", "args": {}, "session": expired.claims}),
+        )
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn correctly_signed_terminal_binding_is_unauthorized() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let child = child(&server, "system_default_user", "1");
+        let claims = GatewayCapabilityClaims::issue(
+            "system_default_user",
+            nomifun_common::LoopbackSessionBinding::terminal("terminal-1"),
+            [
+                nomifun_api_types::GATEWAY_LIST_TOOLS_OPERATION,
+                GATEWAY_CALL_TOOL_OPERATION,
+            ],
+            child.bootstrap.access.claims.scope.clone(),
+        )
+        .unwrap();
+        let (token, _) = server
+            .issuer
+            .activate(GATEWAY_CAPABILITY_DOMAIN, &claims)
+            .unwrap();
+        let (status, _) = post_tool(
+            server.http_port(),
+            Some(&token),
+            json!({"tool": "nomi_list_conversations", "args": {}, "session": claims}),
+        )
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn tools_call_requires_signed_operation_scope() {
+        let server = GatewayMcpServer::start().await.unwrap();
+        let child = child(&server, "system_default_user", "1");
+        let mut claims = child.bootstrap.access.claims.clone();
+        claims.allowed_tools = vec![nomifun_api_types::GATEWAY_LIST_TOOLS_OPERATION.into()];
+        let (token, _) = server
+            .issuer
+            .activate(GATEWAY_CAPABILITY_DOMAIN, &claims)
+            .unwrap();
+        let (status, body) = post_tool(
+            server.http_port(),
+            Some(&token),
+            json!({"tool": "nomi_list_conversations", "args": {}, "session": claims}),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"], "forbidden");
     }
 
     #[test]

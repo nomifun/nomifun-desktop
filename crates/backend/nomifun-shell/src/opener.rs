@@ -1,4 +1,4 @@
-use nomifun_runtime::Builder as CmdBuilder;
+use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 
 use crate::error::ShellError;
 

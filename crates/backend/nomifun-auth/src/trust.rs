@@ -82,6 +82,10 @@ pub struct TrustState {
     pub policy: AuthPolicy,
     /// The per-boot secret. Only `Some` under [`AuthPolicy::TrustLocalToken`].
     pub local_trust_secret: Option<Arc<str>>,
+    /// Canonical installation owner resolved from the database at boot. Local
+    /// trust grants this exact identity; it never reconstructs one from a
+    /// username, request payload, or module-level fallback.
+    pub authoritative_user_id: Arc<str>,
 }
 
 /// Constant-time comparison of two strings. Length may leak (the secret is
@@ -126,8 +130,8 @@ pub fn is_locally_trusted(state: &TrustState, headers: &HeaderMap) -> bool {
 pub async fn trust_resolve_middleware(State(state): State<TrustState>, mut request: Request, next: Next) -> Response {
     if is_locally_trusted(&state, request.headers()) {
         request.extensions_mut().insert(CurrentUser {
-            id: SYSTEM_USER_ID.to_string(),
-            username: SYSTEM_USER_ID.to_string(),
+            id: state.authoritative_user_id.to_string(),
+            username: state.authoritative_user_id.to_string(),
         });
         request.extensions_mut().insert(LocalTrusted);
     }
@@ -161,13 +165,21 @@ mod tests {
 
     #[test]
     fn no_auth_always_trusted() {
-        let st = TrustState { policy: AuthPolicy::NoAuth, local_trust_secret: None };
+        let st = TrustState {
+            policy: AuthPolicy::NoAuth,
+            local_trust_secret: None,
+            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
+        };
         assert!(is_locally_trusted(&st, &hdrs(None)));
     }
 
     #[test]
     fn required_never_trusted() {
-        let st = TrustState { policy: AuthPolicy::Required, local_trust_secret: None };
+        let st = TrustState {
+            policy: AuthPolicy::Required,
+            local_trust_secret: None,
+            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
+        };
         assert!(!is_locally_trusted(&st, &hdrs(Some("anything"))));
     }
 
@@ -176,6 +188,7 @@ mod tests {
         let st = TrustState {
             policy: AuthPolicy::TrustLocalToken,
             local_trust_secret: Some(Arc::from("s3cr3t-abc")),
+            authoritative_user_id: Arc::from(SYSTEM_USER_ID),
         };
         assert!(is_locally_trusted(&st, &hdrs(Some("s3cr3t-abc"))));
         assert!(!is_locally_trusted(&st, &hdrs(Some("wrong"))));

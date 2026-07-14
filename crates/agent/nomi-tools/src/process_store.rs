@@ -1,6 +1,6 @@
-//! Numeric legacy-session adapter shared by `exec_command` and `write_stdin`.
+//! Numeric-session adapter shared by `exec_command` and `write_stdin`.
 //!
-//! The shared execution supervisor owns every process and transport. This store
+//! The shared process supervisor owns every process and transport. This store
 //! retains only owner-qualified session identities plus incremental output
 //! cursor metadata; it never owns a PTY or OS process.
 
@@ -14,33 +14,33 @@ use std::{
     },
 };
 
-use nomi_execution::{
-    ExecutionOwner, OutputCursor, OutputSnapshot, SessionId, Transport,
+use nomi_process_runtime::{
+    ProcessOwner, OutputCursor, OutputSnapshot, SessionId, Transport,
 };
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 
-/// Upper bound on retained legacy numeric session mappings.
+/// Upper bound on retained numeric session mappings.
 ///
 /// This matches the shared supervisor's default capacity. Reaching the cap is
 /// an explicit error: silently evicting a live mapping would leave an owned
-/// process running without any numeric identifier through which the legacy
+/// process running without any numeric identifier through which the command
 /// tools could address it.
 pub const MAX_PROCESSES: usize = 64;
 
 /// Immutable data installed when a running supervisor session is assigned a
-/// legacy numeric identifier.
+/// numeric identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacySessionBinding {
-    pub owner: ExecutionOwner,
+pub struct NumericSessionBinding {
+    pub owner: ProcessOwner,
     pub session_id: SessionId,
     pub cursor: OutputCursor,
     pub dropped_bytes: u64,
     pub transport: Transport,
 }
 
-impl LegacySessionBinding {
+impl NumericSessionBinding {
     pub fn new(
-        owner: ExecutionOwner,
+        owner: ProcessOwner,
         session_id: SessionId,
         cursor: OutputCursor,
         dropped_bytes: u64,
@@ -58,7 +58,7 @@ impl LegacySessionBinding {
     /// Build a binding after the initial `exec_command` poll has already
     /// delivered `output` to the caller.
     pub fn after_output(
-        owner: ExecutionOwner,
+        owner: ProcessOwner,
         session_id: SessionId,
         transport: Transport,
         output: &OutputSnapshot,
@@ -73,34 +73,34 @@ impl LegacySessionBinding {
     }
 }
 
-/// One owner-qualified supervisor identity behind a legacy numeric id.
+/// One owner-qualified supervisor identity behind a numeric id.
 ///
 /// `state` is deliberately per-entry. A `write_stdin` call may hold this mutex
 /// across a long poll without blocking lookups or operations on other sessions,
 /// while concurrent calls for the same numeric id cannot race the durable
 /// output cursor backwards.
 #[derive(Debug)]
-pub struct LegacySessionEntry {
-    owner: ExecutionOwner,
+pub struct NumericSessionEntry {
+    owner: ProcessOwner,
     session_id: SessionId,
     transport: Transport,
-    state: AsyncMutex<LegacySessionState>,
+    state: AsyncMutex<NumericSessionState>,
 }
 
-impl LegacySessionEntry {
-    fn new(binding: LegacySessionBinding) -> Self {
+impl NumericSessionEntry {
+    fn new(binding: NumericSessionBinding) -> Self {
         Self {
             owner: binding.owner,
             session_id: binding.session_id,
             transport: binding.transport,
-            state: AsyncMutex::new(LegacySessionState {
+            state: AsyncMutex::new(NumericSessionState {
                 cursor: binding.cursor,
                 dropped_bytes: binding.dropped_bytes,
             }),
         }
     }
 
-    pub fn owner(&self) -> &ExecutionOwner {
+    pub fn owner(&self) -> &ProcessOwner {
         &self.owner
     }
 
@@ -112,19 +112,19 @@ impl LegacySessionEntry {
         self.transport
     }
 
-    pub async fn lock_state(&self) -> AsyncMutexGuard<'_, LegacySessionState> {
+    pub async fn lock_state(&self) -> AsyncMutexGuard<'_, NumericSessionState> {
         self.state.lock().await
     }
 }
 
 /// Durable per-call progress for one numeric session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LegacySessionState {
+pub struct NumericSessionState {
     cursor: OutputCursor,
     dropped_bytes: u64,
 }
 
-impl LegacySessionState {
+impl NumericSessionState {
     pub const fn cursor(&self) -> OutputCursor {
         self.cursor
     }
@@ -177,7 +177,7 @@ pub(crate) fn missed_bytes(
     retained_base.saturating_sub(previous_cursor.offset())
 }
 
-/// Metadata produced while atomically advancing a legacy session cursor.
+/// Metadata produced while atomically advancing a numeric session cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutputObservation {
     pub previous_cursor: OutputCursor,
@@ -193,31 +193,31 @@ pub struct OutputObservation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LegacySessionStoreError {
+pub enum NumericSessionStoreError {
     CapacityExhausted { max_sessions: usize },
     NumericIdExhausted,
 }
 
-impl fmt::Display for LegacySessionStoreError {
+impl fmt::Display for NumericSessionStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CapacityExhausted { max_sessions } => write!(
                 formatter,
-                "legacy numeric session capacity is exhausted (max sessions: {max_sessions})"
+                "numeric session capacity is exhausted (max sessions: {max_sessions})"
             ),
             Self::NumericIdExhausted => {
-                formatter.write_str("legacy numeric session id space is exhausted")
+                formatter.write_str("numeric session id space is exhausted")
             }
         }
     }
 }
 
-impl Error for LegacySessionStoreError {}
+impl Error for NumericSessionStoreError {}
 
-/// Short-lock adapter from legacy numeric ids to owner-qualified supervisor
+/// Short-lock adapter from numeric ids to owner-qualified supervisor
 /// sessions.
 pub struct ProcessStore {
-    inner: Mutex<HashMap<u64, Arc<LegacySessionEntry>>>,
+    inner: Mutex<HashMap<u64, Arc<NumericSessionEntry>>>,
     next_id: AtomicU64,
 }
 
@@ -239,48 +239,48 @@ impl ProcessStore {
 
     pub fn insert(
         &self,
-        binding: LegacySessionBinding,
-    ) -> Result<u64, LegacySessionStoreError> {
+        binding: NumericSessionBinding,
+    ) -> Result<u64, NumericSessionStoreError> {
         let mut sessions = self
             .inner
             .lock()
-            .expect("legacy session store mutex is poisoned");
+            .expect("numeric session store mutex is poisoned");
         if sessions.len() >= MAX_PROCESSES {
-            return Err(LegacySessionStoreError::CapacityExhausted {
+            return Err(NumericSessionStoreError::CapacityExhausted {
                 max_sessions: MAX_PROCESSES,
             });
         }
 
         let id = self
             .next_available_id(&sessions)
-            .ok_or(LegacySessionStoreError::NumericIdExhausted)?;
-        let replaced = sessions.insert(id, Arc::new(LegacySessionEntry::new(binding)));
+            .ok_or(NumericSessionStoreError::NumericIdExhausted)?;
+        let replaced = sessions.insert(id, Arc::new(NumericSessionEntry::new(binding)));
         debug_assert!(replaced.is_none(), "numeric session id was allocated twice");
         Ok(id)
     }
 
-    pub fn get(&self, id: u64) -> Option<Arc<LegacySessionEntry>> {
+    pub fn get(&self, id: u64) -> Option<Arc<NumericSessionEntry>> {
         self.inner
             .lock()
-            .expect("legacy session store mutex is poisoned")
+            .expect("numeric session store mutex is poisoned")
             .get(&id)
             .cloned()
     }
 
-    pub fn remove(&self, id: u64) -> Option<Arc<LegacySessionEntry>> {
+    pub fn remove(&self, id: u64) -> Option<Arc<NumericSessionEntry>> {
         self.inner
             .lock()
-            .expect("legacy session store mutex is poisoned")
+            .expect("numeric session store mutex is poisoned")
             .remove(&id)
     }
 
     /// Remove `id` only if it still refers to the exact entry previously
     /// returned by `get`.
-    pub fn remove_if_same(&self, id: u64, expected: &Arc<LegacySessionEntry>) -> bool {
+    pub fn remove_if_same(&self, id: u64, expected: &Arc<NumericSessionEntry>) -> bool {
         let mut sessions = self
             .inner
             .lock()
-            .expect("legacy session store mutex is poisoned");
+            .expect("numeric session store mutex is poisoned");
         let should_remove = sessions
             .get(&id)
             .is_some_and(|current| Arc::ptr_eq(current, expected));
@@ -293,7 +293,7 @@ impl ProcessStore {
     pub fn len(&self) -> usize {
         self.inner
             .lock()
-            .expect("legacy session store mutex is poisoned")
+            .expect("numeric session store mutex is poisoned")
             .len()
     }
 
@@ -304,14 +304,14 @@ impl ProcessStore {
     pub fn contains(&self, id: u64) -> bool {
         self.inner
             .lock()
-            .expect("legacy session store mutex is poisoned")
+            .expect("numeric session store mutex is poisoned")
             .contains_key(&id)
     }
 
-    pub fn entries(&self) -> Vec<(u64, Arc<LegacySessionEntry>)> {
+    pub fn entries(&self) -> Vec<(u64, Arc<NumericSessionEntry>)> {
         self.inner
             .lock()
-            .expect("legacy session store mutex is poisoned")
+            .expect("numeric session store mutex is poisoned")
             .iter()
             .map(|(id, entry)| (*id, Arc::clone(entry)))
             .collect()
@@ -319,7 +319,7 @@ impl ProcessStore {
 
     fn next_available_id(
         &self,
-        sessions: &HashMap<u64, Arc<LegacySessionEntry>>,
+        sessions: &HashMap<u64, Arc<NumericSessionEntry>>,
     ) -> Option<u64> {
         // At most 64 ids are live, so MAX_PROCESSES + 1 probes are enough to
         // skip zero and any collision after the atomic counter wraps.
@@ -336,15 +336,15 @@ impl ProcessStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomi_execution::{EncodingMetadata, OutputChunk, OutputStream};
+    use nomi_process_runtime::{EncodingMetadata, OutputChunk, OutputStream};
     use uuid::Uuid;
 
-    fn owner() -> ExecutionOwner {
-        ExecutionOwner::new(Uuid::now_v7(), Uuid::now_v7())
+    fn owner() -> ProcessOwner {
+        ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7())
     }
 
-    fn binding(cursor: u64, dropped_bytes: u64, transport: Transport) -> LegacySessionBinding {
-        LegacySessionBinding::new(
+    fn binding(cursor: u64, dropped_bytes: u64, transport: Transport) -> NumericSessionBinding {
+        NumericSessionBinding::new(
             owner(),
             SessionId::new(),
             OutputCursor::new(cursor),
@@ -397,7 +397,7 @@ mod tests {
         let delivered = output(42, 10, 32);
         let owner = owner();
         let session_id = SessionId::new();
-        let binding = LegacySessionBinding::after_output(
+        let binding = NumericSessionBinding::after_output(
             owner.clone(),
             session_id,
             Transport::Pipe,
@@ -413,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_output_reports_exact_cursor_gap_not_cumulative_drop_delta() {
-        let entry = LegacySessionEntry::new(binding(5, 2, Transport::Pipe));
+        let entry = NumericSessionEntry::new(binding(5, 2, Transport::Pipe));
         let mut state = entry.lock_state().await;
 
         // next=10, retained=4 => retained base is 6. Cursor 5 missed one byte,
@@ -440,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn replaying_the_same_snapshot_does_not_repeat_drop_metadata() {
-        let entry = LegacySessionEntry::new(binding(0, 0, Transport::Pipe));
+        let entry = NumericSessionEntry::new(binding(0, 0, Transport::Pipe));
         let mut state = entry.lock_state().await;
         let snapshot = output(10, 4, 6);
 
@@ -456,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_snapshot_cannot_move_cursor_or_drop_counter_backwards() {
-        let entry = LegacySessionEntry::new(binding(10, 7, Transport::Pipe));
+        let entry = NumericSessionEntry::new(binding(10, 7, Transport::Pipe));
         let mut state = entry.lock_state().await;
 
         let observed = state.record_output(&output(8, 4, 5));
@@ -521,7 +521,7 @@ mod tests {
 
         assert_eq!(
             error,
-            LegacySessionStoreError::CapacityExhausted {
+            NumericSessionStoreError::CapacityExhausted {
                 max_sessions: MAX_PROCESSES
             }
         );
@@ -581,7 +581,7 @@ mod tests {
             dropped_bytes: 0,
             encoding: EncodingMetadata::default(),
         };
-        let binding = LegacySessionBinding::after_output(
+        let binding = NumericSessionBinding::after_output(
             owner(),
             SessionId::new(),
             Transport::Pipe,

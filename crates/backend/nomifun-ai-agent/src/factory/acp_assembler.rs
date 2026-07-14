@@ -1,11 +1,13 @@
-use crate::shared_kernel::PersistedSessionState;
+use crate::session::PersistedSessionState;
 use agent_client_protocol::schema::{EnvVariable, McpServer, McpServerStdio, NewSessionRequest};
 use nomifun_api_types::AgentMetadata;
 use nomifun_api_types::{
     AcpBuildExtra, BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, OpenMcpConfig,
     RequirementMcpConfig,
 };
-use nomifun_common::CommandSpec;
+use nomifun_common::{
+    CommandSpec, LoopbackCapabilityLease, LoopbackCapabilityLeaseSet,
+};
 use nomifun_knowledge::context::{
     KnowledgeContextFormat, KnowledgeContextOptions, build_knowledge_context,
 };
@@ -32,6 +34,10 @@ pub struct AcpSessionParams {
     pub command_spec: CommandSpec,
     pub config: AcpBuildExtra,
     pub mcp_servers: Vec<McpServer>,
+    /// Process-local capability guards for the scoped built-in MCP bridges.
+    /// The manager's `Arc<AcpSessionParams>` owns these for exactly the ACP
+    /// runtime lifetime; final drop revokes every renewable lease.
+    pub loopback_capability_leases: LoopbackCapabilityLeaseSet,
     pub preset_context: Option<String>,
     /// The knowledge-base retrieval-protocol section, kept SEPARATE from
     /// `preset_context`. Delivered on the FIRST prompt of every session open
@@ -80,7 +86,12 @@ pub async fn assemble_acp_params(
     session_snapshot: Option<PersistedSessionState>,
     data_dir: PathBuf,
 ) -> AcpSessionParams {
-    let mcp_servers = resolve_mcp_servers(&config, &conversation_id, user_mcp_servers);
+    let (mcp_servers, loopback_capability_leases) = resolve_mcp_servers(
+        &config,
+        &conversation_id,
+        &workspace.path,
+        user_mcp_servers,
+    );
     let preset_context = append_launch_nudge(
         compose_preset_context(
             config.preset_context.as_deref(),
@@ -102,6 +113,7 @@ pub async fn assemble_acp_params(
         command_spec,
         config,
         mcp_servers,
+        loopback_capability_leases,
         preset_context,
         knowledge_context,
         session_snapshot,
@@ -111,23 +123,31 @@ pub async fn assemble_acp_params(
 
 /// Determine which MCP servers to inject into `session/new`.
 ///
-/// Layout: `[requirement?, ...user_mcp_servers]`. Team/guide MCP is intentionally
-/// not injected because Team is not surfaced in the product. The requirement MCP
-/// server is injected independently so that
+/// Layout: `[requirement?, ...user_mcp_servers]`. The requirement MCP server is
+/// injected independently so that
 /// AutoWork can drive any ACP session; it is harmless when the session is not an
 /// AutoWork target because its tools are simply never called. The user's own
 /// enabled MCP servers are always appended last.
 fn resolve_mcp_servers(
     config: &AcpBuildExtra,
     conversation_id: &str,
+    workspace_path: &str,
     user_mcp_servers: Vec<McpServer>,
-) -> Vec<McpServer> {
+) -> (Vec<McpServer>, LoopbackCapabilityLeaseSet) {
     let mut servers: Vec<McpServer> = Vec::new();
+    let mut leases = LoopbackCapabilityLeaseSet::new();
     if let Some(req_cfg) = config.requirement_mcp_config.as_ref() {
-        servers.push(requirement_mcp_server(req_cfg, conversation_id));
+        if let Some((server, lease)) = requirement_mcp_server(
+            req_cfg,
+            config.user_id.as_deref().unwrap_or_default(),
+            conversation_id,
+        ) {
+            servers.push(server);
+            leases.push(lease);
+        }
     }
     // Scoped knowledge-search MCP: injected ONLY when the session has bound
-    // bases (independent of `desktop_gateway`). The bound base ids are baked
+    // bases (independent of the platform Gateway). The bound base ids are baked
     // into the server's env here, so the model-facing tool stays query-only.
     if let Some(cfg) = config.knowledge_mcp_config.as_ref()
         && !config.knowledge_mounts.is_empty()
@@ -137,7 +157,17 @@ fn resolve_mcp_servers(
             .iter()
             .map(|m| m.id.clone())
             .collect();
-        servers.push(knowledge_mcp_server(cfg, &kb_ids));
+        if let Some((server, lease)) = knowledge_mcp_server(
+            cfg,
+            config.user_id.as_deref().unwrap_or_default(),
+            conversation_id,
+            workspace_path,
+            &kb_ids,
+            config.knowledge_writeback,
+        ) {
+            servers.push(server);
+            leases.push(lease);
+        }
     }
     // Reliable-launch `open` tool, injected unconditionally like requirement
     // (config is `Some` only on Windows, so this is a no-op on macOS/Linux).
@@ -158,13 +188,14 @@ fn resolve_mcp_servers(
     if let Some(browser_cfg) = config.browser_mcp_config.as_ref() {
         servers.push(browser_mcp_server(browser_cfg));
     }
-    if config.desktop_gateway
-        && let Some(gw_cfg) = config.gateway_mcp_config.as_ref()
-    {
-        servers.push(gateway_mcp_server(gw_cfg, config, conversation_id));
+    if let Some(gw_cfg) = config.gateway_mcp_config.as_ref() {
+        if let Some((server, lease)) = gateway_mcp_server(gw_cfg, config, conversation_id) {
+            servers.push(server);
+            leases.push(lease);
+        }
     }
     servers.extend(user_mcp_servers);
-    servers
+    (servers, leases)
 }
 
 /// Compose first-message preset context.
@@ -308,61 +339,82 @@ fn build_knowledge_context_section(
 /// `requirement_update_status` calls back to the in-process
 /// `RequirementMcpServer`. `conversation_id` is passed so mutations can be
 /// scoped to the calling session.
-fn requirement_mcp_server(cfg: &RequirementMcpConfig, conversation_id: &str) -> McpServer {
-    let env = vec![
-        EnvVariable::new(
-            RequirementMcpConfig::ENV_PORT.to_owned(),
-            cfg.port.to_string(),
-        ),
-        EnvVariable::new(
-            RequirementMcpConfig::ENV_TOKEN.to_owned(),
-            cfg.token.clone(),
-        ),
-        EnvVariable::new(
-            RequirementMcpConfig::ENV_CONVERSATION_ID.to_owned(),
-            conversation_id.to_owned(),
-        ),
-    ];
-    let stdio = McpServerStdio::new(RequirementMcpConfig::SERVER_NAME, &cfg.binary_path)
+fn requirement_mcp_server(
+    cfg: &RequirementMcpConfig,
+    user_id: &str,
+    conversation_id: &str,
+) -> Option<(McpServer, LoopbackCapabilityLease)> {
+    let conversation_id = match conversation_id.parse::<i64>() {
+        Ok(id) if id > 0 => id,
+        _ => {
+            tracing::warn!(conversation_id, "requirement MCP capability issuance rejected non-numeric conversation id");
+            return None;
+        }
+    };
+    let child = match cfg.issue_for_conversation(user_id, conversation_id) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, conversation_id, "requirement MCP capability issuance failed closed");
+            return None;
+        }
+    };
+    let env = vec![EnvVariable::new(
+        RequirementMcpConfig::ENV_CAPABILITY.to_owned(),
+        child
+            .bootstrap_json()
+            .expect("validated requirement bootstrap serializes"),
+    )];
+    let stdio = McpServerStdio::new(
+        RequirementMcpConfig::SERVER_NAME,
+        &child.binary_path,
+    )
         .args(vec!["mcp-requirement-stdio".to_owned()])
         .env(env);
-    McpServer::Stdio(stdio)
+    Some((McpServer::Stdio(stdio), child.lease))
 }
 
 /// Build the scoped knowledge-search MCP stdio bridge server for an ACP session
 /// that has bound knowledge bases. The bridge (`nomicore mcp-knowledge-stdio`)
 /// forwards `knowledge_search` calls back to the in-process retrieval server.
 ///
-/// SECURITY: the bound `kb_ids` are BAKED into this server's env
-/// (`NOMI_KB_MCP_KB_IDS`) at injection time, NOT supplied by the model — the
-/// agent-facing tool takes only `query`/`limit`, so the model cannot widen the
-/// searchable base set. The server uses its OWN port/token (from
-/// `KnowledgeMcpConfig`), never the gateway's.
+/// SECURITY: workspace, bound `kb_ids`, write authority, user and session are
+/// signed into one short-lived claims document. The child receives only the
+/// scoped token, never this issuer's root secret, and the model-facing tool
+/// cannot widen the searchable base set.
 fn knowledge_mcp_server(
     cfg: &nomifun_api_types::KnowledgeMcpConfig,
+    user_id: &str,
+    conversation_id: &str,
+    workspace_path: &str,
     kb_ids: &[String],
-) -> McpServer {
-    let env = vec![
-        EnvVariable::new(
-            nomifun_api_types::KnowledgeMcpConfig::ENV_PORT.to_owned(),
-            cfg.port.to_string(),
-        ),
-        EnvVariable::new(
-            nomifun_api_types::KnowledgeMcpConfig::ENV_TOKEN.to_owned(),
-            cfg.token.clone(),
-        ),
-        EnvVariable::new(
-            nomifun_api_types::KnowledgeMcpConfig::ENV_KB_IDS.to_owned(),
-            serde_json::to_string(kb_ids).unwrap_or_else(|_| "[]".to_owned()),
-        ),
-    ];
+    allow_write: bool,
+) -> Option<(McpServer, LoopbackCapabilityLease)> {
+    let child = match cfg.issue_for_conversation(
+        user_id,
+        conversation_id,
+        workspace_path,
+        kb_ids,
+        allow_write,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, conversation_id, "knowledge MCP capability issuance failed closed");
+            return None;
+        }
+    };
+    let env = vec![EnvVariable::new(
+        nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY.to_owned(),
+        child
+            .bootstrap_json()
+            .expect("validated knowledge bootstrap serializes"),
+    )];
     let stdio = McpServerStdio::new(
         nomifun_api_types::KnowledgeMcpConfig::SERVER_NAME,
-        &cfg.binary_path,
+        &child.binary_path,
     )
     .args(vec!["mcp-knowledge-stdio".to_owned()])
     .env(env);
-    McpServer::Stdio(stdio)
+    Some((McpServer::Stdio(stdio), child.lease))
 }
 
 /// Build the reliable-launch (`open`) MCP stdio bridge server. The bridge
@@ -398,8 +450,9 @@ fn browser_mcp_server(cfg: &BrowserMcpConfig) -> McpServer {
     McpServer::Stdio(stdio)
 }
 
-/// Build the Desktop Gateway MCP stdio bridge server for an ACP session that
-/// carries the backend-set `desktopGateway` flag. The bridge
+/// Build the Platform Gateway MCP stdio bridge for an ACP session. The
+/// process-owned issuer config is the authority; no Conversation JSON flag
+/// participates. The bridge receives only one short-lived child capability.
 /// (`nomicore mcp-gateway-stdio`) forwards every `nomi_*` desktop tool call
 /// back to the in-process `GatewayMcpServer`. Caller conversation + user ids
 /// are passed for self-protection and data scoping; the companion binding (when
@@ -408,66 +461,52 @@ fn gateway_mcp_server(
     cfg: &GatewayMcpConfig,
     extra: &AcpBuildExtra,
     conversation_id: &str,
-) -> McpServer {
-    let mut env = vec![
-        EnvVariable::new(GatewayMcpConfig::ENV_PORT.to_owned(), cfg.port.to_string()),
-        EnvVariable::new(GatewayMcpConfig::ENV_TOKEN.to_owned(), cfg.token.clone()),
-        EnvVariable::new(
-            GatewayMcpConfig::ENV_CONVERSATION_ID.to_owned(),
-            conversation_id.to_owned(),
-        ),
-        EnvVariable::new(
-            GatewayMcpConfig::ENV_USER_ID.to_owned(),
-            extra.user_id.clone().unwrap_or_default(),
-        ),
-    ];
-    if let Some(companion_id) = extra
-        .companion_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        env.push(EnvVariable::new(
-            GatewayMcpConfig::ENV_COMPANION_ID.to_owned(),
-            companion_id.to_owned(),
-        ));
-    }
-    if let Some(platform) = extra
-        .channel_platform
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        env.push(EnvVariable::new(
-            GatewayMcpConfig::ENV_CHANNEL_PLATFORM.to_owned(),
-            platform.to_owned(),
-        ));
-    }
-    if let Some(mode) = extra
-        .session_mode
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        env.push(EnvVariable::new(
-            GatewayMcpConfig::ENV_SESSION_MODE.to_owned(),
-            mode.to_owned(),
-        ));
-    }
-    env.push(EnvVariable::new(
-        GatewayMcpConfig::ENV_PROFILE.to_owned(),
-        GatewayMcpConfig::default_profile_for_session(extra.channel_platform.as_deref()).to_owned(),
-    ));
-    let stdio = McpServerStdio::new(GatewayMcpConfig::SERVER_NAME, &cfg.binary_path)
+) -> Option<(McpServer, LoopbackCapabilityLease)> {
+    let child = match cfg.issue_for_conversation(
+        extra.user_id.as_deref().unwrap_or_default(),
+        conversation_id,
+        extra.companion_id.as_deref(),
+        extra.channel_platform.as_deref(),
+        extra.session_mode.as_deref(),
+        &extra.gateway_excluded_tools,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, conversation_id, "gateway MCP capability issuance failed closed");
+            return None;
+        }
+    };
+    let env = vec![EnvVariable::new(
+        GatewayMcpConfig::ENV_CAPABILITY.to_owned(),
+        child
+            .bootstrap_json()
+            .expect("validated gateway bootstrap serializes"),
+    )];
+    let stdio = McpServerStdio::new(GatewayMcpConfig::SERVER_NAME, &child.binary_path)
         .args(vec!["mcp-gateway-stdio".to_owned()])
         .env(env);
-    McpServer::Stdio(stdio)
+    Some((McpServer::Stdio(stdio), child.lease))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_api_types::GuideMcpConfig;
+
+    fn test_issuer() -> std::sync::Arc<nomifun_common::LoopbackCapabilityIssuer> {
+        std::sync::Arc::new(nomifun_common::LoopbackCapabilityIssuer::random().unwrap())
+    }
+
+    fn requirement_config(port: u16, binary: &str) -> RequirementMcpConfig {
+        RequirementMcpConfig::from_issuer(port, test_issuer(), binary.into())
+    }
+
+    fn knowledge_config(port: u16, binary: &str) -> nomifun_api_types::KnowledgeMcpConfig {
+        nomifun_api_types::KnowledgeMcpConfig::from_issuer(port, test_issuer(), binary.into())
+    }
+
+    fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {
+        GatewayMcpConfig::from_issuer(port, test_issuer(), binary.into(), std::sync::Arc::<str>::from(owner))
+    }
 
     #[test]
     fn compose_preset_context_passes_through_base_context() {
@@ -603,20 +642,15 @@ mod tests {
     }
 
     #[test]
-    fn desktop_gateway_flag_injects_gateway_mcp_server() {
+    fn process_owned_gateway_config_injects_gateway_mcp_server() {
         let config = AcpBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41236,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
             user_id: Some("u1".into()),
             companion_id: Some("companion_9".into()),
             session_mode: Some("yolo".into()),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-1", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(rendered.contains("mcp-gateway-stdio"), "got {rendered}");
         assert!(
@@ -624,31 +658,7 @@ mod tests {
             "got {rendered}"
         );
         assert!(
-            rendered.contains(GatewayMcpConfig::ENV_PORT),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_TOKEN),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_CONVERSATION_ID),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_USER_ID),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_COMPANION_ID),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_PROFILE),
-            "got {rendered}"
-        );
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_SESSION_MODE),
+            rendered.contains(GatewayMcpConfig::ENV_CAPABILITY),
             "got {rendered}"
         );
         assert!(rendered.contains("yolo"), "got {rendered}");
@@ -659,48 +669,39 @@ mod tests {
         assert!(rendered.contains("conv-1"), "got {rendered}");
         assert!(rendered.contains("u1"), "got {rendered}");
         assert!(rendered.contains("companion_9"), "got {rendered}");
+        assert!(
+            !rendered.contains("gw-root-secret"),
+            "root Gateway issuer secret must never leave the backend: {rendered}"
+        );
     }
 
     #[test]
     fn gateway_env_omits_companion_id_when_unbound() {
         let config = AcpBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41236,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
             user_id: Some("u1".into()),
             companion_id: None,
             channel_platform: None,
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-1", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(
-            !rendered.contains(GatewayMcpConfig::ENV_COMPANION_ID),
-            "no binding → no env var, got {rendered}"
+            !rendered.contains("companion_id"),
+            "no binding → signed claims omit companion_id, got {rendered}"
         );
     }
 
     #[test]
     fn gateway_env_uses_lite_profile_for_channel_sessions() {
         let config = AcpBuildExtra {
-            desktop_gateway: true,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41236,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: Some(gateway_config(41236, "/usr/bin/nomicore", "owner")),
+            user_id: Some("u1".into()),
             channel_platform: Some("lark".into()),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-1", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
-        assert!(
-            rendered.contains(GatewayMcpConfig::ENV_PROFILE),
-            "got {rendered}"
-        );
         assert!(
             rendered.contains(GatewayMcpConfig::PROFILE_LITE),
             "got {rendered}"
@@ -708,19 +709,12 @@ mod tests {
     }
 
     #[test]
-    fn gateway_mcp_requires_the_desktop_gateway_flag() {
-        // Config present but flag false (e.g. a stale persisted config) →
-        // the gateway must NOT be injected.
+    fn gateway_mcp_is_absent_without_process_owned_config() {
         let config = AcpBuildExtra {
-            desktop_gateway: false,
-            gateway_mcp_config: Some(GatewayMcpConfig {
-                port: 41236,
-                token: "gw-tok".into(),
-                binary_path: "/usr/bin/nomicore".into(),
-            }),
+            gateway_mcp_config: None,
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-1", vec![]);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", vec![]);
         let rendered = serde_json::to_string(&servers).expect("McpServer serializes");
         assert!(!rendered.contains("mcp-gateway-stdio"), "got {rendered}");
     }
@@ -780,130 +774,10 @@ mod tests {
         McpServer::Stdio(McpServerStdio::new(name, "/bin/sh"))
     }
 
-    #[test]
-    fn resolve_mcp_servers_ignores_team_and_guide_configs() {
-        let config = AcpBuildExtra {
-            agent_id: None,
-            backend: Some("claude".into()),
-            cli_path: None,
-            agent_name: None,
-            custom_agent_id: None,
-            preset_context: None,
-            skills: vec![],
-            preset_id: None,
-            session_mode: None,
-            current_model_id: None,
-            cron_job_id: None,
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8888,
-                token: "guide-tok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
-            requirement_mcp_config: None,
-            knowledge_mcp_config: None,
-            desktop_gateway: false,
-            gateway_mcp_config: None,
-            open_mcp_config: None,
-            computer_mcp_config: None,
-            browser_mcp_config: None,
-            mcp_server_ids: None,
-            session_mcp_servers: vec![],
-            user_id: None,
-            companion_id: None,
-            channel_platform: None,
-            knowledge_mounts: vec![],
-            knowledge_writeback: false,
-            knowledge_writeback_mode: None,
-            knowledge_writeback_eagerness: None,
-        };
-        let servers = resolve_mcp_servers(&config, "conv-1", Vec::new());
-        assert!(servers.is_empty());
-    }
-
-    #[test]
-    fn resolve_mcp_servers_ignores_guide_for_builtin_solo() {
-        let config = AcpBuildExtra {
-            agent_id: None,
-            backend: Some("claude".into()),
-            cli_path: None,
-            agent_name: None,
-            custom_agent_id: None,
-            preset_context: None,
-            skills: vec![],
-            preset_id: None,
-            session_mode: None,
-            current_model_id: None,
-            cron_job_id: None,
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8888,
-                token: "guide-tok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
-            requirement_mcp_config: None,
-            knowledge_mcp_config: None,
-            desktop_gateway: false,
-            gateway_mcp_config: None,
-            open_mcp_config: None,
-            computer_mcp_config: None,
-            browser_mcp_config: None,
-            mcp_server_ids: None,
-            session_mcp_servers: vec![],
-            user_id: None,
-            companion_id: None,
-            channel_platform: None,
-            knowledge_mounts: vec![],
-            knowledge_writeback: false,
-            knowledge_writeback_mode: None,
-            knowledge_writeback_eagerness: None,
-        };
-        let servers = resolve_mcp_servers(&config, "conv-1", Vec::new());
-        assert!(servers.is_empty());
-    }
-
-    #[test]
-    fn resolve_mcp_servers_ignores_guide_for_unknown_backend() {
-        let config = AcpBuildExtra {
-            agent_id: None,
-            backend: Some("unknown-backend".into()),
-            cli_path: None,
-            agent_name: None,
-            custom_agent_id: None,
-            preset_context: None,
-            skills: vec![],
-            preset_id: None,
-            session_mode: None,
-            current_model_id: None,
-            cron_job_id: None,
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8888,
-                token: "guide-tok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
-            requirement_mcp_config: None,
-            knowledge_mcp_config: None,
-            desktop_gateway: false,
-            gateway_mcp_config: None,
-            open_mcp_config: None,
-            computer_mcp_config: None,
-            browser_mcp_config: None,
-            mcp_server_ids: None,
-            session_mcp_servers: vec![],
-            user_id: None,
-            companion_id: None,
-            channel_platform: None,
-            knowledge_mounts: vec![],
-            knowledge_writeback: false,
-            knowledge_writeback_mode: None,
-            knowledge_writeback_eagerness: None,
-        };
-        let servers = resolve_mcp_servers(&config, "conv-1", Vec::new());
-        assert!(servers.is_empty());
-    }
-
     /// Core ELECTRON-1JG regression contract: when the operator has
     /// configured user MCP servers (e.g. via Settings → MCP), they must
-    /// reach the `session/new` payload — even when there's no team or
-    /// built-in bridge injection. Pre-fix: this returned an empty Vec because
+    /// reach the `session/new` payload even without built-in bridge injection.
+    /// Pre-fix: this returned an empty Vec because
     /// the factory only knew about internal MCP config fields.
     #[test]
     fn resolve_mcp_servers_appends_user_servers_in_solo_session() {
@@ -919,11 +793,10 @@ mod tests {
             session_mode: None,
             current_model_id: None,
             cron_job_id: None,
-            guide_mcp_config: None,
             requirement_mcp_config: None,
             knowledge_mcp_config: None,
-            desktop_gateway: false,
             gateway_mcp_config: None,
+            gateway_excluded_tools: vec![],
             open_mcp_config: None,
             computer_mcp_config: None,
             browser_mcp_config: None,
@@ -938,7 +811,7 @@ mod tests {
             knowledge_writeback_eagerness: None,
         };
         let user = vec![user_stdio("ctx7"), user_stdio("playwright")];
-        let servers = resolve_mcp_servers(&config, "conv-1", user);
+        let (servers, _leases) = resolve_mcp_servers(&config, "conv-1", "/workspace", user);
         assert_eq!(servers.len(), 2);
         let names: Vec<_> = servers
             .iter()
@@ -948,94 +821,6 @@ mod tests {
             })
             .collect();
         assert_eq!(names, vec!["ctx7", "playwright"]);
-    }
-
-    /// Team config is ignored; user-configured MCP servers still pass through.
-    #[test]
-    fn resolve_mcp_servers_team_config_does_not_displace_user_servers() {
-        let config = AcpBuildExtra {
-            agent_id: None,
-            backend: Some("claude".into()),
-            cli_path: None,
-            agent_name: None,
-            custom_agent_id: None,
-            preset_context: None,
-            skills: vec![],
-            preset_id: None,
-            session_mode: None,
-            current_model_id: None,
-            cron_job_id: None,
-            guide_mcp_config: None,
-            requirement_mcp_config: None,
-            knowledge_mcp_config: None,
-            desktop_gateway: false,
-            gateway_mcp_config: None,
-            open_mcp_config: None,
-            computer_mcp_config: None,
-            browser_mcp_config: None,
-            mcp_server_ids: None,
-            session_mcp_servers: vec![],
-            user_id: None,
-            companion_id: None,
-            channel_platform: None,
-            knowledge_mounts: vec![],
-            knowledge_writeback: false,
-            knowledge_writeback_mode: None,
-            knowledge_writeback_eagerness: None,
-        };
-        let user = vec![user_stdio("ctx7")];
-        let servers = resolve_mcp_servers(&config, "conv-1", user);
-        assert_eq!(servers.len(), 1);
-        match &servers[0] {
-            McpServer::Stdio(s) => assert_eq!(s.name, "ctx7"),
-            _ => panic!("expected stdio"),
-        }
-    }
-
-    /// Guide config is ignored; user MCP servers still pass through.
-    #[test]
-    fn resolve_mcp_servers_guide_config_does_not_displace_user_servers() {
-        let config = AcpBuildExtra {
-            agent_id: None,
-            backend: Some("claude".into()),
-            cli_path: None,
-            agent_name: None,
-            custom_agent_id: None,
-            preset_context: None,
-            skills: vec![],
-            preset_id: None,
-            session_mode: None,
-            current_model_id: None,
-            cron_job_id: None,
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8888,
-                token: "guide-tok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
-            requirement_mcp_config: None,
-            knowledge_mcp_config: None,
-            desktop_gateway: false,
-            gateway_mcp_config: None,
-            open_mcp_config: None,
-            computer_mcp_config: None,
-            browser_mcp_config: None,
-            mcp_server_ids: None,
-            session_mcp_servers: vec![],
-            user_id: None,
-            companion_id: None,
-            channel_platform: None,
-            knowledge_mounts: vec![],
-            knowledge_writeback: false,
-            knowledge_writeback_mode: None,
-            knowledge_writeback_eagerness: None,
-        };
-        let user = vec![user_stdio("ctx7")];
-        let servers = resolve_mcp_servers(&config, "conv-1", user);
-        assert_eq!(servers.len(), 1);
-        match &servers[0] {
-            McpServer::Stdio(s) => assert_eq!(s.name, "ctx7"),
-            _ => panic!("expected stdio"),
-        }
     }
 
     /// The pre-fix bug: with no internal MCP configured and an empty
@@ -1055,11 +840,10 @@ mod tests {
             session_mode: None,
             current_model_id: None,
             cron_job_id: None,
-            guide_mcp_config: None,
             requirement_mcp_config: None,
             knowledge_mcp_config: None,
-            desktop_gateway: false,
             gateway_mcp_config: None,
+            gateway_excluded_tools: vec![],
             open_mcp_config: None,
             computer_mcp_config: None,
             browser_mcp_config: None,
@@ -1073,7 +857,8 @@ mod tests {
             knowledge_writeback_mode: None,
             knowledge_writeback_eagerness: None,
         };
-        let servers = resolve_mcp_servers(&config, "conv-1", Vec::new());
+        let (servers, _leases) =
+            resolve_mcp_servers(&config, "conv-1", "/workspace", Vec::new());
         assert!(servers.is_empty());
     }
 
@@ -1081,14 +866,12 @@ mod tests {
     fn resolve_mcp_servers_appends_requirement_when_configured() {
         let config = AcpBuildExtra {
             backend: Some("claude".into()),
-            requirement_mcp_config: Some(RequirementMcpConfig {
-                port: 41000,
-                token: "rtok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
+            requirement_mcp_config: Some(requirement_config(41000, "/bin/backend")),
+            user_id: Some("user-1".into()),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-9", Vec::new());
+        let (servers, leases) = resolve_mcp_servers(&config, "9", "/workspace", Vec::new());
+        assert_eq!(leases.len(), 1);
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => {
@@ -1097,8 +880,11 @@ mod tests {
                     s.args.iter().any(|a| a == "mcp-requirement-stdio"),
                     "must spawn the requirement stdio bridge"
                 );
-                // port + token + conversation_id env vars are set.
-                assert_eq!(s.env.len(), 3, "expected port/token/conversation env vars");
+                // One indivisible capability bootstrap is set.
+                assert_eq!(s.env.len(), 1, "expected one capability env var");
+                let rendered = serde_json::to_string(&s.env).unwrap();
+                assert!(rendered.contains(RequirementMcpConfig::ENV_CAPABILITY));
+                assert!(!rendered.contains("root-secret"));
             }
             _ => panic!("expected stdio server"),
         }
@@ -1113,7 +899,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-open", Vec::new());
+        let (servers, _leases) =
+            resolve_mcp_servers(&config, "conv-open", "/workspace", Vec::new());
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => {
@@ -1138,7 +925,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-computer", Vec::new());
+        let (servers, _leases) =
+            resolve_mcp_servers(&config, "conv-computer", "/workspace", Vec::new());
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => {
@@ -1165,7 +953,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-browser", Vec::new());
+        let (servers, _leases) =
+            resolve_mcp_servers(&config, "conv-browser", "/workspace", Vec::new());
         assert_eq!(servers.len(), 1);
         match &servers[0] {
             McpServer::Stdio(s) => {
@@ -1199,7 +988,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config, "conv-both", Vec::new());
+        let (servers, _leases) =
+            resolve_mcp_servers(&config, "conv-both", "/workspace", Vec::new());
         assert_eq!(servers.len(), 2, "both bridges injected");
         let names: Vec<&str> = servers
             .iter()
@@ -1234,26 +1024,17 @@ mod tests {
         );
     }
 
-    /// Requirement injection is orthogonal to guide config: guide is ignored,
-    /// while requirement and user servers still pass through in deterministic order.
+    /// Requirement and user servers are emitted in deterministic order.
     #[test]
-    fn resolve_mcp_servers_requirement_and_user_survive_ignored_guide() {
+    fn resolve_mcp_servers_orders_requirement_before_user_servers() {
         let config = AcpBuildExtra {
             backend: Some("claude".into()),
-            guide_mcp_config: Some(GuideMcpConfig {
-                port: 8888,
-                token: "guide-tok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
-            requirement_mcp_config: Some(RequirementMcpConfig {
-                port: 41000,
-                token: "rtok".into(),
-                binary_path: "/bin/backend".into(),
-            }),
+            requirement_mcp_config: Some(requirement_config(41000, "/bin/backend")),
+            user_id: Some("user-1".into()),
             ..Default::default()
         };
         let user = vec![user_stdio("ctx7")];
-        let servers = resolve_mcp_servers(&config, "conv-1", user);
+        let (servers, _leases) = resolve_mcp_servers(&config, "1", "/workspace", user);
         assert_eq!(servers.len(), 2);
         let names: Vec<&str> = servers
             .iter()
@@ -1279,30 +1060,26 @@ mod tests {
 
     /// SECURITY contract for the scoped knowledge MCP injection (Task B5):
     ///   - Invariant 1: injected ONLY when config present AND bound bases exist
-    ///     (and independent of `desktop_gateway` — never set here).
-    ///   - Invariant 2: the bound `kb_ids` are baked into the server env
-    ///     (`NOMI_KB_MCP_KB_IDS`), not supplied by the model.
-    ///   - Invariant 3: the server carries its OWN port/token consts.
+    ///     (and independent of the platform Gateway).
+    ///   - Invariant 2: bound ids live inside signed claims, not loose env/body.
+    ///   - Invariant 3: the root issuer secret never reaches the child.
     #[test]
     fn knowledge_mcp_injected_only_with_config_and_bound_bases() {
-        let cfg = nomifun_api_types::KnowledgeMcpConfig {
-            port: 41555,
-            token: "kb-tok".into(),
-            binary_path: "/bin/nomicore".into(),
-        };
+        let cfg = knowledge_config(41555, "/bin/nomicore");
 
         // Case A: Some(config) + 1 mount → the "nomifun-knowledge" server is
-        // injected, spawns the right bridge, and bakes the mount id into
-        // NOMI_KB_MCP_KB_IDS with its OWN port/token env (never a gateway's).
-        // desktop_gateway is deliberately false to prove independence.
+        // injected, spawns the right bridge, and signs the mount id into claims.
+        // No platform Gateway config is present, proving independence.
         let config_a = AcpBuildExtra {
             backend: Some("claude".into()),
             knowledge_mcp_config: Some(cfg.clone()),
             knowledge_mounts: vec![knowledge_mount("kb_alpha")],
-            desktop_gateway: false,
+            user_id: Some("user-1".into()),
             ..Default::default()
         };
-        let servers = resolve_mcp_servers(&config_a, "conv-kb", Vec::new());
+        let (servers, leases) =
+            resolve_mcp_servers(&config_a, "conv-kb", "/workspace", Vec::new());
+        assert_eq!(leases.len(), 1);
         let kb_server = servers
             .iter()
             .find(|s| match s {
@@ -1325,26 +1102,20 @@ mod tests {
                 .find(|e| e.name == key)
                 .map(|e| e.value.clone())
         };
-        // Invariant 2: the bound kb_ids are baked into NOMI_KB_MCP_KB_IDS — the
-        // agent tool never supplies them.
-        let baked = env_val(nomifun_api_types::KnowledgeMcpConfig::ENV_KB_IDS)
-            .expect("NOMI_KB_MCP_KB_IDS env must be set");
+        // Invariant 2: the bound kb ids live only inside the capability bootstrap.
+        let baked = env_val(nomifun_api_types::KnowledgeMcpConfig::ENV_CAPABILITY)
+            .expect("knowledge capability bootstrap env must be set");
         assert!(
             baked.contains("kb_alpha"),
             "baked kb_ids must carry the mount id, got {baked}"
         );
-        // Invariant 3: the server carries its OWN port/token (not the gateway's).
-        assert_eq!(
-            env_val(nomifun_api_types::KnowledgeMcpConfig::ENV_PORT).as_deref(),
-            Some("41555")
-        );
-        assert_eq!(
-            env_val(nomifun_api_types::KnowledgeMcpConfig::ENV_TOKEN).as_deref(),
-            Some("kb-tok")
-        );
+        // Invariant 3: port + access + renewal proof are one immutable value.
+        assert!(baked.contains("41555"));
+        assert!(!baked.contains("root-kb-secret"));
         // Proof of gateway independence: no gateway server was injected, yet
         // the knowledge server still is.
         let rendered = serde_json::to_string(&servers).expect("serializes");
+        assert!(!rendered.contains("root-kb-secret"));
         assert!(
             !rendered.contains("mcp-gateway-stdio"),
             "no gateway must be present"
@@ -1357,7 +1128,8 @@ mod tests {
             knowledge_mounts: vec![],
             ..Default::default()
         };
-        let servers_b = resolve_mcp_servers(&config_b, "conv-kb", Vec::new());
+        let (servers_b, _leases) =
+            resolve_mcp_servers(&config_b, "conv-kb", "/workspace", Vec::new());
         assert!(
             !servers_b.iter().any(|s| matches!(
                 s,
@@ -1373,7 +1145,8 @@ mod tests {
             knowledge_mounts: vec![knowledge_mount("kb_alpha")],
             ..Default::default()
         };
-        let servers_c = resolve_mcp_servers(&config_c, "conv-kb", Vec::new());
+        let (servers_c, _leases) =
+            resolve_mcp_servers(&config_c, "conv-kb", "/workspace", Vec::new());
         assert!(
             !servers_c.iter().any(|s| matches!(
                 s,
@@ -1387,11 +1160,7 @@ mod tests {
     /// knowledge MCP is actually injected (config present AND bound bases).
     #[test]
     fn knowledge_context_has_search_tool_tracks_injection() {
-        let cfg = nomifun_api_types::KnowledgeMcpConfig {
-            port: 41555,
-            token: "kb-tok".into(),
-            binary_path: "/bin/nomicore".into(),
-        };
+        let cfg = knowledge_config(41555, "/bin/nomicore");
         // config + mount → section promises the search tool.
         let with = AcpBuildExtra {
             knowledge_mcp_config: Some(cfg.clone()),

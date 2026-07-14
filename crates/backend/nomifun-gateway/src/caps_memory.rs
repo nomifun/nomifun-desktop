@@ -81,7 +81,7 @@ async fn list(deps: Arc<GatewayDeps>, p: MemoryListParams) -> Value {
         } else {
             Some("active".to_owned())
         },
-        // Master-agent view spans every companion's memories.
+        // The owner Agent view spans every companion's memories.
         scope_companion_id: None,
         limit: p.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, 200),
         offset: p.offset.unwrap_or(0).max(0),

@@ -13,6 +13,7 @@ nomi-compact.workspace = true
 serde.workspace      = true
 serde_json.workspace = true
 toml                 = "1" # pinned: agent code uses toml 1.0 (workspace default is 0.8 for be-rs)
+toml_edit            = "0.25"
 anyhow.workspace     = true
 thiserror.workspace  = true
 dirs.workspace       = true
@@ -20,6 +21,7 @@ chrono.workspace     = true
 reqwest.workspace    = true
 glob.workspace       = true
 tokio.workspace      = true
+tempfile.workspace   = true
 
 tracing.workspace            = true
 tracing-appender.workspace   = true
@@ -29,5 +31,4 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 wiremock.workspace            = true
 tokio-test.workspace          = true
-tempfile.workspace            = true
 tracing-subscriber.workspace  = true

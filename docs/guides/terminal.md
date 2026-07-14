@@ -112,7 +112,7 @@ stdin.
 ## Terminals as automation targets
 
 The same in-memory PTY map that powers the UI is shared with the **AutoWork
-orchestrator** in `nomifun-requirement` via the `TerminalDriver` trait. That
+execution loop** in `nomifun-requirement` via the `TerminalDriver` trait. That
 trait lets AutoWork:
 
 - Subscribe to a copy of the terminal's live output (it watches for completion
@@ -124,10 +124,10 @@ trait lets AutoWork:
 
 In other words: **a terminal you create here is automatable by AutoWork**.
 Bind a tag from the AutoWork toolbar in the session header, and the
-orchestrator will start claiming requirements and feeding them to the CLI
+AutoWork loop will start claiming requirements and feeding them to the CLI
 running in this terminal. Only agent-CLI terminals (`claude`, `codex`,
 `gemini`) are eligible — a plain shell can be driven manually but is not an
-AutoWork target. The orchestrator also recommends Full Auto mode, because a
+AutoWork target. The AutoWork loop also recommends Full Auto mode, because a
 turn that hits an interactive approval prompt will block until it times out.
 
 If the workspace has knowledge bases mounted (`{cwd}/.nomi/knowledge/`

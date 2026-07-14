@@ -15,6 +15,7 @@ import {
 import HOC from '@renderer/utils/ui/HOC';
 import React, { useEffect } from 'react';
 import LocalImageView from '@renderer/components/media/LocalImageView';
+import { useConversationResponseMessages } from '@renderer/pages/conversation/Messages/useConversationResponseMessages';
 import OpenClawSendBox from './OpenClawSendBox';
 
 const OpenClawChat: React.FC<{
@@ -22,10 +23,12 @@ const OpenClawChat: React.FC<{
   workspace: string;
   cron_job_id?: string;
   hideSendBox?: boolean;
+  readOnly?: boolean;
   emptySlot?: React.ReactNode;
   loadedSkills?: string[];
-}> = ({ conversation_id, workspace, cron_job_id, hideSendBox, emptySlot, loadedSkills }) => {
+}> = ({ conversation_id, workspace, cron_job_id, hideSendBox, readOnly, emptySlot, loadedSkills }) => {
   useMessageLstCache(conversation_id);
+  useConversationResponseMessages(conversation_id);
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {
     updateLocalImage({ root: workspace });
@@ -38,6 +41,7 @@ const OpenClawChat: React.FC<{
         type: 'openclaw-gateway',
         cron_job_id,
         hideSendBox,
+        readOnly,
         loadedSkills,
       }}
     >
@@ -45,7 +49,7 @@ const OpenClawChat: React.FC<{
         <FlexFullContainer>
           <MessageList className='flex-1' emptySlot={emptySlot}></MessageList>
         </FlexFullContainer>
-        {!hideSendBox && <OpenClawSendBox conversation_id={conversation_id} />}
+        {!readOnly && !hideSendBox && <OpenClawSendBox conversation_id={conversation_id} />}
       </div>
     </ConversationProvider>
   );

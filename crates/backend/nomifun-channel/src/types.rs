@@ -364,7 +364,7 @@ pub struct UnifiedIncomingMessage {
 
 /// An incoming message stamped with the `channel_plugins` row it arrived
 /// through. Plugins emit bare [`UnifiedIncomingMessage`]s; the manager's
-/// per-instance forwarder adds the channel id so the orchestrator can route
+/// per-instance forwarder adds the channel id so the message loop can route
 /// sessions, replies and companion bindings per bot (not per platform).
 #[derive(Debug, Clone)]
 pub struct ChannelIncoming {

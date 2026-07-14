@@ -44,7 +44,7 @@ cargo run -p nomifun-web      # 会自动使用默认 --dist=../../ui/dist
 
 ## CLI 参数和环境变量
 
-下方所有参数由 `apps/web/src/main.rs` 读取。每个都有对应的环境变量，方便用于 systemd / Docker / 编排器。
+下方所有参数由 `apps/web/src/main.rs` 读取。每个都有对应的环境变量，方便用于 systemd、Docker 等部署环境。
 
 | 参数 | 环境变量 | 默认值 | 用途 |
 |---|---|---|---|

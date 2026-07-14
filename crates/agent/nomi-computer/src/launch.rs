@@ -37,6 +37,7 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
 /// `mailto:…`, `microsoft-edge:…`) — those ShellExecute directly and must not be
 /// run through Start-Menu app resolution. A drive-letter path (`C:\…`) is NOT a
 /// URL (single-letter scheme is rejected).
+#[cfg(any(target_os = "windows", test))]
 fn is_url(target: &str) -> bool {
     if target.contains("://") {
         return true;

@@ -38,7 +38,13 @@ pub trait IFileService: Send + Sync {
 
     /// Write `data` to `path`. On success, emits a
     /// `fileStream.contentUpdate` event with `operation = write`.
-    async fn write_file(&self, path: &str, data: &[u8], workspace: &str) -> Result<bool, AppError>;
+    async fn write_file(
+        &self,
+        owner_id: &str,
+        path: &str,
+        data: &[u8],
+        workspace: &str,
+    ) -> Result<bool, AppError>;
 
     // -- File management --
 
@@ -53,7 +59,7 @@ pub trait IFileService: Send + Sync {
 
     /// Remove a file or directory (recursively). On success, emits a
     /// `fileStream.contentUpdate` event with `operation = delete`.
-    async fn remove_entry(&self, path: &str, workspace: &str) -> Result<(), AppError>;
+    async fn remove_entry(&self, owner_id: &str, path: &str, workspace: &str) -> Result<(), AppError>;
 
     /// Rename a file or directory. Returns the new absolute path.
     async fn rename_entry(&self, path: &str, new_name: &str) -> Result<String, AppError>;
@@ -145,6 +151,7 @@ pub trait IFileService: Send + Sync {
     /// is used only for the `contentUpdate` event's relative-path scoping.
     async fn write_file_scoped(
         &self,
+        owner_id: &str,
         path: &str,
         data: &[u8],
         workspace: &str,
@@ -154,6 +161,7 @@ pub trait IFileService: Send + Sync {
     /// [`remove_entry`](Self::remove_entry) under an explicit authority.
     async fn remove_entry_scoped(
         &self,
+        owner_id: &str,
         path: &str,
         workspace: &str,
         authority: &PathAuthority,
@@ -174,21 +182,21 @@ pub trait IFileService: Send + Sync {
 pub trait IFileWatchService: Send + Sync {
     /// Start watching a single file for changes.
     /// Emits `fileWatch.fileChanged` events on the broadcast channel.
-    async fn start_watch(&self, file_path: &str) -> Result<(), AppError>;
+    async fn start_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError>;
 
     /// Stop watching a previously registered file.
-    async fn stop_watch(&self, file_path: &str) -> Result<(), AppError>;
+    async fn stop_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError>;
 
     /// Stop all active file watches.
-    async fn stop_all_watches(&self) -> Result<(), AppError>;
+    async fn stop_all_watches(&self, owner_id: &str) -> Result<(), AppError>;
 
     /// Start watching a workspace directory for new Office files
     /// (.pptx, .docx, .xlsx).
     /// Emits `workspaceOfficeWatch.fileAdded` events.
-    async fn start_office_watch(&self, workspace: &str) -> Result<(), AppError>;
+    async fn start_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError>;
 
     /// Stop watching a workspace directory for Office files.
-    async fn stop_office_watch(&self, workspace: &str) -> Result<(), AppError>;
+    async fn stop_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError>;
 }
 
 /// Git-based workspace snapshot system for tracking file changes.

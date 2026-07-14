@@ -9,9 +9,9 @@
  * (tauri dev rebuild, Ctrl+C, crash), the orphaned tree survives — and on
  * Windows a running image locks its exe, so the next `cargo build` fails
  * with `failed to remove file ... os error 5`. The in-process fix is the
- * Job Object in nomifun-runtime (src/job.rs); this script is the preflight
- * safety net that also clears stale processes left by builds that predate
- * the fix, or by any path the job cannot cover.
+ * Job Object/process-group ownership in `nomi-process-runtime`; this script is
+ * the preflight safety net that also clears stale processes left by builds
+ * that predate the supervised runtime, or by paths it cannot cover.
  *
  * Cross-platform; never fails the dev command (always exits 0).
  * Usage: bun scripts/kill-stale-dev.mjs [binary-name ...]   (default: nomifun-desktop)

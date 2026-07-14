@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PLATFORM_PREFIX = 'crates/shared/nomi-execution/src/platform/';
+const PLATFORM_PREFIX = 'crates/shared/nomi-process-runtime/src/platform/';
 const UNIX_PTY_PATH =
-  'crates/shared/nomi-execution/src/platform/unix_pty.rs';
+  'crates/shared/nomi-process-runtime/src/platform/unix_pty.rs';
 const TOOLS_MANIFEST = 'crates/agent/nomi-tools/Cargo.toml';
-const LEGACY_TOOL_FILES = new Set([
+const COMMAND_TOOL_FILES = new Set([
   'crates/agent/nomi-tools/src/bash.rs',
   'crates/agent/nomi-tools/src/exec_command.rs',
   'crates/agent/nomi-tools/src/write_stdin.rs',
 ]);
-const LEGACY_TEST_ONLY_FILES = [
+const RETIRED_TEST_ONLY_FILES = [
   'crates/agent/nomi-tools/src/pty.rs',
   'crates/agent/nomi-tools/src/persistent_shell.rs',
 ];
@@ -40,9 +40,8 @@ const REVIEWED_EXTERNAL_OWNERSHIP = new Map([
 ]);
 const HAND_OFF_ALLOWLIST = new Set([
   'crates/agent/nomi-computer/src/launch.rs',
-  'crates/backend/nomifun-runtime/src/spawn.rs',
   'crates/backend/nomifun-shell/src/opener.rs',
-  'crates/shared/nomi-execution/src/command_builder.rs',
+  'crates/shared/nomi-process-runtime/src/command_builder.rs',
 ]);
 
 const normalizePath = (path) => path.replaceAll('\\', '/');
@@ -59,7 +58,7 @@ function workspacePaths() {
       '--',
       '*.rs',
       TOOLS_MANIFEST,
-      'crates/shared/nomi-execution/Cargo.toml',
+      'crates/shared/nomi-process-runtime/Cargo.toml',
     ],
     { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 },
   );
@@ -485,7 +484,7 @@ function scanEntries(entries) {
   for (const { path, source } of normalizedEntries) {
     if (!path.endsWith('.rs')) continue;
     if (
-      LEGACY_TEST_ONLY_FILES.includes(path) ||
+      RETIRED_TEST_ONLY_FILES.includes(path) ||
       path.split('/').includes('tests')
     ) {
       continue;
@@ -553,7 +552,7 @@ function scanEntries(entries) {
           collectOwnership(
             match.index,
             rule,
-            'process ownership primitive must live under nomi-execution/src/platform',
+            'process ownership primitive must live under nomi-process-runtime/src/platform',
           );
         }
       }
@@ -562,7 +561,7 @@ function scanEntries(entries) {
         collectOwnership(
           taskkillIndex,
           'windows-tree-kill-owner',
-          'process ownership primitive must live under nomi-execution/src/platform',
+          'process ownership primitive must live under nomi-process-runtime/src/platform',
         );
       }
     }
@@ -594,13 +593,13 @@ function scanEntries(entries) {
     }
 
     const inToolSurface =
-      LEGACY_TOOL_FILES.has(path) ||
+      COMMAND_TOOL_FILES.has(path) ||
       path === 'crates/agent/nomi-tools/src/process_store.rs' ||
       path === 'crates/agent/nomi-tools/src/lib.rs' ||
       path === 'crates/agent/nomi-agent/src/bootstrap.rs';
     if (!inToolSurface) continue;
 
-    if (LEGACY_TOOL_FILES.has(path)) {
+    if (COMMAND_TOOL_FILES.has(path)) {
       const forbiddenToolPatterns = [
         ['tool-direct-command', /\btokio\s*::\s*process\s*::\s*Command\b/g],
         ['tool-output-future', /\.output\s*\(/g],
@@ -622,7 +621,7 @@ function scanEntries(entries) {
             production,
             match.index,
             rule,
-            'legacy command adapters must delegate OS execution to ProcessSupervisor',
+            'command tool adapters must delegate OS execution to ProcessSupervisor',
           );
         }
       }
@@ -633,7 +632,7 @@ function scanEntries(entries) {
           production,
           0,
           'tool-supervisor-required',
-          'legacy command adapter must reference ProcessSupervisor',
+          'command tool adapter must reference ProcessSupervisor',
         );
       }
     }
@@ -652,17 +651,17 @@ function scanEntries(entries) {
         toolsLib,
         toolsLib,
         Math.max(0, toolsLib.indexOf(`pub mod ${module};`)),
-        'legacy-test-only-gate',
+        'retired-test-only-gate',
         `${module}.rs must be compiled only under cfg(test)`,
       );
     }
   }
-  for (const path of LEGACY_TEST_ONLY_FILES) {
+  for (const path of RETIRED_TEST_ONLY_FILES) {
     if (!byPath.has(path)) {
       violations.push({
         path,
         line: 1,
-        rule: 'legacy-test-only-source',
+        rule: 'retired-test-only-source',
         detail: 'expected test-only compatibility source is missing',
         snippet: '',
       });
@@ -673,7 +672,7 @@ function scanEntries(entries) {
   const storeSource = byPath.get(storePath) ?? '';
   const store = productionMask(storeSource);
   for (const required of [
-    'ExecutionOwner',
+    'ProcessOwner',
     'SessionId',
     'OutputCursor',
     'Transport',
@@ -731,26 +730,25 @@ function scanEntries(entries) {
       toolsManifest,
       0,
       'portable-pty-test-dependency',
-      'test-only legacy PTY modules require portable-pty under dev-dependencies',
+      'test-only retired PTY modules require portable-pty under dev-dependencies',
     );
   }
 
-  const executionManifestPath =
-    'crates/shared/nomi-execution/Cargo.toml';
-  const executionManifest = byPath.get(executionManifestPath) ?? '';
+  const processManifestPath = 'crates/shared/nomi-process-runtime/Cargo.toml';
+  const processManifest = byPath.get(processManifestPath) ?? '';
   for (const pattern of [
     /\bnomifun-[\w-]*\b/g,
     /\bnomi-(?:types|agent|tools)\b/g,
     /\b(?:rusqlite|sqlx|tauri)\b/g,
   ]) {
-    for (const match of findMatches(executionManifest, pattern)) {
+    for (const match of findMatches(processManifest, pattern)) {
       report(
-        executionManifestPath,
-        executionManifest,
-        executionManifest,
+        processManifestPath,
+        processManifest,
+        processManifest,
         match.index,
-        'execution-dependency-boundary',
-        'nomi-execution must remain backend-neutral',
+        'process-runtime-dependency-boundary',
+        'nomi-process-runtime must remain backend-neutral',
       );
     }
   }
@@ -759,10 +757,14 @@ function scanEntries(entries) {
 }
 
 function workspaceEntries() {
-  return workspacePaths().map((path) => ({
-    path,
-    source: readFileSync(resolve(ROOT, path), 'utf8'),
-  }));
+  return workspacePaths().flatMap((path) => {
+    const absolute = resolve(ROOT, path);
+    // `git ls-files --cached` includes paths deleted in the current hard-cut
+    // until the change is committed. A source scanner must inspect the working
+    // tree, not fail before it can validate the remaining runtime boundary.
+    if (!existsSync(absolute)) return [];
+    return [{ path, source: readFileSync(absolute, 'utf8') }];
+  });
 }
 
 function assertNoViolation(entries, message) {
@@ -787,16 +789,16 @@ function selfTest() {
       source:
         '#[cfg(test)]\npub mod persistent_shell;\n#[cfg(test)]\npub mod pty;\n',
     },
-    ...LEGACY_TOOL_FILES.values().map((path) => ({
+    ...COMMAND_TOOL_FILES.values().map((path) => ({
       path,
-      source: 'use nomi_execution::ProcessSupervisor;\n',
+      source: 'use nomi_process_runtime::ProcessSupervisor;\n',
     })),
     {
       path: 'crates/agent/nomi-tools/src/process_store.rs',
       source:
-        'use nomi_execution::{ExecutionOwner, SessionId, OutputCursor, Transport};\n',
+        'use nomi_process_runtime::{ProcessOwner, SessionId, OutputCursor, Transport};\n',
     },
-    ...LEGACY_TEST_ONLY_FILES.map((path) => ({
+    ...RETIRED_TEST_ONLY_FILES.map((path) => ({
       path,
       source: 'fn compatibility_test_helper() {}\n',
     })),
@@ -805,7 +807,7 @@ function selfTest() {
       source: '[dependencies]\ntokio = "1"\n[dev-dependencies]\nportable-pty = "0.8"\n',
     },
     {
-      path: 'crates/shared/nomi-execution/Cargo.toml',
+      path: 'crates/shared/nomi-process-runtime/Cargo.toml',
       source: '[dependencies]\ntokio = "1"\n',
     },
   ];
@@ -844,7 +846,7 @@ function selfTest() {
   );
   assertViolation(
     base.concat({
-      path: 'crates/shared/nomi-execution/src/platform/unix.rs',
+      path: 'crates/shared/nomi-process-runtime/src/platform/unix.rs',
       source: 'fn open() { native_pty_system(); }\n',
     }),
     'pty-owner',
@@ -965,7 +967,7 @@ function selfTest() {
   );
   assertNoViolation(
     base.concat({
-      path: 'crates/shared/nomi-execution/tests/ownership_fixture.rs',
+      path: 'crates/shared/nomi-process-runtime/tests/ownership_fixture.rs',
       source:
         'fn cleanup(pgid: i32) { unsafe { libc::kill(-pgid, 9); } }\n',
     }),

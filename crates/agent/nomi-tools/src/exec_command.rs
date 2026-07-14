@@ -1,7 +1,7 @@
-//! `exec_command` legacy command and bounded script schemas backed by the
-//! shared process supervisor.
+//! `exec_command` command and bounded-script modes backed by one shared
+//! process supervisor.
 //!
-//! Legacy mode keeps the model-visible numeric `session_id` adapter to an
+//! Command mode keeps the model-visible numeric `session_id` adapter to an
 //! owner-qualified UUIDv7 supervisor session. Script mode is one-shot and never
 //! enters that adapter. No process or PTY object is retained in this crate.
 
@@ -14,9 +14,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use nomi_execution::{
-    CapabilityPolicy, CommandSpec, ExecutionError, ExecutionOutcome, ExecutionOwner,
-    ExecutionPolicy, OutputSnapshot, OutputStream, PollResult, ProcessSupervisor, ShellKind,
+use nomi_process_runtime::{
+    CapabilityPolicy, CommandSpec, ProcessError, ProcessOutcome, ProcessOwner,
+    ProcessPolicy, OutputSnapshot, OutputStream, PollResult, ProcessSupervisor, ShellKind,
     Transport, normalize_request,
 };
 use nomi_protocol::events::ToolCategory;
@@ -26,7 +26,8 @@ use uuid::Uuid;
 
 use crate::{
     Tool,
-    process_store::{LegacySessionBinding, ProcessStore, missed_bytes},
+    process_store::{NumericSessionBinding, ProcessStore, missed_bytes},
+    windows_shell::{shell_transport, validate_shell_script},
 };
 
 const DEFAULT_YIELD_MS: u64 = 10_000;
@@ -40,8 +41,6 @@ const PYTHON_PROBE_INTERRUPT_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_REAP_GRACE: Duration = Duration::from_millis(100);
 const PYTHON_PROBE_CLEANUP_BUDGET: Duration = Duration::from_millis(150);
-const PTY_COLS: u16 = 120;
-const PTY_ROWS: u16 = 30;
 const SCRIPT_TIMEOUT_GUIDANCE: &str = "The script was stopped before completion. Do not assume its side effects finished. Inspect the partial state before retrying or running dependent steps.";
 
 struct PreparedInvocation {
@@ -67,7 +66,7 @@ struct PythonCandidate {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PythonProbeWindow {
-    execution_deadline: Instant,
+    process_deadline: Instant,
     slot_deadline: Instant,
 }
 
@@ -90,7 +89,7 @@ impl PythonCandidate {
 }
 
 enum InvocationMode {
-    Legacy { yield_ms: u64 },
+    Command { yield_ms: u64 },
     Script {
         language: &'static str,
         interpreter: Option<String>,
@@ -112,7 +111,7 @@ pub struct ExecCommandTool {
     store: Arc<ProcessStore>,
     default_cwd: PathBuf,
     capability: CapabilityPolicy,
-    run_id: Uuid,
+    invocation_id: Uuid,
     #[cfg(test)]
     terminal_settle_ms: u64,
 }
@@ -129,7 +128,7 @@ impl ExecCommandTool {
             store,
             default_cwd: cwd,
             capability,
-            run_id: Uuid::now_v7(),
+            invocation_id: Uuid::now_v7(),
             #[cfg(test)]
             terminal_settle_ms: TERMINAL_SETTLE_MS,
         }
@@ -137,7 +136,7 @@ impl ExecCommandTool {
 
     async fn execute_legacy_started(
         &self,
-        handle: nomi_execution::ExecutionHandle,
+        handle: nomi_process_runtime::ProcessHandle,
         transport: Transport,
         yield_ms: u64,
         mut guard: StartedSessionGuard,
@@ -147,13 +146,13 @@ impl ExecCommandTool {
             .poll(
                 &handle.owner,
                 &handle.session_id,
-                nomi_execution::OutputCursor::START,
+                nomi_process_runtime::OutputCursor::START,
                 Instant::now() + Duration::from_millis(yield_ms),
             )
             .await;
         let poll = match poll {
             Ok(poll) => poll,
-            Err(error) => return execution_error("poll", error),
+            Err(error) => return process_error("poll", error),
         };
         match poll {
             PollResult::Finished(outcome) => {
@@ -183,14 +182,14 @@ impl ExecCommandTool {
                         return render_terminal(outcome, transport);
                     }
                     Ok(PollResult::Running { .. }) => {}
-                    Err(error) => return execution_error("settle poll", error),
+                    Err(error) => return process_error("settle poll", error),
                 }
                 let output = match self
                     .supervisor
                     .poll_until_activity(
                         &handle.owner,
                         &handle.session_id,
-                        nomi_execution::OutputCursor::START,
+                        nomi_process_runtime::OutputCursor::START,
                         Instant::now(),
                     )
                     .await
@@ -200,9 +199,9 @@ impl ExecCommandTool {
                         return render_terminal(outcome, transport);
                     }
                     Ok(PollResult::Running { output, .. }) => output,
-                    Err(error) => return execution_error("snapshot poll", error),
+                    Err(error) => return process_error("snapshot poll", error),
                 };
-                let binding = LegacySessionBinding::after_output(
+                let binding = NumericSessionBinding::after_output(
                     handle.owner.clone(),
                     handle.session_id,
                     transport,
@@ -233,7 +232,7 @@ impl ExecCommandTool {
                         &output,
                         Some(missed_bytes(
                             &output,
-                            nomi_execution::OutputCursor::START
+                            nomi_process_runtime::OutputCursor::START
                         ))
                     )
                 ))
@@ -243,7 +242,7 @@ impl ExecCommandTool {
 
     async fn execute_script_started(
         &self,
-        handle: nomi_execution::ExecutionHandle,
+        handle: nomi_process_runtime::ProcessHandle,
         context: ScriptExecutionContext,
         mut guard: StartedSessionGuard,
     ) -> ToolResult {
@@ -252,7 +251,7 @@ impl ExecCommandTool {
             .poll(
                 &handle.owner,
                 &handle.session_id,
-                nomi_execution::OutputCursor::START,
+                nomi_process_runtime::OutputCursor::START,
                 context.deadline,
             )
             .await;
@@ -277,7 +276,7 @@ impl ExecCommandTool {
         match poll {
             PollResult::Finished(outcome) => {
                 guard.disarm();
-                let timed_out = matches!(outcome, ExecutionOutcome::TimedOut { .. });
+                let timed_out = matches!(outcome, ProcessOutcome::TimedOut { .. });
                 let result = render_terminal(outcome, Transport::Pipe);
                 let result = if timed_out {
                     add_script_timeout_context(result, context.timeout_ms)
@@ -339,7 +338,7 @@ impl ExecCommandTool {
                 insufficient_script_budget = probe_deadline == script_deadline;
                 break;
             };
-            debug_assert!(probe_window.execution_deadline < probe_window.slot_deadline);
+            debug_assert!(probe_window.process_deadline < probe_window.slot_deadline);
             debug_assert_eq!(
                 PYTHON_PROBE_INTERRUPT_GRACE
                     + PYTHON_PROBE_TERMINATE_GRACE
@@ -352,8 +351,8 @@ impl ExecCommandTool {
                 OsString::from("-c"),
                 OsString::from(PROBE_SOURCE),
             ]);
-            let request = nomi_execution::ExecutionRequest {
-                owner: ExecutionOwner::new(self.run_id, Uuid::now_v7()),
+            let request = nomi_process_runtime::ProcessRequest {
+                owner: ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
                 command: CommandSpec::Program {
                     program: candidate.program.clone().into_os_string(),
                     args: probe_args,
@@ -361,32 +360,32 @@ impl ExecCommandTool {
                 cwd: cwd.to_path_buf(),
                 env: env.clone(),
                 transport: Transport::Pipe,
-                policy: ExecutionPolicy {
+                policy: ProcessPolicy {
                     output_limit_bytes: PROBE_OUTPUT_MAX_BYTES,
-                    deadline: Some(probe_window.execution_deadline),
+                    deadline: Some(probe_window.process_deadline),
                     interrupt_grace: PYTHON_PROBE_INTERRUPT_GRACE,
                     terminate_grace: PYTHON_PROBE_TERMINATE_GRACE,
                     reap_grace: PYTHON_PROBE_REAP_GRACE,
-                    ..ExecutionPolicy::default()
+                    ..ProcessPolicy::default()
                 },
                 capability: self.capability.clone(),
             };
             let request = match normalize_request(request, &self.default_cwd) {
                 Ok(request) => request,
-                Err(error) => return Err(execution_error("prepare Python probe", error)),
+                Err(error) => return Err(process_error("prepare Python probe", error)),
             };
             let handle = match self.supervisor.start(request).await {
                 Ok(handle) => handle,
-                Err(ExecutionError::SpawnFailed { .. }) => continue,
-                Err(error) => return Err(execution_error("start Python probe", error)),
+                Err(ProcessError::SpawnFailed { .. }) => continue,
+                Err(error) => return Err(process_error("start Python probe", error)),
             };
             let poll = self
                 .supervisor
                 .poll(
                     &handle.owner,
                     &handle.session_id,
-                    nomi_execution::OutputCursor::START,
-                    probe_window.execution_deadline,
+                    nomi_process_runtime::OutputCursor::START,
+                    probe_window.process_deadline,
                 )
                 .await;
             let outcome = match poll {
@@ -395,7 +394,7 @@ impl ExecCommandTool {
                     .supervisor
                     .timeout(&handle.owner, &handle.session_id)
                     .await
-                    .map_err(|error| execution_error("stop Python probe", error))?,
+                    .map_err(|error| process_error("stop Python probe", error))?,
                 Err(error) => {
                     let cleanup = self
                         .supervisor
@@ -412,7 +411,7 @@ impl ExecCommandTool {
             };
             if matches!(
                 &outcome,
-                ExecutionOutcome::Exited {
+                ProcessOutcome::Exited {
                     code: Some(0),
                     output,
                     ..
@@ -422,7 +421,7 @@ impl ExecCommandTool {
             }
             if matches!(
                 &outcome,
-                ExecutionOutcome::Lost {
+                ProcessOutcome::Lost {
                     cleanup,
                     ..
                 } if !cleanup.reaped
@@ -459,12 +458,12 @@ fn python_probe_candidate_window(
         return None;
     }
     let share = overall_deadline.duration_since(now) / candidates_left as u32;
-    let execution_budget = share.checked_sub(PYTHON_PROBE_CLEANUP_BUDGET)?;
-    if execution_budget.is_zero() {
+    let process_budget = share.checked_sub(PYTHON_PROBE_CLEANUP_BUDGET)?;
+    if process_budget.is_zero() {
         return None;
     }
     Some(PythonProbeWindow {
-        execution_deadline: now.checked_add(execution_budget)?,
+        process_deadline: now.checked_add(process_budget)?,
         slot_deadline: now.checked_add(share)?.min(overall_deadline),
     })
 }
@@ -479,14 +478,14 @@ fn add_script_timeout_context(mut result: ToolResult, timeout_ms: u64) -> ToolRe
 }
 
 fn render_script_timeout_cleanup(
-    cleanup: Result<ExecutionOutcome, ExecutionError>,
+    cleanup: Result<ProcessOutcome, ProcessError>,
     captured: &OutputSnapshot,
 ) -> ToolResult {
     match cleanup {
         Ok(outcome) => {
             let lost_output_is_empty = matches!(
                 &outcome,
-                ExecutionOutcome::Lost { output, .. }
+                ProcessOutcome::Lost { output, .. }
                     if output.chunks.is_empty() && output.dropped_bytes == 0
             );
             let mut result = render_terminal(outcome, Transport::Pipe);
@@ -516,20 +515,22 @@ impl Tool for ExecCommandTool {
 
     fn description(&self) -> &str {
         "Runs either one shell command or one bounded, non-interactive shell/Python script through \
-         the shared process supervisor. Legacy commands may return a numeric session_id for ongoing interaction.\n\n\
-         In legacy cmd mode, the command is executed by the platform shell. On Windows this is PowerShell \
+         the shared process supervisor. Command mode may return a numeric session_id for ongoing interaction.\n\n\
+         In command mode, the command is executed by the platform shell. On Windows this is PowerShell \
          (use PowerShell syntax such as Get-ChildItem, $env:NAME, and ';' for sequencing; \
          run cmd /C \"...\" explicitly when cmd.exe syntax is required). On macOS/Linux this \
-         is POSIX sh.\n\n\
+         is POSIX sh. Separate Windows consoles and GUI launches are rejected; use the dedicated launch tool.\n\n\
          Script mode requires script, language (shell or python), and a hard timeout in milliseconds. \
          It is for deterministic, homogeneous local batches that need no intermediate model decision \
-         or approval. It always uses pipe transport, never returns a live session, and does not download \
+         or approval. On Windows, shell commands always use an isolated PTY; on macOS/Linux script mode \
+         uses pipe transport. Script mode never returns a live session and does not download \
          Python when the host has no Python 3 interpreter. Validate preconditions, fail non-zero on a \
          dependent-operation failure, bound output, and print a concise final summary. Do not use scripts \
          to bypass dedicated file, browser, UI, MCP, or approval-aware tools.\n\n\
-         Use tty=true for REPLs, TUIs, and interactive installers.\n\n\
-         - tty=false uses separate stdout/stderr pipe streams.\n\
-         - tty=true uses a merged PTY stream for interactive programs.\n\
+         On macOS/Linux, use tty=true for REPLs, TUIs, and interactive installers.\n\n\
+         - On Windows, shell commands always use an isolated PTY with a merged terminal stream.\n\
+         - On macOS/Linux, tty=false uses separate stdout/stderr pipe streams.\n\
+         - On macOS/Linux, tty=true uses a merged PTY stream for interactive programs.\n\
          - If the process exits within yield_time_ms, the result reports its exit_code and no \
          session_id.\n\
          - If it remains live, use write_stdin with the returned session_id.\n\n\
@@ -544,7 +545,7 @@ impl Tool for ExecCommandTool {
             "properties": {
                 "cmd": {
                     "type": "string",
-                    "description": "Legacy shell command. Mutually exclusive with script."
+                    "description": "Shell command. Mutually exclusive with script."
                 },
                 "script": {
                     "type": "string",
@@ -562,11 +563,11 @@ impl Tool for ExecCommandTool {
                 },
                 "tty": {
                     "type": "boolean",
-                    "description": "Use PTY transport. Defaults to false (pipe)."
+                    "description": "Use PTY transport on macOS/Linux. Defaults to false (pipe) there; Windows always uses an isolated PTY."
                 },
                 "yield_time_ms": {
                     "type": "number",
-                    "description": "Legacy cmd mode only. Milliseconds to wait before yielding. Default 10000, range 250-30000."
+                    "description": "Command mode only. Milliseconds to wait before yielding. Default 10000, range 250-30000."
                 },
                 "timeout": {
                     "type": "integer",
@@ -642,7 +643,7 @@ impl Tool for ExecCommandTool {
         let mut mode = mode;
         let started_at = Instant::now();
         let deadline = match &mode {
-            InvocationMode::Legacy { .. } => None,
+            InvocationMode::Command { .. } => None,
             InvocationMode::Script { timeout_ms, .. } => Some(
                 started_at
                     .checked_add(Duration::from_millis(*timeout_ms))
@@ -675,27 +676,27 @@ impl Tool for ExecCommandTool {
                 command
             }
         };
-        let owner = ExecutionOwner::new(self.run_id, Uuid::now_v7());
-        let request = nomi_execution::ExecutionRequest {
+        let owner = ProcessOwner::new(self.invocation_id, Uuid::now_v7());
+        let request = nomi_process_runtime::ProcessRequest {
             owner,
             command,
             cwd: cwd.clone(),
             env,
             transport,
-            policy: ExecutionPolicy {
+            policy: ProcessPolicy {
                 output_limit_bytes: if deadline.is_some() {
                     SCRIPT_OUTPUT_MAX_BYTES
                 } else {
-                    ExecutionPolicy::default().output_limit_bytes
+                    ProcessPolicy::default().output_limit_bytes
                 },
                 deadline,
-                ..ExecutionPolicy::default()
+                ..ProcessPolicy::default()
             },
             capability: self.capability.clone(),
         };
         let request = match normalize_request(request, &self.default_cwd) {
             Ok(request) => request,
-            Err(error) => return execution_error("prepare", error),
+            Err(error) => return process_error("prepare", error),
         };
         let handle = match self.supervisor.start(request).await {
             Ok(handle) => handle,
@@ -705,7 +706,7 @@ impl Tool for ExecCommandTool {
                         "exec_command: script timed out during ownership setup: {error}\n{SCRIPT_TIMEOUT_GUIDANCE}"
                     ));
                 }
-                return execution_error("start", error);
+                return process_error("start", error);
             }
         };
         let guard = StartedSessionGuard::new(
@@ -714,7 +715,7 @@ impl Tool for ExecCommandTool {
             handle.session_id,
         );
         match mode {
-            InvocationMode::Legacy { yield_ms } => {
+            InvocationMode::Command { yield_ms } => {
                 self.execute_legacy_started(handle, transport, yield_ms, guard)
                     .await
             }
@@ -759,15 +760,9 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
             .filter(|command| !command.is_empty())
             .ok_or_else(|| "cmd must be a non-empty string".to_string())?
             .to_owned();
+        validate_shell_script(&command)?;
         let tty = input.get("tty").and_then(Value::as_bool).unwrap_or(false);
-        let transport = if tty {
-            Transport::Pty {
-                cols: PTY_COLS,
-                rows: PTY_ROWS,
-            }
-        } else {
-            Transport::Pipe
-        };
+        let transport = shell_transport(tty);
         let yield_ms = input
             .get("yield_time_ms")
             .and_then(Value::as_u64)
@@ -784,7 +779,7 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
             }),
             env: BTreeMap::new(),
             transport,
-            mode: InvocationMode::Legacy { yield_ms },
+            mode: InvocationMode::Command { yield_ms },
         });
     }
 
@@ -814,6 +809,9 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
         .get("language")
         .and_then(Value::as_str)
         .ok_or_else(|| "script mode requires language=shell or language=python".to_string())?;
+    if language == "shell" {
+        validate_shell_script(&script)?;
+    }
 
     let (command, interpreter, env, language) = match language {
         "shell" => (
@@ -847,7 +845,11 @@ fn requested_invocation(input: &Value) -> Result<PreparedInvocation, String> {
     Ok(PreparedInvocation {
         command,
         env,
-        transport: Transport::Pipe,
+        transport: if language == "shell" {
+            shell_transport(false)
+        } else {
+            Transport::Pipe
+        },
         mode: InvocationMode::Script {
             language,
             interpreter,
@@ -968,11 +970,11 @@ fn prune_stale_bindings(supervisor: &ProcessSupervisor, store: &ProcessStore) {
             .terminal_outcome_if_ready(
                 entry.owner(),
                 &entry.session_id(),
-                nomi_execution::OutputCursor::START,
+                nomi_process_runtime::OutputCursor::START,
             )
         {
-            Err(ExecutionError::SessionNotFound { .. })
-            | Err(ExecutionError::OwnerMismatch { .. }) => {
+            Err(ProcessError::SessionNotFound { .. })
+            | Err(ProcessError::OwnerMismatch { .. }) => {
                 store.remove_if_same(id, &entry);
             }
             Ok(Some(_)) | Ok(None) | Err(_) => {}
@@ -1034,19 +1036,19 @@ pub(crate) fn render_output(
 }
 
 pub(crate) fn render_terminal(
-    outcome: ExecutionOutcome,
+    outcome: ProcessOutcome,
     transport: Transport,
 ) -> ToolResult {
     render_terminal_with_missed(outcome, transport, None)
 }
 
 pub(crate) fn render_terminal_with_missed(
-    outcome: ExecutionOutcome,
+    outcome: ProcessOutcome,
     transport: Transport,
     missed_bytes: Option<u64>,
 ) -> ToolResult {
     match outcome {
-        ExecutionOutcome::Exited {
+        ProcessOutcome::Exited {
             code,
             signal,
             output,
@@ -1068,7 +1070,7 @@ pub(crate) fn render_terminal_with_missed(
                 images: Vec::new(),
             }
         }
-        ExecutionOutcome::Cancelled { output, cleanup } => {
+        ProcessOutcome::Cancelled { output, cleanup } => {
             let mut content = format!(
                 "(process cancelled)\ntransport={}\n{}",
                 transport_label(transport),
@@ -1077,7 +1079,7 @@ pub(crate) fn render_terminal_with_missed(
             append_cleanup(&mut content, &cleanup);
             ToolResult::error(content)
         }
-        ExecutionOutcome::TimedOut { output, cleanup } => {
+        ProcessOutcome::TimedOut { output, cleanup } => {
             let mut content = format!(
                 "(process timed out)\ntransport={}\n{}",
                 transport_label(transport),
@@ -1086,7 +1088,7 @@ pub(crate) fn render_terminal_with_missed(
             append_cleanup(&mut content, &cleanup);
             ToolResult::error(content)
         }
-        ExecutionOutcome::Lost {
+        ProcessOutcome::Lost {
             last_known,
             output,
             cleanup,
@@ -1101,7 +1103,7 @@ pub(crate) fn render_terminal_with_missed(
             append_cleanup(&mut content, &cleanup);
             ToolResult::error(content)
         }
-        ExecutionOutcome::SpawnFailed(failure) => ToolResult::error(format!(
+        ProcessOutcome::SpawnFailed(failure) => ToolResult::error(format!(
             "exec_command: spawn failed: {} ({})",
             failure.message, failure.code
         )),
@@ -1115,18 +1117,18 @@ pub(crate) fn transport_label(transport: Transport) -> &'static str {
     }
 }
 
-pub(crate) fn outcome_summary(outcome: &ExecutionOutcome) -> String {
+pub(crate) fn outcome_summary(outcome: &ProcessOutcome) -> String {
     match outcome {
-        ExecutionOutcome::Exited { code, signal, .. } => {
+        ProcessOutcome::Exited { code, signal, .. } => {
             format!("exited code={code:?} signal={signal:?}")
         }
-        ExecutionOutcome::Cancelled { cleanup, .. } => {
+        ProcessOutcome::Cancelled { cleanup, .. } => {
             format!("cancelled reaped={}", cleanup.reaped)
         }
-        ExecutionOutcome::TimedOut { cleanup, .. } => {
+        ProcessOutcome::TimedOut { cleanup, .. } => {
             format!("timed_out reaped={}", cleanup.reaped)
         }
-        ExecutionOutcome::Lost {
+        ProcessOutcome::Lost {
             last_known,
             cleanup,
             ..
@@ -1136,20 +1138,20 @@ pub(crate) fn outcome_summary(outcome: &ExecutionOutcome) -> String {
             cleanup.reaped,
             cleanup.errors.join("; ")
         ),
-        ExecutionOutcome::SpawnFailed(failure) => {
+        ProcessOutcome::SpawnFailed(failure) => {
             format!("spawn_failed {}: {}", failure.code, failure.message)
         }
     }
 }
 
-fn append_cleanup(content: &mut String, cleanup: &nomi_execution::CleanupReport) {
+fn append_cleanup(content: &mut String, cleanup: &nomi_process_runtime::CleanupReport) {
     if !cleanup.errors.is_empty() {
         content.push_str("\ncleanup diagnostics: ");
         content.push_str(&cleanup.errors.join("; "));
     }
 }
 
-fn execution_error(operation: &str, error: ExecutionError) -> ToolResult {
+fn process_error(operation: &str, error: ProcessError) -> ToolResult {
     ToolResult::error(format!(
         "exec_command: {operation} failed: {error} ({})",
         error.code()
@@ -1158,16 +1160,16 @@ fn execution_error(operation: &str, error: ExecutionError) -> ToolResult {
 
 struct StartedSessionGuard {
     supervisor: Arc<ProcessSupervisor>,
-    owner: ExecutionOwner,
-    session_id: nomi_execution::SessionId,
+    owner: ProcessOwner,
+    session_id: nomi_process_runtime::SessionId,
     armed: bool,
 }
 
 impl StartedSessionGuard {
     fn new(
         supervisor: Arc<ProcessSupervisor>,
-        owner: ExecutionOwner,
-        session_id: nomi_execution::SessionId,
+        owner: ProcessOwner,
+        session_id: nomi_process_runtime::SessionId,
     ) -> Self {
         Self {
             supervisor,
@@ -1204,7 +1206,7 @@ mod tests {
     use crate::test_support::pty_test_helper_shell_cmd;
 
     fn tool(cwd: PathBuf) -> (ExecCommandTool, Arc<ProcessStore>) {
-        let supervisor = ProcessSupervisor::new(nomi_execution::SupervisorConfig::default());
+        let supervisor = ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default());
         let store = Arc::new(ProcessStore::new());
         (
             ExecCommandTool::new(
@@ -1391,16 +1393,16 @@ mod tests {
     fn initial_output_renderer_reports_exact_missed_bytes() {
         let output = OutputSnapshot {
             chunks: Vec::new(),
-            next_cursor: nomi_execution::OutputCursor::new(4 * 1024 * 1024 + 17),
+            next_cursor: nomi_process_runtime::OutputCursor::new(4 * 1024 * 1024 + 17),
             retained_bytes: 4 * 1024 * 1024,
             dropped_bytes: 17,
-            encoding: nomi_execution::EncodingMetadata::default(),
+            encoding: nomi_process_runtime::EncodingMetadata::default(),
         };
         let rendered = render_output(
             &output,
             Some(missed_bytes(
                 &output,
-                nomi_execution::OutputCursor::START,
+                nomi_process_runtime::OutputCursor::START,
             )),
         );
 
@@ -1444,6 +1446,10 @@ mod tests {
         assert_eq!(properties["timeout"]["maximum"], 600_000);
         assert!(schema.get("oneOf").is_some());
         assert_eq!(schema["additionalProperties"], false);
+        assert!(properties["tty"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Windows always uses an isolated PTY"));
     }
 
     #[tokio::test]
@@ -1585,14 +1591,14 @@ mod tests {
         let overall_deadline = started_at + Duration::from_secs(2);
 
         let first = python_probe_candidate_window(started_at, overall_deadline, 3).unwrap();
-        assert!(first.execution_deadline < first.slot_deadline);
+        assert!(first.process_deadline < first.slot_deadline);
         assert_eq!(
-            first.slot_deadline.duration_since(first.execution_deadline),
+            first.slot_deadline.duration_since(first.process_deadline),
             PYTHON_PROBE_CLEANUP_BUDGET
         );
         let second =
             python_probe_candidate_window(first.slot_deadline, overall_deadline, 2).unwrap();
-        assert!(second.execution_deadline < second.slot_deadline);
+        assert!(second.process_deadline < second.slot_deadline);
         let third =
             python_probe_candidate_window(second.slot_deadline, overall_deadline, 1).unwrap();
         assert_eq!(third.slot_deadline, overall_deadline);
@@ -1702,30 +1708,72 @@ mod tests {
     }
 
     #[test]
+    fn noninteractive_shell_transport_is_platform_appropriate() {
+        let legacy = requested_invocation(&json!({
+            "cmd": "Write-Output ok",
+            "tty": false
+        }))
+        .expect("legacy shell command should prepare");
+        let script = requested_invocation(&json!({
+            "script": "Write-Output ok",
+            "language": "shell",
+            "timeout": 1000
+        }))
+        .expect("shell script should prepare");
+
+        #[cfg(windows)]
+        {
+            assert_eq!(legacy.transport, Transport::Pty { cols: 120, rows: 30 });
+            assert_eq!(script.transport, Transport::Pty { cols: 120, rows: 30 });
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(legacy.transport, Transport::Pipe);
+            assert_eq!(script.transport, Transport::Pipe);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_and_script_shell_reject_explicit_window_launches() {
+        for input in [
+            json!({"cmd": "cmd /k echo hi"}),
+            json!({"cmd": "Start-Process notepad"}),
+            json!({
+                "script": "cmd /c start notepad",
+                "language": "shell",
+                "timeout": 1000
+            }),
+        ] {
+            assert!(requested_invocation(&input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
     fn timeout_lost_outcome_preserves_the_pre_cleanup_snapshot() {
         let captured = OutputSnapshot {
-            chunks: vec![nomi_execution::OutputChunk {
+            chunks: vec![nomi_process_runtime::OutputChunk {
                 seq: 1,
                 start: 0,
                 stream: OutputStream::Stdout,
                 bytes: b"partial-marker\n".to_vec(),
                 text: "partial-marker\n".to_string(),
             }],
-            next_cursor: nomi_execution::OutputCursor::new(15),
+            next_cursor: nomi_process_runtime::OutputCursor::new(15),
             retained_bytes: 15,
             dropped_bytes: 0,
-            encoding: nomi_execution::EncodingMetadata::default(),
+            encoding: nomi_process_runtime::EncodingMetadata::default(),
         };
         let now = Instant::now();
-        let outcome = ExecutionOutcome::Lost {
-            last_known: nomi_execution::ProcessSnapshot {
+        let outcome = ProcessOutcome::Lost {
+            last_known: nomi_process_runtime::ProcessSnapshot {
                 pid: 42,
-                state: nomi_execution::ProcessState::Lost,
+                state: nomi_process_runtime::ProcessState::Lost,
                 started_at: now,
                 last_activity_at: now,
             },
             output: OutputSnapshot::default(),
-            cleanup: nomi_execution::CleanupReport::default(),
+            cleanup: nomi_process_runtime::CleanupReport::default(),
         };
 
         let result = render_script_timeout_cleanup(Ok(outcome), &captured);
@@ -1739,22 +1787,22 @@ mod tests {
     fn lost_terminal_renderer_preserves_exact_cursor_gap_metadata() {
         let output = OutputSnapshot {
             chunks: Vec::new(),
-            next_cursor: nomi_execution::OutputCursor::new(100),
+            next_cursor: nomi_process_runtime::OutputCursor::new(100),
             retained_bytes: 20,
             dropped_bytes: 80,
-            encoding: nomi_execution::EncodingMetadata::default(),
+            encoding: nomi_process_runtime::EncodingMetadata::default(),
         };
         let now = Instant::now();
         let result = render_terminal_with_missed(
-            ExecutionOutcome::Lost {
-                last_known: nomi_execution::ProcessSnapshot {
+            ProcessOutcome::Lost {
+                last_known: nomi_process_runtime::ProcessSnapshot {
                     pid: 42,
-                    state: nomi_execution::ProcessState::Lost,
+                    state: nomi_process_runtime::ProcessState::Lost,
                     started_at: now,
                     last_activity_at: now,
                 },
                 output,
-                cleanup: nomi_execution::CleanupReport::default(),
+                cleanup: nomi_process_runtime::CleanupReport::default(),
             },
             Transport::Pipe,
             Some(37),
@@ -1786,6 +1834,9 @@ mod tests {
         assert!(description.contains("Get-ChildItem"));
         assert!(description.contains("$env:NAME"));
         assert!(description.contains("cmd /C"));
+        assert!(description.contains("On Windows, shell commands always use an isolated PTY"));
+        assert!(description.contains("tty=false uses separate stdout/stderr pipe streams"));
+        assert!(description.contains("Separate Windows consoles and GUI launches are rejected"));
         assert!(description.contains("\"\\r\") as its own write_stdin call"));
     }
 }

@@ -1,18 +1,21 @@
-//! App-layer aggregation of every subsystem's provider-in-use scan + soft-ref cleanup.
+//! App-layer aggregation of every subsystem's provider-in-use scan.
 //!
 //! `nomifun-app` is the only layer that sees the companion, public-agent, IDMM
-//! and orchestrator subsystems at once, so the cross-subsystem
+//! and Agent Execution subsystems at once, so the cross-subsystem
 //! [`ProviderDeletionCoordinator`](nomifun_system::provider_deletion::ProviderDeletionCoordinator)
 //! is implemented here and injected into `ProviderService` (see
 //! `router::state::build_system_state`). Deletion then refuses an in-use provider
-//! (409 `PROVIDER_IN_USE`) and, on a successful delete, strips the single soft
-//! reference this v1 owns: the global model-failover queue.
+//! (409 `PROVIDER_IN_USE`). SQLite owns deletion-time hard guards and soft
+//! reference cleanup atomically; this coordinator exists only for friendly,
+//! labeled product errors.
 
 use std::sync::Arc;
 
 use nomifun_common::{AppError, ProviderUsage, ProviderUsageFeature};
-use nomifun_conversation::model_failover::{get_global_failover_config, set_global_failover_config};
-use nomifun_db::{IClientPreferenceRepository, IConversationRepository, IFleetRepository};
+use nomifun_db::{
+    IAgentExecutionRepository, IAgentExecutionTemplateRepository,
+    IClientPreferenceRepository, IConversationRepository,
+};
 use nomifun_idmm::sidecar::PREF_BACKUP_PROVIDER;
 use nomifun_system::provider_deletion::ProviderDeletionCoordinator;
 
@@ -22,7 +25,8 @@ pub struct AppProviderDeletionCoordinator {
     pub companion: Arc<nomifun_companion::CompanionService>,
     pub public_agent: Arc<nomifun_public_agent::PublicAgentService>,
     pub client_prefs: Arc<dyn IClientPreferenceRepository>,
-    pub fleet_repo: Arc<dyn IFleetRepository>,
+    pub execution_repo: Arc<dyn IAgentExecutionRepository>,
+    pub execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository>,
     pub conversation_repo: Arc<dyn IConversationRepository>,
 }
 
@@ -31,8 +35,8 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
     async fn usages(&self, provider_id: &str) -> Result<Vec<ProviderUsage>, AppError> {
         // Central belt-and-suspenders guard: the empty provider_id is the
         // "unconfigured" sentinel. The companion / public-agent scans already skip
-        // it, but bailing here also keeps the fleet SQL (`provider_id = ''`) and the
-        // idmm-backup pref compare from ever false-matching an unconfigured slot.
+        // it, but bailing here also keeps the execution scan and the IDMM-backup
+        // preference compare from ever false-matching an unconfigured slot.
         if provider_id.is_empty() {
             return Ok(Vec::new());
         }
@@ -61,15 +65,46 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
             });
         }
 
-        // 智能编排 (orchestration): every fleet whose members reference the provider.
-        let fleets = self
-            .fleet_repo
-            .fleets_using_provider(provider_id)
+        // The top-level Conversation model is its current lead and therefore a
+        // hard provider binding. Collaborator-only pool entries remain soft
+        // references and are removed only after this guard passes.
+        let conversations = self
+            .conversation_repo
+            .list_conversations_using_model_provider(provider_id)
             .await
-            .map_err(|e| AppError::Internal(format!("scan fleets: {e}")))?;
-        for (id, name) in fleets {
+            .map_err(|e| AppError::Internal(format!("scan Conversation models: {e}")))?;
+        for (id, name) in conversations {
             out.push(ProviderUsage {
-                feature: ProviderUsageFeature::Orchestrator,
+                feature: ProviderUsageFeature::Conversation,
+                label: name,
+                target_id: Some(id.to_string()),
+            });
+        }
+
+        // Current Agent Execution participants remain live provider bindings
+        // even after completed/failed settlement: retry and adopt can reopen
+        // those aggregates. Only cancelled or tombstoned executions are
+        // permanently inert and therefore stop blocking provider deletion.
+        let executions = self
+            .execution_repo
+            .list_reopenable_provider_usages(provider_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("scan Agent Executions: {e}")))?;
+        for (id, goal) in executions {
+            out.push(ProviderUsage {
+                feature: ProviderUsageFeature::AgentExecution,
+                label: goal,
+                target_id: Some(id),
+            });
+        }
+        let templates = self
+            .execution_template_repo
+            .list_templates_using_provider(provider_id)
+            .await
+            .map_err(|e| AppError::Internal(format!("scan Agent Execution templates: {e}")))?;
+        for (id, name) in templates {
+            out.push(ProviderUsage {
+                feature: ProviderUsageFeature::AgentExecution,
                 label: name,
                 target_id: Some(id),
             });
@@ -77,32 +112,20 @@ impl ProviderDeletionCoordinator for AppProviderDeletionCoordinator {
         Ok(out)
     }
 
-    async fn cleanup_soft_refs(&self, provider_id: &str) -> Result<(), AppError> {
-        // Strip the soft references owned by this coordinator: the global
-        // model-failover queue and every persisted conversation collaborator
-        // range. `idmm_backup_*` is PROTECTED (blocks deletion in `usages`, never
-        // reaches cleanup); channel defaults are backstopped by component B.
-        let mut cfg = get_global_failover_config(&self.client_prefs).await;
-        let before = cfg.queue.len();
-        cfg.queue.retain(|m| m.provider_id != provider_id);
-        if cfg.queue.len() != before {
-            set_global_failover_config(&self.client_prefs, &cfg).await?;
-        }
-        self.conversation_repo
-            .remove_provider_from_orchestrator_model_ranges(provider_id)
-            .await
-            .map_err(|e| AppError::Internal(format!("clean conversation model ranges: {e}")))?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::ProviderUsageFeature;
+    use nomifun_common::{
+        AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, DecisionPolicy,
+        DelegationPolicy, PlanGate, ProviderUsageFeature,
+    };
     use nomifun_db::{
-        IClientPreferenceRepository, IFleetRepository, SqliteClientPreferenceRepository,
-        SqliteFleetRepository, init_database_memory,
+        IAgentExecutionRepository, IAgentExecutionTemplateRepository,
+        IClientPreferenceRepository, SqliteAgentExecutionRepository,
+        SqliteAgentExecutionTemplateRepository, SqliteClientPreferenceRepository,
+        init_database_memory,
     };
     use std::sync::Arc;
 
@@ -132,9 +155,31 @@ mod tests {
         dir: &std::path::Path,
     ) -> (AppProviderDeletionCoordinator, Arc<nomifun_db::Database>) {
         let db = Arc::new(init_database_memory().await.unwrap());
+        for provider_id in [
+            "prov_conversation_lead",
+            "prov_in_use",
+            "prov_keep",
+            "prov_snapshot_audit_only",
+            "prov_template",
+            "prov_x",
+        ] {
+            nomifun_db::sqlx::query(
+                "INSERT INTO providers (\
+                    id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                    capabilities, created_at, updated_at\
+                 ) VALUES (?, 'openai', ?, 'https://example.invalid', 'encrypted', \
+                           '[]', 1, '[]', 1, 1)",
+            )
+            .bind(provider_id)
+            .bind(provider_id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
         let companion = nomifun_companion::CompanionService::start(
             dir,
             Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
+            "system_default_user",
             Arc::new(NoopCompleter),
             Arc::new(nomifun_extension::skill_service::resolve_skill_paths(dir, dir)),
         )
@@ -143,8 +188,10 @@ mod tests {
         let public_agent = nomifun_public_agent::PublicAgentService::start(dir);
         let client_prefs: Arc<dyn IClientPreferenceRepository> =
             Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
-        let fleet_repo: Arc<dyn IFleetRepository> =
-            Arc::new(SqliteFleetRepository::new(db.pool().clone()));
+        let execution_repo: Arc<dyn IAgentExecutionRepository> =
+            Arc::new(SqliteAgentExecutionRepository::new(db.pool().clone()));
+        let execution_template_repo: Arc<dyn IAgentExecutionTemplateRepository> =
+            Arc::new(SqliteAgentExecutionTemplateRepository::new(db.pool().clone()));
         let conversation_repo: Arc<dyn IConversationRepository> =
             Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
         (
@@ -152,7 +199,8 @@ mod tests {
                 companion,
                 public_agent,
                 client_prefs,
-                fleet_repo,
+                execution_repo,
+                execution_template_repo,
                 conversation_repo,
             },
             db,
@@ -181,8 +229,8 @@ mod tests {
     #[tokio::test]
     async fn usages_skips_empty_provider_id() {
         // Central belt-and-suspenders guard: even with a backup pref set, the empty
-        // "unconfigured" sentinel must never aggregate a usage (protects the fleet
-        // SQL `= ''` match + idmm pref compare from false positives).
+        // "unconfigured" sentinel must never aggregate a usage (protects the
+        // execution scan + IDMM preference compare from false positives).
         let dir = tempfile::tempdir().unwrap();
         let (coord, _db) = coordinator(dir.path()).await;
         coord
@@ -194,12 +242,156 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_strips_failover_queue_entry() {
+    async fn aggregates_reopenable_agent_execution_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, db) = coordinator(dir.path()).await;
+        let execution = coord
+            .execution_repo
+            .create_execution_with_participants(
+                nomifun_auth::SYSTEM_USER_ID,
+                &nomifun_db::CreateAgentExecutionParams {
+                    goal: "正在使用受保护模型".into(),
+                    status: AgentExecutionStatus::Paused,
+                    plan_gate: PlanGate::Automatic,
+                    adaptation_policy: AdaptationPolicy::Fixed,
+                    decision_policy: DecisionPolicy::Automatic,
+                    delegation_policy: DelegationPolicy::Automatic,
+                    max_parallel: 1,
+                    work_dir: None,
+                    lead_conversation_id: None,
+                    initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
+                },
+                &[nomifun_db::NewAgentExecutionParticipant {
+                    id: "participant_provider_guard".into(),
+                    source_agent_id: "nomi".into(),
+                    preset_id: None,
+                    preset_revision: None,
+                    preset_snapshot: None,
+                    provider_id: Some("prov_in_use".into()),
+                    model: Some("model_in_use".into()),
+                    role: None,
+                    capability: None,
+                    constraints: None,
+                    description: None,
+                    system_prompt: None,
+                    enabled_skills: "[]".into(),
+                    disabled_builtin_skills: "[]".into(),
+                    sort_order: 0,
+                }],
+                &nomifun_db::NewAgentExecutionEvent {
+                    event_type: AgentExecutionEventKind::Created,
+                    step_id: None,
+                    attempt_id: None,
+                    actor: nomifun_common::AgentExecutionActor::user(
+                        nomifun_auth::SYSTEM_USER_ID,
+                    ),
+                    payload: "{}".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let usages = coord.usages("prov_in_use").await.unwrap();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].feature, ProviderUsageFeature::AgentExecution);
+        assert_eq!(usages[0].label, "正在使用受保护模型");
+        assert_eq!(usages[0].target_id.as_deref(), Some(execution.id.as_str()));
+
+        sqlx::query("UPDATE agent_executions SET status = 'running' WHERE id = ?")
+            .bind(&execution.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agent_executions SET status = 'completed' WHERE id = ?")
+            .bind(&execution.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            coord.usages("prov_in_use").await.unwrap().len(),
+            1,
+            "a completed execution can be reopened by retry/adopt and must retain its provider binding"
+        );
+
+        sqlx::query("UPDATE agent_executions SET status = 'running' WHERE id = ?")
+            .bind(&execution.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE agent_executions SET status = 'cancelled' WHERE id = ?")
+            .bind(&execution.id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        assert!(
+            coord.usages("prov_in_use").await.unwrap().is_empty(),
+            "a cancelled execution can never reopen and must not retain a live provider binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregates_saved_agent_execution_template_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, _db) = coordinator(dir.path()).await;
+        let template = coord
+            .execution_template_repo
+            .create_template(
+                nomifun_auth::SYSTEM_USER_ID,
+                &nomifun_db::CreateAgentExecutionTemplateParams {
+                    name: "长期协作方案".to_owned(),
+                    description: None,
+                    max_parallel: Some(2),
+                    work_dir: None,
+                    context: None,
+                    participants: vec![nomifun_db::NewAgentExecutionTemplateParticipant {
+                        source_agent_id: "nomi".to_owned(),
+                        preset_id: Some("preset_template".to_owned()),
+                        preset_revision: Some(1),
+                        preset_snapshot: Some(
+                            r#"{"preset_id":"preset_template","preset_revision":1,"preset_name":"Template","target":"execution_step","resolved_model":{"provider_id":"prov_snapshot_audit_only","model":"snapshot_model","required":true}}"#
+                                .to_owned(),
+                        ),
+                        provider_id: Some("prov_template".to_owned()),
+                        model: Some("model_template".to_owned()),
+                        role: None,
+                        capability: None,
+                        constraints: None,
+                        description: None,
+                        system_prompt: None,
+                        enabled_skills: "[]".to_owned(),
+                        disabled_builtin_skills: "[]".to_owned(),
+                        sort_order: 0,
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        let usages = coord.usages("prov_template").await.unwrap();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].feature, ProviderUsageFeature::AgentExecution);
+        assert_eq!(usages[0].label, "长期协作方案");
+        assert_eq!(
+            usages[0].target_id.as_deref(),
+            Some(template.template.id.as_str())
+        );
+        assert!(
+            coord
+                .usages("prov_snapshot_audit_only")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the frozen preset snapshot is audit data; the concrete participant row is the only live provider binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_delete_atomically_strips_failover_queue_entry() {
         use nomifun_conversation::model_failover::{
             get_global_failover_config, set_global_failover_config,
         };
         let dir = tempfile::tempdir().unwrap();
-        let (coord, _db) = coordinator(dir.path()).await;
+        let (coord, db) = coordinator(dir.path()).await;
         let mut cfg = get_global_failover_config(&coord.client_prefs).await;
         cfg.queue = vec![
             nomifun_common::ProviderWithModel {
@@ -217,14 +409,17 @@ mod tests {
             .await
             .unwrap();
 
-        coord.cleanup_soft_refs("prov_x").await.unwrap();
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_x'")
+            .execute(db.pool())
+            .await
+            .unwrap();
         let after = get_global_failover_config(&coord.client_prefs).await;
         assert_eq!(after.queue.len(), 1);
         assert_eq!(after.queue[0].provider_id, "prov_keep");
     }
 
     #[tokio::test]
-    async fn cleanup_strips_provider_from_persisted_conversation_ranges() {
+    async fn active_conversation_lead_is_a_hard_provider_binding() {
         use nomifun_db::{IConversationRepository, SqliteConversationRepository, models::ConversationRow};
 
         let dir = tempfile::tempdir().unwrap();
@@ -234,21 +429,22 @@ mod tests {
         let conversation_id = conversation_repo
             .create(&ConversationRow {
                 id: 0,
-                user_id: "system_default_user".into(),
-                name: "cleanup target".into(),
+                user_id: nomifun_auth::SYSTEM_USER_ID.into(),
+                name: "受保护主会话".into(),
                 r#type: "nomi".into(),
-                extra: serde_json::json!({
-                    "workspace": "/keep",
-                    "orchestrator_model_range": {
-                        "mode": "range",
-                        "models": [
-                            { "provider_id": "prov_x", "model": "gone" },
-                            { "provider_id": "prov_keep", "model": "live" }
-                        ]
-                    }
-                })
-                .to_string(),
-                model: None,
+                extra: "{}".into(),
+                delegation_policy: "automatic".into(),
+                execution_model_pool: None,
+                decision_policy: "automatic".into(),
+                execution_template_id: None,
+                model: Some(
+                    serde_json::json!({
+                        "provider_id": "prov_conversation_lead",
+                        "model": "catalog-name",
+                        "use_model": "effective-name"
+                    })
+                    .to_string(),
+                ),
                 status: Some("pending".into()),
                 source: Some("nomifun".into()),
                 channel_chat_id: None,
@@ -264,14 +460,81 @@ mod tests {
             .await
             .unwrap();
 
-        coord.cleanup_soft_refs("prov_x").await.unwrap();
+        let usages = coord.usages("prov_conversation_lead").await.unwrap();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].feature, ProviderUsageFeature::Conversation);
+        assert_eq!(usages[0].label, "受保护主会话");
+        assert_eq!(usages[0].target_id, Some(conversation_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn provider_delete_atomically_strips_persisted_conversation_execution_pool() {
+        use nomifun_db::{IConversationRepository, SqliteConversationRepository, models::ConversationRow};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_coord, db) = coordinator(dir.path()).await;
+        let conversation_repo = SqliteConversationRepository::new(db.pool().clone());
+        let now = nomifun_common::now_ms();
+        let conversation_id = conversation_repo
+            .create(&ConversationRow {
+                id: 0,
+                user_id: "system_default_user".into(),
+                name: "cleanup target".into(),
+                r#type: "nomi".into(),
+                extra: serde_json::json!({
+                    "workspace": "/keep"
+                })
+                .to_string(),
+                delegation_policy: "automatic".into(),
+                execution_model_pool: Some(serde_json::json!({
+                    "mode": "range",
+                    "models": [
+                        { "provider_id": "prov_x", "model": "gone" },
+                        { "provider_id": "prov_keep", "model": "live" }
+                    ]
+                }).to_string()),
+                decision_policy: "automatic".into(),
+                execution_template_id: None,
+                model: Some(
+                    serde_json::json!({
+                        "provider_id": "prov_keep",
+                        "model": "live"
+                    })
+                    .to_string(),
+                ),
+                status: Some("pending".into()),
+                source: Some("nomifun".into()),
+                channel_chat_id: None,
+                pinned: false,
+                pinned_at: None,
+                cron_job_id: None,
+                preset_id: None,
+                preset_revision: None,
+                preset_snapshot: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_x'")
+            .execute(db.pool())
+            .await
+            .unwrap();
 
         let cleaned = conversation_repo.get(conversation_id).await.unwrap().unwrap();
         let extra: serde_json::Value = serde_json::from_str(&cleaned.extra).unwrap();
         assert_eq!(extra["workspace"], "/keep");
+        let model_pool: serde_json::Value = serde_json::from_str(
+            cleaned.execution_model_pool.as_deref().unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            extra["orchestrator_model_range"]["models"],
-            serde_json::json!([{ "provider_id": "prov_keep", "model": "live" }])
+            model_pool,
+            serde_json::json!({
+                "mode": "range",
+                "models": [{ "provider_id": "prov_keep", "model": "live" }]
+            })
         );
     }
 }

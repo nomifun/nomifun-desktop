@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use nomifun_api_types::{ConversationArtifactResponse, WebSocketMessage};
 use nomifun_db::ConversationArtifactRow;
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -90,13 +88,17 @@ pub(crate) fn artifact_response_from_row(
     })
 }
 
-pub(crate) fn broadcast_artifact(
-    broadcaster: &Arc<dyn EventBroadcaster>,
+pub(crate) fn emit_artifact(
+    user_events: &dyn UserEventSink,
+    owner_id: &str,
     row: &ConversationArtifactRow,
 ) -> Result<(), CronError> {
     let payload = serde_json::to_value(artifact_response_from_row(row)?)
         .map_err(|e| CronError::Scheduler(format!("failed to serialize artifact event: {e}")))?;
-    broadcaster.broadcast(WebSocketMessage::new("conversation.artifact", payload));
+    user_events.send_to_user(
+        owner_id,
+        WebSocketMessage::new("conversation.artifact", payload),
+    );
     Ok(())
 }
 
@@ -109,10 +111,33 @@ fn parse_enum<T: DeserializeOwned>(value: &str) -> Result<T, CronError> {
 mod tests {
     use super::*;
     use crate::types::{CreatedBy, CronJob, CronSchedule, ExecutionMode};
+    use std::sync::Mutex;
+
+    struct RecordingUserEvents {
+        deliveries: Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>,
+    }
+
+    impl RecordingUserEvents {
+        fn new() -> Self {
+            Self {
+                deliveries: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl UserEventSink for RecordingUserEvents {
+        fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+            self.deliveries
+                .lock()
+                .unwrap()
+                .push((user_id.to_owned(), event));
+        }
+    }
 
     fn sample_job() -> CronJob {
         CronJob {
             id: "cron_1".into(),
+            user_id: "user_1".into(),
             name: "Daily Report".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -137,7 +162,6 @@ mod tests {
             run_count: 0,
             retry_count: 0,
             max_retries: 3,
-            target_kind: crate::types::TargetKind::Agent,
         }
     }
 
@@ -156,6 +180,25 @@ mod tests {
         assert_eq!(response.kind, nomifun_api_types::ConversationArtifactKind::SkillSuggest);
         assert_eq!(response.status, nomifun_api_types::ConversationArtifactStatus::Pending);
         assert_eq!(response.payload["name"], "daily-report");
+    }
+
+    #[test]
+    fn private_artifact_events_are_scoped_to_each_conversation_owner() {
+        let user_events = RecordingUserEvents::new();
+        let owner_a = build_cron_trigger_artifact("1", &sample_job(), 1000);
+        let owner_b = build_cron_trigger_artifact("2", &sample_job(), 2000);
+
+        emit_artifact(&user_events, "owner-a", &owner_a).unwrap();
+        emit_artifact(&user_events, "owner-b", &owner_b).unwrap();
+
+        let deliveries = user_events.deliveries.lock().unwrap();
+        assert_eq!(deliveries.len(), 2);
+        assert_eq!(deliveries[0].0, "owner-a");
+        assert_eq!(deliveries[0].1.name, "conversation.artifact");
+        assert_eq!(deliveries[0].1.data["conversation_id"], 1);
+        assert_eq!(deliveries[1].0, "owner-b");
+        assert_eq!(deliveries[1].1.name, "conversation.artifact");
+        assert_eq!(deliveries[1].1.data["conversation_id"], 2);
     }
 
     #[test]

@@ -749,7 +749,7 @@ mod tests {
         assert!(out.contains("if a `nomi_knowledge_fetch_url` tool is available"), "got: {out}");
         assert!(out.contains("cannot read realtime sources"), "got: {out}");
         // The old unconditional promise must be gone — the gateway tool only
-        // exists in desktopGateway sessions.
+        // exists when the process-issued Platform Gateway is present.
         assert!(!out.contains("call the `nomi_knowledge_fetch_url` tool instead"), "got: {out}");
     }
 

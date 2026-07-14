@@ -20,6 +20,36 @@ pub mod update_plan;
 pub mod worktree;
 pub mod write;
 pub mod write_stdin;
+pub(crate) mod windows_shell;
+
+#[cfg(test)]
+mod windows_shell_tests {
+    use nomi_process_runtime::Transport;
+
+    use super::windows_shell::{shell_transport, validate_shell_script};
+
+    #[test]
+    fn windows_shell_uses_pty_even_when_tty_is_not_requested() {
+        let transport = shell_transport(false);
+        #[cfg(windows)]
+        assert_eq!(transport, Transport::Pty { cols: 120, rows: 30 });
+        #[cfg(not(windows))]
+        assert_eq!(transport, Transport::Pipe);
+    }
+
+    #[test]
+    fn windows_launch_policy_leaves_quoted_data_and_cmd_c_alone() {
+        assert!(validate_shell_script("cmd /c echo ok").is_ok());
+        assert!(validate_shell_script("Write-Output 'cmd /k is data'").is_ok());
+        #[cfg(windows)]
+        {
+            assert!(validate_shell_script("start cmd").is_err());
+            assert!(validate_shell_script("Start-Process notepad").is_err());
+            assert!(validate_shell_script("cmd /k echo hi").is_err());
+            assert!(validate_shell_script("cmd /c start notepad").is_err());
+        }
+    }
+}
 
 /// Shared test-only helpers (path to the cross-platform `pty_test_helper` bin).
 #[cfg(test)]
@@ -223,7 +253,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Return any hooks declared in the skill's frontmatter for dynamic registration.
-    /// Called after a successful execute() so the orchestration layer can merge
+    /// Called after a successful execute() so the tool-execution layer can merge
     /// the returned hooks into the active HookEngine.
     /// Only SkillTool overrides this; all other tools return None.
     fn skill_hooks_for(&self, _input: &Value) -> Option<HooksConfig> {

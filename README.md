@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://www.nomifun.com">
-  <img src="docs/images/readme-00-orchestration-hero.png" alt="NomiFun orchestration conversation, reusable roles, and DAG canvas" width="100%">
+  <img src="docs/images/readme-00-agent-collaboration-hero.png" alt="NomiFun Agent collaboration, reusable roles, and execution graph" width="100%">
 </a>
 
 <h3>A no-holds-barred, fully open-source, <em>local-first</em> super AI workstation.</h3>
@@ -97,8 +97,8 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun orchestration conversation and DAG canvas" width="100%">
-  <br/><sub><b>Work orchestration: conversation, reusable roles, and DAG canvas</b></sub>
+  <img src="docs/images/readme-01-workbench-overview.png" alt="NomiFun Agent collaboration and execution graph" width="100%">
+  <br/><sub><b>Agent collaboration: one conversation, reusable roles, and a live execution graph</b></sub>
 </p>
 
 <table>
@@ -137,14 +137,14 @@ The companion you talk to every day quietly becomes the partner who *gets* you.
 - **Skills that spread.** Companions generate their own skills, discuss them with you, and can **gift** a skill to another companion (the recipient gets a copy) — opt-in shared learning across your roster.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
 
-### 🧠 Conversation-native orchestration
+### 🧠 Agent collaboration
 
-Start from a normal conversation, then let NomiFun expand the job into a live DAG when the task deserves it.
+Start from a normal Agent conversation. When the task deserves parallel work, the same Agent capability can delegate parts of it and expose a live execution graph.
 
-- **Conversation first.** Launch multi-agent work from the same chat you are already using, then open the orchestration rail / floating canvas without leaving that conversation.
-- **Per-node preflight control.** Before a worker starts, override its model and add a preset brief; settled nodes can be rerun with the same pre-configuration.
-- **Review before execution.** Interactive runs stop at plan-ready and surface an in-conversation approval banner, so you can adjust the DAG before work begins.
-- **Project real worker transcripts.** Click any node to read that worker's actual conversation in the main content area, then jump back to `main` to keep steering the lead agent.
+- **One product concept.** Configure Agents and a collaboration policy; delegated work stays in the same Conversation and the single `AgentExecution` aggregate.
+- **Per-step preflight control.** Before a delegated Agent starts, override its model and add a preset brief; settled steps can be retried with the same configuration.
+- **Review before execution.** Approval-enabled collaboration pauses after planning and shows the plan in the conversation, so you can adjust the graph before work begins.
+- **Real Agent transcripts.** Click any step to read that Agent's actual conversation, then return to the lead conversation to keep guiding the work.
 
 ### 🤖 Unattended automation — Requirements + AutoWork + IDMM
 
@@ -432,7 +432,8 @@ fails on the webkit2gtk link — build on the target architecture's machine/cont
 | `bun run test:fast` | 用 nextest 快速跑 Rust 测试（日常） |
 | **静态检查 / 门禁** | |
 | `bun run check:process-runtime-boundary` | Enforce the supervised process runtime boundary and exact hand-off allowlist. |
-| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + 脚本登记 |
+| `bun run check:agent-vocabulary` | Enforce AgentExecution as the only active collaboration aggregate and permit only exact migration fences. |
+| `bun run check` | 聚合静态门禁：typecheck + i18n + 主题契约 + 图标导入 + 进程运行时边界 + Agent 词汇边界 + 脚本登记 |
 | `bun run typecheck` | 前端 TypeScript 类型检查（tsc --noEmit） |
 | `bun run check:i18n` | 校验 i18n 类型与 locale 键是否一致 |
 | `bun run check:theme` | 校验预设 CSS 主题契约 |

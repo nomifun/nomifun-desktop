@@ -1,18 +1,27 @@
+//! Installation-owner-scoped realtime events for requirements and AutoWork.
+
 use std::sync::Arc;
 
 use nomifun_api_types::{AutoWorkState, Requirement, RequirementDeletedPayload, TagPausedPayload, WebSocketMessage};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tracing::error;
 
 /// Emits Requirements-Platform WebSocket events (`domain.camelCaseAction`).
 #[derive(Clone)]
 pub struct RequirementEventEmitter {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    sink: Arc<dyn UserEventSink>,
+    authoritative_user_id: Arc<str>,
 }
 
 impl RequirementEventEmitter {
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>) -> Self {
-        Self { broadcaster }
+    pub fn new(
+        sink: Arc<dyn UserEventSink>,
+        authoritative_user_id: Arc<str>,
+    ) -> Self {
+        Self {
+            sink,
+            authoritative_user_id,
+        }
     }
 
     pub fn emit_created(&self, req: &Requirement) {
@@ -48,6 +57,9 @@ impl RequirementEventEmitter {
                 return;
             }
         };
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, value));
+        self.sink.send_to_user(
+            &self.authoritative_user_id,
+            WebSocketMessage::new(event_name, value),
+        );
     }
 }

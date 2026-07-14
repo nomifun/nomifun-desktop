@@ -15,26 +15,25 @@ use futures_util::FutureExt;
 use nomi_agent::companion_tools::{CompanionMemorySink, CompanionSkillSink};
 use nomi_agent::requirement_tools::RequirementSink;
 use nomifun_api_types::{
-    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, GuideMcpConfig, OpenMcpConfig,
-    RequirementMcpConfig,
+    BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, OpenMcpConfig, RequirementMcpConfig,
 };
-use nomifun_common::{AgentType, AppError};
+use nomifun_common::{AgentType, AppError, ExecutionAuthority};
 use nomifun_db::{
     IClientPreferenceRepository, IMcpServerRepository, IProviderRepository, IRemoteAgentRepository,
     ISettingsRepository,
 };
 
-use crate::agent_task::AgentInstance;
+use crate::runtime_handle::AgentRuntimeHandle;
 use crate::capability::skill_manager::AcpSkillManager;
 use crate::factory::context::FactoryContext;
 use crate::persistence::AcpSessionSyncService;
 use crate::registry::AgentRegistry;
-use crate::task_manager::AgentFactory;
-use crate::types::BuildTaskOptions;
+use crate::runtime_registry::AgentRuntimeFactory;
+use crate::types::AgentRuntimeBuildOptions;
 
 /// Builds the persona system prompt for companion-companion conversations that do
 /// not carry one in their extra. Companion companion threads persist a prompt at
-/// thread creation; channel master-agent sessions deliberately do NOT, so the
+/// thread creation; Channel Agent sessions deliberately do NOT, so the
 /// factory asks this provider at every agent build — the persona's memory
 /// snapshot then refreshes whenever the agent restarts instead of being
 /// frozen forever. Implemented by `nomifun-companion::CompanionService`.
@@ -111,6 +110,10 @@ pub trait PublicAgentProvider: Send + Sync {
 
 /// Dependencies needed by the agent factory to construct agents.
 pub struct AgentFactoryDeps {
+    /// Canonical owner for installation-scoped tools. Every factory backend
+    /// compares the persisted Conversation owner id against this immutable id
+    /// before injecting host-wide MCP bridges or native singleton-domain tools.
+    pub authoritative_user_id: Arc<str>,
     pub skill_manager: Arc<AcpSkillManager>,
     pub remote_agent_repo: Arc<dyn IRemoteAgentRepository>,
     pub provider_repo: Arc<dyn IProviderRepository>,
@@ -129,9 +132,6 @@ pub struct AgentFactoryDeps {
     /// bridges injected into ACP `session/new`.
     /// Captured once at app startup (`std::env::current_exe()`).
     pub backend_binary_path: Arc<PathBuf>,
-    /// Guide MCP server config. Retained for build-extra compatibility, but not
-    /// injected while Team is not surfaced in the product.
-    pub guide_mcp_config: Option<GuideMcpConfig>,
     /// Requirement MCP server config. When `Some`, injected into ACP agent
     /// sessions so the agent gets the `requirement_complete` /
     /// `requirement_update_status` declaration tools — the ACP soft-failure fix
@@ -140,13 +140,12 @@ pub struct AgentFactoryDeps {
     pub requirement_mcp_config: Option<RequirementMcpConfig>,
     /// Wiring for the scoped knowledge-search MCP. Injected into ACP sessions
     /// ONLY when they have bound knowledge bases (`!knowledge_mounts.is_empty()`).
-    /// Independent of `desktop_gateway`; its token reaches only the
-    /// knowledge_search server, never the gateway. `None` disables ACP knowledge_search.
+    /// Its token reaches only the knowledge_search server, never the platform
+    /// gateway. `None` disables ACP knowledge_search.
     pub knowledge_mcp_config: Option<nomifun_api_types::KnowledgeMcpConfig>,
-    /// Desktop Gateway MCP server config. When `Some`, injected into sessions
-    /// whose `extra.desktopGateway` is true (channel master-agent sessions,
-    /// companion companion threads) so the agent gets the `nomi_*` desktop tools.
-    /// `None` when the gateway server failed to start (graceful degradation).
+    /// Platform Gateway MCP server config. When `Some`, the factory injects it
+    /// only after resolving installation-owner authority. `None` when the
+    /// gateway server failed to start (graceful degradation).
     pub gateway_mcp_config: Option<GatewayMcpConfig>,
     /// Reliable-launch (`open`) MCP server config. When `Some`, injected
     /// UNCONDITIONALLY into every ACP session so the agent gets the `open` tool
@@ -174,7 +173,7 @@ pub struct AgentFactoryDeps {
     /// a restart.
     pub client_prefs: Option<Arc<dyn IClientPreferenceRepository>>,
     /// System-settings repo for reading the app UI language at session-build
-    /// time. Companion-owned sessions (local 桌面伙伴 chat + IM channel master)
+    /// time. Companion-owned sessions (local 桌面伙伴 chat + IM Channel Agent)
     /// get a reply-language directive built from `SystemSettings.language` so the
     /// companion answers in the app's language instead of a hardcoded one.
     /// `Option` so tests can omit it (then the "en-US" default applies). Read live
@@ -191,9 +190,11 @@ pub struct AgentFactoryDeps {
     pub requirement_sink: Option<Arc<dyn RequirementSink>>,
     /// Per-conversation factory for the agent's native cron tools. The app
     /// captures `CronService` here; the agent factory calls it with the
-    /// conversation id to build a bound `CronSink`. `None` leaves the cron tools
-    /// unregistered (e.g. standalone, or cron disabled).
-    pub cron_sink_factory: Option<Arc<dyn Fn(&str) -> Arc<dyn crate::CronSink> + Send + Sync>>,
+    /// authoritative user id and conversation id to build a bound `CronSink`.
+    /// `None` leaves the cron tools unregistered (e.g. standalone, or cron
+    /// disabled).
+    pub cron_sink_factory:
+        Option<Arc<dyn Fn(&str, &str) -> Arc<dyn crate::CronSink> + Send + Sync>>,
     /// Optional sink enabling the companion-companion memory tools
     /// (`recall_memories` / `save_memory` / `list_recent_events`). Only
     /// registered for conversations whose `extra.companionSession` is true.
@@ -212,7 +213,7 @@ pub struct AgentFactoryDeps {
     /// the approval gate. `None` (standalone) leaves it unregistered.
     pub knowledge_writeback: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
     /// Optional persona prompt provider for companionSession conversations that
-    /// carry no `extra.system_prompt` (channel master-agent sessions).
+    /// carry no `extra.system_prompt` (Channel Agent sessions).
     pub companion_prompt: Option<Arc<dyn CompanionPromptProvider>>,
     /// Optional 对外伙伴 (public agent) runtime provider. When `Some` AND a
     /// session carries `extra.public_agent_id`, the factory sources the persona /
@@ -226,24 +227,51 @@ pub struct AgentFactoryDeps {
 
 /// Build a production agent factory that dispatches to concrete agent types.
 ///
-/// [`AgentFactory`] is async: the returned `BoxFuture` is driven by
-/// [`crate::task_manager::IWorkerTaskManager::get_or_build_task`] on whatever
+/// [`AgentRuntimeFactory`] is async: the returned `BoxFuture` is driven by
+/// [`crate::runtime_registry::AgentRuntimeRegistry::get_or_create_runtime`] on whatever
 /// runtime is currently polling it. This lets us spawn CLI processes and
 /// await ACP handshakes directly, without the scoped-thread + `block_on`
 /// bridge the old sync-factory version needed.
-pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentFactory {
+pub fn build_agent_factory(deps: AgentFactoryDeps) -> AgentRuntimeFactory {
     let deps = Arc::new(deps);
 
-    Arc::new(move |options: BuildTaskOptions| {
+    Arc::new(move |options: AgentRuntimeBuildOptions| {
         let deps = deps.clone();
         async move { build_agent(deps, options).await }.boxed()
     })
 }
 
+fn validate_runtime_user_id(user_id: &str) -> Result<(), AppError> {
+    if user_id.is_empty() || user_id.trim() != user_id {
+        return Err(AppError::BadRequest(
+            "Agent runtime owner must be a non-empty canonical user id".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn build_agent(
     deps: Arc<AgentFactoryDeps>,
-    options: BuildTaskOptions,
-) -> Result<AgentInstance, AppError> {
+    options: AgentRuntimeBuildOptions,
+) -> Result<AgentRuntimeHandle, AppError> {
+    validate_runtime_user_id(&options.user_id)?;
+    let authority = ExecutionAuthority::resolve(
+        &options.user_id,
+        deps.authoritative_user_id.as_ref(),
+    );
+
+    // External ACP/OpenClaw/Nanobot/Remote runtimes execute arbitrary code as
+    // the backend OS user.  Without an OS/container sandbox they can never be
+    // made safe by hiding individual tools, so model-only principals are
+    // rejected at the single factory boundary.  Nomi remains available under
+    // the model-only ceiling applied in its factory.
+    if !authority.controls_host() && options.agent_type != AgentType::Nomi {
+        return Err(AppError::Forbidden(format!(
+            "Agent runtime '{}' requires the installation owner; non-owner sessions are model-only",
+            options.agent_type.serde_name()
+        )));
+    }
+
     let ctx = FactoryContext::resolve(&deps, &options).await?;
     match options.agent_type {
         AgentType::Gemini => Err(AppError::ConversationArchived(
@@ -255,7 +283,7 @@ async fn build_agent(
         AgentType::OpenclawGateway => openclaw::build(deps, options, ctx).await,
         AgentType::Nanobot => nanobot::build(deps, options, ctx).await,
         AgentType::Remote => remote::build(deps, options, ctx).await,
-        AgentType::Nomi => nomi::build(deps, options, ctx).await,
+        AgentType::Nomi => nomi::build(deps, options, ctx, authority).await,
     }
 }
 
@@ -269,5 +297,30 @@ mod tests {
         let _: fn() -> AgentFactoryDeps = || {
             panic!("compile-time check only");
         };
+    }
+
+    #[test]
+    fn installation_owner_identity_is_exact_and_fail_closed() {
+        assert_eq!(
+            ExecutionAuthority::resolve("system_default_user", "system_default_user"),
+            ExecutionAuthority::InstanceOwner
+        );
+        assert_eq!(
+            ExecutionAuthority::resolve("secondary", "system_default_user"),
+            ExecutionAuthority::ModelOnly
+        );
+        assert_eq!(
+            ExecutionAuthority::resolve("admin", "system_default_user"),
+            ExecutionAuthority::ModelOnly
+        );
+    }
+
+    #[test]
+    fn runtime_owner_identity_is_first_class_and_canonical() {
+        assert!(validate_runtime_user_id("user-1").is_ok());
+        assert!(validate_runtime_user_id("").is_err());
+        assert!(validate_runtime_user_id("   ").is_err());
+        assert!(validate_runtime_user_id(" user-1").is_err());
+        assert!(validate_runtime_user_id("user-1 ").is_err());
     }
 }

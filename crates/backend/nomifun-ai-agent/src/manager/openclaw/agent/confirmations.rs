@@ -4,11 +4,11 @@ use nomifun_common::{AppError, Confirmation};
 use serde_json::{Value, json};
 use tracing::warn;
 
-use crate::shared_kernel::approval_key;
+use crate::session::approval_key;
 
 use super::OpenClawAgentManager;
 
-/// OpenClaw-specific operations reached through `AgentInstance::OpenClaw(..)`
+/// OpenClaw-specific operations reached through `AgentRuntimeHandle::OpenClaw(..)`
 /// matches in the routes + services (e.g. `persist_session_key` uses
 /// `get_session_key`, and `get_openclaw_runtime` calls `get_diagnostics`).
 impl OpenClawAgentManager {

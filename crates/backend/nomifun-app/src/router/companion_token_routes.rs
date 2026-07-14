@@ -34,7 +34,7 @@ struct AccessTokenMintResponse {
     /// The companion this token is bound to.
     companion_id: String,
     /// Advisory warning when the companion has no resolvable model (the token
-    /// still mints; model-dependent capabilities like nomi_agent_run will fail
+    /// still mints; model-dependent capabilities like nomi_delegate will fail
     /// until a model/provider is configured).
     #[serde(skip_serializing_if = "Option::is_none")]
     warning: Option<String>,
@@ -45,7 +45,7 @@ struct AccessTokenStatusResponse {
     configured: bool,
 }
 
-/// True if `nomi_agent_run` and friends would be able to resolve a model for this
+/// True if `nomi_delegate` and related Agent capabilities can resolve a model for this
 /// companion: either the companion's own profile model is set, or any provider is
 /// enabled (the first-enabled-provider fallback in the gateway's resolution chain).
 async fn companion_model_resolvable(
@@ -77,7 +77,7 @@ async fn mint(
         None
     } else {
         Some(
-            "该伙伴尚未配置可用模型，且本机无启用的 provider；外部调用 nomi_agent_run 等需要模型的能力会失败。请先在桌面应用「模型管理」(/models) 配置 provider 与模型，并为该伙伴指定模型。"
+            "该伙伴尚未配置可用模型，且本机无启用的 provider；外部调用 nomi_delegate 等需要模型的能力会失败。请先在桌面应用「模型管理」(/models) 配置 provider 与模型，并为该伙伴指定模型。"
                 .to_string(),
         )
     };

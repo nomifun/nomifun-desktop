@@ -15,6 +15,8 @@ import {
 } from './projectWorkpaths';
 
 const installStorage = () => {
+  const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const store = new Map<string, string>();
   const localStorageMock = {
     getItem: (key: string) => store.get(key) ?? null,
@@ -27,53 +29,78 @@ const installStorage = () => {
     addEventListener: () => {},
     removeEventListener: () => {},
   };
-  Object.assign(globalThis, {
-    localStorage: localStorageMock,
-    window: windowMock,
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: localStorageMock,
   });
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    writable: true,
+    value: windowMock,
+  });
+
+  return () => {
+    if (originalLocalStorage) Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+    else Reflect.deleteProperty(globalThis, 'localStorage');
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+  };
 };
 
 describe('projectWorkpaths', () => {
   test('adds normalized project paths without capping the sidebar project registry', () => {
-    installStorage();
+    const restore = installStorage();
+    try {
+      for (let i = 0; i < 7; i += 1) {
+        addProjectWorkpath(`/Users/a/project-${i}/`);
+      }
 
-    for (let i = 0; i < 7; i += 1) {
-      addProjectWorkpath(`/Users/a/project-${i}/`);
+      expect(getProjectWorkpaths()).toHaveLength(7);
+      expect(getProjectWorkpaths()[0]).toBe('/Users/a/project-6');
+    } finally {
+      restore();
     }
-
-    expect(getProjectWorkpaths()).toHaveLength(7);
-    expect(getProjectWorkpaths()[0]).toBe('/Users/a/project-6');
   });
 
   test('deduplicates by normalized project path', () => {
-    installStorage();
+    const restore = installStorage();
+    try {
+      addProjectWorkpath('/Users/a/project/');
+      addProjectWorkpath('/Users/a/project');
 
-    addProjectWorkpath('/Users/a/project/');
-    addProjectWorkpath('/Users/a/project');
-
-    expect(getProjectWorkpaths()).toEqual(['/Users/a/project']);
+      expect(getProjectWorkpaths()).toEqual(['/Users/a/project']);
+    } finally {
+      restore();
+    }
   });
 
   test('removes only the normalized project path', () => {
-    installStorage();
+    const restore = installStorage();
+    try {
+      addProjectWorkpath('/Users/a/keep');
+      addProjectWorkpath('/Users/a/remove/');
 
-    addProjectWorkpath('/Users/a/keep');
-    addProjectWorkpath('/Users/a/remove/');
+      removeProjectWorkpath('/Users/a/remove');
 
-    removeProjectWorkpath('/Users/a/remove');
-
-    expect(getProjectWorkpaths()).toEqual(['/Users/a/keep']);
+      expect(getProjectWorkpaths()).toEqual(['/Users/a/keep']);
+    } finally {
+      restore();
+    }
   });
 
   test('migrates existing workpaths only when the project registry has never been created', () => {
-    installStorage();
+    const restore = installStorage();
+    try {
+      expect(migrateProjectWorkpaths(['E:\\nomifun_path\\fun_project\\website\\'])).toEqual([
+        'E:/nomifun_path/fun_project/website',
+      ]);
+      expect(getProjectWorkpaths()).toEqual(['E:/nomifun_path/fun_project/website']);
 
-    expect(migrateProjectWorkpaths(['E:\\nomifun_path\\fun_project\\website\\'])).toEqual([
-      'E:/nomifun_path/fun_project/website',
-    ]);
-    expect(getProjectWorkpaths()).toEqual(['E:/nomifun_path/fun_project/website']);
-
-    removeProjectWorkpath('E:/nomifun_path/fun_project/website');
-    expect(migrateProjectWorkpaths(['E:/nomifun_path/fun_project/website'])).toEqual([]);
+      removeProjectWorkpath('E:/nomifun_path/fun_project/website');
+      expect(migrateProjectWorkpaths(['E:/nomifun_path/fun_project/website'])).toEqual([]);
+    } finally {
+      restore();
+    }
   });
 });

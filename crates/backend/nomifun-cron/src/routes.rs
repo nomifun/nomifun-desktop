@@ -38,60 +38,60 @@ pub fn cron_routes(state: CronRouterState) -> Router {
 
 async fn create_job(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     body: Result<Json<CreateCronJobRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<CronJobResponse>>), AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let job = state.cron_service.add_job(req).await?;
+    let job = state.cron_service.add_job(&user.id, req).await?;
     let resp = CronService::to_response(&job);
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(resp))))
 }
 
 async fn list_jobs(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Query(query): Query<ListCronJobsQuery>,
 ) -> Result<Json<ApiResponse<Vec<CronJobResponse>>>, AppError> {
-    let jobs = state.cron_service.list_jobs(&query).await?;
+    let jobs = state.cron_service.list_jobs(&user.id, &query).await?;
     let items: Vec<CronJobResponse> = jobs.iter().map(CronService::to_response).collect();
     Ok(Json(ApiResponse::ok(items)))
 }
 
 async fn get_job(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<CronJobResponse>>, AppError> {
-    let job = state.cron_service.get_job(&id).await?;
+    let job = state.cron_service.get_job(&user.id, &id).await?;
     Ok(Json(ApiResponse::ok(CronService::to_response(&job))))
 }
 
 async fn update_job(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Result<Json<UpdateCronJobRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CronJobResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let job = state.cron_service.update_job(&id, req).await?;
+    let job = state.cron_service.update_job(&user.id, &id, req).await?;
     Ok(Json(ApiResponse::ok(CronService::to_response(&job))))
 }
 
 async fn delete_job(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.cron_service.remove_job(&id).await?;
+    state.cron_service.remove_job(&user.id, &id).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn run_now(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<RunNowResponse>>, AppError> {
-    let resp = state.cron_service.run_now(&id).await?;
+    let resp = state.cron_service.run_now(&user.id, &id).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 
@@ -113,12 +113,12 @@ async fn system_resume(
 
 async fn save_skill(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
     body: Result<Json<SaveCronSkillRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.cron_service.save_skill(&id, req).await?;
+    state.cron_service.save_skill(&user.id, &id, req).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -127,6 +127,7 @@ async fn list_conversations_by_cron_job(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<ConversationResponse>>>, AppError> {
+    state.cron_service.get_job(&user.id, &id).await?;
     let items = state
         .conversation_service
         .list_by_cron_job(&user.id, &id)
@@ -136,27 +137,27 @@ async fn list_conversations_by_cron_job(
 
 async fn list_runs_by_cron_job(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<CronJobRunResponse>>>, AppError> {
-    let items = state.cron_service.list_runs(&id).await?;
+    let items = state.cron_service.list_runs(&user.id, &id).await?;
     Ok(Json(ApiResponse::ok(items)))
 }
 
 async fn has_skill(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<HasSkillResponse>>, AppError> {
-    let resp = state.cron_service.has_skill(&id).await?;
+    let resp = state.cron_service.has_skill(&user.id, &id).await?;
     Ok(Json(ApiResponse::ok(resp)))
 }
 
 async fn delete_skill(
     State(state): State<CronRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.cron_service.delete_skill(&id).await?;
+    state.cron_service.delete_skill(&user.id, &id).await?;
     Ok(Json(ApiResponse::success()))
 }

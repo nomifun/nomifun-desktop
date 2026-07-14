@@ -10,21 +10,15 @@
   "agentSwitcherLabel": "Agent",
   "switchedToAgent": "已切换到 {{agent}}",
   "modelRequired": "请先选择模型",
-  "orchestration": {
-    "collaborators": {
+  "collaboration": {
+    "models": {
       "title": "协作模型",
       "label": "协作模型",
       "count": "协作模型 · {{count}}",
       "mainTag": "主模型",
-      "placeholder": "选择参与编排的协作模型…",
-      "emptyHint": "主模型始终在池中；可再选协作模型，让主模型按难度把较简单的任务分给更省的模型。",
-      "selectedHint": "主模型 + {{count}} 个协作模型组成模型池，主模型按任务难度为各节点挑选，兼顾成本与效果。"
-    },
-    "approval": {
-      "title": "审批模式",
-      "desc": "关键决策先暂停，等你确认。",
-      "auto": "审批 · 自动",
-      "manual": "审批 · 确认"
+      "placeholder": "选择参与协作的模型…",
+      "emptyHint": "主模型始终参与；可再选择协作模型，让不同任务匹配更合适的模型。",
+      "selectedHint": "主模型和 {{count}} 个协作模型将按任务需要共同推进。"
     }
   },
   "workspace": {
@@ -59,10 +53,7 @@
     "skillsActive": "使用 Skills · 已启用",
     "skillsAdjustAria": "调整本次会话已启用的 {{count}} 个 Skills",
     "skillsActiveAria": "查看本次会话已启用的 {{count}} 个 Skills",
-    "backToFree": "自由发挥",
-    "cluster": "agent 集群",
-    "clusterAria": "切换 agent 集群模式",
-    "clusterHint": "多 agent 协作：主 agent 刻意评估并拆分任务给多个独立 agent 并行交付；太简单的任务会说明原因后直接作答。"
+    "backToFree": "自由发挥"
   },
   "skillsPopover": {
     "title": "本次会话使用的 Skills",

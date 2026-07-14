@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 nomifun-api-types.workspace = true
+nomifun-auth.workspace = true
 nomifun-common.workspace = true
 nomifun-realtime.workspace = true
 async-trait.workspace = true

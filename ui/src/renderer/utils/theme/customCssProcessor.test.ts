@@ -13,6 +13,7 @@ describe('addImportantToAll', () => {
     const processed = addImportantToAll('body { background-image: url("data:image/png;base64,AAAA"); background-size: cover; }');
 
     expect(processed.includes('url("data:image/png;base64,AAAA")')).toBe(true);
+    expect(processed.includes('background-image: url("data:image/png;base64,AAAA") !important;')).toBe(true);
     expect(processed.includes('background-size: cover !important;')).toBe(true);
     expect(processed.includes('data:image/png !important')).toBe(false);
   });

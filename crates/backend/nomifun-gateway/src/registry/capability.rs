@@ -59,16 +59,26 @@ pub enum DangerTier {
     Sensitive,
 }
 
+/// Data-ownership boundary independent from operation danger and transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessScope {
+    /// The handler owns its user scoping (Conversation, Terminal, Cron, etc.).
+    User,
+    /// The capability controls installation-wide state and is available only
+    /// to the canonical installation owner.
+    InstanceOwner,
+}
+
 /// Which kind of session is calling. Derived from [`CallerCtx`]: a channel
 /// platform marks an external IM session; otherwise it is a local desktop
-/// session. `Remote` is reserved for future LAN/web/device sessions.
+/// session. `Remote` is a companion-token-authenticated network caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
     /// Local desktop session (companion thread or a plain local conversation).
     Desktop,
-    /// External IM channel master-agent session (telegram / lark / …).
+    /// External IM channel Agent session (telegram / lark / …).
     Channel,
-    /// Future: remote LAN / web / external-device session.
+    /// Remote REST/MCP companion session.
     Remote,
 }
 
@@ -151,6 +161,8 @@ pub struct CapabilityMeta {
     pub summary: &'static str,
     /// Danger tier — drives the default permission decision.
     pub danger: DangerTier,
+    /// Ownership gate evaluated centrally before the capability handler.
+    pub access_scope: AccessScope,
     /// Surfaces where this capability is hard-denied regardless of confirmation
     /// (escape hatch beyond the danger matrix, e.g. a `Write` too risky for IM).
     pub deny_on: &'static [Surface],
@@ -172,9 +184,16 @@ impl CapabilityMeta {
             domain,
             summary,
             danger,
+            access_scope: AccessScope::User,
             deny_on: &[],
             confirm_on: &[],
         }
+    }
+
+    /// Restrict this installation-scoped capability to the canonical owner.
+    pub const fn instance_owner(mut self) -> Self {
+        self.access_scope = AccessScope::InstanceOwner;
+        self
     }
 
     /// Hard-deny this capability on the given surfaces (beyond the danger matrix).
@@ -204,7 +223,7 @@ pub struct Capability {
     pub input_schema: Map<String, Value>,
     pub handler: Handler,
     /// Optional streaming handler. `Some` for capabilities that can emit
-    /// incremental progress (e.g. `nomi_agent_run`); consumed by
+    /// incremental progress; consumed by
     /// [`Registry::dispatch_stream`]. The buffered [`handler`](Self::handler) is
     /// always present, so non-streaming adapters are unaffected.
     pub stream: Option<StreamingHandler>,
@@ -369,36 +388,80 @@ pub(crate) fn coerce_args_to_schema(schema: &Value, args: Value) -> Value {
         other => other,
     };
 
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return args;
-    };
     let Some(obj) = args.as_object_mut() else {
         return args;
     };
 
-    for (key, prop_schema) in props {
-        let expected = schema_type_names(prop_schema);
+    // Schemars represents untagged/tagged enum request DTOs with root-level
+    // oneOf/anyOf branches, commonly through local $defs references. Tool
+    // clients sometimes stringify arrays, objects, numbers, or booleans; walk
+    // every branch that defines the supplied property so those requests receive
+    // the same coercion as a plain struct schema.
+    let keys = obj.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        let mut property_schemas = Vec::new();
+        collect_property_schemas(schema, schema, &key, &mut property_schemas, 0);
+        let mut expected = Vec::new();
+        for property_schema in property_schemas {
+            collect_schema_type_names(schema, property_schema, &mut expected, 0);
+        }
         if expected.iter().any(|t| *t == "string") {
             continue;
         }
-        let Some(s) = obj.get(key).and_then(Value::as_str).map(str::to_owned) else {
+        let Some(s) = obj.get(&key).and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
         if let Some(coerced) = coerce_string_to_types(&s, &expected) {
-            obj.insert(key.clone(), coerced);
+            obj.insert(key, coerced);
         }
     }
 
     args
 }
 
-fn schema_type_names(schema: &Value) -> Vec<&str> {
-    let mut types = Vec::new();
-    collect_schema_type_names(schema, &mut types);
-    types
+fn collect_property_schemas<'a>(
+    root: &'a Value,
+    schema: &'a Value,
+    key: &str,
+    out: &mut Vec<&'a Value>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    if let Some(resolved) = resolve_local_schema_ref(root, schema) {
+        collect_property_schemas(root, resolved, key, out, depth + 1);
+        return;
+    }
+    if let Some(property) = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get(key))
+    {
+        out.push(property);
+    }
+    for branch_key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(branches) = schema.get(branch_key).and_then(Value::as_array) {
+            for branch in branches {
+                collect_property_schemas(root, branch, key, out, depth + 1);
+            }
+        }
+    }
 }
 
-fn collect_schema_type_names<'a>(schema: &'a Value, out: &mut Vec<&'a str>) {
+fn collect_schema_type_names<'a>(
+    root: &'a Value,
+    schema: &'a Value,
+    out: &mut Vec<&'a str>,
+    depth: usize,
+) {
+    if depth > 32 {
+        return;
+    }
+    if let Some(resolved) = resolve_local_schema_ref(root, schema) {
+        collect_schema_type_names(root, resolved, out, depth + 1);
+        return;
+    }
     match schema.get("type") {
         Some(Value::String(s)) => out.push(s.as_str()),
         Some(Value::Array(items)) => {
@@ -410,13 +473,19 @@ fn collect_schema_type_names<'a>(schema: &'a Value, out: &mut Vec<&'a str>) {
         }
         _ => {}
     }
-    for key in ["oneOf", "anyOf"] {
+    for key in ["oneOf", "anyOf", "allOf"] {
         if let Some(items) = schema.get(key).and_then(Value::as_array) {
             for item in items {
-                collect_schema_type_names(item, out);
+                collect_schema_type_names(root, item, out, depth + 1);
             }
         }
     }
+}
+
+fn resolve_local_schema_ref<'a>(root: &'a Value, schema: &Value) -> Option<&'a Value> {
+    let reference = schema.get("$ref")?.as_str()?;
+    let pointer = reference.strip_prefix('#')?;
+    root.pointer(pointer)
 }
 
 fn coerce_string_to_types(s: &str, expected: &[&str]) -> Option<Value> {
@@ -528,6 +597,7 @@ mod tests {
         domain: "test",
         summary: "delete a thing",
         danger: DangerTier::Destructive,
+        access_scope: AccessScope::User,
         deny_on: &[],
         confirm_on: &[],
     };
@@ -554,6 +624,7 @@ mod tests {
         domain: "test",
         summary: "write a thing",
         danger: DangerTier::Write,
+        access_scope: AccessScope::User,
         deny_on: &[Surface::Channel],
         confirm_on: &[],
     };
@@ -601,5 +672,53 @@ mod tests {
         assert_eq!(parsed.limit, Some(50));
         assert_eq!(parsed.wait_secs, Some(1.5));
         assert_eq!(parsed.confirm, Some(true));
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(untagged)]
+    enum UnionParams {
+        Parallel {
+            strategy: String,
+            tasks: Vec<UnionTask>,
+            synthesize: bool,
+        },
+        Planned {
+            strategy: String,
+            goal: String,
+        },
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    struct UnionTask {
+        name: String,
+    }
+
+    #[test]
+    fn schema_coercion_walks_union_branches_and_local_refs() {
+        let schema = schema_for_params::<UnionParams>();
+        let coerced = coerce_args_to_schema(
+            &Value::Object(schema),
+            json!({
+                "strategy": "parallel",
+                "tasks": "[{\"name\":\"research\"}]",
+                "synthesize": "True"
+            }),
+        );
+        let parsed: UnionParams = serde_json::from_value(coerced).unwrap();
+        match parsed {
+            UnionParams::Parallel {
+                strategy,
+                tasks,
+                synthesize,
+            } => {
+                assert_eq!(strategy, "parallel");
+                assert_eq!(tasks.len(), 1);
+                assert_eq!(tasks[0].name, "research");
+                assert!(synthesize);
+            }
+            UnionParams::Planned { strategy, goal } => {
+                panic!("expected parallel request, got planned {strategy}: {goal}")
+            }
+        }
     }
 }

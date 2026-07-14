@@ -5,7 +5,7 @@
 //! frontend can render a non-blocking toast. Registration order equals
 //! execution order; each hook's output feeds the next hook's input.
 
-use crate::agent_runtime::AgentRuntime;
+use crate::runtime_state::AgentRuntimeState;
 use crate::capability::skill_manager::AcpSkillManager;
 use crate::factory::acp_assembler::AcpSessionParams;
 use crate::manager::acp::AcpSession;
@@ -17,7 +17,7 @@ pub struct PromptCtx<'a> {
     pub session: &'a mut AcpSession,
     pub params: &'a AcpSessionParams,
     pub skill_manager: &'a Arc<AcpSkillManager>,
-    pub runtime: &'a AgentRuntime,
+    pub runtime: &'a AgentRuntimeState,
 }
 
 #[async_trait::async_trait]

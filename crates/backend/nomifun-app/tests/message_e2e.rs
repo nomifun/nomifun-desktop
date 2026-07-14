@@ -117,8 +117,8 @@ async fn upsert_artifact(services: &nomifun_app::AppServices, artifact: nomifun_
 async fn seed_cron_job(services: &nomifun_app::AppServices, id: &str) {
     sqlx::query(
         "INSERT INTO cron_jobs \
-            (id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
-         VALUES (?, 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
+            (id, user_id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
+         VALUES (?, 'system_default_user', 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
     )
     .bind(id)
     .execute(services.database.pool())
@@ -729,7 +729,7 @@ async fn t2_1_send_message_accepted() {
     let resp = app.oneshot(req).await.unwrap();
     // The stub agent factory returns an error, so we expect 500
     // (the route itself is wired correctly — 202 when factory is real)
-    // In E2E with stub factory, the get_or_build_task fails.
+    // In E2E with stub factory, the get_or_create_runtime fails.
     // We verify the route is reachable and returns an error (not 404/405).
     // 400 may occur when the stub environment lacks valid backend configuration.
     let status = resp.status();

@@ -3,13 +3,13 @@ use std::time::Duration;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_realtime::{
-    ConnectionId, PER_CONNECTION_BUFFER, TokenValidator, WebSocketCloseCode, WebSocketManager, WsOutbound,
+    ConnectionId, PER_CONNECTION_BUFFER, TokenAuthenticator, WebSocketCloseCode, WebSocketManager, WsOutbound,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
 
-fn always_valid() -> TokenValidator {
-    Arc::new(|_| true)
+fn always_valid() -> TokenAuthenticator {
+    Arc::new(|_| Some("user".to_owned()))
 }
 
 fn new_client_tx() -> (mpsc::Sender<WsOutbound>, mpsc::Receiver<WsOutbound>) {
@@ -25,7 +25,7 @@ fn register_and_remove_multiple_clients() {
 
     for i in 0..10 {
         let (tx, _rx) = new_client_tx();
-        let id = mgr.add_client(format!("token-{i}"), tx);
+        let id = mgr.add_client("user".into(), format!("token-{i}"), tx);
         ids.push(id);
     }
 
@@ -51,7 +51,7 @@ fn connection_ids_are_unique_and_monotonic() {
 
     for _ in 0..100 {
         let (tx, _rx) = new_client_tx();
-        ids.push(mgr.add_client("tok".into(), tx));
+        ids.push(mgr.add_client("user".into(), "tok".into(), tx));
     }
 
     // Check uniqueness
@@ -75,7 +75,7 @@ fn broadcast_all_delivers_identical_content_to_every_client() {
 
     for i in 0..5 {
         let (tx, rx) = new_client_tx();
-        mgr.add_client(format!("token-{i}"), tx);
+        mgr.add_client("user".into(), format!("token-{i}"), tx);
         receivers.push(rx);
     }
 
@@ -96,6 +96,24 @@ fn broadcast_all_delivers_identical_content_to_every_client() {
 }
 
 #[test]
+fn user_scoped_broadcast_never_crosses_authenticated_identity() {
+    let mgr = WebSocketManager::new();
+    let (alice_tx, mut alice_rx) = new_client_tx();
+    let (bob_tx, mut bob_rx) = new_client_tx();
+    mgr.add_client("alice".into(), "alice-token".into(), alice_tx);
+    mgr.add_client("bob".into(), "bob-token".into(), bob_tx);
+
+    mgr.broadcast_to_user(
+        "alice",
+        WebSocketMessage::new("agentExecution.leadThinking", json!({"delta": "private"})),
+    );
+
+    let alice = alice_rx.try_recv().expect("owner connection receives its event");
+    assert!(matches!(alice, WsOutbound::Text(text) if text.contains("private")));
+    assert!(bob_rx.try_recv().is_err(), "another user must receive no frame");
+}
+
+#[test]
 fn broadcast_cleans_up_disconnected_clients_transparently() {
     let mgr = WebSocketManager::new();
 
@@ -103,15 +121,15 @@ fn broadcast_cleans_up_disconnected_clients_transparently() {
     let (tx1, _rx1) = new_client_tx();
     let (tx2, _rx2) = new_client_tx();
     let (tx3, _rx3) = new_client_tx();
-    mgr.add_client("a".into(), tx1);
-    mgr.add_client("b".into(), tx2);
-    mgr.add_client("c".into(), tx3);
+    mgr.add_client("user".into(), "a".into(), tx1);
+    mgr.add_client("user".into(), "b".into(), tx2);
+    mgr.add_client("user".into(), "c".into(), tx3);
 
     // 2 dead clients (receivers dropped)
     let (tx4, rx4) = new_client_tx();
     let (tx5, rx5) = new_client_tx();
-    mgr.add_client("dead-1".into(), tx4);
-    mgr.add_client("dead-2".into(), tx5);
+    mgr.add_client("user".into(), "dead-1".into(), tx4);
+    mgr.add_client("user".into(), "dead-2".into(), tx5);
     drop(rx4);
     drop(rx5);
 
@@ -132,7 +150,7 @@ fn send_to_reaches_only_target_connection() {
 
     for i in 0..5 {
         let (tx, rx) = new_client_tx();
-        let id = mgr.add_client(format!("token-{i}"), tx);
+        let id = mgr.add_client("user".into(), format!("token-{i}"), tx);
         pairs.push((id, rx));
     }
 
@@ -158,7 +176,7 @@ fn send_to_reaches_only_target_connection() {
 async fn heartbeat_sends_ping_and_keeps_healthy_connections() {
     let mgr = WebSocketManager::new();
     let (tx, mut rx) = new_client_tx();
-    mgr.add_client("valid-token".into(), tx);
+    mgr.add_client("user".into(), "valid-token".into(), tx);
 
     let handle = mgr.start_heartbeat(always_valid());
 
@@ -187,10 +205,10 @@ async fn heartbeat_sends_ping_and_keeps_healthy_connections() {
 async fn heartbeat_closes_expired_token_with_auth_expired_event() {
     let mgr = WebSocketManager::new();
     let (tx, mut rx) = new_client_tx();
-    mgr.add_client("bad-token".into(), tx);
+    mgr.add_client("user".into(), "bad-token".into(), tx);
 
-    let expired_validator: TokenValidator = Arc::new(|_| false);
-    let handle = mgr.start_heartbeat(expired_validator);
+    let expired_authenticator: TokenAuthenticator = Arc::new(|_| None);
+    let handle = mgr.start_heartbeat(expired_authenticator);
 
     // Expect auth-expired event
     let msg1 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
@@ -236,7 +254,7 @@ fn concurrent_add_remove_does_not_panic() {
         let mgr = Arc::clone(&mgr);
         handles.push(std::thread::spawn(move || {
             let (tx, _rx) = new_client_tx();
-            mgr.add_client(format!("thread-{i}"), tx)
+            mgr.add_client("user".into(), format!("thread-{i}"), tx)
         }));
     }
 
@@ -273,7 +291,7 @@ fn concurrent_broadcast_does_not_panic() {
 
     for i in 0..5 {
         let (tx, rx) = new_client_tx();
-        mgr.add_client(format!("tok-{i}"), tx);
+        mgr.add_client("user".into(), format!("tok-{i}"), tx);
         _receivers.push(rx);
     }
 

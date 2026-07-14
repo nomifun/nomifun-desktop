@@ -919,7 +919,7 @@ impl ManagedModelRefreshPolicy {
     /// Pure capped exponential backoff with full positive jitter.
     ///
     /// Attempt 1 starts at `retry_base`; every additional failure doubles the
-    /// base up to `retry_max`. `jitter_unit` adds up to 25% to avoid a fleet of
+    /// base up to `retry_max`. `jitter_unit` adds up to 25% to avoid many
     /// clients retrying in lock-step.
     pub fn delay_after_failure(self, consecutive_failures: u32, jitter_unit: f64) -> Duration {
         let policy = self.normalized();

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use crate::manager::{TokenValidator, WebSocketManager};
+use crate::manager::{TokenAuthenticator, WebSocketManager};
 use crate::router::MessageRouter;
 use crate::types::{ConnectionId, PER_CONNECTION_BUFFER, WebSocketCloseCode, WsOutbound};
 
@@ -25,7 +25,7 @@ pub type TokenExtractor = Arc<dyn Fn(&HeaderMap) -> Option<String> + Send + Sync
 pub struct WsHandlerState {
     pub manager: Arc<WebSocketManager>,
     pub router: Arc<dyn MessageRouter>,
-    pub token_validator: TokenValidator,
+    pub token_authenticator: TokenAuthenticator,
     pub token_extractor: TokenExtractor,
 }
 
@@ -70,13 +70,13 @@ async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandle
         return;
     };
 
-    if !(state.token_validator)(&token) {
+    let Some(user_id) = (state.token_authenticator)(&token) else {
         send_auth_expired_and_close(socket).await;
         return;
-    }
+    };
 
     let (tx, rx) = mpsc::channel::<WsOutbound>(PER_CONNECTION_BUFFER);
-    let conn_id = state.manager.add_client(token, tx);
+    let conn_id = state.manager.add_client(user_id, token, tx);
 
     info!(%conn_id, "websocket connection established");
 
@@ -255,7 +255,7 @@ mod tests {
         WsHandlerState {
             manager,
             router: Arc::new(crate::router::NoopMessageRouter),
-            token_validator: Arc::new(|_| true),
+            token_authenticator: Arc::new(|_| Some("user".to_owned())),
             token_extractor: Arc::new(|_| None),
         }
     }
@@ -264,7 +264,7 @@ mod tests {
     fn subscribe_show_open_file_mode() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         let data = json!({"id": "abc123", "data": {"properties": ["openFile"]}});
@@ -287,7 +287,7 @@ mod tests {
     fn subscribe_show_open_directory_mode() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         let data = json!({"id": "dir1", "data": {"properties": ["openDirectory"]}});
@@ -308,7 +308,7 @@ mod tests {
     fn subscribe_show_open_mixed_mode() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         let data = json!({"id": "mixed", "data": {"properties": ["openFile", "openDirectory"]}});
@@ -329,7 +329,7 @@ mod tests {
     fn subscribe_show_open_empty_properties() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         let data = json!({"id": "empty", "data": {"properties": []}});
@@ -350,7 +350,7 @@ mod tests {
     fn subscribe_show_open_missing_properties() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         handle_subscribe_show_open(&state, conn_id, json!({"id": "noprops", "data": {}}));
@@ -371,7 +371,7 @@ mod tests {
     fn subscribe_show_open_missing_id_falls_back_to_empty_string() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         handle_subscribe_show_open(&state, conn_id, json!({}));
@@ -392,7 +392,7 @@ mod tests {
     fn text_message_pong_updates_last_ping() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, _rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -405,7 +405,7 @@ mod tests {
     fn text_message_invalid_json_sends_error() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         handle_text_message(conn_id, "not json", &state);
@@ -425,7 +425,7 @@ mod tests {
     fn text_message_missing_fields_sends_error() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, mut rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         let state = test_state(manager);
 
         handle_text_message(conn_id, r#"{"foo":"bar"}"#, &state);
@@ -455,7 +455,7 @@ mod tests {
 
         let manager = Arc::new(WebSocketManager::new());
         let (tx, _rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
 
         let router = Arc::new(TestRouter {
             called: AtomicBool::new(false),
@@ -463,7 +463,7 @@ mod tests {
         let state = WsHandlerState {
             manager,
             router: router.clone(),
-            token_validator: Arc::new(|_| true),
+            token_authenticator: Arc::new(|_| Some("user".to_owned())),
             token_extractor: Arc::new(|_| None),
         };
 
@@ -480,7 +480,7 @@ mod tests {
     fn error_response_to_disconnected_client_is_noop() {
         let manager = Arc::new(WebSocketManager::new());
         let (tx, rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("tok".into(), tx);
+        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
         drop(rx); // close channel
 
         let state = test_state(manager.clone());

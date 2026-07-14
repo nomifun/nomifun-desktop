@@ -21,7 +21,11 @@ import type { PendingConversation } from '@/renderer/pages/conversation/componen
 import { planGuidEntry, isAutoWorkEntry } from './autoWorkEntry';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
-import type { TModelRange } from '@/common/types/orchestrator/orchestratorTypes';
+import type {
+  TDecisionPolicy,
+  TDelegationPolicy,
+  TExecutionModelPool,
+} from '@/common/types/agentExecution/agentExecutionTypes';
 
 export type GuidSendDeps = {
   // Input state
@@ -47,7 +51,7 @@ export type GuidSendDeps = {
   // Agent helpers
   findAgentByKey: (key: string) => AvailableAgent | undefined;
   getEffectiveAgentType: (
-    agentInfo: { agent_type: string; backend?: string; custom_agent_id?: string } | undefined
+    agentInfo: { agent_type: string; backend?: string; custom_agent_id?: string } | undefined,
   ) => EffectiveAgentInfo;
   guidDisabledBuiltinSkills: string[] | undefined;
   guidEnabledSkills: string[] | undefined;
@@ -66,14 +70,12 @@ export type GuidSendDeps = {
    * "conversation N is already running". */
   autoWork: AutoWorkDraftValue;
 
-  /** 「agent 集群」模式（需求1）：composer 顶部 toggle 选中时为 true。仅 nomi
-   * 路径消费——落到会话 extra.agent_cluster_mode，后端工厂据此在常驻 subagent
-   * 提示之上追加 CLUSTER_MODE_HINT（必须刻意评估是否开集群、太简单先说明原因）。 */
-  clusterMode?: boolean;
-  /** Homepage cluster model pool: main model first, followed by collaborator models. */
-  orchestratorModelRange?: TModelRange;
-  /** Node-level approval mode for agent-cluster runs. */
-  orchestratorApprovalMode?: 'auto' | 'manual';
+  delegationPolicy: TDelegationPolicy;
+  executionModelPool?: TExecutionModelPool;
+  decisionPolicy: TDecisionPolicy;
+  /** Optional reusable collaboration input selected in the composer. It is an
+   * entry default only; the created Execution copies it and keeps no live FK. */
+  executionTemplateId?: string;
 
   // Mention state reset
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -130,9 +132,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     isGoogleAuth,
     applyAdvancedConfig,
     autoWork,
-    clusterMode,
-    orchestratorModelRange,
-    orchestratorApprovalMode,
+    delegationPolicy,
+    executionModelPool,
+    decisionPolicy,
+    executionTemplateId,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -303,6 +306,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           name: entryPlan.conversationName,
           model: current_model,
           preset_id,
+          delegation_policy: delegationPolicy,
+          execution_model_pool: executionModelPool,
+          decision_policy: decisionPolicy,
+          execution_template_id: executionTemplateId,
           extra: {
             default_files: files,
             workspace: finalWorkspace,
@@ -310,16 +317,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
             preset_enabled_skills: enabled_skills_to_send,
             exclude_auto_inject_skills: excludeBuiltinSkills,
             selected_mcp_server_ids: selectedUserMcpServerIds,
-            // nomi should consume the authoritative session snapshot, just
-            // like team MCP does, instead of reloading only user servers from
-            // the global MCP repository at runtime.
+            // Nomi consumes the authoritative session snapshot instead of
+            // reloading only user servers from the global MCP repository.
             selected_session_mcp_servers: selectedAllSessionMcpServers,
             session_mode: selectedMode,
-            // 「agent 集群」模式（需求1）：显式选中才落键；未选不写（旧会话/普通
-            // 会话 extra 零变化）。
-            agent_cluster_mode: clusterMode || undefined,
-            orchestrator_model_range: clusterMode ? orchestratorModelRange : undefined,
-            orchestrator_approval_mode: clusterMode ? orchestratorApprovalMode : undefined,
           },
         });
 
@@ -450,6 +451,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedMcpServerIds,
     applyAdvancedConfig,
     autoWork,
+    delegationPolicy,
+    executionModelPool,
+    decisionPolicy,
+    executionTemplateId,
     navigate,
     t,
   ]);

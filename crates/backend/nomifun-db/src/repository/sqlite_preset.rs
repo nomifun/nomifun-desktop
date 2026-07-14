@@ -239,7 +239,7 @@ mod tests {
             routing_description: Some("Use for evidence gathering".into()),
             instructions: "Cite primary sources.".into(), avatar: None, fallback_allowed: true,
             localizations: vec![("zh-CN".into(), Some("研究设定".into()), None, None, Some("引用一手来源。".into()))],
-            targets: vec!["conversation".into(), "cluster_member".into()],
+            targets: vec!["conversation".into(), "execution_step".into()],
             agent_preferences: vec![("nomi".into(), false)],
             model_preferences: vec![(Some("prov_x".into()), "model_x".into(), true)],
             skill_bindings: vec![("web-search".into(), "include".into(), true), ("unsafe-auto".into(), "exclude_auto".into(), false)],

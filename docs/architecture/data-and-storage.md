@@ -91,7 +91,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 | `IOAuthTokenRepository` | `SqliteOAuthTokenRepository` | Encrypted OAuth tokens for HTTP MCP servers |
 | `IProviderRepository` | `SqliteProviderRepository` | LLM provider credentials (encrypted) |
 | `IRemoteAgentRepository` | `SqliteRemoteAgentRepository` | Remote-agent endpoints |
-| `ITeamRepository` | `SqliteTeamRepository` | Multi-agent teams, tasks, mailbox state |
+| `IAgentExecutionRepository` | `SqliteAgentExecutionRepository` | AgentExecution, immutable Participants, revisioned Steps/Dependencies, Attempts, Conversation Links, and the Event outbox; see the [unified model](agent-execution.zh.md) |
 | `IRequirementRepository` | `SqliteRequirementRepository` | AutoWork requirements (intentionally **no foreign key** to conversations — the loop survives conversation deletion) |
 | `ICronRepository` | `SqliteCronRepository` | Scheduled tasks and their timezone-normalized expressions |
 | `ITerminalRepository` | `SqliteTerminalRepository` | Terminal session metadata |
@@ -105,9 +105,11 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 A few row-update params types travel alongside (`UpdateAgentHandshakeParams`,
 `ConversationFilters`, `ConversationRowUpdate`, `MessageRowUpdate`,
 `MessageSearchRow`, `UpdateCronJobParams`, `UpsertOAuthTokenParams`,
-`CreateProviderParams`, `UpdateRemoteAgentParams`, `UpdateTeamParams`,
-`UpdateTaskParams`, etc.). The repository traits are the contract; everything
-above the data layer talks to them, never to the pool directly.
+`CreateProviderParams`, `UpdateRemoteAgentParams`,
+`CreateAgentExecutionParams`, `ReconcileAgentExecutionPlanParams`,
+`SettleAgentExecutionAttemptParams`, etc.). Repository traits are the feature
+contract. Domain services use them rather than the pool; narrowly scoped
+bootstrap/schema maintenance remains the documented exception.
 
 ### Migrations
 
@@ -115,13 +117,56 @@ Migrations are SQL files embedded with `sqlx::migrate!`. They run on every
 boot inside `init_database`. Schemas evolve forward only; downgrades are not
 supported.
 
+### Scheduled-task ownership
+
+`cron_jobs.user_id` is the non-null, immutable owner of the scheduled-task
+aggregate, not a request-time hint inferred from a Conversation. Migration 038
+assigns legacy rows once and deterministically: the directly bound Conversation
+first, then the inverse `conversations.cron_job_id` binding; only a truly
+unbound legacy job is assigned to the system user. A missing direct target,
+multiple inverse owners, or disagreement between the two directions aborts and
+rolls back the migration rather than guessing or dropping data.
+
+Public HTTP, Gateway, service, and repository operations all carry `user_id`;
+cross-owner access is indistinguishable from a missing job. The scheduler is
+the only internal global-id reader, and its timer captures the owner and
+re-verifies that pair against the persisted row before execution, closing
+delete/recreate races. Database triggers require both directions of an optional
+Conversation binding, as well as Conversation Artifacts produced by the job, to
+have the same owner; artifact status writes are owner-filtered before mutation.
+Ownership cannot be moved in place. There is no runtime system-user fallback.
+
+Migration 042 removes the obsolete Cron target discriminator and all
+terminal-only columns. Scheduled work has one target—an Agent—so target type is
+no longer represented in the domain model, API, or final schema. Historical
+terminal rows were already non-executable; the migration explicitly detaches
+their Conversation and Artifact references and deletes their run history before
+retiring them. Agent rows and their references are preserved, and all ownership
+and model-only triggers are recreated on the canonical table.
+
+### Installation execution authority
+
+`system_default_user` is the one canonical installation owner. The owner may
+start host runtimes and use files, terminals, skills, presets, knowledge mounts,
+Office preview and Platform Gateway capabilities. Every other authenticated
+principal is limited to ordinary Nomi model calls in Conversations and
+scheduled tasks; identity, role text or open-ended JSON cannot widen that
+authority.
+
+Migration 041 performs the hard cut: it canonicalizes retained secondary-user
+Conversations and scheduled-task model selection, disables rows that have no
+usable model, tombstones recoverable execution graphs, removes secondary
+templates and terminals, and installs ownership/model-only triggers. Startup
+reconciliation also deletes secondary or orphan scheduled-skill directories,
+because SQLite migrations cannot remove filesystem state. Loopback capability
+roots and renewable leases are process memory only and are never persisted.
+
 ### Per-conversation foreign-key note
 
 `requirements` (the AutoWork queue) intentionally has **no foreign key** on
-`conversation_id`. The AutoWork orchestrator (`nomifun-requirement`) is
+`conversation_id`. The persistent AutoWork runner (`nomifun-requirement`) is
 backend-authoritative and survives conversation deletion — the FK would couple
-its lifecycle to the conversation's, defeating the boot-resume design. (See
-the user memory entry "AutoWork backend-authoritative".)
+its lifecycle to the conversation's, defeating the boot-resume design.
 
 ## Encryption at rest — AES-GCM
 
@@ -143,7 +188,7 @@ The `aes-gcm` crate version pinned in the workspace is `0.10`.
 Each conversation owns a directory the agent can freely read and write:
 
 ```
-{work_dir}/conversations/{label}-temp-{conversation_id}/
+{work_dir}/conversations/{label}-temp-{workspace_token}/
 ```
 
 - `work_dir` — the runtime work directory; falls back to the data dir when
@@ -152,10 +197,12 @@ Each conversation owns a directory the agent can freely read and write:
 - `label` — a short slug derived from the conversation title.
 - `temp` — literal string; signals these directories are mutable scratch
   space the user can also drop files into.
-- `conversation_id` — the conversation's unique id (UUID v7 with a short
-  prefix from `nomifun_common::id`).
+- `workspace_token` — a backend-minted `ws_…` token stored as
+  `extra.temp_workspace_id`. It identifies this managed workspace without
+  overloading the SQLite integer conversation key.
 
-The directory is created lazily the first time the conversation needs it.
+For a conversation without a user-selected workspace, the directory is
+provisioned immediately after the conversation row is created.
 On conversation deletion the directory is removed (the
 `OnConversationDelete` hook in `nomifun_common::hooks`). File operations
 inside it are sandboxed and watched:
@@ -231,8 +278,8 @@ subprocesses do not require a system Node.js install:
 | Build time | The bun binary for the target OS/arch is **zstd-compressed** and embedded into `nomifun-runtime` via `include_dir!`. |
 | First run | `nomifun_runtime::init(&data_dir)` extracts the binary into a **`<data_dir>/runtime/`** subtree (see the runtime-cache details below). |
 | Boot | `enhance_process_path()` prepends the bun bin dir to the process `PATH` **before any tokio thread is built** (the order is enforced in both host `main.rs` files). |
-| Spawn | `nomifun_runtime::spawn::Builder` produces children with that merged `PATH` so `npx`, `bun`, and other JS tools resolve correctly. |
-| Cleanup | `kill_process_tree` cross-platform tree-kills agent / MCP children on cancellation. |
+| Spawn | `nomi_process_runtime::ChildProcessBuilder` inherits the boot-time merged `PATH`, so `npx`, `bun`, and other JS tools resolve correctly. |
+| Cleanup | `nomi_process_runtime::ProcessSupervisor` or `kill_process_tree` owns and reaps Agent / MCP child-process trees. |
 
 The runtime cache is anchored to the backend's `data_dir`:
 [`nomifun_runtime::init(&data_dir)`](../../crates/backend/nomifun-runtime/src/cache.rs)

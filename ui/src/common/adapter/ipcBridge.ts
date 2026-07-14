@@ -73,7 +73,7 @@ import type {
   UpdatePresetRequest,
   UpdatePresetTagRequest,
 } from '../types/agent/presetTypes';
-import type { PreviewHistoryTarget, PreviewSnapshotInfo } from '../types/office/preview';
+import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
 import type { AcpModelInfo } from '../types/platform/acpTypes';
 import type {
   CreateProviderRequest,
@@ -115,28 +115,39 @@ import type {
 } from '../types/provider/asrModelService';
 import type { SpeechToTextRequest, SpeechToTextResult } from '../types/provider/speech';
 import type {
-  TAdjustRunRequest,
-  TCreateAdhocRun,
-  TCreateFleet,
-  TFleet,
-  TReassign,
-  TModelRange,
-  TReplanRequest,
-  TRun,
-  TRunDetail,
-  TSteer,
-  TTaskConfigUpdate,
-  TTaskSpecUpdate,
-  TUpdateFleet,
-} from '../types/orchestrator/orchestratorTypes';
+  TAdoptExecutionStepOutput,
+  TAdjustAgentExecution,
+  TAddExecutionSteps,
+  TAgentExecution,
+  TAgentExecutionDetail,
+  TAgentExecutionEvent,
+  TAgentExecutionEventsQuery,
+  TAnswerExecutionDecision,
+  TConfigureExecutionStep,
+  TCreateAgentExecution,
+  TDecisionPolicy,
+  TDelegationPolicy,
+  TExecutionModelPool,
+  TExecutionStep,
+  TReassignExecutionStep,
+  TRenameAgentExecution,
+  TReplanAgentExecution,
+  TRetryExecutionStep,
+  TSteerExecutionStep,
+  TUpdateExecutionStep,
+  TVersionedAgentExecutionCommand,
+} from '../types/agentExecution/agentExecutionTypes';
 import type {
-  TOrchRunCompletedEvent,
-  TOrchRunLeadThinkingEvent,
-  TOrchRunPlanUpdatedEvent,
-  TOrchRunStatusEvent,
-  TOrchTaskAssignedEvent,
-  TOrchTaskStatusEvent,
-} from '../types/orchestrator/orchestratorEvents';
+  TAgentExecutionChangedEvent,
+  TAgentExecutionLeadThinkingEvent,
+} from '../types/agentExecution/agentExecutionEvents';
+import type {
+  TAgentExecutionTemplate,
+  TAgentExecutionTemplateDetail,
+  TCreateAgentExecutionTemplate,
+  TCreateExecutionFromTemplate,
+  TUpdateAgentExecutionTemplate,
+} from '../types/agentExecution/agentExecutionTemplateTypes';
 import type {
   AutoUpdateStatus,
   UpdateCheckRequest,
@@ -174,9 +185,13 @@ import {
 // ---------------------------------------------------------------------------
 
 export const shell = {
-  openFile: httpPost<void, string>('/api/shell/open-file', (file_path) => ({ file_path })),
+  openFile: httpPost<void, string>('/api/shell/open-file', (file_path) => ({
+    file_path,
+  })),
   showItemInFolder: httpPost<void, string>('/api/shell/show-item-in-folder', (file_path) => ({ file_path })),
-  openExternal: httpPost<void, string>('/api/shell/open-external', (url) => ({ url })),
+  openExternal: httpPost<void, string>('/api/shell/open-external', (url) => ({
+    url,
+  })),
   checkToolInstalled: httpPost<boolean, { tool: string }>('/api/shell/check-tool-installed'),
   openFolderWith: httpPost<void, { folder_path: string; tool: 'vscode' | 'terminal' | 'explorer' }>(
     '/api/shell/open-folder-with'
@@ -255,6 +270,10 @@ export const conversation = {
       if (isNomi) {
         const model = toApiModelOptional(p.model);
         if (model) body.model = model;
+        if (p.delegation_policy) body.delegation_policy = p.delegation_policy;
+        if (p.execution_model_pool) body.execution_model_pool = p.execution_model_pool;
+        if (p.decision_policy) body.decision_policy = p.decision_policy;
+        if (p.execution_template_id) body.execution_template_id = p.execution_template_id;
       }
       return body;
     }),
@@ -360,7 +379,11 @@ export const conversation = {
   ),
   updateArtifact: httpPatch<
     IConversationArtifact,
-    { conversation_id: number; artifact_id: number; status: IConversationArtifactStatus }
+    {
+      conversation_id: number;
+      artifact_id: number;
+      status: IConversationArtifactStatus;
+    }
   >(
     (p) => `/api/conversations/${p.conversation_id}/artifacts/${p.artifact_id}`,
     (p) => ({ status: p.status })
@@ -393,9 +416,9 @@ export const conversation = {
       runtime: {
         state: (rawRuntime.state ?? 'starting') as IConversationTurnStartedEvent['runtime']['state'],
         can_send_message: (rawRuntime.can_send_message ?? rawRuntime.canSendMessage ?? false) as boolean,
-        has_task: (rawRuntime.has_task ?? rawRuntime.hasTask ?? true) as boolean,
-        task_status: (rawRuntime.task_status ??
-          rawRuntime.taskStatus) as IConversationTurnStartedEvent['runtime']['task_status'],
+        has_runtime: (rawRuntime.has_runtime ?? rawRuntime.hasRuntime ?? true) as boolean,
+        runtime_status: (rawRuntime.runtime_status ??
+          rawRuntime.runtimeStatus) as IConversationTurnStartedEvent['runtime']['runtime_status'],
         is_processing: (rawRuntime.is_processing ?? rawRuntime.isProcessing ?? true) as boolean,
         pending_confirmations: (rawRuntime.pending_confirmations ?? rawRuntime.pendingConfirmations ?? 0) as number,
         ...(Number.isFinite(processing_started_at) ? { processing_started_at } : {}),
@@ -425,9 +448,9 @@ export const conversation = {
     const runtime: IConversationTurnCompletedEvent['runtime'] = {
       state: (rawRuntime.state ?? 'idle') as IConversationTurnCompletedEvent['runtime']['state'],
       can_send_message: (rawRuntime.can_send_message ?? rawRuntime.canSendMessage ?? true) as boolean,
-      has_task: (rawRuntime.has_task ?? rawRuntime.hasTask ?? false) as boolean,
-      task_status: (rawRuntime.task_status ??
-        rawRuntime.taskStatus) as IConversationTurnCompletedEvent['runtime']['task_status'],
+      has_runtime: (rawRuntime.has_runtime ?? rawRuntime.hasRuntime ?? false) as boolean,
+      runtime_status: (rawRuntime.runtime_status ??
+        rawRuntime.runtimeStatus) as IConversationTurnCompletedEvent['runtime']['runtime_status'],
       is_processing: (rawRuntime.is_processing ?? rawRuntime.isProcessing ?? false) as boolean,
       pending_confirmations: (rawRuntime.pending_confirmations ?? rawRuntime.pendingConfirmations ?? 0) as number,
     };
@@ -472,10 +495,20 @@ export const conversation = {
     update: wsEmitter<IConfirmation<unknown> & { conversation_id: number }>('confirmation.update'),
     confirm: httpPost<
       void,
-      { conversation_id: number; msg_id: string; data: unknown; call_id: string; always_allow?: boolean }
+      {
+        conversation_id: number;
+        msg_id: string;
+        data: unknown;
+        call_id: string;
+        always_allow?: boolean;
+      }
     >(
       (p) => `/api/conversations/${p.conversation_id}/confirmations/${encodeURIComponent(p.call_id)}/confirm`,
-      (p) => ({ msg_id: p.msg_id, data: p.data, always_allow: p.always_allow ?? false })
+      (p) => ({
+        msg_id: p.msg_id,
+        data: p.data,
+        always_allow: p.always_allow ?? false,
+      })
     ),
     list: httpGet<IConfirmation<unknown>[], { conversation_id: number }>(
       (p) => `/api/conversations/${p.conversation_id}/confirmations`
@@ -555,9 +588,16 @@ export const application = {
   openDevTools: stubShellProvider<boolean, void>(false),
   isDevToolsOpened: stubShellProvider<boolean, void>(false),
   systemInfo: withResponseMap(
-    httpGet<{ cache_dir: string; work_dir: string; log_dir: string; platform: string; arch: string }, void>(
-      '/api/system/info'
-    ),
+    httpGet<
+      {
+        cache_dir: string;
+        work_dir: string;
+        log_dir: string;
+        platform: string;
+        arch: string;
+      },
+      void
+    >('/api/system/info'),
     (raw) => ({
       cacheDir: raw.cache_dir,
       workDir: raw.work_dir,
@@ -588,7 +628,14 @@ export const application = {
   // DEGRADE_STUB: Tauri (WebView2/WKWebView) exposes no Chrome DevTools Protocol surface.
   getCdpStatus: stubShellProvider<IBridgeResponse<ICdpStatus>, void>({
     success: true,
-    data: { enabled: false, port: null, startupEnabled: false, instances: [], configEnabled: false, isDevMode: false },
+    data: {
+      enabled: false,
+      port: null,
+      startupEnabled: false,
+      instances: [],
+      configEnabled: false,
+      isDevMode: false,
+    },
   }),
   updateCdpConfig: stubShellProvider<IBridgeResponse<ICdpConfig>, Partial<ICdpConfig>>({
     success: false,
@@ -604,22 +651,45 @@ export const application = {
   setStartOnBoot: shellProvider<IBridgeResponse<IStartOnBootStatus>, { enabled: boolean }>(
     async ({ enabled }) => {
       await tauriSetAutostart(enabled);
-      return { success: true, data: { supported: true, enabled, isPackaged: true, platform: navigator.platform } };
+      return {
+        success: true,
+        data: {
+          supported: true,
+          enabled,
+          isPackaged: true,
+          platform: navigator.platform,
+        },
+      };
     },
     { success: false }
   ),
   // DEGRADE_STUB: no GPU-process recovery hooks in Tauri's webview.
   getGpuStatus: stubShellProvider<IBridgeResponse<IGpuStatus>, void>({
     success: true,
-    data: { userOverride: null, autoDisabled: false, crashCount: 0, lastCrashAt: null },
+    data: {
+      userOverride: null,
+      autoDisabled: false,
+      crashCount: 0,
+      lastCrashAt: null,
+    },
   }),
   setGpuOverride: stubShellProvider<IBridgeResponse<IGpuStatus>, { override: IGpuOverride | null }>({
     success: true,
-    data: { userOverride: null, autoDisabled: false, crashCount: 0, lastCrashAt: null },
+    data: {
+      userOverride: null,
+      autoDisabled: false,
+      crashCount: 0,
+      lastCrashAt: null,
+    },
   }),
   // DEGRADE_STUB: renderer-log piping to the shell; the in-process backend owns log files.
   writeRendererLog: stubShellProvider<void, IRendererLogEntry>(undefined),
-  logStream: noopEmitter<{ level: 'log' | 'warn' | 'error'; tag: string; message: string; data?: unknown }>(),
+  logStream: noopEmitter<{
+    level: 'log' | 'warn' | 'error';
+    tag: string;
+    message: string;
+    data?: unknown;
+  }>(),
   devToolsStateChanged: noopEmitter<{ isOpen: boolean }>(),
 };
 
@@ -673,7 +743,13 @@ export const update = {
 
 export const autoUpdate = {
   check: shellProvider<
-    IBridgeResponse<{ updateInfo?: { version: string; releaseDate?: string; releaseNotes?: string } }>,
+    IBridgeResponse<{
+      updateInfo?: {
+        version: string;
+        releaseDate?: string;
+        releaseNotes?: string;
+      };
+    }>,
     { includePrerelease?: boolean }
   >(async () => {
     // `force` so each modal open / retry performs a fresh check; update.check
@@ -767,7 +843,10 @@ export const fs = {
   cancelZip: httpPost<boolean, { request_id: string }>('/api/fs/zip/cancel'),
   getFileMetadata: httpPost<IFileMetadata, { path: string; workspace?: string }>('/api/fs/metadata'),
   copyFilesToWorkspace: httpPost<
-    { copied_files: string[]; failed_files?: Array<{ path: string; error: string }> },
+    {
+      copied_files: string[];
+      failed_files?: Array<{ path: string; error: string }>;
+    },
     { file_paths: string[]; workspace: string; source_root?: string }
   >('/api/fs/copy'),
   removeEntry: httpPost<void, { path: string }>('/api/fs/remove'),
@@ -927,7 +1006,12 @@ export const googleAuth = {
 
 export const google = {
   subscriptionStatus: httpGet<
-    { isSubscriber: boolean; tier?: string; lastChecked: number; message?: string },
+    {
+      isSubscriber: boolean;
+      tier?: string;
+      lastChecked: number;
+      message?: string;
+    },
     { proxy?: string }
   >('/api/google/subscription-status'),
 };
@@ -1147,11 +1231,15 @@ export const acpConversation = {
   // ordinary state doesn't pollute Sentry breadcrumbs (ELECTRON-1BT).
   getMode: httpGet<{ mode: string; initialized: boolean }, { conversation_id: number }>(
     (p) => `/api/conversations/${p.conversation_id}/mode`,
-    { silentStatuses: [404] }
+    {
+      silentStatuses: [404],
+    }
   ),
   getModel: httpGet<{ model_info: AcpModelInfo | null }, { conversation_id: number }>(
     (p) => `/api/conversations/${p.conversation_id}/model`,
-    { silentStatuses: [404] }
+    {
+      silentStatuses: [404],
+    }
   ),
   setModel: httpPut<void, { conversation_id: number; model_id: string }>(
     (p) => `/api/conversations/${p.conversation_id}/model`,
@@ -1171,7 +1259,9 @@ export const mcpService = {
   >('/api/mcp/servers'),
   importServers: httpPost<
     IMcpServer[],
-    { servers: Array<Pick<IMcpServer, 'name' | 'description' | 'transport' | 'original_json' | 'builtin'>> }
+    {
+      servers: Array<Pick<IMcpServer, 'name' | 'description' | 'transport' | 'original_json' | 'builtin'>>;
+    }
   >('/api/mcp/servers/import'),
   updateServer: httpPut<
     IMcpServer,
@@ -1190,7 +1280,9 @@ export const mcpService = {
   ),
   batchImportServers: httpPost<
     IMcpServer[],
-    { servers: Array<Partial<IMcpServer> & Pick<IMcpServer, 'name' | 'transport'>> }
+    {
+      servers: Array<Partial<IMcpServer> & Pick<IMcpServer, 'name' | 'transport'>>;
+    }
   >('/api/mcp/servers/import'),
   getAgentMcpConfigs: httpGet<
     Array<{
@@ -1202,7 +1294,12 @@ export const mcpService = {
         }
       >;
     }>,
-    Array<{ agent_type: string; backend?: string; name: string; cli_path?: string }>
+    Array<{
+      agent_type: string;
+      backend?: string;
+      name: string;
+      cli_path?: string;
+    }>
   >('/api/mcp/agent-configs'),
   testMcpConnection: httpPost<
     {
@@ -1277,7 +1374,10 @@ export const remoteAgent = {
   >('/api/remote-agents'),
   update: httpPut<
     boolean,
-    { id: number; updates: Partial<import('@/common/types/agent/remoteAgentTypes').RemoteAgentInput> }
+    {
+      id: number;
+      updates: Partial<import('@/common/types/agent/remoteAgentTypes').RemoteAgentInput>;
+    }
   >(
     (p) => `/api/remote-agents/${p.id}`,
     (p) => p.updates
@@ -1356,7 +1456,11 @@ export const database = {
 // ---------------------------------------------------------------------------
 
 function mapPreviewTarget(target: PreviewHistoryTarget): Record<string, unknown> {
-  return { ...target, content_type: target.contentType, contentType: undefined };
+  return {
+    ...target,
+    content_type: target.contentType,
+    contentType: undefined,
+  };
 }
 
 export const previewHistory = {
@@ -1365,12 +1469,18 @@ export const previewHistory = {
   })),
   save: httpPost<PreviewSnapshotInfo, { target: PreviewHistoryTarget; content: string }>(
     '/api/preview-history/save',
-    (p) => ({ target: mapPreviewTarget(p.target), content: p.content })
+    (p) => ({
+      target: mapPreviewTarget(p.target),
+      content: p.content,
+    })
   ),
   getContent: httpPost<
     { snapshot: PreviewSnapshotInfo; content: string } | null,
     { target: PreviewHistoryTarget; snapshot_id: string }
-  >('/api/preview-history/get-content', (p) => ({ target: mapPreviewTarget(p.target), snapshot_id: p.snapshot_id })),
+  >('/api/preview-history/get-content', (p) => ({
+    target: mapPreviewTarget(p.target),
+    snapshot_id: p.snapshot_id,
+  })),
 };
 
 // Preview panel
@@ -1401,25 +1511,30 @@ export const document = {
 // ---------------------------------------------------------------------------
 
 export const pptPreview = {
-  start: httpPost<{ url: string; error?: string }, { file_path: string; workspace?: string }>('/api/ppt-preview/start'),
-  stop: httpPost<void, { file_path: string }>('/api/ppt-preview/stop'),
-  status: wsEmitter<{ state: 'starting' | 'installing' | 'ready' | 'error'; message?: string }>('ppt-preview.status'),
+  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/ppt-preview/start'),
+  stop: httpPost<void, { capability: string }>('/api/ppt-preview/stop'),
+  status: wsEmitter<{
+    state: 'starting' | 'installing' | 'ready' | 'error';
+    message?: string;
+  }>('ppt-preview.status'),
 };
 
 export const wordPreview = {
-  start: httpPost<{ url: string; error?: string }, { file_path: string; workspace?: string }>(
-    '/api/word-preview/start'
-  ),
-  stop: httpPost<void, { file_path: string }>('/api/word-preview/stop'),
-  status: wsEmitter<{ state: 'starting' | 'installing' | 'ready' | 'error'; message?: string }>('word-preview.status'),
+  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/word-preview/start'),
+  stop: httpPost<void, { capability: string }>('/api/word-preview/stop'),
+  status: wsEmitter<{
+    state: 'starting' | 'installing' | 'ready' | 'error';
+    message?: string;
+  }>('word-preview.status'),
 };
 
 export const excelPreview = {
-  start: httpPost<{ url: string; error?: string }, { file_path: string; workspace?: string }>(
-    '/api/excel-preview/start'
-  ),
-  stop: httpPost<void, { file_path: string }>('/api/excel-preview/stop'),
-  status: wsEmitter<{ state: 'starting' | 'installing' | 'ready' | 'error'; message?: string }>('excel-preview.status'),
+  start: httpPost<PreviewUrlResponse, { file_path: string; workspace?: string }>('/api/excel-preview/start'),
+  stop: httpPost<void, { capability: string }>('/api/excel-preview/stop'),
+  status: wsEmitter<{
+    state: 'starting' | 'installing' | 'ready' | 'error';
+    message?: string;
+  }>('excel-preview.status'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1523,7 +1638,12 @@ export type INotificationOptions = {
 
 export const notification = {
   show: shellProvider<void, INotificationOptions>(
-    (opts) => tauriSendNotification({ title: opts.title, body: opts.body, icon: opts.icon }),
+    (opts) =>
+      tauriSendNotification({
+        title: opts.title,
+        body: opts.body,
+        icon: opts.icon,
+      }),
     undefined
   ),
   // DEGRADE_STUB: click→navigate needs a Rust notification-action listener that
@@ -1618,7 +1738,7 @@ export const webui = {
    * Mint returns the plaintext exactly ONCE (`token`) — it is never persisted nor
    * re-emitted; the backend stores only a hash. `warning` is present when the
    * companion has no resolvable model (the token still mints, but model-dependent
-   * capabilities like `nomi_agent_run` will fail until a provider/model is set).
+   * capabilities will fail until a provider/model is set).
    */
   companionAccessToken: {
     status: httpGet<{ configured: boolean }, { companionId: string }>(
@@ -1652,12 +1772,11 @@ export const cron = {
       description: p.updates.description,
       enabled: p.updates.enabled,
       schedule: p.updates.schedule,
-      message: p.updates.target?.payload.text,
-      execution_mode: p.updates.target?.execution_mode,
+      message: p.updates.message,
+      execution_mode: p.updates.execution_mode,
       agent_config: p.updates.metadata?.agent_config,
       conversation_title: p.updates.metadata?.conversation_title,
       max_retries: p.updates.state?.max_retries,
-      target_kind: p.updates.target?.target_kind,
     })
   ),
   removeJob: httpDelete<void, { job_id: string }>((p) => `/api/cron/jobs/${p.job_id}`),
@@ -1675,9 +1794,11 @@ export const cron = {
   onJobCreated: wsEmitter<ICronJob>('cron.job-created'),
   onJobUpdated: wsEmitter<ICronJob>('cron.job-updated'),
   onJobRemoved: wsEmitter<{ job_id: string }>('cron.job-removed'),
-  onJobExecuted: wsEmitter<{ job_id: string; status: 'ok' | 'error' | 'skipped' | 'missed'; error?: string }>(
-    'cron.job-executed'
-  ),
+  onJobExecuted: wsEmitter<{
+    job_id: string;
+    status: 'ok' | 'error' | 'skipped' | 'missed';
+    error?: string;
+  }>('cron.job-executed'),
 };
 
 // ---------------------------------------------------------------------------
@@ -1689,8 +1810,6 @@ export type ICronSchedule =
   | { kind: 'every'; every_ms: number; description: string }
   | { kind: 'cron'; expr: string; tz?: string; description: string };
 
-export type ICronTargetKind = 'agent';
-
 export type ICronJobRunStatus = 'ok' | 'error' | 'skipped' | 'missed';
 
 export interface ICronJob {
@@ -1699,11 +1818,8 @@ export interface ICronJob {
   description?: string;
   enabled: boolean;
   schedule: ICronSchedule;
-  target: {
-    payload: { kind: 'message'; text: string };
-    execution_mode?: 'existing' | 'new_conversation';
-    target_kind?: ICronTargetKind;
-  };
+  message: string;
+  execution_mode: 'existing' | 'new_conversation';
   metadata: {
     conversation_id: number;
     conversation_title?: string;
@@ -1756,7 +1872,6 @@ export interface ICreateCronJobParams {
   created_by: 'user' | 'agent';
   execution_mode?: 'existing' | 'new_conversation';
   agent_config?: ICronAgentConfig;
-  target_kind?: ICronTargetKind;
 }
 
 // ---------------------------------------------------------------------------
@@ -1803,7 +1918,6 @@ export interface ICreateTerminalParams {
   knowledge_base_ids?: string[];
 }
 
-/** Response shape for GET /api/terminals/mcp-register-template. */
 export interface IMcpRegisterTemplate {
   claude_cmd: string;
   claude_json: string;
@@ -1811,17 +1925,23 @@ export interface IMcpRegisterTemplate {
   gemini_json: string;
 }
 
-/** Response shape for POST /api/terminals/register-knowledge. */
 export interface IRegisterKnowledgeOutcome {
   written_path: string;
   scope: string;
   note?: string;
 }
 
-/** Request body for POST /api/terminals/register-knowledge. */
-export interface IRegisterKnowledgeParams {
-  cwd: string;
-  family: string;
+export interface IUnregisterKnowledgeOutcome {
+  path: string;
+  removed: boolean;
+}
+
+export type KnowledgeCliFamily = 'claude' | 'codex' | 'gemini';
+
+export interface IKnowledgeGlobalRegistrationStatus {
+  claude: boolean | null;
+  codex: boolean | null;
+  gemini: boolean | null;
 }
 
 export const terminal = {
@@ -1829,7 +1949,21 @@ export const terminal = {
   get: httpGet<ITerminalSession, { id: number }>((p) => `/api/terminals/${p.id}`),
   create: httpPost<ITerminalSession, ICreateTerminalParams>('/api/terminals'),
   mcpRegisterTemplate: httpGet<IMcpRegisterTemplate, void>('/api/terminals/mcp-register-template'),
-  registerKnowledge: httpPost<IRegisterKnowledgeOutcome, IRegisterKnowledgeParams>('/api/terminals/register-knowledge'),
+  registerKnowledge: httpPost<
+    IRegisterKnowledgeOutcome,
+    { cwd: string; family: KnowledgeCliFamily }
+  >('/api/terminals/register-knowledge'),
+  registerKnowledgeGlobal: httpPost<
+    IRegisterKnowledgeOutcome,
+    { family: KnowledgeCliFamily }
+  >('/api/terminals/register-knowledge-global'),
+  unregisterKnowledgeGlobal: httpPost<
+    IUnregisterKnowledgeOutcome,
+    { family: KnowledgeCliFamily }
+  >('/api/terminals/unregister-knowledge-global'),
+  knowledgeGlobalStatus: httpGet<IKnowledgeGlobalRegistrationStatus, void>(
+    '/api/terminals/knowledge-global-status'
+  ),
   input: httpPost<void, { id: number; data_b64: string }>(
     (p) => `/api/terminals/${p.id}/input`,
     (p) => ({ data_b64: p.data_b64 })
@@ -1905,6 +2039,12 @@ export interface ICreateConversationParams {
   /** Backend-resolved reusable launch configuration. */
   preset_id?: string;
   preset_overrides?: import('../types/agent/presetTypes').PresetOverrides;
+  delegation_policy?: TDelegationPolicy;
+  execution_model_pool?: TExecutionModelPool;
+  decision_policy?: TDecisionPolicy;
+  /** Optional collaboration authoring default. The first delegated Execution
+   * copies the template and never retains a runtime foreign key. */
+  execution_template_id?: string;
   extra: {
     workspace?: string;
     custom_workspace?: boolean;
@@ -1925,24 +2065,6 @@ export interface ICreateConversationParams {
     custom_agent_id?: string;
     context?: string;
     context_file_name?: string;
-    /** Legacy field kept for backward-compat only (`#[serde(default)]`); no longer
-     *  drives any lead prompt (the homepage 智能编排 entry was removed). The model
-     *  range (主/协作) is now set per-conversation via the composer's collaborator
-     *  selector into `extra.orchestrator_model_range`. */
-    orchestrator_role?: string;
-    /** Curated model range for the orchestration run this lead conversation
-     *  spawns (homepage「主模型 + 协作模型」picker). `models[0]` = 主模型 (also the
-     *  lead/planner); the rest = 协作模型. Read back by the `nomi_run_create`
-     *  gateway handler from the conversation's extra (deterministic, not via the
-     *  LLM). Absent ⇒ Auto (every enabled model). */
-    orchestrator_model_range?: TModelRange;
-    /** 「agent 集群」意图标记（需求1）：composer 顶部 toggle 选中后落此键。后端
-     *  nomi 工厂据此在常驻 subagent 提示之上追加 CLUSTER_MODE_HINT（对每个任务
-     *  刻意评估是否开集群、太简单先向用户说明原因）。 */
-    agent_cluster_mode?: boolean;
-    /** 节点级审批模式（需求5，迁移 030）：'manual' = 集群节点遇关键决策挂起向
-     *  用户提问；'auto'/缺省 = 全授权。建 run 时由网关从会话 extra 读取生效。 */
-    orchestrator_approval_mode?: string;
     /** Transient: preset opt-in skills. Consumed by backend create handler
      *  and stripped before persistence. */
     preset_enabled_skills?: string[];
@@ -1973,7 +2095,6 @@ export interface ICreateConversationParams {
     is_health_check?: boolean;
     remote_agent_id?: number;
     extra_skill_paths?: string[];
-    team_id?: string;
   };
 }
 
@@ -2016,13 +2137,17 @@ export interface IResponseMessage {
   hidden?: boolean;
   /** Replace accumulated text for the same msg_id instead of appending. */
   replace?: boolean;
+  /** This content is a self-contained finalized projection, not a fragment of
+   *  an active model turn. Consumers must render it without raising turn or
+   *  conversation activity state. */
+  stream_complete?: boolean;
   /** Companion wire markers (backend StreamRelay stamps them on every
    *  fragment): true + owning companion id when the conversation is a companion
-   *  companion / channel master session. */
+   *  owned session. */
   companion?: boolean;
   companion_id?: string | null;
   /** IM platform ("telegram" | "lark" | ...) when the conversation is a
-   *  channel master session; null/absent for local conversations. */
+   *  channel-originated turn; null/absent for local conversations. */
   channel_platform?: string | null;
   /** Originating subsystem of the turn's user message (companion/cron/autowork/
    *  idmm); null/absent = typed by a real person. */
@@ -2140,8 +2265,8 @@ export interface IConversationTurnStartedEvent {
   runtime: {
     state: 'idle' | 'starting' | 'running' | 'waiting_confirmation';
     can_send_message: boolean;
-    has_task: boolean;
-    task_status?: 'pending' | 'running' | 'finished';
+    has_runtime: boolean;
+    runtime_status?: 'pending' | 'running' | 'finished';
     is_processing: boolean;
     pending_confirmations: number;
     processing_started_at?: number;
@@ -2169,8 +2294,8 @@ export interface IConversationTurnCompletedEvent {
   runtime: {
     state: 'idle' | 'starting' | 'running' | 'waiting_confirmation';
     can_send_message: boolean;
-    has_task: boolean;
-    task_status?: 'pending' | 'running' | 'finished';
+    has_runtime: boolean;
+    runtime_status?: 'pending' | 'running' | 'finished';
     is_processing: boolean;
     pending_confirmations: number;
     processing_started_at?: number;
@@ -2408,24 +2533,24 @@ export const channel = {
   ),
   syncChannelSettings: httpPost<void, { platform: string }>('/api/channel/settings/sync'),
   /**
-   * Bind one companion as the master-agent greeter for an IM platform (spec §4.4/§4.7).
+   * Bind one companion to an IM channel platform.
    * Atomic on the backend: writes the channel companion preference and resets
    * the platform's active sessions in one step.
-   * Omitted/empty `companion_id` clears the binding (falls back to the default companion).
+   * Omitted/empty `companion_id` clears the binding.
    * Binding a non-existent companion returns 400 — errors propagate to the caller
    * as `BackendHttpError`.
    */
-  setMasterAgentCompanion: httpPost<void, { platform?: string; plugin_id?: string; companion_id?: string | null }>(
+  setChannelCompanion: httpPost<void, { platform?: string; plugin_id?: string; companion_id?: string | null }>(
     '/api/channel/settings/companion'
   ),
   /**
-   * Bind one public agent (对外伙伴) as the master-agent greeter for a channel row.
-   * Symmetric to {@link setMasterAgentCompanion} but for public agents — a channel
+   * Bind one public agent (对外伙伴) to a channel row.
+   * Symmetric to {@link setChannelCompanion} but for public agents — a channel
    * bot serves EITHER a companion OR a public agent (mutually exclusive). Atomic on
    * the backend: persists the binding AND resets only this channel row's sessions.
    * A `null` `public_agent_id` clears the binding.
    */
-  setMasterAgentPublicAgent: httpPost<void, { plugin_id: string; public_agent_id: string | null }>(
+  setChannelPublicAgent: httpPost<void, { plugin_id: string; public_agent_id: string | null }>(
     '/api/channel/settings/public-agent'
   ),
   /**
@@ -2437,16 +2562,16 @@ export const channel = {
   pairingRequested: wsMappedEmitter<IChannelPairingRequest>('channel.pairing-requested', (raw) =>
     toPairing(raw as RawPairing)
   ),
-  pluginStatusChanged: wsMappedEmitter<{ plugin_id: string; status: IChannelPluginStatus }>(
-    'channel.plugin-status-changed',
-    (raw) => {
-      const r = raw as Record<string, unknown>;
-      return {
-        plugin_id: r.plugin_id as string,
-        status: toPluginStatus(r.status as RawPluginStatus),
-      };
-    }
-  ),
+  pluginStatusChanged: wsMappedEmitter<{
+    plugin_id: string;
+    status: IChannelPluginStatus;
+  }>('channel.plugin-status-changed', (raw) => {
+    const r = raw as Record<string, unknown>;
+    return {
+      plugin_id: r.plugin_id as string,
+      status: toPluginStatus(r.status as RawPluginStatus),
+    };
+  }),
   userAuthorized: wsMappedEmitter<IChannelUser>('channel.user-authorized', (raw) => toChannelUser(raw as RawUser)),
   /**
    * 微信扫码登录生命周期事件（替代旧 SSE 流）。`phase` 区分阶段：
@@ -2476,7 +2601,11 @@ export const hub = {
   retryInstall: httpPost<void, { name: string }>('/api/hub/retry-install'),
   checkUpdates: httpPost<{ name: string }[], void>('/api/hub/check-updates'),
   update: httpPost<void, { name: string }>('/api/hub/update'),
-  onStateChanged: wsEmitter<{ name: string; status: HubExtensionStatus; error?: string }>('hub.state-changed'),
+  onStateChanged: wsEmitter<{
+    name: string;
+    status: HubExtensionStatus;
+    error?: string;
+  }>('hub.state-changed'),
 };
 
 // ── Requirements Platform (需求平台) ─────────────────────────────────
@@ -2575,7 +2704,7 @@ export interface ITagSummary {
   needs_review: number;
   total: number;
   /** AutoWork is paused for this tag (a requirement exhausted its retries).
-   * While true, the orchestrator does not claim this tag's requirements until
+   * While true, automatic execution does not claim this tag's requirements until
    * the tag is resumed. */
   paused: boolean;
   /** Why the tag was paused (`requirement_failed` | `manual` | …). */
@@ -2977,147 +3106,133 @@ export const webhook = {
   ),
 };
 
-// ─────────────────────────── 智能编排 (Orchestration) ───────────────────────────
-// REST client for fleets + orchestration workspaces, routed to
-// /api/orchestrator/*. Mirrors the plain-REST webhook block above; IDs are
-// strings (`fleet_…` / `ows_…`).
-
-export const orchestrator = {
-  fleets: {
-    list: httpGet<TFleet[], void>('/api/orchestrator/fleets'),
-    get: httpGet<TFleet, { id: string }>((p) => `/api/orchestrator/fleets/${p.id}`),
-    create: httpPost<TFleet, TCreateFleet>('/api/orchestrator/fleets'),
-    update: httpPut<TFleet, { id: string } & TUpdateFleet>(
-      (p) => `/api/orchestrator/fleets/${p.id}`,
-      ({ id: _id, ...body }) => body
-    ),
-    remove: httpDelete<void, { id: string }>((p) => `/api/orchestrator/fleets/${p.id}`),
+// Persistent Agent Execution is the sole collaboration transport exposed to the
+// renderer. Planning, routing, scheduling and retries remain implementation
+// details behind this aggregate.
+export const agentExecution = {
+  list: httpGet<TAgentExecution[], void>('/api/agent-executions'),
+  create: httpPost<TAgentExecution, TCreateAgentExecution>('/api/agent-executions'),
+  get: httpGet<TAgentExecutionDetail, { id: string }>((p) => `/api/agent-executions/${p.id}`),
+  remove: httpDelete<void, { id: string; expected_version: number }>(
+    (p) => `/api/agent-executions/${p.id}?expected_version=${p.expected_version}`
+  ),
+  rename: httpPatch<TAgentExecution, { id: string; updates: TRenameAgentExecution }>(
+    (p) => `/api/agent-executions/${p.id}/rename`,
+    (p) => p.updates
+  ),
+  replan: httpPost<TAgentExecutionDetail, { id: string; updates: TReplanAgentExecution }>(
+    (p) => `/api/agent-executions/${p.id}/replan`,
+    (p) => p.updates
+  ),
+  adjust: httpPost<TAgentExecutionDetail, { id: string; updates: TAdjustAgentExecution }>(
+    (p) => `/api/agent-executions/${p.id}/adjust`,
+    (p) => p.updates
+  ),
+  approve: httpPost<TAgentExecution, { id: string; updates: TVersionedAgentExecutionCommand }>(
+    (p) => `/api/agent-executions/${p.id}/approve`,
+    (p) => p.updates
+  ),
+  pause: httpPost<TAgentExecution, { id: string; updates: TVersionedAgentExecutionCommand }>(
+    (p) => `/api/agent-executions/${p.id}/pause`,
+    (p) => p.updates
+  ),
+  resume: httpPost<TAgentExecution, { id: string; updates: TVersionedAgentExecutionCommand }>(
+    (p) => `/api/agent-executions/${p.id}/resume`,
+    (p) => p.updates
+  ),
+  cancel: httpPost<TAgentExecutionDetail, { id: string; updates: TVersionedAgentExecutionCommand }>(
+    (p) => `/api/agent-executions/${p.id}/cancel`,
+    (p) => p.updates
+  ),
+  addSteps: httpPost<TAgentExecutionDetail, { id: string; updates: TAddExecutionSteps }>(
+    (p) => `/api/agent-executions/${p.id}/steps`,
+    (p) => p.updates
+  ),
+  updateStep: httpPatch<TExecutionStep, { execution_id: string; step_id: string; updates: TUpdateExecutionStep }>(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}`,
+    (p) => p.updates
+  ),
+  reassign: httpPut<TExecutionStep, { execution_id: string; step_id: string; updates: TReassignExecutionStep }>(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/reassign`,
+    (p) => p.updates
+  ),
+  steer: httpPost<void, { execution_id: string; step_id: string; updates: TSteerExecutionStep }>(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/steer`,
+    (p) => p.updates
+  ),
+  retry: httpPost<TAgentExecutionDetail, { execution_id: string; step_id: string; updates: TRetryExecutionStep }>(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/retry`,
+    (p) => p.updates
+  ),
+  adopt: httpPost<
+    TAgentExecutionDetail,
+    {
+      execution_id: string;
+      step_id: string;
+      updates: TAdoptExecutionStepOutput;
+    }
+  >(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/adopt`,
+    (p) => p.updates
+  ),
+  configure: httpPatch<TExecutionStep, { execution_id: string; step_id: string; updates: TConfigureExecutionStep }>(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/configure`,
+    (p) => p.updates
+  ),
+  answerDecision: httpPost<
+    TAgentExecutionDetail,
+    {
+      execution_id: string;
+      step_id: string;
+      attempt_id: string;
+      updates: TAnswerExecutionDecision;
+    }
+  >(
+    (p) => `/api/agent-executions/${p.execution_id}/steps/${p.step_id}/attempts/${p.attempt_id}/answer`,
+    (p) => p.updates
+  ),
+  listEvents: httpGet<TAgentExecutionEvent[], { id: string; query?: TAgentExecutionEventsQuery }>((p) => {
+    const params = new URLSearchParams();
+    if (p.query?.after_sequence !== undefined) {
+      params.set('after_sequence', String(p.query.after_sequence));
+    }
+    if (p.query?.limit !== undefined) params.set('limit', String(p.query.limit));
+    const query = params.toString();
+    return `/api/agent-executions/${p.id}/events${query ? `?${query}` : ''}`;
+  }),
+  getWorkspace: {
+    provider: () => {},
+    invoke: (async (p: { id: string; work_dir: string; path: string; search?: string }) => {
+      const rel = absoluteToRelativePath(p.path, p.work_dir);
+      const url = `/api/agent-executions/${p.id}/workspace?path=${encodeURIComponent(rel)}${p.search ? `&search=${encodeURIComponent(p.search)}` : ''}`;
+      const raw = await httpRequest<Array<{ name: string; type: string }>>('GET', url);
+      return fromBackendWorkspaceList(raw, p.work_dir, rel);
+    }) as (p: { id: string; work_dir: string; path: string; search?: string }) => Promise<IDirOrFile[]>,
   },
-  runs: {
-    // Every run owned by the current user (all workspaces + ad-hoc/workspace-less
-    // runs), newest first — the read path for the read-only Run-history library.
-    listMine: httpGet<TRun[], void>('/api/orchestrator/runs'),
-    // Create an ad-hoc run straight from the「智能编排」Tab's structured form
-    // (no workspace / pre-built fleet — the fleet is synthesized from
-    // `model_range`). Backend defaults autonomy to `interactive`, so the run
-    // parks at `awaiting_plan_approval` until approved. Body matches the wire
-    // shape verbatim, so no mapBody is needed.
-    createAdhoc: httpPost<TRun, TCreateAdhocRun>('/api/orchestrator/runs/adhoc'),
-    get: httpGet<TRunDetail, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
-    // Delete a run (owner-scoped). The backend stops any live engine loop first,
-    // then deletes the row — the schema's ON DELETE CASCADE FKs sweep out the
-    // run's tasks/deps/assignments. 403 if the run is owned by another user.
-    remove: httpDelete<void, { id: string }>((p) => `/api/orchestrator/runs/${p.id}`),
-    // Rename a run = change its goal (owner-scoped, PATCH). Body is { goal }.
-    rename: httpPatch<void, { id: string; goal: string }>(
-      (p) => `/api/orchestrator/runs/${p.id}`,
-      (p) => ({ goal: p.goal })
-    ),
-    // Re-plan a run IN PLACE (owner-scoped, POST). Clears the run's old task graph
-    // and re-decomposes against the (optionally) edited goal / model_range /
-    // autonomy / pinned_roles — every edit field is optional (omitted = keep
-    // current). Returns the re-planned run. The backend stops any live engine
-    // loop, applies the edits, clears the old plan, then re-plans + re-arms the
-    // engine for non-`interactive` runs (`interactive` re-parks at approval).
-    replan: httpPost<TRun, { id: string } & TReplanRequest>(
-      (p) => `/api/orchestrator/runs/${p.id}/replan`,
-      ({ id: _id, ...body }) => body
-    ),
-    // Conversation-driven intelligent re-adjust IN PLACE (owner-scoped, POST):
-    // the lead model judges, per task, whether to KEEP the completed work or
-    // re-decompose, and the backend RECONCILEs the run to the result — preserving
-    // the kept tasks + their output (unlike `replan`, which wipes the whole plan),
-    // dropping the un-kept ones, inserting + routing the new tasks, and rebuilding
-    // the deps. Returns the (re-activated) run. Rejected (400) for a blank intent
-    // or a run with any running task (pause first). The backend runs the whole
-    // reconcile + terminal re-activation under the run's per-run lock and re-arms
-    // the engine for a re-activated run, mirroring `rerunTask`.
-    adjustRun: httpPost<TRun, { run_id: string } & TAdjustRunRequest>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/adjust`,
-      ({ run_id: _run_id, ...body }) => body
-    ),
-    cancel: httpPost<void, { id: string }>(
-      (p) => `/api/orchestrator/runs/${p.id}/cancel`,
-      () => undefined
-    ),
-    approve: httpPost<void, { id: string }>(
-      (p) => `/api/orchestrator/runs/${p.id}/approve`,
-      () => undefined
-    ),
-    pause: httpPost<void, { id: string }>(
-      (p) => `/api/orchestrator/runs/${p.id}/pause`,
-      () => undefined
-    ),
-    resume: httpPost<void, { id: string }>(
-      (p) => `/api/orchestrator/runs/${p.id}/resume`,
-      () => undefined
-    ),
-    reassign: httpPut<void, { run_id: string; task_id: string; updates: TReassign }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/assignment`,
-      (p) => p.updates
-    ),
-    steer: httpPost<void, { run_id: string; task_id: string; updates: TSteer }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/steer`,
-      (p) => p.updates
-    ),
-    // Re-execute a single node (UC-2a): resets the task + its settled downstream
-    // dependents to pending and re-activates a terminal run, so the engine re-drives
-    // it. Rejected (400) if the task is currently running (pause/stop first).
-    rerunTask: httpPost<void, { run_id: string; task_id: string }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/rerun`,
-      () => undefined
-    ),
-    // Adopt the node's worker conversation's CURRENT output as the node's product
-    // (UC-2c「采用为该节点产出」): reads the worker's latest assistant text into the
-    // node, marks it done, and re-activates a terminal run so downstream unblocks.
-    // For a failed/stuck node the user kept chatting in the content area. Rejected
-    // (400) if the run is running, or the node has no worker conversation / no
-    // output yet.
-    adoptTaskResult: httpPost<void, { run_id: string; task_id: string }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/adopt`,
-      () => undefined
-    ),
-    // Fine-tune a node's intent/prompt (UC-2a): replace the task's spec. Rejected
-    // (400) for a blank spec or a running task; a later rerun uses the new spec.
-    updateTaskSpec: httpPatch<void, { run_id: string; task_id: string; updates: TTaskSpecUpdate }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/spec`,
-      (p) => p.updates
-    ),
-    // 启动前配置台 (迁移 026): set/clear a node's per-task model override + 预置要求.
-    // FULL replace of the three fields (null/blank clears); rejected (400) for a
-    // running task. A pending node picks these up at dispatch; a settled node on
-    // the next rerun.
-    setTaskConfig: httpPatch<void, { run_id: string; task_id: string; updates: TTaskConfigUpdate }>(
-      (p) => `/api/orchestrator/runs/${p.run_id}/tasks/${p.task_id}/config`,
-      (p) => p.updates
-    ),
-    // List one directory level under a run's working directory (read-only). Root
-    // is the run's `work_dir` (server resolves the actual dir); the client passes
-    // an ABSOLUTE path (root or a node's fullPath) which is mapped to a
-    // workspace-relative `path`. Mirrors terminal/conversation `getWorkspace` so
-    // the shared WorkspaceRailBody tree source consumes it unchanged (IDirOrFile[]).
-    getWorkspace: {
-      provider: () => {},
-      invoke: (async (p: { id: string; work_dir: string; path: string; search?: string }) => {
-        const rel = absoluteToRelativePath(p.path, p.work_dir);
-        const url = `/api/orchestrator/runs/${p.id}/workspace?path=${encodeURIComponent(rel)}${p.search ? `&search=${encodeURIComponent(p.search)}` : ''}`;
-        const raw = await httpRequest<Array<{ name: string; type: string }>>('GET', url);
-        return fromBackendWorkspaceList(raw, p.work_dir, rel);
-      }) as (p: { id: string; work_dir: string; path: string; search?: string }) => Promise<IDirOrFile[]>,
-    },
-  },
-  // Realtime WS events from the run engine (OrchestratorRunEventEmitter). Wire
-  // names verbatim from orchestratorEvents.ts.
-  runEvents: {
-    statusChanged: wsEmitter<TOrchRunStatusEvent>('orchestrator.run.statusChanged'),
-    planUpdated: wsEmitter<TOrchRunPlanUpdatedEvent>('orchestrator.run.planUpdated'),
-    completed: wsEmitter<TOrchRunCompletedEvent>('orchestrator.run.completed'),
-    taskStatusChanged: wsEmitter<TOrchTaskStatusEvent>('orchestrator.task.statusChanged'),
-    taskAssigned: wsEmitter<TOrchTaskAssignedEvent>('orchestrator.task.assigned'),
-    leadThinking: wsEmitter<TOrchRunLeadThinkingEvent>('orchestrator.run.leadThinking'),
+  events: {
+    changed: wsEmitter<TAgentExecutionChangedEvent>('agentExecution.changed'),
+    leadThinking: wsEmitter<TAgentExecutionLeadThinkingEvent>('agentExecution.leadThinking'),
   },
 };
 
+// Reusable collaboration authoring input. Templates never become runtime
+// state; createExecution copies them once into the canonical execution model.
+export const agentExecutionTemplate = {
+  list: httpGet<TAgentExecutionTemplate[], void>('/api/agent-execution-templates'),
+  get: httpGet<TAgentExecutionTemplateDetail, { id: string }>((p) => `/api/agent-execution-templates/${p.id}`),
+  create: httpPost<TAgentExecutionTemplateDetail, TCreateAgentExecutionTemplate>('/api/agent-execution-templates'),
+  update: httpPut<TAgentExecutionTemplateDetail, { id: string; updates: TUpdateAgentExecutionTemplate }>(
+    (p) => `/api/agent-execution-templates/${p.id}`,
+    (p) => p.updates
+  ),
+  remove: httpDelete<void, { id: string; expected_version: number }>(
+    (p) => `/api/agent-execution-templates/${p.id}?expected_version=${p.expected_version}`
+  ),
+  createExecution: httpPost<TAgentExecution, { id: string; request: TCreateExecutionFromTemplate }>(
+    (p) => `/api/agent-execution-templates/${p.id}/create-execution`,
+    (p) => p.request
+  ),
+};
 // ─────────────────────────── Companion (nomi 桌面伙伴) ───────────────────────────
 
 export interface ICompanionCollectConfig {
@@ -3386,13 +3501,15 @@ export interface ICompanionSharedConfig {
   evolve: ICompanionEvolveConfig;
   /** Session-window archiving (伙伴会话归档). */
   archive: ICompanionArchiveConfig;
-  /** 智能编排：开启后本地伙伴会话可用 nomi_run_create 把复杂大任务拆给子 agent。 */
-  smart_orchestration: boolean;
+  /** 智能协作：开启后本地伙伴可把复杂任务拆给多个协作者并行推进。 */
+  smart_collaboration: boolean;
   /** Empty when no companion exists yet (zero-companion state is allowed). */
   default_companion_id: string | null;
 }
 
-export type ICompanionWithStatus = ICompanionProfile & { status: ICompanionStatus };
+export type ICompanionWithStatus = ICompanionProfile & {
+  status: ICompanionStatus;
+};
 
 /// RFC 7396 merge patch over ICompanionProfile — nested partial objects merge.
 export type ICompanionProfilePatch = {
@@ -3413,7 +3530,7 @@ export type ICompanionSharedConfigPatch = {
   }>;
   evolve?: Partial<ICompanionEvolveConfig>;
   archive?: Partial<ICompanionArchiveConfig>;
-  smart_orchestration?: boolean;
+  smart_collaboration?: boolean;
 };
 
 /** Export endpoint result — backend echoes the resolved destination path
@@ -3450,7 +3567,14 @@ export interface ICompanionDeletedEvent {
 export const companion = {
   listMemories: httpGet<
     ICompanionMemoryPage,
-    { kind?: string; q?: string; status?: string; scope_companion_id?: string; limit?: number; offset?: number }
+    {
+      kind?: string;
+      q?: string;
+      status?: string;
+      scope_companion_id?: string;
+      limit?: number;
+      offset?: number;
+    }
   >((p) => {
     const params = new URLSearchParams();
     if (p?.kind) params.set('kind', p.kind);
@@ -3494,7 +3618,13 @@ export const companion = {
   // ── Self-evolved skills (P2: see + edit). Keyed by companion_id + skill_name (no standalone id). ──
   listSkills: httpGet<
     ICompanionSkillPage,
-    { companion_id: string; include_shared?: boolean; status?: string; limit?: number; offset?: number }
+    {
+      companion_id: string;
+      include_shared?: boolean;
+      status?: string;
+      limit?: number;
+      offset?: number;
+    }
   >((p) => {
     const params = new URLSearchParams();
     if (p.include_shared === false) params.set('include_shared', 'false');
@@ -3522,7 +3652,13 @@ export const companion = {
   /** Archived session-window day-digests (伙伴会话归档回看时间线 / 去年今日). */
   listDayDigests: httpGet<
     ICompanionDayDigest[],
-    { companion_id: string; since?: string; until?: string; on_day?: string; limit?: number }
+    {
+      companion_id: string;
+      since?: string;
+      until?: string;
+      on_day?: string;
+      limit?: number;
+    }
   >((p) => {
     const q = new URLSearchParams();
     if (p.since) q.set('since', p.since);
@@ -3569,7 +3705,11 @@ export const companion = {
     { companion_id: string; preset_id: string; locale?: string; overrides?: import('../types/agent/presetTypes').PresetOverrides }
   >(
     (p) => `/api/companion/companions/${p.companion_id}/apply-preset`,
-    (p) => ({ preset_id: p.preset_id, locale: p.locale, overrides: p.overrides ?? {} })
+    (p) => ({
+      preset_id: p.preset_id,
+      locale: p.locale,
+      overrides: p.overrides ?? {},
+    })
   ),
   deleteCompanion: httpDelete<void, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}`),
   getCompanionStatus: httpGet<ICompanionStatus, { companion_id: string }>((p) => `/api/companion/companions/${p.companion_id}/status`),
@@ -3618,7 +3758,10 @@ export const companion = {
       (p) => `/api/companion/companions/${p.companion_id}/companion/threads`,
       () => ({})
     ),
-    (raw): ICompanionThread => ({ ...raw, conversation_id: Number(raw.conversation_id) })
+    (raw): ICompanionThread => ({
+      ...raw,
+      conversation_id: Number(raw.conversation_id),
+    })
   ),
   // ── Shared (cross-companion) config — same /api/companion/config route, multi-companion shape ──
   getSharedConfig: httpGet<ICompanionSharedConfig, void>('/api/companion/config'),
@@ -3627,7 +3770,10 @@ export const companion = {
   exportMemory: httpPost<ICompanionExportResult, { dest_path: string; include_events: boolean }>('/api/companion/export/memory'),
   exportCompanion: httpPost<ICompanionExportResult, { companion_id: string; dest_path: string; knowledge_names?: string[] }>(
     (p) => `/api/companion/export/companions/${p.companion_id}`,
-    (p) => ({ dest_path: p.dest_path, knowledge_names: p.knowledge_names ?? [] })
+    (p) => ({
+      dest_path: p.dest_path,
+      knowledge_names: p.knowledge_names ?? [],
+    })
   ),
   /** Import a memory/companion bundle; the backend dispatches on manifest.kind. */
   importCompanionBundle: httpPost<Record<string, unknown>, { src_path: string }>('/api/companion/import'),
@@ -3671,7 +3817,11 @@ export const browserSecret = {
   /** Register (or overwrite) a secret. `value` is encrypted into the vault and never echoed. */
   register: httpPost<void, { pet_id: string; name: string; value: string; allowed_origins: string[] }>(
     (p) => `/api/browser-secrets/${encodeURIComponent(p.pet_id)}`,
-    (p) => ({ name: p.name, value: p.value, allowed_origins: p.allowed_origins })
+    (p) => ({
+      name: p.name,
+      value: p.value,
+      allowed_origins: p.allowed_origins,
+    })
   ),
   /** Remove a secret by name. */
   remove: httpDelete<void, { pet_id: string; name: string }>(
@@ -3993,10 +4143,19 @@ export const publicAgent = {
   ),
   applyPreset: httpPost<
     IPublicAgent,
-    { id: string; preset_id: string; locale?: string; overrides?: import('../types/agent/presetTypes').PresetOverrides }
+    {
+      id: string;
+      preset_id: string;
+      locale?: string;
+      overrides?: import('../types/agent/presetTypes').PresetOverrides;
+    }
   >(
     (p) => `/api/public-agents/${p.id}/apply-preset`,
-    (p) => ({ preset_id: p.preset_id, locale: p.locale, overrides: p.overrides ?? {} })
+    (p) => ({
+      preset_id: p.preset_id,
+      locale: p.locale,
+      overrides: p.overrides ?? {},
+    })
   ),
   /** Delete a public companion (204). */
   remove: httpDelete<void, { id: string }>((p) => `/api/public-agents/${p.id}`),
@@ -4034,7 +4193,9 @@ export const publicAgent = {
 const KB_READ_TIMEOUT_MS = 30_000;
 
 export const knowledge = {
-  listBases: httpGet<IKnowledgeBase[], void>('/api/knowledge/bases', { timeoutMs: KB_READ_TIMEOUT_MS }),
+  listBases: httpGet<IKnowledgeBase[], void>('/api/knowledge/bases', {
+    timeoutMs: KB_READ_TIMEOUT_MS,
+  }),
   createBase: httpPost<
     IKnowledgeBase,
     {
@@ -4055,7 +4216,11 @@ export const knowledge = {
   /** AI overview generation (description + README.md). Slow (LLM round-trip, 30s+); 409 when no AI provider is configured. */
   autogenBase: httpPost<IKnowledgeAutogenOutcome, { id: string; overwrite_readme?: boolean; provider_id?: string; model?: string }>(
     (p) => `/api/knowledge/bases/${p.id}/autogen`,
-    (p) => ({ overwrite_readme: p.overwrite_readme ?? false, provider_id: p.provider_id, model: p.model })
+    (p) => ({
+      overwrite_readme: p.overwrite_readme ?? false,
+      provider_id: p.provider_id,
+      model: p.model,
+    })
   ),
   /**
    * Stateless AI description draft from a local directory (no base required — used by the create form).
@@ -4197,7 +4362,11 @@ export const knowledge = {
   // ── Cross-base search ──
   search: httpPost<IKnowledgeSearchHit[], { kbIds: string[]; query: string; limit?: number }>(
     '/api/knowledge/search',
-    (p) => ({ kbIds: p.kbIds, query: p.query, limit: p.limit })
+    (p) => ({
+      kbIds: p.kbIds,
+      query: p.query,
+      limit: p.limit,
+    })
   ),
   // ── Batch inbox operations ──
   mergeAllInbox: httpPost<void, { kbId: string; scope?: string }>(

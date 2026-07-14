@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_file::{FileService, IFileService};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 
 /// A no-op broadcaster for testing (events are silently discarded).
 struct NoopBroadcaster;
 
-impl EventBroadcaster for NoopBroadcaster {
-    fn broadcast(&self, _event: WebSocketMessage<serde_json::Value>) {}
+impl UserEventSink for NoopBroadcaster {
+    fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
 }
 
 /// Create a `FileService` whose sandbox is rooted at the given temp directory.

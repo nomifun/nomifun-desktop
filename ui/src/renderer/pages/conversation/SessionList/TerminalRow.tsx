@@ -68,7 +68,7 @@ const TerminalRow: React.FC<TerminalRowProps> = ({
   const [renameVisible, setRenameVisible] = useState(false);
   const [renameName, setRenameName] = useState('');
 
-  // Session-level capability markers (trailing cluster), shared builder with
+  // Session-level capability markers (trailing group), shared builder with
   // ConversationRow: 定时任务 → 自动工作 → 智能决策.
   const capabilityItems = buildSessionCapabilityItems(t, { cronStatus, autoworkState, idmmState });
   const ageLabel = formatSessionAgeLabel(t, session.created_at);

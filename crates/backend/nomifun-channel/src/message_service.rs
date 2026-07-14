@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_ai_agent::{AgentStreamEvent, IWorkerTaskManager};
+use nomifun_ai_agent::{AgentStreamEvent, AgentRuntimeRegistry};
 use nomifun_api_types::{
     ConversationRuntimeStateKind, CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
 };
@@ -16,24 +16,24 @@ use crate::constants::{STREAM_THROTTLE_INTERVAL, TOOL_CONFIRM_TIMEOUT};
 use crate::error::ChannelError;
 use crate::types::{OutgoingMessageType, PluginType, UnifiedOutgoingMessage};
 
-/// Profile of the desktop's master agent (the companion). The channel layer
+/// Agent profile used by channel conversations. The channel layer
 /// resolves which companion greets a session via the channel row's own `companion_id`
-/// binding first, falling back to this profile (`master_companion_id`: legacy
+/// binding first, falling back to this profile (`channel_companion_id`: the
 /// per-platform binding only — no default-companion fallback). `companion_model` is the **primary** model
-/// source for a master-mode nomi session bound to a companion (唯一事实源
-/// `profile.model`); the platform `defaultModel` is only a legacy fallback
+/// source for a channel Nomi session bound to a companion (唯一事实源
+/// `profile.model`); the platform `defaultModel` is only a fallback
 /// when the companion has no model.
 /// Implemented in `nomifun-app` over `CompanionService` + `ChannelSettingsService`
 /// so the channel crate stays companion-agnostic.
 #[async_trait::async_trait]
-pub trait MasterAgentProfile: Send + Sync {
+pub trait ChannelAgentProfile: Send + Sync {
     /// The configured model of `companion_id`, `None` when the companion does not
     /// exist or its model is not configured.
     async fn companion_model(&self, companion_id: &str) -> Option<nomifun_common::ProviderWithModel>;
-    /// The legacy per-platform fallback companion for `platform` (e.g. "telegram"):
+    /// The per-platform fallback companion for `platform` (e.g. "telegram"):
     /// the platform binding when set (and alive), else `None`. There is **no
     /// default-companion fallback** — an unbound channel is hosted by no companion.
-    async fn master_companion_id(&self, platform: &str) -> Option<String>;
+    async fn channel_companion_id(&self, platform: &str) -> Option<String>;
     /// Whether `companion_id` names a live companion. Used to validate companion-binding
     /// writes and to skip dead channel bindings.
     async fn companion_exists(&self, companion_id: &str) -> bool;
@@ -48,10 +48,10 @@ pub trait MasterAgentProfile: Send + Sync {
     /// Idempotently resolve (create-or-get) the companion's ONE persistent
     /// session conversation id. This is what unifies a companion's IM-channel
     /// turns into the SAME session the desktop bubble and chat tab use, instead
-    /// of minting a separate per-chat channel-master conversation. Returns
+    /// of minting a separate per-chat channel conversation. Returns
     /// `None` when the companion cannot host a session yet (e.g. its chat model
     /// is not configured) — the caller then refuses the turn with a notice
-    /// rather than leaking a standalone conversation.
+    /// rather than leaking an unintended per-chat conversation.
     async fn ensure_companion_session(&self, companion_id: &str) -> Option<i64>;
 
     // ── 对外伙伴 / public agent (a platform bot serves EITHER a companion OR a
@@ -98,7 +98,7 @@ pub trait MasterAgentProfile: Send + Sync {
 ///
 /// Defined here (not in `nomifun-workshop`) so `nomifun-channel` stays free of
 /// a workshop dependency; the concrete impl lives in `nomifun-app`
-/// (`channel_asset_resolver.rs`), mirroring [`MasterAgentProfile`].
+/// (`channel_asset_resolver.rs`), mirroring [`ChannelAgentProfile`].
 #[async_trait::async_trait]
 pub trait AssetResolver: Send + Sync {
     /// Load `asset_id` as bytes + mime + a suggested filename. `None` when the
@@ -116,11 +116,11 @@ pub trait AssetResolver: Send + Sync {
 /// - Handling tool confirmation with timeout
 pub struct ChannelMessageService {
     conversation_svc: Arc<ConversationService>,
-    task_manager: Arc<dyn IWorkerTaskManager>,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     settings: Arc<ChannelSettingsService>,
     repo: Arc<dyn IChannelRepository>,
     owner_user_id: String,
-    master_profile: Option<Arc<dyn MasterAgentProfile>>,
+    channel_agent_profile: Option<Arc<dyn ChannelAgentProfile>>,
     /// Per-conversation store of the decision currently awaiting a numbered
     /// reply. Shared with each `ChannelStreamRelay` (writer) so the inbound
     /// reply can be resolved against the right `call_id`/option.
@@ -133,27 +133,28 @@ pub struct ChannelMessageService {
 impl ChannelMessageService {
     pub fn new(
         conversation_svc: Arc<ConversationService>,
-        task_manager: Arc<dyn IWorkerTaskManager>,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
         settings: Arc<ChannelSettingsService>,
         repo: Arc<dyn IChannelRepository>,
         owner_user_id: String,
     ) -> Self {
         Self {
             conversation_svc,
-            task_manager,
+            runtime_registry,
             settings,
             repo,
             owner_user_id,
-            master_profile: None,
+            channel_agent_profile: None,
             pending_decisions: crate::pending_decision::PendingDecisionStore::new(),
             asset_resolver: None,
         }
     }
 
-    /// Wire the master-agent profile (the companion). Without it, master mode still
-    /// grants the desktop gateway but cannot fall back to the companion's model.
-    pub fn with_master_profile(mut self, profile: Arc<dyn MasterAgentProfile>) -> Self {
-        self.master_profile = Some(profile);
+    /// Wire the profile that resolves a channel's companion and public-agent owner.
+    /// Without it, channel conversations still receive their base Agent context,
+    /// but owner-specific model and persona resolution are unavailable.
+    pub fn with_channel_agent_profile(mut self, profile: Arc<dyn ChannelAgentProfile>) -> Self {
+        self.channel_agent_profile = Some(profile);
         self
     }
 
@@ -164,15 +165,15 @@ impl ChannelMessageService {
         self
     }
 
-    /// The wired asset resolver, if any. The orchestrator hands this to each
+    /// The wired asset resolver, if any. The message loop hands this to each
     /// `ChannelStreamRelay` it spawns.
     pub fn asset_resolver(&self) -> Option<Arc<dyn AssetResolver>> {
         self.asset_resolver.clone()
     }
 
-    /// The shared pending-decision store. The orchestrator hands this to each
+    /// The shared pending-decision store. The message loop hands this to each
     /// `ChannelStreamRelay` it spawns and reads it back when intercepting a
-    /// numeric reply, so the relay (writer) and the orchestrator (reader) act
+    /// numeric reply, so the relay (writer) and the message loop (reader) act
     /// on the same store.
     pub fn pending_decisions(&self) -> Arc<crate::pending_decision::PendingDecisionStore> {
         Arc::clone(&self.pending_decisions)
@@ -180,7 +181,7 @@ impl ChannelMessageService {
 
     /// Whether the conversation's agent is currently working on a turn.
     ///
-    /// Used by the orchestrator as a per-chat concurrency guard: a new
+    /// Used by the message loop as a per-chat concurrency guard: a new
     /// channel message for a busy conversation is answered with a "still
     /// processing" notice instead of being queued as a second prompt.
     pub async fn is_conversation_busy(&self, conversation_id: &str) -> bool {
@@ -209,7 +210,7 @@ impl ChannelMessageService {
             always_allow: false,
         };
         self.conversation_svc
-            .confirm(&self.owner_user_id, conversation_id, call_id, req, &self.task_manager)
+            .confirm(&self.owner_user_id, conversation_id, call_id, req, &self.runtime_registry)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))
     }
@@ -238,7 +239,7 @@ impl ChannelMessageService {
     /// Sends a text message from a channel user to the AI agent.
     ///
     /// 1. Ensures the session has a backing conversation (creates one if needed)
-    /// 2. Warms up the backing agent task so stream subscription is available
+    /// 2. Warms up the backing Agent runtime so stream subscription is available
     /// 3. Sends the message via ConversationService
     /// 4. Returns the conversation_id and stream receiver for relay
     ///
@@ -253,7 +254,7 @@ impl ChannelMessageService {
         // 对外伙伴 (public agent) binding takes precedence over EVERYTHING. A
         // bot bound to a public agent serves strangers via an isolated per-chat,
         // PublicService-clamped nomi session — never a companion, and never the
-        // desktop gateway. Resolved FIRST and PER-BOT (from the channel row's own
+        // Platform Gateway. Resolved FIRST and PER-BOT (from the channel row's own
         // `public_agent_id`, via session.channel_id) so a companion-bound bot on
         // the same platform is unaffected: precedence is per-bot, and the hard
         // clamp is the boundary.
@@ -267,9 +268,9 @@ impl ChannelMessageService {
         // Resolve the target conversation. A nomi channel turn bound to a
         // companion is routed into that companion's ONE persistent session, so
         // the desktop bubble, the chat tab, and every IM chat share a single
-        // transcript (no more separate per-chat channel-master conversation
+        // transcript (no more separate per-chat channel conversation
         // leaking into the homepage work list). Non-companion / ACP / unbound
-        // channels keep a standalone per-session conversation. The FK is i64
+        // channels keep a dedicated per-session conversation. The FK is i64
         // (Option A); downstream services are string-keyed, so keep a String.
         let agent_type = parse_agent_type(&session.agent_type);
         let companion_id = if agent_type == AgentType::Nomi {
@@ -278,12 +279,12 @@ impl ChannelMessageService {
             None
         };
         let conversation_id = if let Some(cid) = companion_id.as_deref() {
-            match self.master_profile.as_ref() {
+            match self.channel_agent_profile.as_ref() {
                 Some(profile) => match profile.ensure_companion_session(cid).await {
                     Some(id) => id.to_string(),
                     // Companion bound but no chat model → can't open its single
                     // session. Refuse with a notice instead of silently minting a
-                    // leaking standalone channel conversation (reintroducing the bug).
+                    // leaking an unintended channel conversation (reintroducing the bug).
                     None => {
                         return Err(ChannelError::CompanionNotReady(
                             "这个伙伴还没有配置对话模型，请先在桌面端为它选择模型后再聊天。".into(),
@@ -292,7 +293,7 @@ impl ChannelMessageService {
                 },
                 None => {
                     return Err(ChannelError::MessageSendFailed(
-                        "master agent profile not configured".into(),
+                        "channel agent profile not configured".into(),
                     ));
                 }
             }
@@ -307,7 +308,7 @@ impl ChannelMessageService {
         // companion's shared single session (companion_id resolved): that
         // conversation row carries no `channelPlatform`, so the per-turn marker
         // is what lets the floating window render it as a remote IM turn.
-        // Standalone channel conversations keep their extra-derived marker
+        // Dedicated per-chat channel conversations keep their extra-derived marker
         // (marker None → send_message falls back to extra).
         let channel_platform = companion_id.as_ref().map(|_| platform.to_string());
         self.dispatch_to_conversation(&session.id, conversation_id, text, channel_platform)
@@ -316,7 +317,7 @@ impl ChannelMessageService {
 
     /// Routes an inbound turn on a 对外伙伴 (public-agent) bound platform into an
     /// isolated per-chat, `PublicService`-clamped nomi session. NEVER a companion
-    /// and NEVER the desktop gateway — the session's `extra.public_agent_id` is
+    /// and NEVER the Platform Gateway — the session's `extra.public_agent_id` is
     /// what hard-clamps it to safe tools in the nomi factory, so a stranger can be
     /// auto-served safely.
     async fn send_to_public_agent(
@@ -326,8 +327,8 @@ impl ChannelMessageService {
         platform: PluginType,
         public_agent_id: &str,
     ) -> Result<SendResult, ChannelError> {
-        let profile = self.master_profile.as_ref().ok_or_else(|| {
-            ChannelError::MessageSendFailed("master agent profile not configured".into())
+        let profile = self.channel_agent_profile.as_ref().ok_or_else(|| {
+            ChannelError::MessageSendFailed("channel agent profile not configured".into())
         })?;
 
         // Servable = bound + alive + enabled. A disabled/missing public agent
@@ -366,9 +367,9 @@ impl ChannelMessageService {
     }
 
     /// Warms the conversation's agent, subscribes to its stream, and sends the
-    /// user turn. Shared by the companion / standalone path and the public-agent
+    /// user turn. Shared by the companion / per-chat path and the public-agent
     /// path — the only per-path difference is the `channel_platform` per-turn
-    /// marker (companion shared session ⇒ platform; public-agent / standalone ⇒
+    /// marker (companion shared session ⇒ platform; public-agent / per-chat ⇒
     /// None, the marker rides the conversation extra).
     async fn dispatch_to_conversation(
         &self,
@@ -395,26 +396,26 @@ impl ChannelMessageService {
         // and builds cold agents in the background, so warm the conversation
         // explicitly for channel traffic.
         self.conversation_svc
-            .warmup(user_id, &conversation_id, &self.task_manager)
+            .warmup(user_id, &conversation_id, &self.runtime_registry)
             .await
             .map_err(|e| ChannelError::MessageSendFailed(e.to_string()))?;
 
         let stream_rx = self
-            .task_manager
-            .get_task(&conversation_id)
+            .runtime_registry
+            .get_runtime(&conversation_id)
             .map(|handle| handle.subscribe())
             .ok_or_else(|| {
                 ChannelError::MessageSendFailed(format!(
-                    "Agent task missing after warmup for conversation {conversation_id}"
+                    "Agent runtime missing after warmup for conversation {conversation_id}"
                 ))
             })?;
 
         self.conversation_svc
-            .send_message(user_id, &conversation_id, req, &self.task_manager)
+            .send_message(user_id, &conversation_id, req, &self.runtime_registry)
             .await
             .map_err(|e| match e {
                 // A concurrent turn already holds the (now shared) session —
-                // surface a distinct busy error so the orchestrator answers with
+                // surface a distinct busy error so the message loop answers with
                 // the friendly "still processing" notice instead of a raw failure
                 // line. Covers the first-turn race the per-chat busy guard can't
                 // see (it checks the pre-bind session id).
@@ -451,15 +452,13 @@ impl ChannelMessageService {
         let model_config = self.settings.get_model_config(platform).await?;
 
         // The companion greeting this session. Resolution order: the channel
-        // row's own companion binding (per-bot, the multi-bot path) > the legacy
+        // row's own companion binding (per-bot, the multi-bot path) > the
         // per-platform binding. NO default-companion fallback — an unbound channel
         // is hosted by no companion. Recorded in extra.companionId so the
         // persona/memory layers and gateway tools know which companion owns the
-        // session. Nomi engine only. Every channel session is a companion master
-        // session now — the former "Master Agent mode" on/off toggle was removed;
-        // all companions control the desktop with full capabilities, there is no
-        // "plain standalone session" path.
-        let master_companion_id = if agent_type == AgentType::Nomi {
+        // session. Companion persona and memory context apply to Nomi only; every
+        // channel session receives the base channel Agent context.
+        let channel_companion_id = if agent_type == AgentType::Nomi {
             self.resolve_session_companion(session, platform).await
         } else {
             None
@@ -469,8 +468,8 @@ impl ChannelMessageService {
         // 绑定伙伴的 profile.model 为主（唯一事实源）> 平台 defaultModel（遗留兜底）> 空。
         // 伙伴模型只作用于 nomi 引擎——ACP CLI 自带模型配置，仍走平台 defaultModel。
         let mut model = if agent_type == AgentType::Nomi
-            && let Some(profile) = self.master_profile.as_ref()
-            && let Some(companion_id) = master_companion_id.as_deref()
+            && let Some(profile) = self.channel_agent_profile.as_ref()
+            && let Some(companion_id) = channel_companion_id.as_deref()
             && let Some(companion_model) = profile.companion_model(companion_id).await
         {
             companion_model
@@ -478,14 +477,14 @@ impl ChannelMessageService {
             resolved_model_to_provider(model_config.as_ref())
         };
 
-        // 遗留兜底：伙伴模型缺失（伙伴未配置或非 nomi/无绑定）时，
+        // 兜底：伙伴模型缺失（伙伴未配置或非 nomi/无绑定）时，
         // 回退到平台 defaultModel，保持非伙伴会话的既有行为。
         if model.provider_id.is_empty() {
             model = resolved_model_to_provider(model_config.as_ref());
         }
 
         let mut extra = Self::build_channel_extra(agent_config.backend.as_deref());
-        apply_master_agent_extra(&mut extra, agent_type, platform, master_companion_id.as_deref());
+        apply_channel_agent_context(&mut extra, agent_type, platform, channel_companion_id.as_deref());
         let name = channel_conversation_name(
             platform,
             &session.agent_type,
@@ -509,6 +508,10 @@ impl ChannelMessageService {
             channel_chat_id: session.chat_id.clone(),
             preset_id: None,
             preset_overrides: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
             extra,
         };
 
@@ -533,17 +536,17 @@ impl ChannelMessageService {
     /// A public-agent session is ALWAYS a nomi conversation (the `PublicService`
     /// hard clamp lives in the nomi factory and keys off `extra.public_agent_id`),
     /// regardless of the platform's configured agent type. The extra carries
-    /// `public_agent_id` + `channelPlatform` but deliberately NO `companionId` and
-    /// NO `desktopGateway` — public agents get no gateway. The answering model
-    /// comes from the public agent's own config.
+    /// `public_agent_id` + `channelPlatform` but deliberately no `companionId`.
+    /// The factory recognizes the public-agent marker and denies private gateway
+    /// capabilities. The answering model comes from the public agent's own config.
     async fn create_public_agent_conversation(
         &self,
         session: &ChannelSessionRow,
         platform: PluginType,
         public_agent_id: &str,
     ) -> Result<String, ChannelError> {
-        let profile = self.master_profile.as_ref().ok_or_else(|| {
-            ChannelError::MessageSendFailed("master agent profile not configured".into())
+        let profile = self.channel_agent_profile.as_ref().ok_or_else(|| {
+            ChannelError::MessageSendFailed("channel agent profile not configured".into())
         })?;
 
         // Resolve the answering model through the SINGLE authority
@@ -577,6 +580,10 @@ impl ChannelMessageService {
             channel_chat_id: session.chat_id.clone(),
             preset_id: None,
             preset_overrides: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
             extra,
         };
 
@@ -601,9 +608,9 @@ impl ChannelMessageService {
     /// The channel row's `companion_id` wins (each bot is bound to its own companion);
     /// a dead binding degrades to the profile fallback instead of pinning
     /// sessions to a ghost. Without a channel binding, the profile resolves
-    /// the legacy per-platform binding only (no default-companion fallback).
+    /// the per-platform binding only (no default-companion fallback).
     async fn resolve_session_companion(&self, session: &ChannelSessionRow, platform: PluginType) -> Option<String> {
-        let profile = self.master_profile.as_ref()?;
+        let profile = self.channel_agent_profile.as_ref()?;
 
         if let Some(channel_id) = session.channel_id.as_deref() {
             match self.repo.get_plugin(channel_id).await {
@@ -624,7 +631,7 @@ impl ChannelMessageService {
             }
         }
 
-        profile.master_companion_id(&platform.to_string()).await
+        profile.channel_companion_id(&platform.to_string()).await
     }
 
     /// Processes a stream event from the AI agent and converts it to
@@ -828,8 +835,8 @@ impl ChannelMessageService {
     /// `session_mode: "yolo"` (no interactive confirmations on a channel), plus
     /// `public_agent_id` (the nomi factory keys the `PublicService` hard clamp off
     /// this) and `channelPlatform` (persona remote-context framing). Deliberately
-    /// carries NO `companionId` and NO `desktopGateway` — public agents get no
-    /// gateway; the clamp turns off gateway / computer / browser / spawn.
+    /// carries no `companionId`; the factory-owned public clamp turns off gateway /
+    /// computer / browser / spawn capabilities.
     pub fn build_public_agent_extra(platform: PluginType, public_agent_id: &str) -> serde_json::Value {
         let mut extra = Self::build_channel_extra(None);
         extra["public_agent_id"] = serde_json::Value::String(public_agent_id.to_owned());
@@ -843,7 +850,7 @@ impl ChannelMessageService {
 pub struct SendResult {
     pub conversation_id: String,
     /// Agent event stream for the ChannelStreamRelay.
-    /// `None` when the agent task could not be found after sending
+    /// `None` when the Agent runtime could not be found after sending
     /// (should not happen in normal flow).
     pub stream_rx: Option<broadcast::Receiver<AgentStreamEvent>>,
 }
@@ -863,7 +870,7 @@ pub enum StreamAction {
     ToolCall { name: String, status: String },
     /// A blocking decision (permission / confirmation) the channel user must
     /// answer. Carried so the relay can forward a numbered list and the
-    /// orchestrator can map a numeric reply back to `confirm`.
+    /// message loop can map a numeric reply back to `confirm`.
     Decision {
         call_id: String,
         prompt: String,
@@ -875,25 +882,23 @@ pub enum StreamAction {
     MediaProduced(Vec<String>),
 }
 
-/// Decorate a channel conversation's extra so the session is a companion master
-/// session: it gets the Desktop Gateway tools (`extra.desktopGateway`, every
-/// agent type), and on the nomi engine additionally the companion semantics —
-/// persona system prompt (built fresh per agent build by the factory's
+/// Decorate a channel conversation with its persisted Agent context. Gateway
+/// authorization is deliberately absent here: the factory injects its
+/// process-owned capability only after validating runtime ownership. On the Nomi
+/// engine this function adds companion semantics — persona system prompt (built fresh per agent build by the factory's
 /// `CompanionPromptProvider`) + memory tools (`extra.companionSession`), with the
 /// platform recorded for the persona's remote-context framing and the bound
 /// companion pinned in `extra.companionId` (per-bot binding > platform binding;
 /// key omitted when no companion is bound — the session then has no companion persona).
 ///
-/// Unconditional: EVERY channel session is a companion master session. The former
-/// "Master Agent mode" on/off toggle (and its "plain standalone session" path) was
-/// removed — all companions control the desktop with full capabilities.
-fn apply_master_agent_extra(
+/// This context is unconditional for channel sessions; it is not a separate
+/// product mode or runtime type.
+fn apply_channel_agent_context(
     extra: &mut serde_json::Value,
     agent_type: AgentType,
     platform: PluginType,
     companion_id: Option<&str>,
 ) {
-    extra["desktopGateway"] = serde_json::Value::Bool(true);
     if agent_type == AgentType::Nomi {
         extra["companionSession"] = serde_json::Value::Bool(true);
         extra["channelPlatform"] = serde_json::Value::String(platform.to_string());
@@ -1158,13 +1163,12 @@ mod tests {
         assert_eq!(platform_to_source(PluginType::Telegram), ConversationSource::Telegram);
     }
 
-    // ── apply_master_agent_extra ───────────────────────────────────────
+    // ── apply_channel_agent_context ────────────────────────────────────
 
     #[test]
-    fn master_extra_nomi_gets_gateway_and_companion() {
+    fn channel_context_nomi_applies_companion_context() {
         let mut extra = ChannelMessageService::build_channel_extra(None);
-        apply_master_agent_extra(&mut extra, AgentType::Nomi, PluginType::Telegram, Some("companion_1"));
-        assert_eq!(extra["desktopGateway"], serde_json::json!(true));
+        apply_channel_agent_context(&mut extra, AgentType::Nomi, PluginType::Telegram, Some("companion_1"));
         assert_eq!(extra["companionSession"], serde_json::json!(true));
         assert_eq!(extra["channelPlatform"], serde_json::json!("telegram"));
         assert_eq!(extra["companionId"], serde_json::json!("companion_1"));
@@ -1173,23 +1177,22 @@ mod tests {
     }
 
     #[test]
-    fn master_extra_nomi_without_companion_omits_companion_id_key() {
+    fn channel_context_nomi_without_companion_omits_companion_id_key() {
         let mut extra = ChannelMessageService::build_channel_extra(None);
-        apply_master_agent_extra(&mut extra, AgentType::Nomi, PluginType::Telegram, None);
+        apply_channel_agent_context(&mut extra, AgentType::Nomi, PluginType::Telegram, None);
         assert_eq!(extra["companionSession"], serde_json::json!(true));
         assert!(extra.get("companionId").is_none(), "no companion → no companionId key");
 
         // Blank companion id is treated the same as no companion.
         let mut extra = ChannelMessageService::build_channel_extra(None);
-        apply_master_agent_extra(&mut extra, AgentType::Nomi, PluginType::Telegram, Some("  "));
+        apply_channel_agent_context(&mut extra, AgentType::Nomi, PluginType::Telegram, Some("  "));
         assert!(extra.get("companionId").is_none());
     }
 
     #[test]
-    fn master_extra_acp_gets_gateway_only() {
+    fn channel_context_acp_preserves_backend_without_nomi_context() {
         let mut extra = ChannelMessageService::build_channel_extra(Some("claude"));
-        apply_master_agent_extra(&mut extra, AgentType::Acp, PluginType::Lark, Some("companion_1"));
-        assert_eq!(extra["desktopGateway"], serde_json::json!(true));
+        apply_channel_agent_context(&mut extra, AgentType::Acp, PluginType::Lark, Some("companion_1"));
         assert!(extra.get("companionSession").is_none());
         assert!(extra.get("channelPlatform").is_none());
         assert!(extra.get("companionId").is_none());
@@ -1199,15 +1202,15 @@ mod tests {
     // ── build_public_agent_extra ───────────────────────────────────────
 
     #[test]
-    fn public_agent_extra_marks_public_and_has_no_gateway_or_companion() {
+    fn public_agent_extra_marks_public_without_companion_context() {
         let extra = ChannelMessageService::build_public_agent_extra(PluginType::Telegram, "pubagent_1");
         // Public-agent marker + platform present.
         assert_eq!(extra["public_agent_id"], serde_json::json!("pubagent_1"));
         assert_eq!(extra["channelPlatform"], serde_json::json!("telegram"));
         // Yolo channel semantics preserved.
         assert_eq!(extra["session_mode"], serde_json::json!("yolo"));
-        // NEVER a gateway, NEVER a companion — public agents get no gateway.
-        assert!(extra.get("desktopGateway").is_none(), "public agent must not get the gateway");
+        // The factory owns capability denial; persisted context only identifies
+        // the public agent and must never claim a desktop companion.
         assert!(extra.get("companionId").is_none(), "public agent must not carry a companion");
         assert!(extra.get("companionSession").is_none());
     }

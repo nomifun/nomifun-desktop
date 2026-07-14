@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -9,18 +9,19 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::broadcaster::EventBroadcaster;
+use crate::broadcaster::{EventBroadcaster, UserEventSink};
 use crate::types::{ClientInfo, ConnectionId, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT, WebSocketCloseCode, WsOutbound};
 
-/// Validates whether a JWT token is still valid.
-/// Returns `true` if the token is valid, `false` if expired or revoked.
-pub type TokenValidator = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// Authenticates a connection token and resolves its stable application user.
+/// Returning `None` rejects (or expires) the connection.
+pub type TokenAuthenticator = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// Manages active WebSocket connections, heartbeat detection,
 /// and provides broadcast/unicast messaging.
 pub struct WebSocketManager {
     connections: Arc<DashMap<ConnectionId, ClientInfo>>,
     next_id: AtomicU64,
+    heartbeat_started: AtomicBool,
 }
 
 impl WebSocketManager {
@@ -28,13 +29,20 @@ impl WebSocketManager {
         Self {
             connections: Arc::new(DashMap::new()),
             next_id: AtomicU64::new(1),
+            heartbeat_started: AtomicBool::new(false),
         }
     }
 
     /// Register a new client connection and return its assigned ID.
-    pub fn add_client(&self, token: String, tx: mpsc::Sender<WsOutbound>) -> ConnectionId {
+    pub fn add_client(
+        &self,
+        user_id: String,
+        token: String,
+        tx: mpsc::Sender<WsOutbound>,
+    ) -> ConnectionId {
         let id = ConnectionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let info = ClientInfo {
+            user_id,
             token,
             last_ping: Instant::now(),
             tx,
@@ -95,6 +103,39 @@ impl WebSocketManager {
         }
     }
 
+    /// Send a message only to connections authenticated as `user_id`.
+    ///
+    /// A user may have several browser tabs/devices, so this is a scoped
+    /// multicast rather than a single-connection unicast.
+    pub fn broadcast_to_user(&self, user_id: &str, msg: WebSocketMessage<serde_json::Value>) {
+        let text = match serde_json::to_string(&msg) {
+            Ok(text) => text,
+            Err(error) => {
+                warn!(%error, user_id, "failed to serialize user-scoped message");
+                return;
+            }
+        };
+
+        let mut disconnected = Vec::new();
+        for entry in self.connections.iter() {
+            if entry.value().user_id != user_id {
+                continue;
+            }
+            let conn_id = *entry.key();
+            match entry.value().tx.try_send(WsOutbound::Text(text.clone())) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(%conn_id, user_id, "outbound channel full, user-scoped message dropped");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => disconnected.push(conn_id),
+            }
+        }
+
+        for conn_id in disconnected {
+            self.remove_client(conn_id);
+        }
+    }
+
     /// Send a message to a specific connection.
     pub fn send_to(&self, conn_id: ConnectionId, msg: WebSocketMessage<serde_json::Value>) {
         let text = match serde_json::to_string(&msg) {
@@ -137,15 +178,38 @@ impl WebSocketManager {
     /// 3. Sends a `ping` message with current timestamp
     ///
     /// Returns a `JoinHandle` — abort it to stop the heartbeat loop.
-    pub fn start_heartbeat(&self, token_validator: TokenValidator) -> JoinHandle<()> {
+    pub fn start_heartbeat(&self, token_authenticator: TokenAuthenticator) -> JoinHandle<()> {
         let connections = Arc::clone(&self.connections);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
             loop {
                 interval.tick().await;
-                heartbeat_tick(&connections, &token_validator);
+                heartbeat_tick(&connections, &token_authenticator);
             }
         })
+    }
+
+    /// Start the manager's production heartbeat loop at most once.
+    ///
+    /// Router assembly can be invoked through several test/custom entrypoints;
+    /// the manager, not the caller, owns the singleton guarantee.
+    pub fn ensure_heartbeat(&self, token_authenticator: TokenAuthenticator) -> bool {
+        if self
+            .heartbeat_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.heartbeat_started.store(false, Ordering::Release);
+            warn!("cannot start WebSocket heartbeat without a Tokio runtime");
+            return false;
+        }
+        // Dropping a Tokio JoinHandle detaches the task. The manager's shared
+        // connection map and the application runtime own its lifetime.
+        drop(self.start_heartbeat(token_authenticator));
+        true
     }
 }
 
@@ -161,8 +225,17 @@ impl EventBroadcaster for WebSocketManager {
     }
 }
 
+impl UserEventSink for WebSocketManager {
+    fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+        self.broadcast_to_user(user_id, event);
+    }
+}
+
 /// Single heartbeat tick: check timeouts, token validity, send pings.
-fn heartbeat_tick(connections: &DashMap<ConnectionId, ClientInfo>, token_validator: &TokenValidator) {
+fn heartbeat_tick(
+    connections: &DashMap<ConnectionId, ClientInfo>,
+    token_authenticator: &TokenAuthenticator,
+) {
     let now = Instant::now();
     let mut to_remove = Vec::new();
 
@@ -182,7 +255,7 @@ fn heartbeat_tick(connections: &DashMap<ConnectionId, ClientInfo>, token_validat
         }
 
         // 2. Token expiry
-        if !token_validator(&client.token) {
+        if (token_authenticator)(&client.token).as_deref() != Some(client.user_id.as_str()) {
             info!(%conn_id, "token expired, closing connection");
             let auth_expired = WebSocketMessage::new("auth-expired", json!({"message": "Token expired"}));
             if let Ok(text) = serde_json::to_string(&auth_expired) {
@@ -225,12 +298,12 @@ mod tests {
     use super::*;
     use crate::types::PER_CONNECTION_BUFFER;
 
-    fn always_valid() -> TokenValidator {
-        Arc::new(|_| true)
+    fn always_valid() -> TokenAuthenticator {
+        Arc::new(|_| Some("user".to_owned()))
     }
 
-    fn always_expired() -> TokenValidator {
-        Arc::new(|_| false)
+    fn always_expired() -> TokenAuthenticator {
+        Arc::new(|_| None)
     }
 
     fn new_client_tx() -> (mpsc::Sender<WsOutbound>, mpsc::Receiver<WsOutbound>) {
@@ -243,8 +316,8 @@ mod tests {
         let (tx1, _rx1) = new_client_tx();
         let (tx2, _rx2) = new_client_tx();
 
-        let id1 = mgr.add_client("token-a".into(), tx1);
-        let id2 = mgr.add_client("token-b".into(), tx2);
+        let id1 = mgr.add_client("user".into(), "token-a".into(), tx1);
+        let id2 = mgr.add_client("user".into(), "token-b".into(), tx2);
 
         assert_eq!(id1, ConnectionId(1));
         assert_eq!(id2, ConnectionId(2));
@@ -255,7 +328,7 @@ mod tests {
     fn remove_client_decrements_count() {
         let mgr = WebSocketManager::new();
         let (tx, _rx) = new_client_tx();
-        let id = mgr.add_client("token".into(), tx);
+        let id = mgr.add_client("user".into(), "token".into(), tx);
 
         assert_eq!(mgr.client_count(), 1);
         mgr.remove_client(id);
@@ -273,7 +346,7 @@ mod tests {
     fn update_last_ping_refreshes_timestamp() {
         let mgr = WebSocketManager::new();
         let (tx, _rx) = new_client_tx();
-        let id = mgr.add_client("token".into(), tx);
+        let id = mgr.add_client("user".into(), "token".into(), tx);
 
         let before = mgr.connections.get(&id).map(|c| c.last_ping).unwrap();
 
@@ -299,8 +372,8 @@ mod tests {
         let (tx1, mut rx1) = new_client_tx();
         let (tx2, mut rx2) = new_client_tx();
 
-        mgr.add_client("t1".into(), tx1);
-        mgr.add_client("t2".into(), tx2);
+        mgr.add_client("user".into(), "t1".into(), tx1);
+        mgr.add_client("user".into(), "t2".into(), tx2);
 
         let event = WebSocketMessage::new("test-event", json!({"key": "val"}));
         mgr.broadcast_all(event);
@@ -323,8 +396,8 @@ mod tests {
         let (tx1, rx1) = new_client_tx();
         let (tx2, _rx2) = new_client_tx();
 
-        mgr.add_client("t1".into(), tx1);
-        mgr.add_client("t2".into(), tx2);
+        mgr.add_client("user".into(), "t1".into(), tx1);
+        mgr.add_client("user".into(), "t2".into(), tx2);
 
         // Drop rx1 to close the channel
         drop(rx1);
@@ -341,7 +414,7 @@ mod tests {
         let mgr = WebSocketManager::new();
         // Use a channel with capacity 1
         let (tx, _rx) = mpsc::channel(1);
-        mgr.add_client("tok".into(), tx);
+        mgr.add_client("user".into(), "tok".into(), tx);
 
         // Fill the channel
         mgr.broadcast_all(WebSocketMessage::new("e1", json!(null)));
@@ -352,13 +425,33 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_to_user_isolates_users_and_reaches_all_user_connections() {
+        let mgr = WebSocketManager::new();
+        let (alice_tx_1, mut alice_rx_1) = new_client_tx();
+        let (alice_tx_2, mut alice_rx_2) = new_client_tx();
+        let (bob_tx, mut bob_rx) = new_client_tx();
+        mgr.add_client("alice".into(), "alice-1".into(), alice_tx_1);
+        mgr.add_client("alice".into(), "alice-2".into(), alice_tx_2);
+        mgr.add_client("bob".into(), "bob-1".into(), bob_tx);
+
+        mgr.broadcast_to_user(
+            "alice",
+            WebSocketMessage::new("private", json!({"secret": "alice-only"})),
+        );
+
+        assert!(matches!(alice_rx_1.try_recv(), Ok(WsOutbound::Text(_))));
+        assert!(matches!(alice_rx_2.try_recv(), Ok(WsOutbound::Text(_))));
+        assert!(bob_rx.try_recv().is_err());
+    }
+
+    #[test]
     fn send_to_delivers_to_target_only() {
         let mgr = WebSocketManager::new();
         let (tx1, mut rx1) = new_client_tx();
         let (tx2, mut rx2) = new_client_tx();
 
-        let id1 = mgr.add_client("t1".into(), tx1);
-        mgr.add_client("t2".into(), tx2);
+        let id1 = mgr.add_client("user".into(), "t1".into(), tx1);
+        mgr.add_client("user".into(), "t2".into(), tx2);
 
         let msg = WebSocketMessage::new("unicast", json!({"for": "id1"}));
         mgr.send_to(id1, msg);
@@ -378,7 +471,7 @@ mod tests {
     fn send_to_removes_closed_channel() {
         let mgr = WebSocketManager::new();
         let (tx, rx) = new_client_tx();
-        let id = mgr.add_client("tok".into(), tx);
+        let id = mgr.add_client("user".into(), "tok".into(), tx);
         drop(rx);
 
         mgr.send_to(id, WebSocketMessage::new("test", json!(null)));
@@ -393,6 +486,7 @@ mod tests {
         connections.insert(
             ConnectionId(1),
             ClientInfo {
+                user_id: "user".into(),
                 token: "valid".into(),
                 last_ping: Instant::now(),
                 tx,
@@ -427,6 +521,7 @@ mod tests {
         connections.insert(
             ConnectionId(1),
             ClientInfo {
+                user_id: "user".into(),
                 token: "valid".into(),
                 last_ping: old_ping,
                 tx,
@@ -454,6 +549,7 @@ mod tests {
         connections.insert(
             ConnectionId(1),
             ClientInfo {
+                user_id: "user".into(),
                 token: "expired-token".into(),
                 last_ping: Instant::now(),
                 tx,
@@ -492,6 +588,7 @@ mod tests {
         connections.insert(
             ConnectionId(1),
             ClientInfo {
+                user_id: "user".into(),
                 token: "expired".into(),
                 last_ping: old_ping,
                 tx,
@@ -521,6 +618,7 @@ mod tests {
         connections.insert(
             ConnectionId(1),
             ClientInfo {
+                user_id: "user".into(),
                 token: "good".into(),
                 last_ping: Instant::now(),
                 tx: tx1,
@@ -532,14 +630,16 @@ mod tests {
         connections.insert(
             ConnectionId(2),
             ClientInfo {
+                user_id: "user".into(),
                 token: "good".into(),
                 last_ping: Instant::now() - (HEARTBEAT_TIMEOUT * 2),
                 tx: tx2,
             },
         );
 
-        let selective_validator: TokenValidator = Arc::new(|_| true);
-        heartbeat_tick(&connections, &selective_validator);
+        let selective_authenticator: TokenAuthenticator =
+            Arc::new(|_| Some("user".to_owned()));
+        heartbeat_tick(&connections, &selective_authenticator);
 
         // Only healthy connection remains
         assert_eq!(connections.len(), 1);
@@ -547,10 +647,35 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_closes_connection_when_token_identity_changes() {
+        let connections = Arc::new(DashMap::new());
+        let (tx, mut rx) = new_client_tx();
+        connections.insert(
+            ConnectionId(1),
+            ClientInfo {
+                user_id: "alice".into(),
+                token: "valid-but-remapped".into(),
+                last_ping: Instant::now(),
+                tx,
+            },
+        );
+        let remapped: TokenAuthenticator = Arc::new(|_| Some("bob".to_owned()));
+
+        heartbeat_tick(&connections, &remapped);
+
+        assert!(connections.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(WsOutbound::Text(_))));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            WsOutbound::Close(WebSocketCloseCode::PolicyViolation, "token expired".into())
+        );
+    }
+
+    #[test]
     fn event_broadcaster_impl_delegates_to_broadcast_all() {
         let mgr = WebSocketManager::new();
         let (tx, mut rx) = new_client_tx();
-        mgr.add_client("tok".into(), tx);
+        mgr.add_client("user".into(), "tok".into(), tx);
 
         let broadcaster: &dyn EventBroadcaster = &mgr;
         broadcaster.broadcast(WebSocketMessage::new("via-trait", json!({})));
@@ -568,5 +693,12 @@ mod tests {
     fn default_creates_empty_manager() {
         let mgr = WebSocketManager::default();
         assert_eq!(mgr.client_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn production_heartbeat_starts_only_once_per_manager() {
+        let mgr = WebSocketManager::new();
+        assert!(mgr.ensure_heartbeat(always_valid()));
+        assert!(!mgr.ensure_heartbeat(always_valid()));
     }
 }

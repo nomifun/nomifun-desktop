@@ -129,7 +129,7 @@ is `('companion', companionId)`). Scope of effect:
   without a web tool can call the gateway tool
   `nomi_knowledge_fetch_url`). Only public `http/https` URLs are
   accepted (SSRF guard).
-- The companion can also **grow its own libraries**: the Desktop Gateway
+- The companion can also **grow its own libraries**: the platform Gateway
   ships seven knowledge tools (list / bindings / create / write /
   autogen / fetch-url), and knowledge-deposit tips are built into the
   companion's system prompt — a companion or channel chat can create a base
@@ -146,21 +146,20 @@ all per-companion, while memory stays shared.
 
 ## Binding a companion to a channel
 
-Each IM platform (Telegram / Lark / DingTalk / WeChat) can bind its own
-greeter companion for remote messages: open the companion's **Remote**
-tab (`/nomi?companion=<id>&tab=remote`) and connect or rebind the bot
-there. The binding is persisted as `channels.{platform}.companionId`
-for legacy platform-level preferences when a channel row has no direct
-companion binding. With no binding the **default companion** takes over;
-switching the binding resets that channel's active sessions (the next
-message is greeted by the new companion); if a bound companion is deleted,
-the platform falls back to the default companion and the sessions are
-likewise reset. See the "Master Agent mode" section of the
-[Channels guide](./channels.md).
+Each IM platform (Telegram / Lark / DingTalk / WeChat) can bind a greeter
+companion for remote messages: open the companion's **Remote** tab
+(`/nomi?companion=<id>&tab=remote`) and connect or rebind the bot there. A
+channel row can hold the direct binding; an unbound row falls back to the
+platform preference `channels.{platform}.companionId`. If neither resolves to
+a live companion, the channel remains unbound rather than acquiring an
+implicit identity. Switching or deleting a binding resets the affected active
+sessions so the next message resolves ownership again. See the "Channel Agent
+integration" section of the [Channels guide](./channels.md).
 
 > A companionId grants no permissions (memory is shared anyway): it only
-> selects persona / model / knowledge mounts — unlike the
-> `desktopGateway` marker, which grants gateway tools.
+> selects persona / model / knowledge mounts. Platform Gateway availability is
+> derived server-side from the authenticated instance-owner boundary; it is
+> never granted by companion or Conversation metadata.
 
 ## Export / import: migrating between machines
 
@@ -247,7 +246,7 @@ To verify a multi-companion setup end to end, walk through in order:
 
 ## Related
 
-- [Channels](./channels.md) — channel Master Agent mode and per-platform
+- [Channels](./channels.md) — Channel Agent integration and per-platform
   companion binding.
 - [Data and Storage](../architecture/data-and-storage.md) — the `companion/`
   data directory layout.

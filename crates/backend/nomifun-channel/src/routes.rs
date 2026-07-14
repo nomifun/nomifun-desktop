@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::channel_settings::ChannelSettingsService;
 use crate::error::{ChannelError, ChannelOwner};
 use crate::manager::{ChannelManager, EnableChannelSpec, PluginFactory};
-use crate::message_service::MasterAgentProfile;
+use crate::message_service::ChannelAgentProfile;
 use crate::pairing::PairingService;
 use crate::session::SessionManager;
 use crate::types::{PluginConfig, PluginConfigOptions, PluginCredentials, PluginType};
@@ -39,10 +39,10 @@ pub struct ChannelRouterState {
     pub repo: Arc<dyn IChannelRepository>,
     pub plugin_factory: Arc<PluginFactory>,
     pub settings_service: Arc<ChannelSettingsService>,
-    /// Master-agent profile (the companion), used to validate companion-binding writes
+    /// Channel Agent profile, used to validate companion-binding writes
     /// against the live roster. `None` when the host wires channels without
     /// a companion domain — validation is then skipped, not failed.
-    pub master_profile: Option<Arc<dyn MasterAgentProfile>>,
+    pub channel_agent_profile: Option<Arc<dyn ChannelAgentProfile>>,
     pub extension_registry: ExtensionRegistry,
 }
 
@@ -72,8 +72,8 @@ pub fn channel_routes(state: ChannelRouterState) -> Router {
         .route("/api/channel/sessions", get(get_active_sessions))
         // Settings sync
         .route("/api/channel/settings/sync", post(sync_channel_settings))
-        // Master-agent companion binding (persist + session reset in one step)
-        .route("/api/channel/settings/companion", post(set_channel_master_companion))
+        // Channel companion binding (persist + session reset in one step)
+        .route("/api/channel/settings/companion", post(set_channel_companion))
         // 对外伙伴 (public agent) per-bot binding (persist + session reset in one
         // step). Mirrors the per-bot companion binding; row-level mutually
         // exclusive with it.
@@ -337,7 +337,7 @@ async fn enable_plugin(
     // A typo'd or already-deleted companion id must fail here instead of being
     // persisted onto the channel row.
     if let Some(companion_id) = req.companion_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.master_profile
+        && let Some(profile) = &state.channel_agent_profile
         && !profile.companion_exists(companion_id).await
     {
         return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
@@ -347,7 +347,7 @@ async fn enable_plugin(
     // against the roster, mirroring the companion check). Row-level mutual
     // exclusivity (public agent clears companion) is applied in the manager.
     if let Some(public_agent_id) = req.public_agent_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.master_profile
+        && let Some(profile) = &state.channel_agent_profile
         && !profile.public_agent_exists(public_agent_id).await
     {
         return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));
@@ -392,7 +392,7 @@ async fn enable_plugin(
 /// when the name can't be resolved (deleted owner, or no profile wired), so the
 /// message is always actionable.
 async fn already_bound_message(state: &ChannelRouterState, owner: &ChannelOwner) -> String {
-    let profile = state.master_profile.as_deref();
+    let profile = state.channel_agent_profile.as_deref();
     match owner {
         ChannelOwner::Companion(id) => {
             let who = match profile {
@@ -684,14 +684,14 @@ struct SetChannelCompanionRequest {
     companion_id: Option<String>,
 }
 
-/// `POST /api/channel/settings/companion` — bind (or clear) the companion that greets a
-/// bot channel's master-agent sessions.
+/// `POST /api/channel/settings/companion` — bind (or clear) the companion that
+/// owns a bot channel's Agent context.
 ///
 /// Per-channel writes go to `channel_plugins.companion_id` and clear only that
 /// channel's sessions; platform writes keep the per-platform preference key
 /// and clear all sessions. Both fold write + reset into one step so the
 /// reset cannot be skipped.
-async fn set_channel_master_companion(
+async fn set_channel_companion(
     State(state): State<ChannelRouterState>,
     body: Result<Json<SetChannelCompanionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<BridgeResponse>>, AppError> {
@@ -699,10 +699,10 @@ async fn set_channel_master_companion(
 
     // Validate a non-empty binding against the live companion roster: a typo'd or
     // already-deleted companion id must 400 here instead of being persisted and
-    // silently degrading every session to the default companion. Clearing the
+    // silently leaving subsequent sessions without a live owner. Clearing the
     // binding (None / empty string) needs no validation.
     if let Some(companion_id) = req.companion_id.as_deref().filter(|s| !s.is_empty())
-        && let Some(profile) = &state.master_profile
+        && let Some(profile) = &state.channel_agent_profile
         && !profile.companion_exists(companion_id).await
     {
         return Err(AppError::BadRequest(format!("companion '{companion_id}' not found")));
@@ -726,10 +726,10 @@ async fn set_channel_master_companion(
     let platform = PluginType::from_str_opt(platform_str)
         .ok_or_else(|| AppError::BadRequest(format!("Invalid platform: {platform_str}")))?;
 
-    state.settings_service.set_master_agent_companion_id(platform, companion_id).await?;
+    state.settings_service.set_channel_companion_id(platform, companion_id).await?;
 
-    // Same reset branch as the masterAgent switch: clear active sessions so
-    // the next message starts a conversation under the new binding.
+    // Clear active sessions so the next message starts a conversation under
+    // the new binding.
     state.session_manager.clear_all_sessions().await?;
 
     Ok(Json(ApiResponse::ok(BridgeResponse {
@@ -778,7 +778,7 @@ async fn set_channel_public_agent(
     // or already-deleted id must 400 here instead of being persisted. Clearing
     // (null / empty) needs no validation. Skipped when no profile is wired.
     if let Some(public_agent_id) = req.public_agent_id.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        && let Some(profile) = &state.master_profile
+        && let Some(profile) = &state.channel_agent_profile
         && !profile.public_agent_exists(public_agent_id).await
     {
         return Err(AppError::BadRequest(format!("public agent '{public_agent_id}' not found")));

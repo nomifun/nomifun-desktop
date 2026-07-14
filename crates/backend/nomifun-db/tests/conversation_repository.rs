@@ -7,6 +7,18 @@ const USER_ID: &str = "system_default_user";
 
 async fn setup() -> (SqliteConversationRepository, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
+    sqlx::query(
+        "INSERT INTO providers (\
+            id, platform, name, base_url, api_key_encrypted, models, enabled, \
+            capabilities, created_at, updated_at\
+         ) VALUES (\
+            'prov_1', 'openai', 'Fixture provider', 'https://example.invalid', \
+            'encrypted', '[]', 1, '[]', 0, 0\
+         )",
+    )
+    .execute(db.pool())
+    .await
+    .unwrap();
     let repo = SqliteConversationRepository::new(db.pool().clone());
     (repo, db)
 }
@@ -20,6 +32,10 @@ fn make_conversation(suffix: &str) -> ConversationRow {
         name: format!("Conversation {suffix}"),
         r#type: "gemini".to_string(),
         extra: r#"{"workspace":"/home/user/project"}"#.to_string(),
+        delegation_policy: "automatic".to_string(),
+        execution_model_pool: None,
+        decision_policy: "automatic".to_string(),
+        execution_template_id: None,
         model: Some(r#"{"providerId":"prov_1","model":"claude-sonnet-4-20250514"}"#.to_string()),
         status: Some("pending".to_string()),
         source: Some("nomifun".to_string()),
@@ -76,10 +92,11 @@ fn make_artifact(conv_id: i64) -> nomifun_db::ConversationArtifactRow {
 async fn seed_cron_job(pool: &sqlx::SqlitePool, id: &str) {
     sqlx::query(
         "INSERT INTO cron_jobs \
-            (id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
-         VALUES (?, 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
+            (id, user_id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
+         VALUES (?, ?, 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
     )
     .bind(id)
+    .bind(USER_ID)
     .execute(pool)
     .await
     .unwrap();
@@ -144,6 +161,329 @@ async fn delete_conversation_cascades_messages() {
 
     let msgs = repo.get_messages(conv.id, 1, 50, SortOrder::Desc).await.unwrap();
     assert_eq!(msgs.total, 0);
+}
+
+#[tokio::test]
+async fn internal_creation_and_delivery_operations_are_durable_and_immutable() {
+    let (repo, db) = setup().await;
+    let conversation = make_conversation("durable-operation");
+
+    let (conversation_id, created_now) = repo
+        .create_idempotent(&conversation, "attempt:create:1")
+        .await
+        .unwrap();
+    assert!(created_now);
+    let (replayed_id, replay_created_now) = repo
+        .create_idempotent(&conversation, "attempt:create:1")
+        .await
+        .unwrap();
+    assert_eq!(replayed_id, conversation_id);
+    assert!(!replay_created_now);
+    assert_eq!(
+        repo.find_by_creation_key(USER_ID, "attempt:create:1")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        conversation_id
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE conversation_creation_keys SET creation_key = 'rewritten' \
+             WHERE creation_key = 'attempt:create:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "a creation identity cannot be rewritten"
+    );
+    assert!(
+        sqlx::query(
+            "DELETE FROM conversation_creation_keys WHERE creation_key = 'attempt:create:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "a direct delete cannot erase the creation replay fence"
+    );
+
+    let accepted_at = nomifun_common::now_ms();
+    let request = r#"{"content":"continue"}"#;
+    let accepted = repo
+        .claim_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            "turn",
+            request,
+            accepted_at,
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(accepted.result_ok, None);
+
+    let replayed = repo
+        .claim_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            "turn",
+            request,
+            accepted_at + 1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(replayed.status, "accepted");
+
+    assert!(
+        repo.claim_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            "turn",
+            r#"{"content":"different"}"#,
+            accepted_at + 1,
+        )
+        .await
+        .is_err(),
+        "a stable operation cannot be rebound to a different request"
+    );
+
+    assert!(
+        sqlx::query(
+            "UPDATE conversation_delivery_receipts SET updated_at = updated_at + 1 \
+             WHERE operation_id = 'decision:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "accepted receipt state cannot be rewritten in place"
+    );
+
+    assert!(
+        repo.complete_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            false,
+            None,
+            Some("terminal provider error"),
+            accepted_at + 2,
+        )
+        .await
+        .unwrap()
+    );
+    assert!(
+        repo.complete_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            false,
+            None,
+            Some("terminal provider error"),
+            accepted_at + 3,
+        )
+        .await
+        .unwrap(),
+        "settlement replay returns the already committed terminal result"
+    );
+    let completed = repo
+        .claim_delivery_receipt(
+            USER_ID,
+            conversation_id,
+            "decision:1",
+            "turn",
+            request,
+            accepted_at + 4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.result_ok, Some(false));
+    assert_eq!(completed.result_text, None);
+    assert_eq!(completed.result_error.as_deref(), Some("terminal provider error"));
+
+    assert!(
+        sqlx::query(
+            "UPDATE conversation_delivery_receipts SET result_error = 'rewritten' \
+             WHERE operation_id = 'decision:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "completed result is immutable"
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE conversation_delivery_receipts SET request_payload = '{\"content\":\"rewritten\"}' \
+             WHERE operation_id = 'decision:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "operation identity and request are immutable"
+    );
+    assert!(
+        sqlx::query(
+            "DELETE FROM conversation_delivery_receipts WHERE operation_id = 'decision:1'",
+        )
+        .execute(db.pool())
+        .await
+        .is_err(),
+        "a direct delete cannot erase the replay fence"
+    );
+
+    repo.delete(conversation_id).await.unwrap();
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_delivery_receipts WHERE operation_id = 'decision:1'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0, "Conversation deletion may cascade the receipt");
+    let remaining_creation_keys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_creation_keys \
+         WHERE creation_key = 'attempt:create:1'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining_creation_keys, 0,
+        "Conversation deletion may cascade the creation replay fence"
+    );
+}
+
+#[tokio::test]
+async fn assistant_message_projection_is_atomic_idempotent_and_owner_scoped() {
+    let (repo, db) = setup().await;
+    let mut conversation = make_conversation("message-projection");
+    conversation.id = repo.create(&conversation).await.unwrap();
+
+    let now = nomifun_common::now_ms();
+    let request = r#"{"execution_id":"exec_1","summary":"done"}"#;
+    let mut message = make_message(conversation.id, "Execution completed");
+    message.position = Some("left".to_owned());
+    message.msg_id = Some(message.id.clone());
+    message.created_at = now;
+
+    let inserted = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            conversation.id,
+            "execution:exec_1:lead-report",
+            "projection",
+            request,
+            &message,
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(inserted.inserted);
+    assert_eq!(inserted.message.id, message.id);
+
+    let mut replay_candidate = make_message(conversation.id, "must not replace the result");
+    replay_candidate.position = Some("left".to_owned());
+    replay_candidate.msg_id = Some(replay_candidate.id.clone());
+    let replayed = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            conversation.id,
+            "execution:exec_1:lead-report",
+            "projection",
+            request,
+            &replay_candidate,
+            now + 1,
+        )
+        .await
+        .unwrap();
+    assert!(!replayed.inserted);
+    assert_eq!(replayed.message.id, message.id);
+    assert_eq!(replayed.message.content, message.content);
+
+    let message_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+    )
+    .bind(conversation.id)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(message_count, 1, "a replay must not duplicate the assistant message");
+
+    let mut invalid_shape = replay_candidate.clone();
+    invalid_shape.position = Some("right".to_owned());
+    let invalid_shape = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            conversation.id,
+            "execution:exec_invalid:lead-report",
+            "projection",
+            request,
+            &invalid_shape,
+            now + 2,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(invalid_shape, nomifun_db::DbError::Conflict(_)));
+
+    let invalid_kind = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            conversation.id,
+            "execution:exec_invalid_kind:lead-report",
+            "turn",
+            request,
+            &replay_candidate,
+            now + 2,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(invalid_kind, nomifun_db::DbError::Conflict(_)));
+
+    let payload_conflict = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            conversation.id,
+            "execution:exec_1:lead-report",
+            "projection",
+            r#"{"execution_id":"exec_1","summary":"different"}"#,
+            &message,
+            now + 2,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(payload_conflict, nomifun_db::DbError::Conflict(_)));
+
+    let non_owner = repo
+        .project_assistant_message_with_receipt(
+            "another_user",
+            conversation.id,
+            "execution:exec_2:lead-report",
+            "projection",
+            request,
+            &message,
+            now + 3,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(non_owner, nomifun_db::DbError::NotFound(_)));
+
+    let mut missing_message = message.clone();
+    missing_message.conversation_id = i64::MAX;
+    let missing = repo
+        .project_assistant_message_with_receipt(
+            USER_ID,
+            i64::MAX,
+            "execution:exec_3:lead-report",
+            "projection",
+            request,
+            &missing_message,
+            now + 4,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, nomifun_db::DbError::NotFound(_)));
 }
 
 // ── Cursor pagination ───────────────────────────────────────────────
@@ -744,7 +1084,23 @@ async fn artifact_upsert_list_and_mark_saved() {
     assert_eq!(dismissed.status, "dismissed");
     assert_eq!(dismissed.updated_at, 2000);
 
-    let saved = repo.mark_skill_suggest_artifacts_saved("cron_1", 3000).await.unwrap();
+    let foreign = repo
+        .mark_skill_suggest_artifacts_saved("foreign-owner", "cron_1", 2500)
+        .await
+        .unwrap();
+    assert!(foreign.is_empty());
+    let unchanged = repo
+        .get_artifact(conv.id, artifact_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, "dismissed");
+    assert_eq!(unchanged.updated_at, 2000);
+
+    let saved = repo
+        .mark_skill_suggest_artifacts_saved(USER_ID, "cron_1", 3000)
+        .await
+        .unwrap();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].status, "saved");
     assert_eq!(saved[0].updated_at, 3000);
@@ -785,6 +1141,11 @@ async fn list_paginated_scoped_to_user() {
 
     let mut c2 = make_conversation("user2-conv");
     c2.user_id = "user_2".to_string();
+    c2.r#type = "nomi".to_string();
+    c2.delegation_policy = "disabled".to_string();
+    c2.model = Some(
+        r#"{"provider_id":"prov_1","model":"claude-sonnet-4-20250514"}"#.to_string(),
+    );
     repo.create(&c2).await.unwrap();
 
     // User 1 only sees their own

@@ -1,31 +1,34 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
-use nomifun_ai_agent::{AgentInstance, IWorkerTaskManager};
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
+use nomifun_ai_agent::{AgentRuntimeHandle, AgentRuntimeRegistry};
 
 use crate::response_middleware::ICronService;
 use crate::runtime_state::ConversationRuntimeStateService;
+use crate::ExecutionConversationBoundary;
 use nomifun_api_types::{
     ApprovalCheckResponse, CloneConversationRequest, ConfirmRequest, ConfirmationListResponse,
     ConversationArtifactKind, ConversationArtifactListResponse, ConversationArtifactResponse,
     ConversationArtifactStatus, ConversationListResponse, ConversationMcpStatus, ConversationMcpStatusKind,
     ConversationResponse, ConversationRuntimeSummary, CreateConversationRequest, KnowledgeMountInfo, ListConversationsQuery,
     ListMessagesQuery, MessageListResponse, MessageResponse, MessageSearchResponse, SearchMessagesQuery,
-    SendMessageRequest, SessionMcpServer, SessionMcpTransport, UpdateConversationArtifactRequest,
+    ExecutionModelPool, ExecutionModelRef, SendMessageRequest, SessionMcpServer, SessionMcpTransport, UpdateConversationArtifactRequest,
     UpdateConversationRequest, WebSocketMessage,
 };
 use nomifun_common::{
-    AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus, ErrorChain, MessageType,
-    OnConversationDelete, PaginatedResult, generate_prefixed_id, now_ms, workspace_path_has_edge_whitespace_segment,
+    AgentKillReason, AgentType, AppError, ConversationSource,
+    ConversationStatus, DecisionPolicy, DelegationPolicy, ErrorChain, ExecutionAuthority, MessageType, OnConversationDelete, PaginatedResult, ProviderWithModel,
+    generate_prefixed_id, now_ms, workspace_path_has_edge_whitespace_segment,
 };
 use nomifun_db::models::{ConversationRow, MessageRow};
 use nomifun_db::{
     ConversationFilters, ConversationRowUpdate, CreateAcpSessionParams, IAcpSessionRepository,
-    IAgentMetadataRepository, IConversationRepository, IMcpServerRepository, SaveRuntimeStateParams, SortOrder,
+    IAgentMetadataRepository, IConversationRepository,
+    IMcpServerRepository, SaveRuntimeStateParams, SortOrder,
 };
 use nomifun_mcp::{AcpMcpCapabilities, parse_acp_mcp_capabilities};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use nomifun_runtime::resolve_command_path;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -33,7 +36,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::convert::{
-    TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, row_to_artifact_response, row_to_message_response,
+    TOOL_CONTENT_COMPACT_THRESHOLD_BYTES, parse_provider_with_model, row_to_artifact_response, row_to_message_response,
     row_to_message_response_compact, row_to_response, row_to_response_with_extra, search_row_to_item, string_to_enum,
 };
 use crate::skill_resolver::SkillResolver;
@@ -44,12 +47,65 @@ use std::sync::RwLock;
 const MAX_CRON_CONTINUATIONS_PER_TURN: usize = 4;
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotentMessageDelivery {
+    pub message_id: String,
+    pub completed: bool,
+    pub result_ok: Option<bool>,
+    pub result_text: Option<String>,
+    pub result_error: Option<String>,
+}
+
 /// Parse a string conversation id (the service's public-API / in-memory key
 /// form) into the integer key the repo now uses. A non-numeric id yields an
 /// explicit NotFound rather than silently matching another row (spec §2.5/§7.4).
 pub(crate) fn parse_conv_id(id: &str) -> Result<i64, nomifun_common::AppError> {
     id.parse::<i64>()
         .map_err(|_| nomifun_common::AppError::NotFound(format!("conversation {id}")))
+}
+
+fn conversation_lead_model(model: &ProviderWithModel) -> Result<ExecutionModelRef, AppError> {
+    let provider_id = model.provider_id.trim();
+    // Older persisted rows may carry an explicitly empty `use_model`. Treat
+    // that exactly like an absent override; it must never erase the concrete
+    // fallback in `model` or make finite collaboration authority unreadable.
+    let selected_model_raw = model
+        .use_model
+        .as_deref()
+        .filter(|candidate| !candidate.trim().is_empty())
+        .unwrap_or(&model.model);
+    let selected_model = selected_model_raw.trim();
+    if provider_id.is_empty()
+        || provider_id != model.provider_id
+        || selected_model.is_empty()
+        || selected_model_raw != selected_model
+    {
+        return Err(AppError::BadRequest(
+            "Conversation model requires trimmed provider_id and selected model".to_owned(),
+        ));
+    }
+    Ok(ExecutionModelRef {
+        provider_id: provider_id.to_owned(),
+        model: selected_model.to_owned(),
+    })
+}
+
+fn validate_conversation_model_authority(
+    model: Option<&ProviderWithModel>,
+    pool: Option<&ExecutionModelPool>,
+) -> Result<(), AppError> {
+    let (Some(model), Some(pool)) = (model, pool) else {
+        return Ok(());
+    };
+    pool.validate().map_err(AppError::BadRequest)?;
+    let lead = conversation_lead_model(model)?;
+    if !pool.contains(&lead) {
+        return Err(AppError::BadRequest(format!(
+            "Conversation lead model {}/{} must belong to execution_model_pool",
+            lead.provider_id, lead.model
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,11 +158,11 @@ impl McpSupportPolicy {
 /// `nomifun-idmm` (which sits above it). `nomifun-idmm::IdmmManager` implements
 /// it; `nomifun-app` injects the implementation at assembly time via
 /// [`ConversationService::with_supervision_hook`]. Called fire-and-forget once
-/// per turn after the agent task exists; the implementation resolves config
+/// per turn after the Agent runtime exists; the implementation resolves config
 /// internally and is a cheap no-op when IDMM is disabled or already supervising.
 ///
 /// Mirrors AutoWork's `IdmmHandle::ensure_supervising` (which arms per
-/// orchestrator loop iteration) for the plain, user-driven desktop chat path —
+/// polling iteration) for the plain, user-driven desktop chat path —
 /// the only path that otherwise never armed IDMM (no AutoWork loop, no
 /// boot-resume), so an enabled 智能决策 silently never observed the turn.
 pub trait ConversationSupervisionHook: Send + Sync {
@@ -116,12 +172,16 @@ pub trait ConversationSupervisionHook: Send + Sync {
 
 #[derive(Clone)]
 pub struct ConversationService {
+    /// Immutable installation owner used to derive the maximum runtime
+    /// authority for every persisted Conversation owner.  This keeps host
+    /// capability decisions inside the service and out of open `extra` JSON.
+    authoritative_user_id: Arc<str>,
     workspace_root: PathBuf,
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
     skill_resolver: Arc<dyn SkillResolver>,
-    task_manager: Arc<dyn IWorkerTaskManager>,
+    runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     /// Hooks invoked at the end of `delete()` so other services
-    /// (`WorkerTaskManagerImpl`, `CronService`, …) can clean up their
+    /// (`InMemoryAgentRuntimeRegistry`, `CronService`, …) can clean up their
     /// per-conversation state. Wrapped in `Arc<RwLock<…>>` so registration
     /// can happen post-construction without breaking the `Clone` impl —
     /// mirrors the `cron_service` slot pattern below.
@@ -130,7 +190,7 @@ pub struct ConversationService {
     mcp_server_repo: Arc<RwLock<Option<Arc<dyn IMcpServerRepository>>>>,
     /// Knowledge base service slot (same post-construction registration
     /// pattern as `cron_service`). When wired, bound knowledge bases are
-    /// mounted into the workspace at task start and surfaced to the agent
+    /// mounted into the workspace when its Agent runtime is created and surfaced to the agent
     /// via `extra.knowledge_mounts` / `extra.knowledge_writeback`.
     knowledge_service: Arc<RwLock<Option<Arc<nomifun_knowledge::KnowledgeService>>>>,
     /// Unified preset resolver. When a create request carries `preset_id`, the
@@ -139,7 +199,7 @@ pub struct ConversationService {
     preset_service: Arc<RwLock<Option<Arc<nomifun_preset::PresetService>>>>,
     runtime_state: Arc<ConversationRuntimeStateService>,
     /// Per-conversation timestamp (ms) of the most recent USER-initiated
-    /// cancel (`POST /api/conversations/{id}/cancel`). AutoWork's orchestrator
+    /// cancel (`POST /api/conversations/{id}/cancel`). The AutoWork runner
     /// consults this after a turn ends (`user_cancelled_since`) to tell "the
     /// user deliberately stopped this work" apart from a turn failure —
     /// engine stream events alone can't carry that intent reliably across
@@ -163,26 +223,91 @@ pub struct ConversationService {
     /// —— fail-safe,所以不跑故障转移的上下文(测试、纯 webui)无需任何改动。
     failover_provider_repo: Arc<RwLock<Option<Arc<dyn nomifun_db::IProviderRepository>>>>,
     failover_client_prefs: Arc<RwLock<Option<Arc<dyn nomifun_db::IClientPreferenceRepository>>>>,
+    /// Mandatory read-side for the explicit Conversation↔Execution relation.
+    /// Production assembly shares one repository-backed instance across every
+    /// ConversationService; isolated tests must opt into the explicit no-op
+    /// implementation instead of silently omitting this authority.
+    execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
 }
 
 // ── Construction & Dependency Injection ──────────────────────────────
 
 impl ConversationService {
+    /// A durable internal turn must not release its in-process ownership until
+    /// the receiver receipt is committed. Otherwise a transient SQLite error
+    /// after model/tool side effects would let an at-least-once replay start
+    /// the same turn again.
+    async fn complete_delivery_receipt_before_release(
+        repo: &Arc<dyn IConversationRepository>,
+        user_id: &str,
+        conversation_id: i64,
+        operation_id: Option<&str>,
+        result_ok: bool,
+        result_text: Option<&str>,
+        result_error: Option<&str>,
+    ) {
+        let Some(operation_id) = operation_id else {
+            return;
+        };
+        let mut retry_delay_ms = 25_u64;
+        loop {
+            match repo
+                .complete_delivery_receipt(
+                    user_id,
+                    conversation_id,
+                    operation_id,
+                    result_ok,
+                    result_text,
+                    result_error,
+                    now_ms(),
+                )
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {
+                    if matches!(repo.get(conversation_id).await, Ok(None)) {
+                        // The only legal receipt deletion is an owning account
+                        // or Conversation cascade. With no addressable receiver,
+                        // replay is impossible and retaining the turn would leak
+                        // a background task forever.
+                        return;
+                    }
+                    error!(
+                        conversation_id,
+                        operation_id,
+                        "Durable Conversation delivery receipt was not acknowledged; retaining turn ownership"
+                    );
+                }
+                Err(receipt_error) => error!(
+                    conversation_id,
+                    operation_id,
+                    error = %ErrorChain(&receipt_error),
+                    "Failed to persist durable Conversation delivery receipt; retaining turn ownership"
+                ),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+            retry_delay_ms = (retry_delay_ms * 2).min(2_000);
+        }
+    }
+
     pub fn new(
+        authoritative_user_id: Arc<str>,
         workspace_root: PathBuf,
-        broadcaster: Arc<dyn EventBroadcaster>,
+        user_events: Arc<dyn UserEventSink>,
         skill_resolver: Arc<dyn SkillResolver>,
-        task_manager: Arc<dyn IWorkerTaskManager>,
+        runtime_registry: Arc<dyn AgentRuntimeRegistry>,
 
         conversation_repo: Arc<dyn IConversationRepository>,
         agent_metadata_repo: Arc<dyn IAgentMetadataRepository>,
         acp_session_repo: Arc<dyn IAcpSessionRepository>,
+        execution_conversation_boundary: Arc<dyn ExecutionConversationBoundary>,
     ) -> Self {
         Self {
+            authoritative_user_id,
             workspace_root,
-            broadcaster,
+            user_events,
             skill_resolver,
-            task_manager,
+            runtime_registry,
             delete_hooks: Arc::new(RwLock::new(Vec::new())),
             cron_service: Arc::new(RwLock::new(None)),
             mcp_server_repo: Arc::new(RwLock::new(None)),
@@ -197,7 +322,12 @@ impl ConversationService {
             supervision_hook: Arc::new(RwLock::new(None)),
             failover_provider_repo: Arc::new(RwLock::new(None)),
             failover_client_prefs: Arc::new(RwLock::new(None)),
+            execution_conversation_boundary,
         }
+    }
+
+    fn execution_authority(&self, user_id: &str) -> ExecutionAuthority {
+        ExecutionAuthority::resolve(user_id, self.authoritative_user_id.as_ref())
     }
 
     pub fn with_runtime_state(mut self, runtime_state: Arc<ConversationRuntimeStateService>) -> Self {
@@ -261,8 +391,8 @@ impl ConversationService {
     /// Register a hook to be notified when a conversation is deleted.
     ///
     /// Hooks are dispatched sequentially in registration order from
-    /// `delete()`. Used by `nomifun-app` to wire up `WorkerTaskManagerImpl`
-    /// (kill the agent process) and `CronService` (cascade-delete cron jobs).
+    /// `delete()`. Used by `nomifun-app` to wire up `InMemoryAgentRuntimeRegistry`
+    /// (terminate the Agent process) and `CronService` (cascade-delete cron jobs).
     pub fn with_delete_hook(&self, hook: Arc<dyn OnConversationDelete>) {
         if let Ok(mut guard) = self.delete_hooks.write() {
             guard.push(hook);
@@ -313,31 +443,105 @@ impl ConversationService {
     /// output` summed across the turns the stream relay saw complete). Returns
     /// `None` when nothing was recorded — e.g. a turn that errored before
     /// completing, a non-nomi engine that emits no `TurnCompleted`, or a relay
-    /// not wired with the runtime state (every non-orchestrator conversation).
-    /// The orchestrator worker calls this exactly once, after its turn settles,
-    /// to fill `orch_run_tasks.tokens`. Removing the entry keeps the map bounded.
+    /// not wired with the runtime state. An execution attempt consumes this
+    /// exactly once after its Agent turn settles; removing the entry keeps the
+    /// map bounded and prevents reuse by a later attempt.
     pub fn take_turn_tokens(&self, conversation_id: &str) -> Option<i64> {
         self.runtime_state.take_turn_tokens(conversation_id)
     }
 
-    pub(crate) fn task(&self, conversation_id: &str) -> Result<AgentInstance, AppError> {
-        self.task_manager
-            .get_task(conversation_id)
+    async fn project_execution_relation(
+        &self,
+        user_id: &str,
+        response: &mut ConversationResponse,
+    ) -> Result<(), AppError> {
+        let projection = self
+            .execution_conversation_boundary
+            .projection(user_id, response.id)
+            .await?;
+        response.linked_execution_id = projection.linked_execution_id;
+        response.execution_step_id = projection.execution_step_id;
+        response.execution_attempt_id = projection.execution_attempt_id;
+        Ok(())
+    }
+
+    async fn is_active_execution_attempt_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+    ) -> Result<bool, AppError> {
+        self.execution_conversation_boundary
+            .is_active_attempt(user_id, conversation_id)
+            .await
+    }
+
+    async fn is_execution_attempt_conversation(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+    ) -> Result<bool, AppError> {
+        self.execution_conversation_boundary
+            .is_retained_attempt(user_id, conversation_id)
+            .await
+    }
+
+    async fn ensure_not_retained_execution_attempt(
+        &self,
+        user_id: &str,
+        conversation_id: i64,
+    ) -> Result<(), AppError> {
+        if self
+            .is_execution_attempt_conversation(user_id, conversation_id)
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "Execution Attempt Conversations are owned audit transcripts; use Agent Execution decision/control APIs"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Shared preflight for public/background initiators that would mutate a
+    /// Conversation or its runtime outside the normal service methods. Call it
+    /// before building an Agent, staging files, clearing context or acquiring a
+    /// turn. Agent Execution uses its separate infrastructure port instead.
+    pub async fn ensure_public_mutation_allowed(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), AppError> {
+        let conversation_id = parse_conv_id(conversation_id)?;
+        self.conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|conversation| conversation.user_id == user_id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Conversation {conversation_id} not found"))
+            })?;
+        self.ensure_not_retained_execution_attempt(user_id, conversation_id)
+            .await
+    }
+
+    pub(crate) fn runtime_handle(&self, conversation_id: &str) -> Result<AgentRuntimeHandle, AppError> {
+        self.runtime_registry
+            .get_runtime(conversation_id)
             .ok_or_else(|| AppError::NotFound(format!("No active agent for conversation '{conversation_id}'")))
     }
 
     pub async fn runtime_summary_for(&self, conversation_id: &str) -> ConversationRuntimeSummary {
-        let agent = self.task_manager.get_task(conversation_id);
-        let has_task = agent.is_some();
-        let task_status = agent.as_ref().and_then(|agent| agent.status());
+        let agent = self.runtime_registry.get_runtime(conversation_id);
+        let has_runtime = agent.is_some();
+        let runtime_status = agent.as_ref().and_then(|agent| agent.status());
         let pending_confirmations = agent.as_ref().map(|agent| agent.get_confirmations().len()).unwrap_or(0);
 
         self.runtime_state
-            .summary_from_parts(conversation_id, task_status, has_task, pending_confirmations)
+            .summary_from_parts(conversation_id, runtime_status, has_runtime, pending_confirmations)
     }
 
     pub async fn complete_turn_with_companion_context(
         &self,
+        user_id: &str,
         conversation_id: &str,
         companion: bool,
         companion_id: Option<String>,
@@ -347,7 +551,8 @@ impl ConversationService {
         let runtime = self.runtime_summary_for(conversation_id).await;
         StreamRelay::complete_conversation_with_context(
             &self.conversation_repo,
-            &self.broadcaster,
+            &self.user_events,
+            user_id,
             conversation_id,
             Some(runtime),
             companion,
@@ -360,6 +565,7 @@ impl ConversationService {
 
     async fn broadcast_turn_started_with_context(
         &self,
+        user_id: &str,
         conversation_id: &str,
         turn_id: &str,
         companion: bool,
@@ -383,7 +589,8 @@ impl ConversationService {
             "origin": origin,
             "channel_platform": channel_platform,
         });
-        self.broadcaster.broadcast(WebSocketMessage::new("turn.started", payload));
+        self.user_events
+            .send_to_user(user_id, WebSocketMessage::new("turn.started", payload));
     }
 }
 
@@ -399,11 +606,23 @@ impl ConversationService {
         user_id: &str,
         req: CreateConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
-        self.create_inner(user_id, req, None).await
+        self.create_inner(user_id, req, None, None).await
+    }
+
+    /// Trusted in-process create with a durable operation identity.  This is
+    /// intentionally separate from `CreateConversationRequest`: public callers
+    /// retain server-generated semantics and cannot choose an idempotency key.
+    pub async fn create_idempotent(
+        &self,
+        user_id: &str,
+        req: CreateConversationRequest,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        self.create_inner(user_id, req, None, Some(creation_key)).await
     }
 
     /// Trusted in-process creation path for long-lived consumers that already
-    /// hold a frozen snapshot (cron, orchestrator workers, companions). This
+    /// hold a frozen snapshot (cron, delegated Agent attempts, companions). This
     /// never re-resolves the catalog, so an existing target cannot drift to a
     /// newer preset revision. It is intentionally not exposed by HTTP DTOs.
     pub async fn create_from_preset_snapshot(
@@ -414,7 +633,40 @@ impl ConversationService {
     ) -> Result<ConversationResponse, AppError> {
         req.preset_id = None;
         req.preset_overrides = None;
-        self.create_inner(user_id, req, Some(snapshot)).await
+        self.create_inner(user_id, req, Some(snapshot), None).await
+    }
+
+    /// Snapshot-preserving counterpart of [`Self::create_idempotent`].
+    pub async fn create_from_preset_snapshot_idempotent(
+        &self,
+        user_id: &str,
+        mut req: CreateConversationRequest,
+        snapshot: nomifun_api_types::ResolvedPresetSnapshot,
+        creation_key: &str,
+    ) -> Result<ConversationResponse, AppError> {
+        req.preset_id = None;
+        req.preset_overrides = None;
+        self.create_inner(user_id, req, Some(snapshot), Some(creation_key))
+            .await
+    }
+
+    /// Remove a creation-keyed conversation that never acquired its owning
+    /// durable relation.  The normal execution-attempt deletion guard remains
+    /// authoritative: if the link transaction actually committed but its
+    /// acknowledgement was lost, this returns Conflict and preserves history.
+    pub async fn discard_unlinked_creation(
+        &self,
+        user_id: &str,
+        creation_key: &str,
+    ) -> Result<(), AppError> {
+        let Some(conversation) = self
+            .conversation_repo
+            .find_by_creation_key(user_id, creation_key)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.delete(user_id, &conversation.id.to_string()).await
     }
 
     #[tracing::instrument(skip_all, fields(user_id = %user_id, agent_type = ?req.r#type))]
@@ -423,7 +675,31 @@ impl ConversationService {
         user_id: &str,
         mut req: CreateConversationRequest,
         trusted_snapshot: Option<nomifun_api_types::ResolvedPresetSnapshot>,
+        creation_key: Option<&str>,
     ) -> Result<ConversationResponse, AppError> {
+        let authority = self.execution_authority(user_id);
+        if !authority.controls_host() {
+            if req.r#type != AgentType::Nomi {
+                return Err(AppError::Forbidden(format!(
+                    "Agent type '{}' requires the installation owner; non-owner conversations are model-only",
+                    req.r#type.serde_name()
+                )));
+            }
+
+            // Open Conversation JSON is a presentation/config bag, never a
+            // capability grant.  A model-only principal gets a backend-owned
+            // temporary workspace and no preset, skill, MCP, channel,
+            // collaboration or custom-path authority regardless of payload.
+            req.extra = serde_json::json!({});
+            req.preset_id = None;
+            req.preset_overrides = None;
+            req.delegation_policy = DelegationPolicy::Disabled;
+            req.execution_model_pool = None;
+            req.decision_policy = DecisionPolicy::default();
+            req.execution_template_id = None;
+            req.channel_chat_id = None;
+        }
+
         let now = now_ms();
         let source = req.source.unwrap_or(ConversationSource::Nomifun);
 
@@ -439,9 +715,13 @@ impl ConversationService {
         }
 
         let mut extra = req.extra;
+        reject_execution_policy_extra_keys(&extra)?;
         let preset_id = req.preset_id.take().map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
         let preset_overrides = req.preset_overrides.take().unwrap_or_default();
-        let mut resolved_preset_snapshot = trusted_snapshot;
+        let mut resolved_preset_snapshot = authority
+            .controls_host()
+            .then_some(trusted_snapshot)
+            .flatten();
         // Snapshot/lineage are server-owned first-class columns. Never trust a
         // similarly named value hidden in the open-ended `extra` bag.
         if let Some(object) = extra.as_object_mut() {
@@ -607,7 +887,11 @@ impl ConversationService {
             None => (Vec::new(), Vec::new()),
         };
 
-        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
+        let auto_inject_names = if authority.controls_host() {
+            self.skill_resolver.auto_inject_names().await
+        } else {
+            Vec::new()
+        };
         let initial_skills = compute_initial_skills(&auto_inject_names, &preset_enabled, &exclude_auto_inject);
 
         // Skill symlinks are wired into the auto-provisioned workspace *after*
@@ -653,7 +937,7 @@ impl ConversationService {
             .read()
             .ok()
             .and_then(|guard| guard.as_ref().cloned());
-        if let Some(repo) = repo {
+        if authority.controls_host() && let Some(repo) = repo {
             let rows = match selected_mcp_server_ids.as_ref() {
                 Some(ids) => repo
                     .list_by_ids_any(ids)
@@ -762,6 +1046,14 @@ impl ConversationService {
             .and_then(serde_json::Value::as_i64)
             .or_else(|| extra.get("preset_revision").and_then(serde_json::Value::as_i64));
 
+        if let Some(pool) = req.execution_model_pool.as_ref() {
+            pool.validate().map_err(AppError::BadRequest)?;
+        }
+        validate_conversation_model_authority(
+            req.model.as_ref(),
+            req.execution_model_pool.as_ref(),
+        )?;
+
         let row = nomifun_db::models::ConversationRow {
             // Placeholder: the integer PK is allocated by SQLite inside
             // `create()` and returned as `new_id`. The repo ignores this field.
@@ -771,6 +1063,15 @@ impl ConversationService {
             r#type: enum_to_db(&req.r#type)?,
             extra: serde_json::to_string(&extra)
                 .map_err(|e| AppError::Internal(format!("Failed to serialize extra: {e}")))?,
+            delegation_policy: req.delegation_policy.as_str().to_owned(),
+            execution_model_pool: req
+                .execution_model_pool
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| AppError::Internal(format!("Failed to serialize execution model pool: {e}")))?,
+            decision_policy: req.decision_policy.as_str().to_owned(),
+            execution_template_id: req.execution_template_id,
             model: req
                 .model
                 .as_ref()
@@ -790,7 +1091,25 @@ impl ConversationService {
             updated_at: now,
         };
 
-        let new_id = self.conversation_repo.create(&row).await?;
+        let (new_id, created_now) = match creation_key {
+            Some(key) => self.conversation_repo.create_idempotent(&row, key).await?,
+            None => (self.conversation_repo.create(&row).await?, true),
+        };
+        if !created_now {
+            let existing = self
+                .conversation_repo
+                .get(new_id)
+                .await?
+                .filter(|existing| existing.user_id == user_id)
+                .ok_or_else(|| {
+                    AppError::Conflict(
+                        "conversation creation key resolved outside its owner boundary".to_owned(),
+                    )
+                })?;
+            let mut response = row_to_response(existing, &self.workspace_root)?;
+            self.project_execution_relation(user_id, &mut response).await?;
+            return Ok(response);
+        }
 
         // Materialize the preset's knowledge policy as an explicit target
         // binding. This deliberately bypasses workpath inheritance at runtime:
@@ -903,9 +1222,10 @@ impl ConversationService {
                 .map_err(|e| AppError::Internal(format!("Failed to serialize extra: {e}")))?,
             ..row
         };
-        let response = row_to_response(response_row, &self.workspace_root)?;
+        let mut response = row_to_response(response_row, &self.workspace_root)?;
+        self.project_execution_relation(user_id, &mut response).await?;
 
-        self.broadcast_list_changed(&new_id.to_string(), "created", response.source.as_ref());
+        self.broadcast_list_changed(user_id, &new_id.to_string(), "created", response.source.as_ref());
 
         log_conversation_created(&response, &extra);
 
@@ -1001,6 +1321,7 @@ impl ConversationService {
         self.backfill_extra_inplace(row.id, &mut extra).await;
         let mut response = row_to_response_with_extra(row, extra, &self.workspace_root)?;
         response.runtime = Some(self.runtime_summary_for(id).await);
+        self.project_execution_relation(user_id, &mut response).await?;
         Ok(response)
     }
 
@@ -1053,7 +1374,10 @@ impl ConversationService {
             };
             self.backfill_extra_inplace(row_id, &mut extra).await;
             match row_to_response_with_extra(row, extra, &self.workspace_root) {
-                Ok(resp) => items.push(resp),
+                Ok(mut response) => {
+                    self.project_execution_relation(user_id, &mut response).await?;
+                    items.push(response);
+                }
                 Err(err) => warn!(
                     conversation_id = %row_id,
                     error = %ErrorChain(&err),
@@ -1079,8 +1403,8 @@ impl ConversationService {
         &self,
         user_id: &str,
         id: &str,
-        req: UpdateConversationRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        mut req: UpdateConversationRequest,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<ConversationResponse, AppError> {
         let existing = self
             .conversation_repo
@@ -1088,6 +1412,29 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+
+        let authority = self.execution_authority(user_id);
+        if !authority.controls_host() {
+            if string_to_enum::<AgentType>(&existing.r#type)? != AgentType::Nomi {
+                return Err(AppError::Forbidden(
+                    "Non-owner conversations are model-only; this legacy runtime cannot be resumed"
+                        .into(),
+                ));
+            }
+            // Only ordinary presentation/model fields are mutable.  Runtime
+            // grants, paths and collaboration policy are backend-owned.
+            req.extra = None;
+            req.delegation_policy = Some(DelegationPolicy::Disabled);
+            req.execution_model_pool = Some(None);
+            req.decision_policy = Some(DecisionPolicy::default());
+            req.execution_template_id = Some(None);
+        }
+
+        // Public PATCH cannot mutate or recycle the runtime snapshot owned by
+        // an Execution Attempt. Backend-only metadata seams such as
+        // `update_extra` remain separate and intentionally bypass this API.
+        self.ensure_not_retained_execution_attempt(user_id, existing.id)
+            .await?;
 
         // Snapshot invariant: once written at create time, `extra.skills`
         // must not be re-shaped by PATCH. The frontend must clone the
@@ -1102,6 +1449,9 @@ impl ConversationService {
             return Err(AppError::BadRequest(
                 "extra.skills and MCP snapshots are immutable post-creation".into(),
             ));
+        }
+        if let Some(incoming) = &req.extra {
+            reject_execution_policy_extra_keys(incoming)?;
         }
 
         // Type-aware rule: top-level `model` is nomi-only. For non-nomi
@@ -1152,7 +1502,7 @@ impl ConversationService {
         // project directory) changes the agent's cwd — and, via the surface
         // scope, its native/gateway file authority. The cached agent baked the
         // old cwd at build time, so it must be recycled for the change to take
-        // effect on the next message (same rationale as the model-change kill
+        // effect on the next message (same rationale as the model-change termination
         // below). Detected by comparing the pre/post merged `extra.workspace`.
         let workspace_changed = req.extra.as_ref().is_some_and(|e| e.get("workspace").is_some()) && {
             let ws_of = |raw: &str| -> Option<String> {
@@ -1209,12 +1559,59 @@ impl ConversationService {
             })
             .transpose()?;
 
+        let delegation_policy_changed = req
+            .delegation_policy
+            .is_some_and(|policy| existing.delegation_policy != policy.as_str());
+        let delegation_policy = req
+            .delegation_policy
+            .map(|policy| policy.as_str().to_owned());
+        if let Some(Some(pool)) = req.execution_model_pool.as_ref() {
+            pool.validate().map_err(AppError::BadRequest)?;
+        }
+        let persisted_model = existing
+            .model
+            .as_deref()
+            .map(parse_provider_with_model)
+            .transpose()?;
+        let persisted_pool = existing
+            .execution_model_pool
+            .as_deref()
+            .map(serde_json::from_str::<ExecutionModelPool>)
+            .transpose()
+            .map_err(|error| {
+                AppError::Internal(format!("Invalid persisted execution model pool: {error}"))
+            })?;
+        let effective_pool = match req.execution_model_pool.as_ref() {
+            None => persisted_pool.as_ref(),
+            Some(None) => None,
+            Some(Some(pool)) => Some(pool),
+        };
+        validate_conversation_model_authority(
+            req.model.as_ref().or(persisted_model.as_ref()),
+            effective_pool,
+        )?;
+        let execution_model_pool = match req.execution_model_pool.as_ref() {
+            None => None,
+            Some(None) => Some(None),
+            Some(Some(pool)) => Some(Some(serde_json::to_string(pool).map_err(|error| {
+                AppError::Internal(format!("Failed to serialize execution model pool: {error}"))
+            })?)),
+        };
+        let decision_policy = req
+            .decision_policy
+            .map(|policy| policy.as_str().to_owned());
+        let execution_template_id = req.execution_template_id;
+
         let updates = ConversationRowUpdate {
             name: req.name,
             pinned: req.pinned,
             pinned_at,
             model: model_json,
             extra: merged_extra,
+            delegation_policy,
+            execution_model_pool,
+            decision_policy,
+            execution_template_id,
             status: None,
             cron_job_id: None,
             preset_id: preset_id_update,
@@ -1225,14 +1622,15 @@ impl ConversationService {
 
         self.conversation_repo.update(parse_conv_id(id)?, &updates).await?;
 
-        if model_changed || workspace_changed || preset_changed {
+        if model_changed || workspace_changed || preset_changed || delegation_policy_changed {
             info!(
                 model_changed,
                 workspace_changed,
                 preset_changed,
-                "Conversation updated, killing agent task so the change takes effect on the next message"
+                delegation_policy_changed,
+                "Conversation updated, terminating Agent runtime so the change takes effect on the next message"
             );
-            task_manager.kill_and_wait(id, None).await;
+            runtime_registry.terminate_and_wait(id, None).await;
         }
 
         // Re-fetch to return the updated version
@@ -1242,21 +1640,25 @@ impl ConversationService {
             .await?
             .ok_or_else(|| AppError::Internal("Conversation vanished after update".into()))?;
 
-        let response = row_to_response(updated, &self.workspace_root)?;
+        let mut response = row_to_response(updated, &self.workspace_root)?;
+        self.project_execution_relation(user_id, &mut response).await?;
 
         info!("Conversation updated");
-        self.broadcast_list_changed(id, "updated", response.source.as_ref());
+        self.broadcast_list_changed(user_id, id, "updated", response.source.as_ref());
 
         Ok(response)
     }
 
-    /// Merge a JSON patch into `conversation.extra` without touching model,
-    /// name, pinned flag, or task lifecycle. Intended for internal callers
-    /// (e.g. `TeamSessionService::ensure_session` writing
-    /// `team_mcp_stdio_config`) where a full `update()` would kill the agent
-    /// on a spurious model comparison.
+    /// Merge backend-owned Agent metadata into `conversation.extra` without
+    /// touching the typed conversation fields or terminating its runtime.
+    ///
+    /// Execution identity and policy are deliberately rejected here: they have
+    /// first-class persistence and must not regain a second source of truth via
+    /// an internal caller.
     #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
     pub async fn update_extra(&self, conversation_id: &str, patch: serde_json::Value) -> Result<(), AppError> {
+        reject_execution_policy_extra_keys(&patch)?;
+
         let existing = self
             .conversation_repo
             .get(parse_conv_id(conversation_id)?)
@@ -1280,28 +1682,6 @@ impl ConversationService {
         };
         self.conversation_repo.update(parse_conv_id(conversation_id)?, &updates).await?;
         debug!("Conversation extra merged");
-        Ok(())
-    }
-
-    /// Link an orchestrator run to its originating conversation.
-    ///
-    /// Merges `extra.orchestrator_run_id` (only touching `extra` — never
-    /// model/name/pinned, never killing the agent task) so the frontend can
-    /// light up the canvas entry, then broadcasts `conversation.listChanged`
-    /// so the conversation list subscription re-fetches. This is the single
-    /// shared link-write point for both orchestrator launch paths (caps and
-    /// route), keeping the write DRY.
-    ///
-    /// An empty `conversation_id` (MCP / no-session callers) is a silent
-    /// no-op: returns `Ok(())` and broadcasts nothing.
-    #[tracing::instrument(skip_all, fields(conversation_id = %conversation_id, run_id = %run_id))]
-    pub async fn link_orchestrator_run(&self, conversation_id: &str, run_id: &str) -> Result<(), AppError> {
-        if conversation_id.is_empty() {
-            return Ok(());
-        }
-        self.update_extra(conversation_id, serde_json::json!({ "orchestrator_run_id": run_id }))
-            .await?;
-        self.broadcast_list_changed(conversation_id, "updated", None);
         Ok(())
     }
 
@@ -1331,6 +1711,16 @@ impl ConversationService {
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
 
+        if self
+            .is_execution_attempt_conversation(user_id, conv_id)
+            .await?
+        {
+            return Err(AppError::Conflict(
+                "Execution attempt conversations are retained as audit history and cannot be deleted directly"
+                    .into(),
+            ));
+        }
+
         let source: Option<ConversationSource> = existing
             .source
             .as_deref()
@@ -1354,7 +1744,7 @@ impl ConversationService {
         let hooks: Vec<Arc<dyn OnConversationDelete>> =
             self.delete_hooks.read().map(|guard| guard.clone()).unwrap_or_default();
         for hook in hooks {
-            hook.on_conversation_deleted(conv_id).await;
+            hook.on_conversation_deleted(user_id, conv_id).await;
         }
 
         if let Some(path) = managed_temp_workspace
@@ -1372,14 +1762,14 @@ impl ConversationService {
         // Drop the in-memory knowledge signature so the map does not retain
         // entries for deleted conversations across a long-lived process.
         self.runtime_state.clear_knowledge_signature(&conv_id.to_string());
-        // Likewise drop any accumulated token total — an orchestrator worker
-        // conversation that errored before the worker `take`d it would otherwise
+        // Likewise drop any accumulated token total — an execution-attempt
+        // conversation that errored before the attempt consumed it would otherwise
         // linger here until process restart (a small in-memory leak). No-op for the
         // common chat/companion conversation (which never records a token total).
         self.runtime_state.clear_turn_tokens(&conv_id.to_string());
 
         info!("Conversation deleted");
-        self.broadcast_list_changed(id, "deleted", source.as_ref());
+        self.broadcast_list_changed(user_id, id, "deleted", source.as_ref());
 
         Ok(())
     }
@@ -1390,7 +1780,7 @@ impl ConversationService {
     /// (inheriting name / extra / cron binding). That use case has been
     /// removed — the method is retained only because `POST
     /// /api/conversations/clone` has three active callers
-    /// (`_AddNewConversation`, worker task manager, legacy repo shim) that
+    /// (`_AddNewConversation`, Agent runtime registry, legacy repo shim) that
     /// send a pre-built payload shape. New code should prefer `create`.
     pub async fn clone_create(
         &self,
@@ -1403,16 +1793,24 @@ impl ConversationService {
     /// Reset a conversation: clear messages and set status back to pending.
     #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %id))]
     pub async fn reset(&self, user_id: &str, id: &str) -> Result<(), AppError> {
+        let conv_id = parse_conv_id(id)?;
         // Verify existence and ownership
         self.conversation_repo
-            .get(parse_conv_id(id)?)
+            .get(conv_id)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
 
+        self.ensure_not_retained_execution_attempt(user_id, conv_id)
+            .await?;
+
         // Delete all messages
-        self.conversation_repo.delete_messages_by_conversation(parse_conv_id(id)?).await?;
-        self.conversation_repo.delete_artifacts_by_conversation(parse_conv_id(id)?).await?;
+        self.conversation_repo
+            .delete_messages_by_conversation(conv_id)
+            .await?;
+        self.conversation_repo
+            .delete_artifacts_by_conversation(conv_id)
+            .await?;
 
         // Reset status to pending
         let now = now_ms();
@@ -1421,7 +1819,7 @@ impl ConversationService {
             updated_at: Some(now),
             ..Default::default()
         };
-        self.conversation_repo.update(parse_conv_id(id)?, &updates).await?;
+        self.conversation_repo.update(conv_id, &updates).await?;
 
         info!("Conversation reset");
         Ok(())
@@ -1430,9 +1828,13 @@ impl ConversationService {
     /// List conversations associated by the same workspace.
     pub async fn list_associated(&self, user_id: &str, id: &str) -> Result<Vec<ConversationResponse>, AppError> {
         let rows = self.conversation_repo.list_associated(user_id, parse_conv_id(id)?).await?;
-        rows.into_iter()
-            .map(|row| row_to_response(row, &self.workspace_root))
-            .collect()
+        let mut responses = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut response = row_to_response(row, &self.workspace_root)?;
+            self.project_execution_relation(user_id, &mut response).await?;
+            responses.push(response);
+        }
+        Ok(responses)
     }
 
     /// List conversations spawned by a specific cron job.
@@ -1442,9 +1844,13 @@ impl ConversationService {
         cron_job_id: &str,
     ) -> Result<Vec<ConversationResponse>, AppError> {
         let rows = self.conversation_repo.list_by_cron_job(user_id, cron_job_id).await?;
-        rows.into_iter()
-            .map(|row| row_to_response(row, &self.workspace_root))
-            .collect()
+        let mut responses = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut response = row_to_response(row, &self.workspace_root)?;
+            self.project_execution_relation(user_id, &mut response).await?;
+            responses.push(response);
+        }
+        Ok(responses)
     }
 }
 
@@ -1665,11 +2071,14 @@ impl ConversationService {
             .ok_or_else(|| AppError::NotFound(format!("Artifact {artifact_id} not found")))?;
 
         let response = row_to_artifact_response(row)?;
-        self.broadcaster.broadcast(WebSocketMessage::new(
-            "conversation.artifact",
-            serde_json::to_value(&response)
-                .map_err(|e| AppError::Internal(format!("Failed to serialize artifact event: {e}")))?,
-        ));
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "conversation.artifact",
+                serde_json::to_value(&response)
+                    .map_err(|e| AppError::Internal(format!("Failed to serialize artifact event: {e}")))?,
+            ),
+        );
 
         Ok(response)
     }
@@ -1692,11 +2101,15 @@ impl ConversationService {
             .search_messages(user_id, &query.keyword, page, page_size)
             .await?;
 
-        let items = result
+        let mut items = result
             .items
             .into_iter()
             .map(|row| search_row_to_item(row, &self.workspace_root))
             .collect::<Result<Vec<_>, _>>()?;
+        for item in &mut items {
+            self.project_execution_relation(user_id, &mut item.conversation)
+                .await?;
+        }
 
         Ok(PaginatedResult {
             items,
@@ -1714,7 +2127,7 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<ConfirmationListResponse, AppError> {
         self.conversation_repo
             .get(parse_conv_id(conversation_id)?)
@@ -1722,7 +2135,7 @@ impl ConversationService {
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
-        let agent = match task_manager.get_task(conversation_id) {
+        let agent = match runtime_registry.get_runtime(conversation_id) {
             Some(a) => a,
             None => return Ok(Vec::new()),
         };
@@ -1740,7 +2153,7 @@ impl ConversationService {
         conversation_id: &str,
         call_id: &str,
         req: ConfirmRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<(), AppError> {
         self.conversation_repo
             .get(parse_conv_id(conversation_id)?)
@@ -1748,8 +2161,8 @@ impl ConversationService {
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
-        let agent = task_manager
-            .get_task(conversation_id)
+        let agent = runtime_registry
+            .get_runtime(conversation_id)
             .ok_or_else(|| AppError::NotFound("No active agent for this conversation".into()))?;
 
         let confirmations = agent.get_confirmations();
@@ -1766,7 +2179,7 @@ impl ConversationService {
                 "id": conf_id,
             });
             let msg = WebSocketMessage::new("confirmation.remove", payload);
-            self.broadcaster.broadcast(msg);
+            self.user_events.send_to_user(user_id, msg);
         }
 
         Ok(())
@@ -1779,7 +2192,7 @@ impl ConversationService {
         conversation_id: &str,
         action: &str,
         command_type: Option<&str>,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<ApprovalCheckResponse, AppError> {
         self.conversation_repo
             .get(parse_conv_id(conversation_id)?)
@@ -1787,8 +2200,8 @@ impl ConversationService {
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
-        let approved = task_manager
-            .get_task(conversation_id)
+        let approved = runtime_registry
+            .get_runtime(conversation_id)
             .is_some_and(|agent| agent.check_approval(action, command_type));
 
         Ok(ApprovalCheckResponse { approved })
@@ -1802,7 +2215,7 @@ impl ConversationService {
     ///
     /// 1. Validates the conversation belongs to the user
     /// 2. Stores the user message (position: "right", status: "finish")
-    /// 3. Claims the conversation in runtime state
+    /// 3. Acquires the conversation's turn handle in runtime state
     /// 4. Spawns background agent build/send and stream relay work
     /// 5. Returns immediately (202 Accepted semantics)
     #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
@@ -1811,7 +2224,214 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         req: SendMessageRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<String, AppError> {
+        self.send_message_inner(user_id, conversation_id, req, runtime_registry, None)
+            .await
+    }
+
+    /// Trusted at-least-once delivery boundary for durable internal effects.
+    /// `operation_id` is used as the Agent turn correlation identity and to
+    /// deduplicate the persisted user transcript row.  It is deliberately not
+    /// part of `SendMessageRequest`, so public callers still receive freshly
+    /// server-minted message identities on every accepted request.
+    pub(crate) async fn send_message_idempotent(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        req: SendMessageRequest,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<IdempotentMessageDelivery, AppError> {
+        let operation_id = operation_id.trim();
+        if operation_id.is_empty() {
+            return Err(AppError::BadRequest(
+                "internal message operation id must not be empty".to_owned(),
+            ));
+        }
+        let conversation_key = parse_conv_id(conversation_id)?;
+        let request_payload = serde_json::json!({
+            "content": &req.content,
+            "files": &req.files,
+            "inject_skills": &req.inject_skills,
+            "hidden": req.hidden,
+            "origin": &req.origin,
+            "channel_platform": &req.channel_platform,
+        })
+        .to_string();
+        let receipt = self
+            .conversation_repo
+            .claim_delivery_receipt(
+                user_id,
+                conversation_key,
+                operation_id,
+                "turn",
+                &request_payload,
+                now_ms(),
+            )
+            .await?;
+        let message_id = format!("{operation_id}:user");
+        if receipt.status == "completed" {
+            return Ok(IdempotentMessageDelivery {
+                message_id,
+                completed: true,
+                result_ok: receipt.result_ok,
+                result_text: receipt.result_text,
+                result_error: receipt.result_error,
+            });
+        }
+        let accepted_message_id = self.send_message_inner(
+            user_id,
+            conversation_id,
+            req,
+            runtime_registry,
+            Some(operation_id),
+        )
+        .await?;
+        Ok(IdempotentMessageDelivery {
+            message_id: accepted_message_id,
+            completed: false,
+            result_ok: None,
+            result_text: None,
+            result_error: None,
+        })
+    }
+
+    /// Project a finalized assistant result into a Conversation without
+    /// starting an Agent turn. This is the sole boundary for durable
+    /// execution-result delivery: the repository atomically binds the stable
+    /// operation identity to one canonical left-side text row, then this
+    /// method publishes the existing final-content realtime contract only
+    /// after that transaction commits.
+    ///
+    /// Replays intentionally rebroadcast the same stable `msg_id`. This closes
+    /// the crash window between DB commit and WebSocket publication; clients
+    /// already merge stream messages by `msg_id` and `replace=true`.
+    /// `stream_complete=true` makes the lifecycle boundary explicit: this is a
+    /// self-contained projection, not the beginning of a model stream, so UI
+    /// activity indicators must render it without entering a running state.
+    pub async fn project_assistant_message_idempotent(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        content: &str,
+        origin: &str,
+    ) -> Result<String, AppError> {
+        let conversation_id = parse_conv_id(conversation_id)?;
+        let operation_id = operation_id.trim();
+        let content = content.trim();
+        let origin = origin.trim();
+        if operation_id.is_empty() {
+            return Err(AppError::BadRequest(
+                "assistant projection operation id must not be empty".to_owned(),
+            ));
+        }
+        if content.is_empty() {
+            return Err(AppError::BadRequest(
+                "assistant projection content must not be empty".to_owned(),
+            ));
+        }
+        if origin.is_empty() {
+            return Err(AppError::BadRequest(
+                "assistant projection origin must not be empty".to_owned(),
+            ));
+        }
+
+        let message_id = format!("{operation_id}:assistant");
+        let created_at = now_ms();
+        let request_payload = serde_json::json!({
+            "content": content,
+            "origin": origin,
+        })
+        .to_string();
+        let candidate = MessageRow {
+            id: message_id.clone(),
+            conversation_id,
+            msg_id: Some(message_id),
+            r#type: "text".to_owned(),
+            content: serde_json::json!({ "content": content }).to_string(),
+            position: Some("left".to_owned()),
+            status: Some("finish".to_owned()),
+            hidden: false,
+            created_at,
+        };
+        let projected = self
+            .conversation_repo
+            .project_assistant_message_with_receipt(
+                user_id,
+                conversation_id,
+                operation_id,
+                "projection",
+                &request_payload,
+                &candidate,
+                created_at,
+            )
+            .await?;
+        let conversation = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|conversation| conversation.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("conversation {conversation_id}")))?;
+        let (companion, companion_id, channel_platform) =
+            companion_context_from_extra(&conversation.extra);
+        let row = projected.message;
+        let data = serde_json::from_str::<serde_json::Value>(&row.content)
+            .unwrap_or_else(|_| serde_json::json!({ "content": row.content }));
+        let stable_message_id = row.msg_id.clone().unwrap_or_else(|| row.id.clone());
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
+                "conversation_id": row.conversation_id,
+                "msg_id": stable_message_id,
+                "type": "content",
+                "data": data,
+                "position": row.position,
+                "status": row.status,
+                "hidden": row.hidden,
+                "replace": true,
+                "stream_complete": true,
+                "origin": origin,
+                "companion": companion,
+                "companion_id": companion_id,
+                "channel_platform": channel_platform,
+                "created_at": row.created_at,
+                }),
+            ),
+        );
+        Ok(row.id)
+    }
+
+    pub(crate) async fn idempotent_delivery_result(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<IdempotentMessageDelivery>, AppError> {
+        let conversation_id = parse_conv_id(conversation_id)?;
+        let receipt = self
+            .conversation_repo
+            .get_delivery_receipt(user_id, conversation_id, operation_id)
+            .await?;
+        Ok(receipt.map(|receipt| IdempotentMessageDelivery {
+            message_id: format!("{operation_id}:user"),
+            completed: receipt.status == "completed",
+            result_ok: receipt.result_ok,
+            result_text: receipt.result_text,
+            result_error: receipt.result_error,
+        }))
+    }
+
+    async fn send_message_inner(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        req: SendMessageRequest,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        durable_operation_id: Option<&str>,
     ) -> Result<String, AppError> {
         if req.content.trim().is_empty() {
             return Err(AppError::BadRequest("Message content must not be empty".into()));
@@ -1825,6 +2445,31 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let conversation_key = row.id;
+
+        if !self.execution_authority(user_id).controls_host() {
+            if row.r#type != AgentType::Nomi.serde_name() {
+                return Err(AppError::Forbidden(
+                    "Non-owner conversations are model-only; host runtimes cannot be started"
+                        .into(),
+                ));
+            }
+            if !req.files.is_empty() || !req.inject_skills.is_empty() {
+                return Err(AppError::Forbidden(
+                    "Model-only conversations cannot attach host files or inject installation skills"
+                        .into(),
+                ));
+            }
+        }
+
+        // Attempt transcripts are owned by their Agent Execution for their
+        // entire retained lifetime, not only while the Attempt link is active.
+        // Only the execution infrastructure port supplies a durable operation
+        // identity and may start the initial/continuation turn.
+        if durable_operation_id.is_none() {
+            self.ensure_not_retained_execution_attempt(user_id, conversation_key)
+                .await?;
+        }
 
         // Short-circuit for legacy Gemini conversations: the dedicated Gemini
         // runtime has been removed, so we cannot build an agent for this row.
@@ -1840,13 +2485,41 @@ impl ConversationService {
             ));
         }
 
-        let turn_claim = self.runtime_state.try_claim_turn(conversation_id)?;
+        let track_execution_tokens = self
+            .is_active_execution_attempt_conversation(user_id, row.id)
+            .await?;
+
+        let user_msg_id = durable_operation_id
+            .map(|operation_id| format!("{operation_id}:user"))
+            .unwrap_or_else(Self::mint_msg_id);
+        let existing_user_message = self
+            .conversation_repo
+            .get_message(row.id, &user_msg_id)
+            .await?;
+        if let Some(existing) = existing_user_message.as_ref() {
+            let expected_content = serde_json::json!({ "content": &req.content }).to_string();
+            if existing.position.as_deref() != Some("right")
+                || existing.r#type != "text"
+                || existing.content != expected_content
+            {
+                return Err(AppError::Conflict(
+                    "internal message operation id was reused with different content".to_owned(),
+                ));
+            }
+            // The first delivery is still owned by this live process.  Returning
+            // the stable message identity lets the caller await that turn
+            // instead of racing a duplicate model invocation.
+            if self.runtime_summary_for(conversation_id).await.is_processing {
+                return Ok(user_msg_id);
+            }
+        }
+
+        let mut turn_handle = self.runtime_state.try_acquire_turn(conversation_id)?;
 
         // Store user message. `msg_id` is server-generated so the WebSocket
         // stream, DB row, and client-side message index all agree on the same
         // key. We reuse the same value for `id` (primary key) and `msg_id`
         // to preserve legacy callers that still rely on `id == msg_id`.
-        let user_msg_id = Self::mint_msg_id();
         let user_msg = nomifun_db::models::MessageRow {
             id: user_msg_id.clone(),
             conversation_id: parse_conv_id(conversation_id)?,
@@ -1858,12 +2531,14 @@ impl ConversationService {
             hidden: req.hidden,
             created_at: now_ms(),
         };
-        if let Err(e) = self.conversation_repo.insert_message(&user_msg).await {
-            warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
-            return Err(e.into());
-        }
+        if existing_user_message.is_none() {
+            if let Err(e) = self.conversation_repo.insert_message(&user_msg).await {
+                warn!(msg_id = %user_msg_id, error = %ErrorChain(&e), "Failed to insert user message");
+                return Err(e.into());
+            }
 
-        info!(msg_id = %user_msg_id, "User message persisted");
+            info!(msg_id = %user_msg_id, "User message persisted");
+        }
 
         // Companion wire markers (see `companion_context_from_extra`): stamped on
         // every broadcast of this turn so the companion collector can classify the
@@ -1895,42 +2570,62 @@ impl ConversationService {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
 
-        self.broadcaster.broadcast(WebSocketMessage::new(
-            "message.userCreated",
-            serde_json::json!({
-                "conversation_id": user_msg.conversation_id,
-                "msg_id": &user_msg_id,
-                "content": &req.content,
-                "position": "right",
-                "status": "finish",
-                "hidden": req.hidden,
-                "origin": origin,
-                "companion": companion,
-                "companion_id": companion_id,
-                "channel_platform": channel_platform,
-                "created_at": user_msg.created_at,
-            }),
-        ));
+        if existing_user_message.is_none() {
+            self.user_events.send_to_user(
+                user_id,
+                WebSocketMessage::new(
+                    "message.userCreated",
+                    serde_json::json!({
+                    "conversation_id": user_msg.conversation_id,
+                    "msg_id": &user_msg_id,
+                    "content": &req.content,
+                    "position": "right",
+                    "status": "finish",
+                    "hidden": req.hidden,
+                    "origin": origin,
+                    "companion": companion,
+                    "companion_id": companion_id,
+                    "channel_platform": channel_platform,
+                    "created_at": user_msg.created_at,
+                    }),
+                ),
+            );
+        }
 
-        // Build task options from conversation row
-        let mut build_opts = match self.build_task_options(&row) {
+        // Build runtime options from conversation row
+        let mut runtime_options = match self.build_runtime_options(&row) {
             Ok(opts) => opts,
             Err(err) => {
                 error!(
                     error_code = err.error_code(),
                     error = %ErrorChain(&err),
-                    "Failed to build task options for message send"
+                    "Failed to build runtime options for message send"
                 );
                 let _ = self.persist_send_failure_tip(conversation_id, &err).await;
+                let receipt_error = format!("{}", ErrorChain(&err));
+                Self::complete_delivery_receipt_before_release(
+                    &self.conversation_repo,
+                    user_id,
+                    conversation_key,
+                    durable_operation_id,
+                    false,
+                    None,
+                    Some(&receipt_error),
+                )
+                .await;
+                turn_handle.release();
                 return Err(err);
             }
         };
-        self.ensure_auto_workspace_skill_links(&row, &build_opts).await;
-        self.apply_knowledge_mounts(&row, &mut build_opts).await;
-        let stored_workspace = build_opts.workspace.clone();
+        self.ensure_auto_workspace_skill_links(&row, &runtime_options).await;
+        self.apply_knowledge_mounts(&row, &mut runtime_options).await;
+        let stored_workspace = runtime_options.workspace.clone();
 
-        let first_turn_msg_id = Self::mint_msg_id();
+        let first_turn_msg_id = durable_operation_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(Self::mint_msg_id);
         self.broadcast_turn_started_with_context(
+            user_id,
             conversation_id,
             &first_turn_msg_id,
             companion,
@@ -1942,28 +2637,17 @@ impl ConversationService {
 
         let conv_id = conversation_id.to_owned();
         let repo = Arc::clone(&self.conversation_repo);
-        let broadcaster = Arc::clone(&self.broadcaster);
+        let user_events = Arc::clone(&self.user_events);
         let cron_service = self.current_cron_service();
         let user_id_owned = user_id.to_owned();
         let service = self.clone();
-        let task_manager = Arc::clone(task_manager);
-        // Orchestrator-driven worker conversations carry `orchestrator_run_id` in
-        // their `extra` (stamped by `build_worker_extra`). For those — and ONLY
-        // those — hand the relay a clone of the runtime state so it accumulates
-        // each turn's `TurnCompleted` token usage into the conversation's running
-        // total (read back by the worker after the turn settles to fill
-        // `orch_run_tasks.tokens`). Gating on this key keeps the common chat /
-        // companion path free of any per-turn map entry (no growth, no behaviour
-        // change) — those conversations never read the total, so accumulating it
-        // would only leak across a long-lived process.
-        let token_runtime_state: Option<Arc<ConversationRuntimeStateService>> =
-            serde_json::from_str::<serde_json::Value>(&row.extra)
-                .ok()
-                .as_ref()
-                .and_then(|extra| extra.get("orchestrator_run_id"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.trim().is_empty())
-                .map(|_| Arc::clone(&self.runtime_state));
+        let runtime_registry = Arc::clone(runtime_registry);
+        let durable_operation_id = durable_operation_id.map(str::to_owned);
+        // Only an active attempt relation needs per-turn token accounting. The
+        // relation repository is authoritative; Conversation extra carries no
+        // execution identity. Ordinary chat/companion turns therefore create no
+        // accumulator entry.
+        let token_runtime_state = track_execution_tokens.then(|| Arc::clone(&self.runtime_state));
         // Phase 3 (plan D3): the conversation's `extra` JSON drives the failover
         // config resolution (session-level `extra.model_failover` override else
         // global). Captured once at turn start — the config does not change
@@ -1980,29 +2664,49 @@ impl ConversationService {
         // agent-internal tracing all share one identifier per turn.
         let user_msg_id_ret = user_msg_id.clone();
         tokio::spawn(async move {
-            let mut turn_claim = turn_claim;
+            let mut turn_handle = turn_handle;
             let build_started_at = now_ms();
-            info!(conversation_id = %conv_id, "Agent task build started");
-            let knowledge_extra = build_opts.extra.clone();
-            let mut agent = match task_manager.get_or_build_task(&conv_id, build_opts).await {
+            info!(conversation_id = %conv_id, "Agent runtime build started");
+            let knowledge_extra = runtime_options.extra.clone();
+            let mut agent = match runtime_registry.get_or_create_runtime(&conv_id, runtime_options).await {
                 Ok(agent) => agent,
                 Err(err) => {
                     error!(
                         conversation_id = %conv_id,
                         error_code = err.error_code(),
                         error = %ErrorChain(&err),
-                        "Agent task build failed"
+                        "Agent runtime build failed"
                     );
-                    service.persist_and_broadcast_send_failure_tip(&conv_id, &err).await;
-                    turn_claim.release();
                     service
-                        .complete_turn_with_companion_context(&conv_id, companion, companion_id.clone(), origin.clone(), channel_platform.clone())
+                        .persist_and_broadcast_send_failure_tip(&user_id_owned, &conv_id, &err)
+                        .await;
+                    let receipt_error = format!("{}", ErrorChain(&err));
+                    Self::complete_delivery_receipt_before_release(
+                        &repo,
+                        &user_id_owned,
+                        conversation_key,
+                        durable_operation_id.as_deref(),
+                        false,
+                        None,
+                        Some(&receipt_error),
+                    )
+                    .await;
+                    turn_handle.release();
+                    service
+                        .complete_turn_with_companion_context(
+                            &user_id_owned,
+                            &conv_id,
+                            companion,
+                            companion_id.clone(),
+                            origin.clone(),
+                            channel_platform.clone(),
+                        )
                         .await;
                     return;
                 }
             };
 
-            // Arm IDMM supervision now that the agent task exists (so the
+            // Arm IDMM supervision now that the Agent runtime exists (so the
             // probe's `observe` attaches to THIS turn's event stream). The
             // user-driven desktop chat path has no AutoWork loop / boot-resume
             // to arm it, so without this an enabled 智能决策 never observed the
@@ -2024,10 +2728,30 @@ impl ConversationService {
                     error = %ErrorChain(&err),
                     "Failed to persist resolved workspace"
                 );
-                service.persist_and_broadcast_send_failure_tip(&conv_id, &err).await;
-                turn_claim.release();
                 service
-                    .complete_turn_with_companion_context(&conv_id, companion, companion_id.clone(), origin.clone(), channel_platform.clone())
+                    .persist_and_broadcast_send_failure_tip(&user_id_owned, &conv_id, &err)
+                    .await;
+                let receipt_error = format!("{}", ErrorChain(&err));
+                Self::complete_delivery_receipt_before_release(
+                    &repo,
+                    &user_id_owned,
+                    conversation_key,
+                    durable_operation_id.as_deref(),
+                    false,
+                    None,
+                    Some(&receipt_error),
+                )
+                .await;
+                turn_handle.release();
+                service
+                    .complete_turn_with_companion_context(
+                        &user_id_owned,
+                        &conv_id,
+                        companion,
+                        companion_id.clone(),
+                        origin.clone(),
+                        channel_platform.clone(),
+                    )
                     .await;
                 return;
             }
@@ -2036,7 +2760,7 @@ impl ConversationService {
                 conversation_id = %conv_id,
                 agent_type = ?agent.agent_type(),
                 elapsed_ms = now_ms().saturating_sub(build_started_at),
-                "Agent task ready"
+                "Agent runtime ready"
             );
 
             let mut pending_send = Some((
@@ -2071,6 +2795,7 @@ impl ConversationService {
                 String,
                 String,
             )> = None;
+            let mut durable_completion: Option<(bool, Option<String>, Option<String>)> = None;
             // Phase 3 (review #1/#5): resolve the effective failover config ONCE
             // (it does not change mid-turn). Used to build the relay's error
             // suppressor so a pre-response provider fault that WILL be failed over
@@ -2099,7 +2824,7 @@ impl ConversationService {
                     msg_id,
                     user_id_owned.clone(),
                     Arc::clone(&repo),
-                    Arc::clone(&broadcaster),
+                    Arc::clone(&user_events),
                     cron_service.clone(),
                 )
                 .with_turn_completion(false)
@@ -2107,9 +2832,9 @@ impl ConversationService {
                 .with_origin(origin.clone())
                 .with_channel_platform(channel_platform.clone());
 
-                // Orchestrator worker turns: let the relay accumulate this turn's
-                // token usage into the conversation's running total (read back by
-                // the worker after settle). No-op for every other conversation.
+                // Execution-attempt turns: let the relay accumulate this turn's
+                // token usage into the conversation's running total, consumed by
+                // the owning attempt after settle. No-op for every other conversation.
                 if let Some(state) = token_runtime_state.clone() {
                     relay = relay.with_runtime_state(state);
                 }
@@ -2171,7 +2896,7 @@ impl ConversationService {
                         failover_switches_done,
                         &failover_tried,
                         &failover_extra_json,
-                        &task_manager,
+                        &runtime_registry,
                     )
                     .await
                 {
@@ -2208,7 +2933,7 @@ impl ConversationService {
                         == Some(nomifun_api_types::AgentErrorCode::UserLlmProviderImageUnsupported)
                 {
                     if let Some(rebuilt) = service
-                        .strip_images_and_rebuild(&conv_id, &task_manager)
+                        .strip_images_and_rebuild(&conv_id, &runtime_registry)
                         .await
                     {
                         service.persist_images_stripped_tip(&conv_id).await;
@@ -2241,7 +2966,7 @@ impl ConversationService {
                         Self::mint_msg_id(),
                         user_id_owned.clone(),
                         Arc::clone(&repo),
-                        Arc::clone(&broadcaster),
+                        Arc::clone(&user_events),
                         cron_service.clone(),
                     )
                     .with_companion_context(companion, companion_id.clone())
@@ -2250,8 +2975,20 @@ impl ConversationService {
                     surface_relay.surface_terminal_error(suppressed).await;
                 }
 
+                let result_ok = matches!(outcome.terminal, RelayTerminal::Finish)
+                    && outcome
+                        .final_text
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty());
+                durable_completion = Some((
+                    result_ok,
+                    outcome.final_text.clone(),
+                    (!matches!(outcome.terminal, RelayTerminal::Finish))
+                        .then(|| format!("{:?}", outcome.terminal)),
+                ));
+
                 if service
-                    .evict_acp_task_after_terminal_error(&conv_id, agent.agent_type(), &outcome, &task_manager)
+                    .evict_acp_task_after_terminal_error(&conv_id, agent.agent_type(), &outcome, &runtime_registry)
                     .await
                 {
                     break;
@@ -2293,16 +3030,42 @@ impl ConversationService {
                 ));
             }
 
-            turn_claim.release();
+            let (ok, text, error) = durable_completion.unwrap_or_else(|| {
+                (
+                    false,
+                    None,
+                    Some("Agent turn ended without a terminal relay outcome".to_owned()),
+                )
+            });
+            Self::complete_delivery_receipt_before_release(
+                &repo,
+                &user_id_owned,
+                conversation_key,
+                durable_operation_id.as_deref(),
+                ok,
+                text.as_deref(),
+                error.as_deref(),
+            )
+            .await;
+
+            turn_handle.release();
             service
-                .complete_turn_with_companion_context(&conv_id, companion, companion_id, origin, channel_platform)
+                .complete_turn_with_companion_context(
+                    &user_id_owned,
+                    &conv_id,
+                    companion,
+                    companion_id,
+                    origin,
+                    channel_platform,
+                )
                 .await;
             if let Some((knowledge_service, request, msg_id, final_text)) = final_turn_writeback {
                 run_turn_writeback_report(
                     knowledge_service,
                     request,
                     Arc::clone(&repo),
-                    Arc::clone(&broadcaster),
+                    Arc::clone(&user_events),
+                    user_id_owned.clone(),
                     conv_id.clone(),
                     msg_id,
                     final_text,
@@ -2319,6 +3082,159 @@ impl ConversationService {
         Ok(user_msg_id_ret)
     }
 
+    /// Trusted idempotent steering boundary for a previously persisted
+    /// execution effect.  Unlike the public `steer_message`, this never falls
+    /// back to starting a new turn: if the original turn is unavailable the
+    /// caller keeps its durable intent pending for recovery/audit.
+    pub(crate) async fn steer_message_idempotent(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        operation_id: &str,
+        req: SendMessageRequest,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<String, AppError> {
+        if req.content.trim().is_empty() {
+            return Err(AppError::BadRequest("Message content must not be empty".into()));
+        }
+        if !req.files.is_empty() {
+            return Err(AppError::BadRequest(
+                "steer_unsupported: attachments must be sent as a new turn".into(),
+            ));
+        }
+        let operation_id = operation_id.trim();
+        if operation_id.is_empty() {
+            return Err(AppError::BadRequest(
+                "internal steer operation id must not be empty".to_owned(),
+            ));
+        }
+        let conv_id = parse_conv_id(conversation_id)?;
+        let row = self
+            .conversation_repo
+            .get(conv_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+        let request_payload = serde_json::json!({
+            "content": &req.content,
+            "hidden": req.hidden,
+            "origin": &req.origin,
+            "channel_platform": &req.channel_platform,
+        })
+        .to_string();
+        let receipt = self
+            .conversation_repo
+            .claim_delivery_receipt(
+                user_id,
+                conv_id,
+                operation_id,
+                "steer",
+                &request_payload,
+                now_ms(),
+            )
+            .await?;
+        let message_id = format!("{operation_id}:user");
+        if receipt.status == "completed" {
+            return Ok(message_id);
+        }
+        if let Some(existing) = self.conversation_repo.get_message(conv_id, &message_id).await? {
+            let expected = serde_json::json!({ "content": &req.content }).to_string();
+            if existing.r#type != "text"
+                || existing.position.as_deref() != Some("right")
+                || existing.content != expected
+            {
+                return Err(AppError::Conflict(
+                    "internal steer operation id was reused with different content".to_owned(),
+                ));
+            }
+            let completed = self.conversation_repo
+                .complete_delivery_receipt(
+                    user_id,
+                    conv_id,
+                    operation_id,
+                    true,
+                    None,
+                    None,
+                    now_ms(),
+                )
+                .await?;
+            if !completed {
+                return Err(AppError::Internal(
+                    "failed to acknowledge idempotent steer receipt".to_owned(),
+                ));
+            }
+            return Ok(message_id);
+        }
+        let instance = runtime_registry.get_runtime(conversation_id).ok_or_else(|| {
+            AppError::Conflict("the Agent turn to steer is no longer active".to_owned())
+        })?;
+        if instance.status() != Some(ConversationStatus::Running) {
+            return Err(AppError::Conflict(
+                "the Agent turn to steer is no longer running".to_owned(),
+            ));
+        }
+        match instance.steer(req.content.clone()) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(AppError::Conflict(
+                    "the Agent turn ended before the steer was delivered".to_owned(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+
+        let message = nomifun_db::models::MessageRow {
+            id: message_id.clone(),
+            conversation_id: conv_id,
+            msg_id: Some(message_id.clone()),
+            r#type: "text".into(),
+            content: serde_json::json!({ "content": &req.content }).to_string(),
+            position: Some("right".into()),
+            status: Some("finish".into()),
+            hidden: req.hidden,
+            created_at: now_ms(),
+        };
+        self.conversation_repo.insert_message(&message).await?;
+        let completed = self.conversation_repo
+            .complete_delivery_receipt(
+                user_id,
+                conv_id,
+                operation_id,
+                true,
+                None,
+                None,
+                now_ms(),
+            )
+            .await?;
+        if !completed {
+            return Err(AppError::Internal(
+                "failed to acknowledge idempotent steer receipt".to_owned(),
+            ));
+        }
+        let (companion, companion_id, extra_channel_platform) =
+            companion_context_from_extra(&row.extra);
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.userCreated",
+                serde_json::json!({
+                "conversation_id": conv_id,
+                "msg_id": &message_id,
+                "content": &req.content,
+                "position": "right",
+                "status": "finish",
+                "hidden": req.hidden,
+                "origin": req.origin,
+                "companion": companion,
+                "companion_id": companion_id,
+                "channel_platform": req.channel_platform.or(extra_channel_platform),
+                "created_at": message.created_at,
+                }),
+            ),
+        );
+        Ok(message_id)
+    }
+
     /// Inject a user interjection into a RUNNING turn (mid-turn steering). If no
     /// turn is live, falls back to a normal [`Self::send_message`] (new turn). If
     /// the live agent cannot be steered (non-Nomi engine), returns a BadRequest the
@@ -2329,26 +3245,30 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
         req: SendMessageRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
         if req.content.trim().is_empty() {
             return Err(AppError::BadRequest("Message content must not be empty".into()));
         }
+        let conv_id = parse_conv_id(conversation_id)?;
 
         // Verify conversation exists and belongs to user.
         let row = self
             .conversation_repo
-            .get(parse_conv_id(conversation_id)?)
+            .get(conv_id)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
+        self.ensure_not_retained_execution_attempt(user_id, conv_id)
+            .await?;
+
         // No live turn → nothing to steer; send normally (new turn).
-        let Some(instance) = task_manager.get_task(conversation_id) else {
-            return self.send_message(user_id, conversation_id, req, task_manager).await;
+        let Some(instance) = runtime_registry.get_runtime(conversation_id) else {
+            return self.send_message(user_id, conversation_id, req, runtime_registry).await;
         };
         if instance.status() != Some(ConversationStatus::Running) {
-            return self.send_message(user_id, conversation_id, req, task_manager).await;
+            return self.send_message(user_id, conversation_id, req, runtime_registry).await;
         }
 
         // The steering inbox is text-only. Silently dropping attachments here
@@ -2373,7 +3293,7 @@ impl ConversationService {
         match instance.steer(req.content.clone()) {
             Ok(true) => {}
             Ok(false) => {
-                return self.send_message(user_id, conversation_id, req, task_manager).await;
+                return self.send_message(user_id, conversation_id, req, runtime_registry).await;
             }
             Err(e) => return Err(e),
         }
@@ -2404,9 +3324,11 @@ impl ConversationService {
         // can classify this message off the wire. A mid-turn interjection is the
         // human owner speaking into a live turn — no per-turn channel marker.
         let (companion, companion_id, _) = companion_context_from_extra(&row.extra);
-        self.broadcaster.broadcast(WebSocketMessage::new(
-            "message.userCreated",
-            serde_json::json!({
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.userCreated",
+                serde_json::json!({
                 "conversation_id": user_msg.conversation_id,
                 "msg_id": &user_msg_id,
                 "content": &req.content,
@@ -2418,13 +3340,19 @@ impl ConversationService {
                 "companion_id": companion_id,
                 "channel_platform": serde_json::Value::Null,
                 "created_at": user_msg.created_at,
-            }),
-        ));
+                }),
+            ),
+        );
 
         Ok(user_msg_id)
     }
 
-    async fn persist_and_broadcast_send_failure_tip(&self, conversation_id: &str, err: &AppError) {
+    async fn persist_and_broadcast_send_failure_tip(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        err: &AppError,
+    ) {
         let Some(row) = self.persist_send_failure_tip(conversation_id, err).await else {
             return;
         };
@@ -2432,9 +3360,11 @@ impl ConversationService {
         let msg_id = row.msg_id.clone().unwrap_or_else(|| row.id.clone());
         let content_value: serde_json::Value =
             serde_json::from_str(&row.content).unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
-        self.broadcaster.broadcast(WebSocketMessage::new(
-            "message.stream",
-            serde_json::json!({
+        self.user_events.send_to_user(
+            user_id,
+            WebSocketMessage::new(
+                "message.stream",
+                serde_json::json!({
                 "conversation_id": row.conversation_id,
                 "msg_id": msg_id,
                 "type": row.r#type,
@@ -2443,36 +3373,9 @@ impl ConversationService {
                 "status": row.status,
                 "hidden": row.hidden,
                 "replace": true,
-            }),
-        ));
-    }
-
-    /// Insert a pre-built `MessageRow` into the conversation's message history
-    /// and broadcast a `message.stream` event so live subscribers render it
-    /// immediately.
-    ///
-    /// Used by paths outside the normal user→agent turn (e.g. the team
-    /// scheduler writing an incoming teammate message as a left bubble in the
-    /// target agent's conversation so the UI shows who spoke).
-    pub async fn insert_raw_message(&self, row: &MessageRow) -> Result<(), AppError> {
-        self.conversation_repo.insert_message(row).await?;
-
-        let msg_id = row.msg_id.clone().unwrap_or_else(|| row.id.clone());
-        let content_value: serde_json::Value =
-            serde_json::from_str(&row.content).unwrap_or_else(|_| serde_json::Value::String(row.content.clone()));
-        let payload = serde_json::json!({
-            "conversation_id": row.conversation_id,
-            "msg_id": msg_id,
-            "type": row.r#type,
-            "data": content_value,
-            "position": row.position,
-            "status": row.status,
-            "hidden": row.hidden,
-            "replace": true,
-        });
-        self.broadcaster
-            .broadcast(WebSocketMessage::new("message.stream", payload));
-        Ok(())
+                }),
+            ),
+        );
     }
 
     /// Edit the most recent user message and re-run from there (Nomi only).
@@ -2487,7 +3390,7 @@ impl ConversationService {
         conversation_id: &str,
         message_id: &str,
         req: SendMessageRequest,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<String, AppError> {
         if req.content.trim().is_empty() {
             return Err(AppError::BadRequest("Message content must not be empty".into()));
@@ -2501,6 +3404,9 @@ impl ConversationService {
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
+
+        self.ensure_not_retained_execution_attempt(user_id, conv_id)
+            .await?;
 
         // 2. 仅 Nomi
         if row.r#type != "nomi" {
@@ -2527,7 +3433,7 @@ impl ConversationService {
         let (from_created_at, from_id) = (target.created_at, target.id.clone());
 
         // 4. 取在飞 agent 并回退最后一个 turn（内部会先停掉在飞 turn）。
-        let agent = self.task(conversation_id)?;
+        let agent = self.runtime_handle(conversation_id)?;
         agent.rewind_last_turn().await?;
 
         // 5. 截断 DB：删除目标(含)及其后所有消息。
@@ -2536,7 +3442,7 @@ impl ConversationService {
             .await?;
 
         // 6. 复用正常发送：重新插入用户消息行 + 起新 turn。
-        self.send_message(user_id, conversation_id, req, task_manager).await
+        self.send_message(user_id, conversation_id, req, runtime_registry).await
     }
 
     /// Stop the current streaming response for a conversation.
@@ -2545,21 +3451,65 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<(), AppError> {
+        self.cancel_with_origin(
+            user_id,
+            conversation_id,
+            runtime_registry,
+            CancelOrigin::User,
+        )
+        .await
+    }
+
+    /// Cancel an Agent Execution attempt without classifying infrastructure
+    /// cleanup (pause/replan/recovery/cancel) as a direct user stop.
+    pub async fn cancel_for_execution(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+    ) -> Result<(), AppError> {
+        self.cancel_with_origin(
+            user_id,
+            conversation_id,
+            runtime_registry,
+            CancelOrigin::AgentExecution,
+        )
+        .await
+    }
+
+    async fn cancel_with_origin(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
+        origin: CancelOrigin,
     ) -> Result<(), AppError> {
         // Verify conversation exists and belongs to user
-        self.conversation_repo
+        let conversation = self
+            .conversation_repo
             .get(parse_conv_id(conversation_id)?)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
-        // Record the user's intent BEFORE touching the agent: even when no
-        // agent is live (claimed-but-not-yet-injected AutoWork window), the
-        // stamp tells the orchestrator this work was deliberately stopped.
-        self.note_user_cancel(conversation_id);
+        // A user stops or decides Attempt work through Agent Execution. The
+        // internal cleanup path keeps using AgentExecution origin and must be
+        // able to cancel live runtimes during pause/replan/recovery.
+        if origin == CancelOrigin::User {
+            self.ensure_not_retained_execution_attempt(user_id, conversation.id)
+                .await?;
+        }
 
-        let Some(agent) = task_manager.get_task(conversation_id) else {
+        // Record the user's intent BEFORE touching the agent: even when no
+        // Agent is live (turn-acquired-but-not-yet-injected AutoWork window), the
+        // stamp tells the owning execution flow this work was deliberately stopped.
+        if origin == CancelOrigin::User {
+            self.note_user_cancel(conversation_id);
+        }
+
+        let Some(agent) = runtime_registry.get_runtime(conversation_id) else {
             info!("No active agent to cancel; treating as idempotent success");
             return Ok(());
         };
@@ -2599,7 +3549,7 @@ impl ConversationService {
     ///  1. resets the live agent's in-memory/session context if one is running
     ///     (ACP rotates to a fresh `session/new`, Nomi empties its engine,
     ///     OpenClaw/Remote forget their gateway session) — see
-    ///     [`AgentInstance::clear_context`]; and
+    ///     [`AgentRuntimeHandle::clear_context`]; and
     ///  2. clears the persisted `acp_session` row (NULL session_id + drop
     ///     cached usage) so a process rebuild starts fresh instead of resuming.
     ///
@@ -2611,17 +3561,21 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<(), AppError> {
+        let conv_id = parse_conv_id(conversation_id)?;
         // Verify conversation exists and belongs to user.
         self.conversation_repo
-            .get(parse_conv_id(conversation_id)?)
+            .get(conv_id)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
+        self.ensure_not_retained_execution_attempt(user_id, conv_id)
+            .await?;
+
         // 1. Reset the live agent's context, if one is running.
-        if let Some(agent) = task_manager.get_task(conversation_id) {
+        if let Some(agent) = runtime_registry.get_runtime(conversation_id) {
             agent.clear_context().await?;
         } else {
             info!("No active agent; clearing persisted state only");
@@ -2629,7 +3583,7 @@ impl ConversationService {
 
         // 2. Forget the persisted ACP session so a rebuild does not resume the
         //    old session. Returns false (no-op) for non-ACP conversations.
-        if let Err(e) = self.acp_session_repo.clear_session_id(parse_conv_id(conversation_id)?).await {
+        if let Err(e) = self.acp_session_repo.clear_session_id(conv_id).await {
             warn!(error = %ErrorChain(&e), "Failed to clear persisted acp_session during clear_context");
         }
 
@@ -2653,24 +3607,27 @@ impl ConversationService {
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<(), AppError> {
+        let conv_id = parse_conv_id(conversation_id)?;
         // Verify existence and ownership (same pattern as clear_context).
         self.conversation_repo
-            .get(parse_conv_id(conversation_id)?)
+            .get(conv_id)
             .await?
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
+        self.ensure_not_retained_execution_attempt(user_id, conv_id)
+            .await?;
+
         // 1. Delete the persisted transcript and artifacts (NOT status).
-        let conv_id = parse_conv_id(conversation_id)?;
         self.conversation_repo.delete_messages_by_conversation(conv_id).await?;
         self.conversation_repo.delete_artifacts_by_conversation(conv_id).await?;
 
         // 2. Reset the live agent's context, if one is running (same as
         //    clear_context: ACP rotates to a fresh session, Nomi empties its
         //    engine, etc.).
-        if let Some(agent) = task_manager.get_task(conversation_id) {
+        if let Some(agent) = runtime_registry.get_runtime(conversation_id) {
             agent.clear_context().await?;
         } else {
             info!("No active agent; clearing persisted messages only");
@@ -2686,16 +3643,16 @@ impl ConversationService {
         Ok(())
     }
 
-    /// Pre-initialize an agent task for a conversation (warmup).
+    /// Pre-initialize an Agent runtime for a conversation (warmup).
     ///
-    /// This builds the agent task without sending a message, so the
+    /// This builds the Agent runtime without sending a message, so the
     /// first real message can be processed faster.
     #[tracing::instrument(skip_all, fields(user_id = %user_id, conversation_id = %conversation_id))]
     pub async fn warmup(
         &self,
         user_id: &str,
         conversation_id: &str,
-        task_manager: &Arc<dyn IWorkerTaskManager>,
+        runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<(), AppError> {
         let row = self
             .conversation_repo
@@ -2704,11 +3661,14 @@ impl ConversationService {
             .filter(|r| r.user_id == user_id)
             .ok_or_else(|| AppError::NotFound(format!("Conversation {conversation_id} not found")))?;
 
-        let mut build_opts = self.build_task_options(&row)?;
-        self.ensure_auto_workspace_skill_links(&row, &build_opts).await;
-        self.apply_knowledge_mounts(&row, &mut build_opts).await;
-        let stored_workspace = build_opts.workspace.clone();
-        let agent = task_manager.get_or_build_task(conversation_id, build_opts).await?;
+        self.ensure_not_retained_execution_attempt(user_id, row.id)
+            .await?;
+
+        let mut runtime_options = self.build_runtime_options(&row)?;
+        self.ensure_auto_workspace_skill_links(&row, &runtime_options).await;
+        self.apply_knowledge_mounts(&row, &mut runtime_options).await;
+        let stored_workspace = runtime_options.workspace.clone();
+        let agent = runtime_registry.get_or_create_runtime(conversation_id, runtime_options).await?;
 
         // Persist auto-resolved workspace if factory picked a different path.
         self.maybe_persist_workspace(conversation_id, &stored_workspace, agent.workspace())
@@ -2719,29 +3679,37 @@ impl ConversationService {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelOrigin {
+    User,
+    AgentExecution,
+}
+
 // ── Internal Helpers ────────────────────────────────────────────────
 
 impl ConversationService {
-    /// Build [`BuildTaskOptions`] from a conversation database row.
+    /// Build [`AgentRuntimeBuildOptions`] from a conversation database row.
     ///
-    /// Provider/model resolution lives in [`crate::task_options::provider_model_from_conversation_row`]
+    /// Provider/model resolution lives in [`crate::runtime_options::provider_model_from_conversation_row`]
     /// so the cron executor can derive identical values for the same row.
     /// Diverging the lookup here historically produced
     /// `Provider '<vendor>' not found` failures under cron when the
     /// interactive path worked fine (Sentry ELECTRON-1HM).
-    pub(crate) fn build_task_options(&self, row: &nomifun_db::models::ConversationRow) -> Result<BuildTaskOptions, AppError> {
+    pub(crate) fn build_runtime_options(&self, row: &nomifun_db::models::ConversationRow) -> Result<AgentRuntimeBuildOptions, AppError> {
         let agent_type = string_to_enum(&row.r#type)?;
 
-        let model = crate::task_options::provider_model_from_conversation_row(row);
+        let model = crate::runtime_options::provider_model_from_conversation_row(row);
+        let delegation_policy = crate::runtime_options::delegation_policy_from_conversation_row(row)?;
 
         let mut extra: serde_json::Value =
             serde_json::from_str(&row.extra).map_err(|e| AppError::Internal(format!("Invalid extra JSON: {e}")))?;
 
-        // Inject user_id into extra so the Guide MCP bridge can pass it to
-        // nomi_create_team without a separate lookup. Harmless for non-ACP types.
-        if let Some(obj) = extra.as_object_mut() {
-            obj.entry("user_id")
-                .or_insert_with(|| serde_json::Value::String(row.user_id.clone()));
+        if !self.execution_authority(&row.user_id).controls_host() {
+            // Even a row written outside the service cannot smuggle a custom
+            // workspace, prompt-side capability config or installation binding
+            // into execution.  FactoryContext will allocate a managed workspace
+            // beneath the process-owned work root from an empty request.
+            extra = serde_json::json!({});
         }
 
         // Extract workspace from extra (common across agent types)
@@ -2756,26 +3724,31 @@ impl ConversationService {
             _ => String::new(),
         };
 
-        Ok(BuildTaskOptions {
+        Ok(AgentRuntimeBuildOptions {
+            user_id: row.user_id.clone(),
             agent_type,
             workspace,
             model,
             conversation_id: row.id.to_string(),
+            delegation_policy,
             extra,
             // Stamp/validate the nomi session against this conversation instance.
             conversation_created_at: Some(row.created_at),
         })
     }
 
-    async fn ensure_auto_workspace_skill_links(&self, row: &ConversationRow, build_opts: &BuildTaskOptions) {
+    async fn ensure_auto_workspace_skill_links(&self, row: &ConversationRow, runtime_options: &AgentRuntimeBuildOptions) {
+        if !self.execution_authority(&row.user_id).controls_host() {
+            return;
+        }
         let expected_workspace = auto_workspace_path_for_row(
             &self.workspace_root,
             row,
-            &build_opts.agent_type,
-            &build_opts.extra,
+            &runtime_options.agent_type,
+            &runtime_options.extra,
         );
 
-        let stored_workspace = build_opts.workspace.trim();
+        let stored_workspace = runtime_options.workspace.trim();
         let workspace = if stored_workspace.is_empty() {
             expected_workspace
         } else {
@@ -2786,7 +3759,7 @@ impl ConversationService {
             workspace
         };
 
-        let skill_names = build_opts
+        let skill_names = runtime_options
             .extra
             .get("skills")
             .cloned()
@@ -2798,8 +3771,8 @@ impl ConversationService {
 
         let Some(rel_dirs) = native_skills_dirs(
             &self.agent_metadata_repo,
-            &build_opts.agent_type,
-            build_opts.extra.get("backend"),
+            &runtime_options.agent_type,
+            runtime_options.extra.get("backend"),
         )
         .await
         else {
@@ -2836,24 +3809,31 @@ impl ConversationService {
     /// Unlike skill links, this also applies to user-chosen custom
     /// workspaces: the binding is explicit per-session opt-in, and the mounts
     /// stay confined to the hidden `.nomi/knowledge/` directory. Never
-    /// fails the task start — mount errors degrade to warnings.
+    /// fails Agent runtime creation — mount errors degrade to warnings.
     ///
     /// Binding target selection (spec §3 ruling 6 / §4.5): a conversation
     /// whose `extra.companionId` is a non-blank string mounts the companion-level
     /// binding `('companion', companionId)`; everything else keeps the per-conversation
     /// binding `('conversation', conversation_id)`. No merge between the two.
-    async fn apply_knowledge_mounts(&self, row: &ConversationRow, build_opts: &mut BuildTaskOptions) {
+    async fn apply_knowledge_mounts(&self, row: &ConversationRow, runtime_options: &mut AgentRuntimeBuildOptions) {
+        // Knowledge roots are installation-owned filesystem resources.  A
+        // model-only user must never reach workpath/companion binding lookup or
+        // create a physical mount before the Agent factory applies its own
+        // ceiling.
+        if !self.execution_authority(&row.user_id).controls_host() {
+            return;
+        }
         let service = self.knowledge_service.read().ok().and_then(|guard| guard.clone());
         let Some(service) = service else { return };
 
-        let stored_workspace = build_opts.workspace.trim();
+        let stored_workspace = runtime_options.workspace.trim();
         let workspace = if stored_workspace.is_empty() {
-            auto_workspace_path_for_row(&self.workspace_root, row, &build_opts.agent_type, &build_opts.extra)
+            auto_workspace_path_for_row(&self.workspace_root, row, &runtime_options.agent_type, &runtime_options.extra)
         } else {
             PathBuf::from(stored_workspace)
         };
 
-        let (target_kind, target_id) = knowledge_binding_target(&build_opts.extra, &build_opts.conversation_id);
+        let (target_kind, target_id) = knowledge_binding_target(&runtime_options.extra, &runtime_options.conversation_id);
         let target_id = target_id.to_owned();
         // Workpath-first for conversation sessions (session-list unification
         // spec §7): the binding belongs to the workspace path, not the
@@ -2866,7 +3846,7 @@ impl ConversationService {
         // back to the legacy `('conversation', id)` binding on a full miss.
         // Companion sessions keep their `('companion', companionId)` binding unchanged — they
         // are not per-workspace.
-        let preset_binding = build_opts
+        let preset_binding = runtime_options
             .extra
             .get("preset_knowledge_binding")
             .and_then(serde_json::Value::as_bool)
@@ -2885,22 +3865,22 @@ impl ConversationService {
         // Recycle the cached agent when the resolved knowledge context changed
         // since it was last built. The agent bakes the retrieval-protocol
         // section into its prompt at build time and is cached per conversation
-        // (`get_or_build_task` is a per-conversation `OnceCell`), so a
+        // (`get_or_create_runtime` is a per-conversation `OnceCell`), so a
         // `挂载知识库` toggle on an already-warmed/used session would otherwise
         // never reach the running agent — the freshly-resolved mounts here would
         // be discarded by the cache. That silently breaks the UI's promise that
         // a binding change "takes effect on the next message" (the reported bug:
         // KB enabled mid-session → task dispatched → retrieval never triggers).
-        // Killing the in-memory task lets the imminent `get_or_build_task`
+        // Terminating the in-memory runtime lets the imminent `get_or_create_runtime`
         // rebuild with the new mounts; the conversation and any persisted ACP
         // session are preserved (the rebuilt ACP agent resumes and re-delivers
         // the section via the knowledge prelude hook).
-        let conversation_id = build_opts.conversation_id.clone();
+        let conversation_id = runtime_options.conversation_id.clone();
         let new_signature = knowledge_mounts_signature(&outcome);
         let signature_changed =
             self.runtime_state.knowledge_signature(&conversation_id).as_deref() != Some(new_signature.as_str());
         if signature_changed {
-            match self.task_manager.get_task(&conversation_id) {
+            match self.runtime_registry.get_runtime(&conversation_id) {
                 // Mid-turn: never recycle a running agent (it would abort the
                 // live turn). Leave the signature stale so the next idle send
                 // or warmup reconciles the change.
@@ -2916,8 +3896,8 @@ impl ConversationService {
                         "knowledge binding changed; recycling cached agent so the new mounts take effect on the next message"
                     );
                     if let Err(e) = self
-                        .task_manager
-                        .kill(&conversation_id, Some(AgentKillReason::KnowledgeBindingChanged))
+                        .runtime_registry
+                        .terminate(&conversation_id, Some(AgentKillReason::KnowledgeBindingChanged))
                     {
                         warn!(
                             conversation_id = %conversation_id,
@@ -2935,7 +3915,7 @@ impl ConversationService {
             }
         }
 
-        let Some(obj) = build_opts.extra.as_object_mut() else { return };
+        let Some(obj) = runtime_options.extra.as_object_mut() else { return };
         if outcome.mounts.is_empty() {
             obj.remove("knowledge_mounts");
             obj.remove("knowledge_writeback");
@@ -3106,6 +4086,7 @@ impl ConversationService {
     /// Broadcast a `conversation.listChanged` WebSocket event.
     pub(crate) fn broadcast_list_changed(
         &self,
+        user_id: &str,
         conversation_id: &str,
         action: &str,
         source: Option<&ConversationSource>,
@@ -3118,7 +4099,7 @@ impl ConversationService {
             "source": source,
         });
         let event = WebSocketMessage::new("conversation.listChanged", payload);
-        self.broadcaster.broadcast(event);
+        self.user_events.send_to_user(user_id, event);
     }
 
     fn current_cron_service(&self) -> Option<Arc<dyn ICronService>> {
@@ -3535,6 +4516,35 @@ fn enum_to_db<T: serde::Serialize>(val: &T) -> Result<String, AppError> {
         .ok_or_else(|| AppError::Internal("Expected string enum value".into()))
 }
 
+/// Execution preferences and execution identity are typed columns/relations,
+/// never open-ended Agent factory data. Rejecting these keys prevents clients
+/// from recreating the retired dual-source contract after migration 037 has
+/// removed it from every existing row.
+fn reject_execution_policy_extra_keys(extra: &serde_json::Value) -> Result<(), AppError> {
+    let Some(object) = extra.as_object() else {
+        return Ok(());
+    };
+    let forbidden = object.keys().find(|key| {
+        matches!(
+            key.as_str(),
+            "delegation_policy"
+                | "execution_model_pool"
+                | "decision_policy"
+                | "execution_template_id"
+                | "agent_cluster_mode"
+                | "team_id"
+                | "teamId"
+        ) || key.starts_with("orchestrator_")
+    });
+
+    match forbidden {
+        Some(key) => Err(AppError::BadRequest(format!(
+            "`extra.{key}` is retired; use the typed conversation execution fields"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Persist the agent's session key into `conversation.extra.sessionKey`.
 ///
 /// Called after send_message completes so the session can be resumed
@@ -3642,7 +4652,7 @@ fn parse_message_cursor(cursor: &str) -> Result<(i64, String), AppError> {
 /// These markers ride on `message.userCreated` / `message.stream` /
 /// `turn.completed` broadcasts so downstream consumers (the companion memory
 /// collector, the companion window's remote-turn bubble) can recognize companion
-/// conversations — including channel master sessions that never register in
+/// conversations — including Channel Agent sessions that never register in
 /// the companion-side thread table — straight off the wire.
 fn companion_context_from_extra(extra: &str) -> (bool, Option<String>, Option<String>) {
     let value: serde_json::Value = serde_json::from_str(extra).unwrap_or_default();
@@ -3824,6 +4834,56 @@ mod tests {
     }
 
     #[test]
+    fn finite_conversation_model_pool_must_contain_the_lead() {
+        let model = ProviderWithModel {
+            provider_id: "provider-1".to_owned(),
+            model: "model-1".to_owned(),
+            use_model: Some("model-1".to_owned()),
+        };
+        let matching = ExecutionModelPool::Single {
+            model: ExecutionModelRef {
+                provider_id: "provider-1".to_owned(),
+                model: "model-1".to_owned(),
+            },
+        };
+        assert!(validate_conversation_model_authority(Some(&model), Some(&matching)).is_ok());
+
+        let mismatched = ExecutionModelPool::Single {
+            model: ExecutionModelRef {
+                provider_id: "provider-2".to_owned(),
+                model: "model-2".to_owned(),
+            },
+        };
+        assert!(matches!(
+            validate_conversation_model_authority(Some(&model), Some(&mismatched)),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(
+            validate_conversation_model_authority(
+                Some(&model),
+                Some(&ExecutionModelPool::Automatic),
+            )
+            .is_ok()
+        );
+
+        for blank_override in ["", "   "] {
+            let fallback_model = ProviderWithModel {
+                provider_id: "provider-1".to_owned(),
+                model: "model-1".to_owned(),
+                use_model: Some(blank_override.to_owned()),
+            };
+            assert!(
+                validate_conversation_model_authority(
+                    Some(&fallback_model),
+                    Some(&matching),
+                )
+                .is_ok(),
+                "blank use_model must inherit model"
+            );
+        }
+    }
+
+    #[test]
     fn parse_selected_mcp_ids_accepts_number_array() {
         // REGRESSION: after the integer-PK migration the frontend sends
         // selected_mcp_server_ids as a JSON NUMBER array; the old Vec<String>
@@ -3918,7 +4978,7 @@ mod tests {
 
     #[test]
     fn knowledge_binding_target_non_object_extra_falls_back() {
-        // build_task_options can yield a non-object extra only in degenerate
+        // build_runtime_options can yield a non-object extra only in degenerate
         // cases, but the helper must still not panic on them.
         let extra = serde_json::Value::Null;
         assert_eq!(knowledge_binding_target(&extra, "conv-1"), ("conversation", "conv-1"));
@@ -3945,6 +5005,13 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
+            delegation_policy: Default::default(),
+            execution_model_pool: None,
+            decision_policy: Default::default(),
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
             created_at: 0,
             modified_at: 0,
             extra: json!({}),
@@ -4062,5 +5129,36 @@ mod tests {
         );
 
         assert_eq!(status.status, ConversationMcpStatusKind::Failed);
+    }
+
+    #[test]
+    fn execution_policy_extra_keys_are_rejected() {
+        for key in [
+            "delegation_policy",
+            "execution_model_pool",
+            "decision_policy",
+            "agent_cluster_mode",
+            "orchestrator_legacy_identity",
+            "orchestrator_role",
+        ] {
+            let mut object = serde_json::Map::new();
+            object.insert(key.to_owned(), json!("value"));
+            let extra = serde_json::Value::Object(object);
+            assert!(
+                reject_execution_policy_extra_keys(&extra).is_err(),
+                "{key} must not recreate the retired extra contract"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_agent_extra_remains_allowed() {
+        assert!(
+            reject_execution_policy_extra_keys(&json!({
+                "workspace": "/project",
+                "skills": ["pdf"]
+            }))
+            .is_ok()
+        );
     }
 }

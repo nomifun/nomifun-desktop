@@ -290,7 +290,7 @@ pub async fn streaming_completion_kinded(
     drain_text_response_kinded(rx, on_delta).await
 }
 
-/// Like [`streaming_completion_kinded`] but for the ORCHESTRATION PLANNER: when the
+/// Like [`streaming_completion_kinded`] but for the Agent Execution planner: when the
 /// model emits its answer ONLY in the reasoning channel (empty `content`), the
 /// returned String falls back to the assembled reasoning text (see
 /// [`drain_text_or_reasoning`]) so a requested JSON can still be recovered. Both
@@ -405,7 +405,7 @@ async fn drain_text_response_kinded(
     }
 }
 
-/// Drain variant for the ORCHESTRATION PLANNER: assembles `TextDelta` into the
+/// Drain variant for the Agent Execution planner: assembles `TextDelta` into the
 /// primary buffer AND `ThinkingDelta` into a separate reasoning buffer (forwarding
 /// both to `on_delta`, tagged). On `Done`, returns the text buffer when it has
 /// content, otherwise FALLS BACK to the reasoning buffer.

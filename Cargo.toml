@@ -34,7 +34,7 @@ nomifun-companion = { path = "crates/backend/nomifun-companion" }
 nomifun-gateway = { path = "crates/backend/nomifun-gateway" }
 nomifun-public = { path = "crates/backend/nomifun-public" }
 nomifun-webhook = { path = "crates/backend/nomifun-webhook" }
-nomifun-orchestrator = { path = "crates/backend/nomifun-orchestrator" }
+nomifun-agent-execution = { path = "crates/backend/nomifun-agent-execution" }
 nomifun-terminal = { path = "crates/backend/nomifun-terminal" }
 nomifun-preset = { path = "crates/backend/nomifun-preset" }
 nomifun-secret = { path = "crates/backend/nomifun-secret" }
@@ -46,7 +46,7 @@ nomifun-app = { path = "crates/backend/nomifun-app" }
 # --- Internal crates: shared ---
 nomifun-net = { path = "crates/shared/nomifun-net" }
 nomi-redact = { path = "crates/shared/nomi-redact" }
-nomi-execution = { path = "crates/shared/nomi-execution" }
+nomi-process-runtime = { path = "crates/shared/nomi-process-runtime" }
 
 # --- Internal crates: agent (from nomifun-agent-rs, now local) ---
 nomi-types = { path = "crates/agent/nomi-types" }
@@ -81,6 +81,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+ts-rs = "12.0.1"
 encoding_rs = "0.8"
 
 # --- Async / error / log ---
@@ -272,7 +273,7 @@ debug = false
 #   strip = true       drop residual symbol tables (also shrinks the non-Windows
 #                      appimage/deb/rpm/dmg artifacts).
 # NOT panic = "abort": the codebase relies on panic = "unwind" to isolate a
-# panicking tool from the agent process (nomi-agent/src/orchestration.rs,
+# panicking tool from the agent process (nomi-agent/src/tool_execution.rs,
 # apps/desktop/src/main.rs catch_unwind boundaries) and a test asserts unwind
 # semantics (nomifun-ai-agent/src/protocol/acp.rs). Aborting would turn a single
 # tool panic into a full-process crash — a real behavior regression.

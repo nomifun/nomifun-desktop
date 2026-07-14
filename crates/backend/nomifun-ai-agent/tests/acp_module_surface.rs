@@ -11,7 +11,7 @@
 use nomifun_ai_agent::manager::acp::{
     AcpSession, AcpSessionEvent, CatalogForwarder, PermissionRouter, ReconcileAction,
 };
-use nomifun_ai_agent::shared_kernel::PersistedSessionState;
+use nomifun_ai_agent::session::PersistedSessionState;
 
 fn _surface_probe() {
     let _ = std::any::type_name::<AcpSession>();

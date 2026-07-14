@@ -16,7 +16,8 @@ use common::{body_json, build_app, get_with_token, json_with_token, setup_and_lo
 #[tokio::test]
 async fn list_agents_returns_array() {
     let (mut app, services) = build_app().await;
-    let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, _csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let req = get_with_token("/api/agents", &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -32,7 +33,8 @@ async fn list_agents_returns_array() {
 #[tokio::test]
 async fn refresh_agents_returns_array() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let req = json_with_token("POST", "/api/agents/refresh", json!({}), &token, &csrf);
     let resp = app.oneshot(req).await.unwrap();
@@ -46,7 +48,8 @@ async fn refresh_agents_returns_array() {
 #[tokio::test]
 async fn test_custom_agent_nonexistent_command() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     // Endpoint was renamed from /api/agents/test to /api/agents/custom/try-connect
     // when the custom-agent CRUD routes were introduced.  The new endpoint always
@@ -69,7 +72,8 @@ async fn test_custom_agent_nonexistent_command() {
 #[tokio::test]
 async fn health_check_returns_status() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let req = json_with_token(
         "POST",
@@ -92,7 +96,8 @@ async fn health_check_returns_status() {
 #[tokio::test]
 async fn health_check_unknown_backend_reports_unavailable() {
     let (mut app, services) = build_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) =
+        setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     // Same rationale as `detect_cli_unknown_backend_returns_null_path`:
     // unknown backends are valid at the request layer and surface as
@@ -111,7 +116,7 @@ async fn health_check_unknown_backend_reports_unavailable() {
     assert_eq!(body["data"]["available"], false);
 }
 
-// ── Session-bound ACP routes (no active task → 404) ──────────────
+// ── Session-bound ACP routes (no active runtime → 404) ──────────────
 
 #[tokio::test]
 async fn get_mode_no_active_task() {

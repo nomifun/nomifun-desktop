@@ -19,7 +19,7 @@ describe('manual theme background CSS', () => {
     const css = injectBackgroundCssBlock('', IMAGE_DATA_URL);
 
     expect(css.includes('/* Nomi Theme Background Mask v2 */')).toBe(true);
-    expect(css.includes('--nomi-manual-bg-mask: rgba(255, 255, 255, 0.34);')).toBe(true);
+    expect(css.includes('--nomi-manual-bg-mask: rgba(255, 255, 255, 0.66);')).toBe(true);
     expect(css.includes("html[data-theme='dark']")).toBe(true);
     expect(css.includes('--nomi-manual-bg-mask: rgba(0, 0, 0, 0.34);')).toBe(true);
     expect(css.includes('linear-gradient(var(--nomi-manual-bg-mask), var(--nomi-manual-bg-mask))')).toBe(true);

@@ -202,7 +202,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
 
           <div className={`${styles.wsDropdownItem} ${styles.wsDropdownItemAccent}`} onClick={handleBrowseWorkspace}>
             <PlusIcon />
-            <span>{t('team.create.chooseDifferentFolder')}</span>
+            <span>{t('common.filePicker.chooseDifferentFolder')}</span>
           </div>
 
           <>

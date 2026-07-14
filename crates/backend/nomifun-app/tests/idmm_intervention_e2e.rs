@@ -2,7 +2,7 @@
 //! round-trips (which `idmm_e2e.rs` already covers).
 //!
 //! REGRESSION CONTEXT: 智能决策「无法主动触发决策 / 完全不可用」recurred several times
-//! (wrong-instance supervision hook — 6f7df38f; desktopGateway-as-routing —
+//! (wrong-instance supervision hook — 6f7df38f; persisted gateway-as-routing —
 //! 74d85a5c + b2777ddd, fixed by ef487298; the on-arm pending-confirmation gap)
 //! WITHOUT a single failing test, because the only IDMM integration tests
 //! covered config persistence and never the arm → detect → intervene path.
@@ -25,9 +25,9 @@ use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
 
-use nomifun_ai_agent::types::{BuildTaskOptions, SendMessageData};
+use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentInstance, AgentSendError, AgentStreamEvent, IAgentTask, IMockAgent, IWorkerTaskManager, WorkerTaskManagerImpl,
+    AgentRuntimeHandle, AgentSendError, AgentStreamEvent, AgentRuntimeControl, MockAgentRuntime, AgentRuntimeRegistry, InMemoryAgentRuntimeRegistry,
 };
 use nomifun_app::{AppConfig, AppServices, create_router};
 use nomifun_common::{
@@ -45,7 +45,7 @@ struct BlockedOnConfirmationAgent {
 }
 
 #[async_trait::async_trait]
-impl IAgentTask for BlockedOnConfirmationAgent {
+impl AgentRuntimeControl for BlockedOnConfirmationAgent {
     fn agent_type(&self) -> AgentType {
         AgentType::Nomi
     }
@@ -79,7 +79,7 @@ impl IAgentTask for BlockedOnConfirmationAgent {
 }
 
 #[async_trait::async_trait]
-impl IMockAgent for BlockedOnConfirmationAgent {
+impl MockAgentRuntime for BlockedOnConfirmationAgent {
     fn get_confirmations(&self) -> Vec<Confirmation> {
         vec![Confirmation {
             id: "conf_1".into(),
@@ -124,23 +124,23 @@ async fn build_app_blocked_on_confirmation() -> (axum::Router, AppServices, Arc<
     let confirmed_factory = confirmed.clone();
     let db = nomifun_db::init_database_memory().await.unwrap();
     let factory: Arc<
-        dyn Fn(BuildTaskOptions) -> futures_util::future::BoxFuture<'static, Result<AgentInstance, AppError>>
+        dyn Fn(AgentRuntimeBuildOptions) -> futures_util::future::BoxFuture<'static, Result<AgentRuntimeHandle, AppError>>
             + Send
             + Sync,
-    > = Arc::new(move |opts: BuildTaskOptions| {
+    > = Arc::new(move |opts: AgentRuntimeBuildOptions| {
         let confirmed = confirmed_factory.clone();
         Box::pin(async move {
-            Ok(AgentInstance::Mock(Arc::new(BlockedOnConfirmationAgent {
+            Ok(AgentRuntimeHandle::Mock(Arc::new(BlockedOnConfirmationAgent {
                 conversation_id: opts.conversation_id,
                 confirmed,
             })))
         })
     });
-    let wtm: Arc<dyn IWorkerTaskManager> = Arc::new(WorkerTaskManagerImpl::new(factory));
+    let runtime_registry: Arc<dyn AgentRuntimeRegistry> = Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
     let services = AppServices::from_config(db, &AppConfig::default())
         .await
         .unwrap()
-        .with_worker_task_manager(wtm);
+        .with_agent_runtime_registry(runtime_registry);
     let router = create_router(&services).await;
     (router, services, confirmed)
 }
@@ -178,7 +178,7 @@ async fn idmm_recovers_and_confirms_on_arm_pending_tool_confirmation() {
     assert_eq!(resp.status(), StatusCode::OK, "enabling the decision watch should succeed");
 
     // Send a message: this builds + registers the (already confirmation-blocked)
-    // agent task and fires on_turn_start, which arms IDMM. The supervisor's
+    // Agent runtime and fires on_turn_start, which arms IDMM. The supervisor's
     // pending_signal must recover the live pending confirmation and auto-confirm
     // it — the agent emitted no future events (closed stream), so the on-arm lane
     // is the only one that can act.

@@ -198,7 +198,7 @@ struct UpdateTerminalParams {
 
 async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.get(id).await {
@@ -224,7 +224,7 @@ async fn get_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetTerminalPara
 
 async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.input(id, &p.data_b64).await {
@@ -235,7 +235,7 @@ async fn write_input(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteInputParams
 
 async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     if let Err(e) = deps.terminal_service.submit_text(id, &p.text).await {
@@ -269,7 +269,7 @@ async fn submit_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SubmitTermin
 
 async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTerminalOutputParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     let cap = p.max_bytes.unwrap_or(16_384).min(65_536);
@@ -286,7 +286,7 @@ async fn read_terminal_output(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ReadTer
 
 async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.kill(id).await {
@@ -297,7 +297,7 @@ async fn kill_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: KillTerminalPa
 
 async fn delete_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.delete(id).await {
@@ -308,7 +308,7 @@ async fn delete_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: DeleteTermin
 
 async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.resize(id, p.cols, p.rows).await {
@@ -319,7 +319,7 @@ async fn resize_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResizeTermin
 
 async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     let id = p.id.get();
     match deps.terminal_service.relaunch(id).await {
@@ -340,7 +340,7 @@ async fn relaunch_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: RelaunchTe
 
 async fn update_terminal(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: UpdateTerminalParams) -> Value {
     if ctx.user_id.is_empty() {
-        return json!({"error": "missing caller user identity (NOMI_GW_MCP_USER_ID)"});
+        return json!({"error": "missing caller user identity in signed Gateway capability"});
     }
     if p.name.is_none() && p.pinned.is_none() {
         return json!({"error": "nothing to update: provide at least one of name / pinned"});

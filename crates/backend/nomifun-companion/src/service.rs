@@ -107,6 +107,10 @@ pub trait CompanionCleanupHook: Send + Sync {
 }
 
 pub struct CompanionService {
+    /// Canonical owner of host-control-plane companion conversations. Resolved
+    /// once from the authoritative user repository and propagated explicitly to
+    /// every conversation adapter; never inferred from a username or DB literal.
+    authoritative_user_id: Arc<str>,
     /// Shared multi-companion home (`{data_dir}/companion/shared`): config + events + db.
     shared_dir: PathBuf,
     /// Cached ML assets (`{data_dir}/companion/models`): the MODNet matting model
@@ -148,9 +152,17 @@ impl CompanionService {
     pub async fn start(
         data_dir: &std::path::Path,
         bus: Arc<nomifun_realtime::BroadcastEventBus>,
+        owner_id: &str,
         completer: Arc<dyn CompanionCompleter>,
         skill_paths: Arc<SkillPaths>,
     ) -> Result<Arc<Self>, AppError> {
+        let owner_id = owner_id.trim();
+        if owner_id.is_empty() {
+            return Err(AppError::Internal(
+                "authoritative companion owner id must not be empty".into(),
+            ));
+        }
+        let authoritative_user_id: Arc<str> = Arc::from(owner_id);
         // Pre-rename installs keep their data under `{data}/pet`; move it to
         // `{data}/companion` before anything reads the new paths. Best-effort.
         crate::migrate::migrate_pet_dir_to_companion(data_dir);
@@ -207,7 +219,7 @@ impl CompanionService {
         {
             tracing::warn!(error = %e, companion_id, "first-companion backfill failed; legacy rows stay unattributed");
         }
-        let emitter = CompanionEventEmitter::new(bus.clone());
+        let emitter = CompanionEventEmitter::new(bus.clone(), authoritative_user_id.to_string());
 
         Collector::new(shared_dir.clone(), config.clone(), store.clone()).spawn(bus);
 
@@ -242,6 +254,7 @@ impl CompanionService {
         evolution.clone().spawn();
 
         Ok(Arc::new(Self {
+            authoritative_user_id,
             shared_dir,
             models_dir,
             model_lock: Mutex::new(()),
@@ -265,7 +278,7 @@ impl CompanionService {
     pub fn attach_companion(
         &self,
         conversations: Arc<nomifun_conversation::ConversationService>,
-        task_manager: Arc<dyn nomifun_ai_agent::IWorkerTaskManager>,
+        runtime_registry: Arc<dyn nomifun_ai_agent::AgentRuntimeRegistry>,
     ) {
         // Also wire the real transcript source so skill drafting rehydrates the actual
         // (redacted) session transcript from the conversation store — the durable single
@@ -285,8 +298,9 @@ impl CompanionService {
                 // Reuse the learn completer + model — one background LLM config.
                 completer: self.learner.completer.clone(),
                 port: Arc::new(crate::archive_port::ConversationArchivePort::new(
+                    self.authoritative_user_id.clone(),
                     conversations.clone(),
-                    task_manager.clone(),
+                    runtime_registry.clone(),
                 )),
                 run_lock: Arc::new(Mutex::new(())),
             });
@@ -295,11 +309,12 @@ impl CompanionService {
             }
         }
         let _ = self.companion.set(CompanionThreads {
+            authoritative_user_id: self.authoritative_user_id.clone(),
             store: self.store.clone(),
             config: self.config.clone(),
             registry: self.registry.clone(),
             conversations,
-            task_manager,
+            runtime_registry,
         });
     }
 
@@ -552,7 +567,7 @@ impl CompanionService {
             &self.store,
             profile,
             None,
-            self.config.read().await.smart_orchestration,
+            self.config.read().await.smart_collaboration,
         )
         .await;
         if let Err(error) = companion
@@ -1396,7 +1411,7 @@ impl CompanionService {
     }
 }
 
-/// The factory-facing persona prompt provider: channel master-agent sessions
+/// The factory-facing persona prompt provider: Channel Agent sessions
 /// carry `companionSession` but no persisted `system_prompt`, so the nomi factory
 /// asks the bound companion for a fresh persona (with current memory snapshot) at
 /// every agent build. The persona is built **only** for an explicitly-bound, live
@@ -1407,7 +1422,7 @@ impl CompanionService {
 impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
     async fn build_system_prompt(&self, companion_id: Option<&str>, channel_platform: Option<&str>) -> Option<String> {
         let profile = self.registry.get(companion_id.map(str::trim).filter(|id| !id.is_empty())?).await?;
-        let smart = self.config.read().await.smart_orchestration;
+        let smart = self.config.read().await.smart_collaboration;
         Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
     }
 }
@@ -1430,11 +1445,30 @@ mod tests {
         CompanionService::start(
             data_dir,
             Arc::new(BroadcastEventBus::new(16)),
+            "owner-a",
             Arc::new(NoopCompleter),
             Arc::new(nomifun_extension::skill_service::resolve_skill_paths(data_dir, data_dir)),
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn start_rejects_missing_authoritative_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = CompanionService::start(
+            dir.path(),
+            Arc::new(BroadcastEventBus::new(16)),
+            "  ",
+            Arc::new(NoopCompleter),
+            Arc::new(nomifun_extension::skill_service::resolve_skill_paths(
+                dir.path(),
+                dir.path(),
+            )),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::Internal(message)) if message.contains("owner id")));
     }
 
     #[tokio::test]

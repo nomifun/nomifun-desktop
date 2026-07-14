@@ -367,7 +367,7 @@ async fn poll_loop(
                     }
 
                     // Record + persist the watermark immediately after the
-                    // update was dispatched onto the orchestrator queue — not
+                    // update was dispatched onto the message-loop queue — not
                     // after the agent finished handling it. Deliberate
                     // trade-off: dying between dispatch and persist re-runs
                     // this one update (tiny window), while dying after

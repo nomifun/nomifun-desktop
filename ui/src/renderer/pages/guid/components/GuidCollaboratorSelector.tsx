@@ -9,27 +9,39 @@ import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Button, Dropdown } from '@arco-design/web-react';
 import { Branch, Down } from '@icon-park/react';
-import type { TModelRef } from '@/common/types/orchestrator/orchestratorTypes';
+import {
+  MAX_AGENT_EXECUTION_MODELS,
+  type TExecutionModelRef,
+} from '@/common/types/agentExecution/agentExecutionTypes';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
-import { encodePair, decodePair, useModelRange } from '@/renderer/pages/orchestrator/useModelRange';
+import {
+  encodePair,
+  decodePair,
+  useExecutionModelPool,
+} from '@/renderer/pages/conversation/execution/useExecutionModelPool';
 import { iconColors } from '@/renderer/styles/colors';
-import ocStyles from '@/renderer/pages/orchestrator/orchestratorComposer.module.css';
+import ocStyles from '@/renderer/pages/conversation/execution/executionPlanEditor.module.css';
+import GuidCollaborationTemplatePicker from './GuidCollaborationTemplatePicker';
+import type { AppliedCollaborationTemplate } from '@/renderer/components/collaboration/collaborationTemplateModel';
+
+export type GuidAppliedCollaborationTemplate = AppliedCollaborationTemplate;
 
 export interface GuidCollaboratorSelectorProps {
   /** Currently chosen collaborator (provider, model) pairs. */
-  value: TModelRef[];
-  onChange: (next: TModelRef[]) => void;
-  /** The 主模型 — excluded from the collaborator list (it is always the lead and
-   * already in the run's pool). */
-  mainModel?: TModelRef | null;
+  value: TExecutionModelRef[];
+  onChange: (next: TExecutionModelRef[]) => void;
+  /** The main model, shown as a pinned participant and not persisted twice. */
+  mainModel?: TExecutionModelRef | null;
+  selectedTemplate?: GuidAppliedCollaborationTemplate | null;
+  workDir?: string;
+  onTemplateApply: (template: GuidAppliedCollaborationTemplate) => void;
+  onTemplateClear: () => void;
   /** Optional extra class merged onto the trigger button so callers (e.g. the
    * conversation composer) can restyle the pill. */
   className?: string;
 }
 
-/** Case-insensitive substring match against an option's text label — mirrors
- * {@link OrchestratorComposer}'s picker filter (Arco types the option as a bare
- * `ReactNode`). */
+/** Case-insensitive substring match against an option's text label. */
 const filterByLabel = (input: string, option: React.ReactNode): boolean => {
   const children = (option as React.ReactElement<{ children?: React.ReactNode }>)?.props?.children;
   return String(children ?? '')
@@ -37,20 +49,19 @@ const filterByLabel = (input: string, option: React.ReactNode): boolean => {
     .includes(input.toLowerCase());
 };
 
-/**
- * GuidCollaboratorSelector —「协作模型」pill for the homepage 智能编排 entry.
- *
- * Sits next to the 主模型 picker (only in orchestration mode). It edits the
- * ADDITIONAL worker pool the lead/planner may assign per node by difficulty
- * (the 主模型 itself is always available and is excluded here). A compact
- * round pill (matching {@link GuidModelSelector}) opens a popover with a
- * provider-grouped multi-select; the empty state hints that the run then uses
- * just the 主模型. Visuals reuse the OrchestratorComposer popover tokens so the
- * two model surfaces read as one family.
- */
-const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({ value, onChange, mainModel, className }) => {
+/** Selects additional models that may participate in a Nomi collaboration. */
+const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
+  value,
+  onChange,
+  mainModel,
+  selectedTemplate,
+  workDir,
+  onTemplateApply,
+  onTemplateClear,
+  className,
+}) => {
   const { t } = useTranslation();
-  const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useModelRange();
+  const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
   const [open, setOpen] = useState(false);
 
   const availableKeys = useMemo(() => new Set(allPairs.map(encodePair)), [allPairs]);
@@ -60,10 +71,8 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({ val
     return availableKeys.has(encodedMain) ? encodedMain : null;
   }, [availableKeys, mainModel]);
 
-  // The 主模型 is ALWAYS part of the run — it is the lead/planner AND a worker the
-  // planner can assign to nodes — so it is PINNED into this selection: shown
-  // selected and not removable here (change it in the 主模型 picker). The user only
-  // adds EXTRA collaborators on top.
+  // The main model always participates, so show it pinned and persist only the
+  // additional collaborator models.
   const encodedValue = useMemo(() => {
     if (isLoading) return [];
     const collab = value.map(encodePair);
@@ -75,34 +84,44 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({ val
       // Strip the pinned 主模型 — it is implicit (owned by the 主模型 picker) and is
       // never persisted as a collaborator. Re-pinned on the next render via
       // `encodedValue`, so it can't be removed from the pool here.
-      const keys = ((v as string[]) ?? []).filter((k) => k !== mainKey);
+      const collaboratorLimit = MAX_AGENT_EXECUTION_MODELS - (mainKey ? 1 : 0);
+      const keys = Array.from(new Set(((v as string[]) ?? []).filter((k) => k !== mainKey))).slice(
+        0,
+        collaboratorLimit,
+      );
       onChange(keys.map(decodePair));
     },
-    [onChange, mainKey]
+    [onChange, mainKey],
   );
 
-  const label =
-    value.length > 0
-      ? t('guid.orchestration.collaborators.count', { count: value.length })
-      : t('guid.orchestration.collaborators.label');
+  const label = selectedTemplate
+    ? selectedTemplate.name
+    : value.length > 0
+      ? t('guid.collaboration.models.count', { count: value.length })
+      : t('guid.collaboration.models.label');
 
   const panel = (
     <div className={ocStyles.composerPopover}>
       <div className='flex flex-col gap-10px'>
         <div className='flex items-center gap-8px'>
           <Branch theme='outline' size='14' fill='rgb(var(--primary-6))' className='shrink-0' />
-          <span className={ocStyles.composerPopoverTitle}>{t('guid.orchestration.collaborators.title')}</span>
+          <span className={ocStyles.composerPopoverTitle}>{t('guid.collaboration.models.title')}</span>
         </div>
 
         {!hasModels ? (
-          <div className='text-12px leading-18px text-warning-6'>{t('orchestrator.composer.noModels')}</div>
+          <div className='text-12px leading-18px text-warning-6'>
+            {t('agentExecution.editor.noModels', {
+              defaultValue: '暂无可用模型',
+            })}
+          </div>
         ) : (
           <>
             <NomiSelect
               mode='multiple'
               value={encodedValue}
               onChange={handleChange}
-              placeholder={t('guid.orchestration.collaborators.placeholder')}
+              disabled={Boolean(selectedTemplate)}
+              placeholder={t('guid.collaboration.models.placeholder')}
               showSearch
               filterOption={filterByLabel}
               className='w-full'
@@ -113,13 +132,22 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({ val
                 return (
                   <NomiSelect.OptGroup key={p.id} label={p.name || p.platform}>
                     {models.map((m) => {
-                      const ref: TModelRef = { provider_id: p.id, model: m };
+                      const ref: TExecutionModelRef = {
+                        provider_id: p.id,
+                        model: m,
+                      };
                       const key = encodePair(ref);
                       const isMainOpt = key === mainKey;
+                      const isSelected = encodedValue.includes(key);
+                      const modelLimitReached = encodedValue.length >= MAX_AGENT_EXECUTION_MODELS;
                       return (
-                        <NomiSelect.Option key={key} value={key} disabled={isMainOpt}>
+                        <NomiSelect.Option
+                          key={key}
+                          value={key}
+                          disabled={isMainOpt || (modelLimitReached && !isSelected)}
+                        >
                           {formatModelLabel(p, m)}
-                          {isMainOpt ? ` · ${t('guid.orchestration.collaborators.mainTag')}` : ''}
+                          {isMainOpt ? ` · ${t('guid.collaboration.models.mainTag')}` : ''}
                         </NomiSelect.Option>
                       );
                     })}
@@ -128,12 +156,28 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({ val
               })}
             </NomiSelect>
             <div className={ocStyles.composerHint}>
-              {value.length === 0
-                ? t('guid.orchestration.collaborators.emptyHint')
-                : t('guid.orchestration.collaborators.selectedHint', { count: value.length })}
+              {selectedTemplate
+                ? t('collaboration.template.activeHint', {
+                    defaultValue: '将完整使用方案中的 {{count}} 位协作者；不会截断成当前模型选择。',
+                    count: selectedTemplate.participantCount,
+                  })
+                : value.length === 0
+                ? t('guid.collaboration.models.emptyHint')
+                : t('guid.collaboration.models.selectedHint', {
+                    count: value.length,
+                  })}
             </div>
           </>
         )}
+        <GuidCollaborationTemplatePicker
+          visible={open}
+          selectedTemplateId={selectedTemplate?.id ?? null}
+          models={value}
+          mainModel={mainModel}
+          workDir={workDir}
+          onApply={onTemplateApply}
+          onClear={onTemplateClear}
+        />
       </div>
     </div>
   );

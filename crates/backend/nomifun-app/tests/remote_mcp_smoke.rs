@@ -300,9 +300,21 @@ fn remote_surface_projection_is_correct() {
 
     assert!(!remote.is_empty(), "Remote surface must expose tools");
 
-    // P1: the headline agent-delegation caps are exposed to external callers.
-    assert!(remote.contains(&"nomi_agent_run"), "nomi_agent_run must be on the Remote surface");
-    assert!(remote.contains(&"nomi_agent_result"), "nomi_agent_result must be on the Remote surface");
+    // Remote, Desktop and Channel project the same persistent collaboration
+    // vocabulary. The removed synchronous run/result gateway must never return.
+    for name in [
+        "nomi_delegate",
+        "nomi_execution_get",
+        "nomi_execution_update",
+    ] {
+        assert!(remote.contains(&name), "{name} must be on the Remote surface");
+        assert!(desktop.contains(&name), "{name} must be on the Desktop surface");
+    }
+    assert!(!remote.contains(&"nomi_agent_run"));
+    assert!(!remote.contains(&"nomi_agent_result"));
+
+    // Saved remote gateways remain discoverable to owner-authorized callers,
+    // while endpoint mutation and active network probes stay desktop-only.
     assert!(
         remote.contains(&"nomi_remote_agent_list"),
         "Remote callers may discover saved OpenClaw gateway ids"
@@ -348,20 +360,6 @@ fn remote_surface_projection_is_correct() {
         "Destructive tools are hard-denied (hidden) on the Channel surface"
     );
 
-    // Orchestration is a DESKTOP master-agent feature (the lead conversation runs
-    // on a trusted desktop session). Its tools must be DESKTOP-only: visible there
-    // (the lead's nomi_run_create must keep working) but ABSENT from the external
-    // Remote front door (a Remote companion is never a lead, and the run reads take
-    // a bare run_id with no ownership predicate). Hard-denied on Remote via
-    // `deny_on(Surface::Remote)`, so they are neither advertised nor dispatchable.
-    for name in ["nomi_run_create", "nomi_run_status", "nomi_run_result"] {
-        assert!(
-            desktop.contains(&name),
-            "orchestrator tool '{name}' must remain visible on the Desktop surface (the lead)"
-        );
-        assert!(
-            !remote.contains(&name),
-            "orchestrator tool '{name}' must NOT be exposed on the external Remote surface"
-        );
-    }
+    // `nomi_execution_update` stays visible because most operations are Write;
+    // its cancel variant applies the Destructive matrix inside dispatch.
 }

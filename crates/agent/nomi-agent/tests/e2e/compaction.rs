@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use nomi_agent::confirm::ToolConfirmer;
 use nomi_agent::engine::AgentEngine;
-use nomi_agent::orchestration::execute_tool_calls;
+use nomi_agent::tool_execution::execute_tool_calls;
 use nomi_agent::output::OutputSink;
 use nomi_agent::output::null_sink::NullSink;
 use nomi_compact::CompactionLevel;
@@ -195,7 +195,7 @@ async fn case_9_off_vs_safe_content() {
 
     let prompt = "Call check_tool, then answer: does the tool output contain ANSI color escape codes (sequences starting with \\x1b)? Answer only 'yes' or 'no'.";
     let result = engine
-        .run(prompt, "")
+        .execute_turn(prompt, "")
         .await
         .expect("engine.run should succeed");
 
@@ -263,7 +263,7 @@ async fn case_10_off_vs_full_token_savings() {
 
     let prompt = "Call big_tool, then say 'done'.";
     let result_off = engine_off
-        .run(prompt, "")
+        .execute_turn(prompt, "")
         .await
         .expect("engine.run should succeed");
 
@@ -283,7 +283,7 @@ async fn case_10_off_vs_full_token_savings() {
     );
 
     let result_full = engine_full
-        .run(prompt, "")
+        .execute_turn(prompt, "")
         .await
         .expect("engine.run should succeed");
 
@@ -375,7 +375,7 @@ async fn case_11_toon_comprehension_and_system_prompt() {
 
     let prompt = "Call data_tool, then answer: what is the name of the second record? Answer with just the name, nothing else.";
     let result = engine
-        .run(prompt, "")
+        .execute_turn(prompt, "")
         .await
         .expect("engine.run should succeed");
 

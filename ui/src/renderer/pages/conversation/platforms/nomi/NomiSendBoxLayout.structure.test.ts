@@ -44,49 +44,54 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('keeps collaborator controls next to the main model and moves cluster next to permission', () => {
+  test('keeps collaborator models next to the main model and collaboration policy next to permission', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
 
     const collaboratorBlock = chatSource.slice(
       chatSource.indexOf('const collaboratorSelectorNode'),
-      chatSource.indexOf('const { providers: healProviders')
+      chatSource.indexOf('const { providers: healProviders'),
     );
     expect(collaboratorBlock.includes('<GuidCollaboratorSelector')).toBe(true);
-    expect(collaboratorBlock.includes('<ClusterModePill')).toBe(false);
-    expect(chatSource.includes('extraRightTools={<ClusterModePill conversation={conversation} />}')).toBe(true);
+    expect(chatSource.includes('<CollaborationPolicyControl')).toBe(true);
+    expect(chatSource.includes('extraRightTools={collaborationPolicyNode}')).toBe(true);
 
     const rightToolsIndex = sendBoxSource.indexOf('rightTools={');
     const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
     const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
     const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
-    const clusterIndex = sendBoxSource.indexOf('{extraRightTools}', rightToolsIndex);
+    const policyIndex = sendBoxSource.indexOf('{extraRightTools}', rightToolsIndex);
     const permissionIndex = sendBoxSource.indexOf('<AgentModeSelector', rightToolsIndex);
 
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
     expect(collaboratorIndex).toBeGreaterThan(modelIndex);
-    expect(clusterIndex).toBeGreaterThan(collaboratorIndex);
-    expect(permissionIndex).toBeGreaterThan(clusterIndex);
+    expect(policyIndex).toBeGreaterThan(collaboratorIndex);
+    expect(permissionIndex).toBeGreaterThan(policyIndex);
   });
 
   test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
 
-    expect(chatSource.includes("import { reconcileModelRefs, sameModelRefs }")).toBe(true);
+    expect(chatSource.includes('import { reconcileModelRefs, sameModelRefs }')).toBe(true);
     expect(chatSource.includes('const activeCollaborators = collaboratorReconciliation?.active ?? []')).toBe(true);
     expect(chatSource.includes('value={activeCollaborators}')).toBe(true);
-    expect(chatSource.includes('}, activeCollaborators);')).toBe(true);
+    expect(
+      /buildConversationModelPool\(\s*\{ provider_id: _provider\.id, model: modelName \},\s*activeCollaborators,\s*\)/.test(
+        chatSource,
+      ),
+    ).toBe(true);
     expect(chatSource.includes('collaboratorReconciliation.removed.length === 0')).toBe(true);
     expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
   });
 
-  test('keeps the cluster trigger icon-only instead of showing status text in the toolbar', () => {
-    const source = readSource(new URL('../../components/ClusterModePill.tsx', import.meta.url));
+  test('keeps the compact collaboration policy trigger icon-only in the conversation toolbar', () => {
+    const source = readSource(
+      new URL('../../../../components/collaboration/CollaborationPolicyControl.tsx', import.meta.url),
+    );
 
-    expect(source.includes("data-testid='cluster-mode-pill'")).toBe(true);
-    expect(source.includes('sendbox-cluster-pill__dot')).toBe(true);
-    expect(source.includes('conversation.cluster.pill,')).toBe(false);
-    expect(source.includes('conversation.cluster.approvalShort')).toBe(false);
+    expect(source.includes("data-testid='collaboration-policy-control'")).toBe(true);
+    expect(source.includes("shape={compact ? 'circle' : 'round'}")).toBe(true);
+    expect(/\{compact && active &&\s*<span className='size-5px/.test(source)).toBe(true);
   });
 });

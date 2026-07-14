@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Row in the `attachments` table — requirement images. The former generic
 /// (kind, target_id) polymorphism is collapsed to a real requirement_id FK
 /// (only the requirement kind was ever used). id stays a string `att_` because
-/// it rides the requirement DTO into the master agent's ACP transcript.
+/// it rides the requirement DTO into the owning Agent's ACP transcript.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AttachmentRow {
     pub id: String,

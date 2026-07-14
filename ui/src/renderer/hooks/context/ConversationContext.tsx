@@ -36,9 +36,16 @@ export interface ConversationContextValue {
   cron_job_id?: string;
 
   /**
-   * When true, platform chat components should hide the SendBox (e.g. sub-agents in team mode)
+   * When true, platform chat components should hide the SendBox (for example, projected participant transcripts).
    */
   hideSendBox?: boolean;
+
+  /**
+   * Immutable transcript surface. Unlike `hideSendBox`, this is a capability
+   * boundary: consumers must not send, confirm, warm up a runtime, or persist
+   * conversation changes while it is set.
+   */
+  readOnly?: boolean;
 
   /**
    * True while the current conversation turn is still producing output.

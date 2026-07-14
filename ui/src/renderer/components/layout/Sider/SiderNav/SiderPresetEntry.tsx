@@ -19,7 +19,7 @@ interface SiderPresetEntryProps {
   onClick: () => void;
 }
 
-/** Presets — reusable launch configurations for agents, companions and clusters. */
+/** Presets — reusable launch configurations for Agents, companions and execution steps. */
 const SiderPresetEntry: React.FC<SiderPresetEntryProps> = ({
   isMobile,
   isActive,

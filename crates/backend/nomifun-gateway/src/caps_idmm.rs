@@ -51,22 +51,29 @@ struct GetIdmmParams {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-fn parse_kind(raw: &str) -> Result<IdmmTargetKind, Value> {
+pub(crate) fn parse_kind(raw: &str) -> Result<IdmmTargetKind, Value> {
     IdmmTargetKind::parse(raw)
         .ok_or_else(|| json!({"error": format!("unknown kind '{raw}' (expected conversation | terminal)")}))
 }
 
-/// Terminal targets are ownership-checked (conversation ids are scoped by the
-/// conversation service itself; mirrors the REST routes' asymmetry).
-async fn verify_terminal(deps: &GatewayDeps, ctx: &CallerCtx, kind: IdmmTargetKind, target_id: &str) -> Option<Value> {
-    if kind != IdmmTargetKind::Terminal {
-        return None;
-    }
+/// Shared Gateway ownership boundary for every target-scoped IDMM capability.
+/// Keeping this in one helper prevents the base and extended capability sets
+/// from drifting into different authorization behavior.
+pub(crate) async fn verify_target(
+    deps: &GatewayDeps,
+    ctx: &CallerCtx,
+    kind: IdmmTargetKind,
+    target_id: &str,
+) -> Option<Value> {
     let user_id = match require_user(ctx) {
         Ok(u) => u.to_owned(),
         Err(e) => return Some(e),
     };
-    match deps.idmm_service.verify_terminal_owner(target_id, &user_id).await {
+    match deps
+        .idmm_service
+        .verify_target_owner(kind, target_id, &user_id)
+        .await
+    {
         Ok(()) => None,
         Err(e) => Some(json!({"error": e.to_string()})),
     }
@@ -79,14 +86,18 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Some(err) = verify_terminal(&deps, &ctx, kind, &p.target_id).await {
+    if let Some(err) = verify_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
 
     // Overlay onto the previously persisted config so unexposed knobs
     // (fault watch / strategy / budget details) keep their values. The gateway
     // exposes the DECISION watch (the agent-facing decision capability).
-    let mut cfg = match deps.idmm_service.read_config_persisted(kind, &p.target_id).await {
+    let mut cfg = match deps
+        .idmm_service
+        .read_config_persisted(&ctx.user_id, kind, &p.target_id)
+        .await
+    {
         Ok(c) => c.unwrap_or_default(),
         Err(e) => return json!({"error": e.to_string()}),
     };
@@ -104,13 +115,21 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
         cfg.decision_watch.strategy.freeform_policy = Some(sp);
     }
 
-    if let Err(e) = deps.idmm_service.save_config(kind, &p.target_id, &cfg).await {
+    if let Err(e) = deps
+        .idmm_service
+        .save_config(&ctx.user_id, kind, &p.target_id, &cfg)
+        .await
+    {
         // Typical validation errors: sidecar tier without a steering prompt
         // or without a resolvable backup provider — relay them verbatim so
         // the agent can fix the call or ask the owner.
         return json!({"error": e.to_string()});
     }
-    match deps.idmm_service.build_state(kind, &p.target_id).await {
+    match deps
+        .idmm_service
+        .build_state(&ctx.user_id, kind, &p.target_id)
+        .await
+    {
         Ok(state) => ok(state),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -121,10 +140,14 @@ async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetIdmmParams) -> Value 
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Some(err) = verify_terminal(&deps, &ctx, kind, &p.target_id).await {
+    if let Some(err) = verify_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
-    match deps.idmm_service.build_state(kind, &p.target_id).await {
+    match deps
+        .idmm_service
+        .build_state(&ctx.user_id, kind, &p.target_id)
+        .await
+    {
         Ok(state) => ok(state),
         Err(e) => json!({"error": e.to_string()}),
     }

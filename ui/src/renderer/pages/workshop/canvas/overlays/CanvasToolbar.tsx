@@ -5,7 +5,7 @@
  */
 
 /**
- * CanvasToolbar — the top-right floating glass control cluster: undo / redo,
+ * CanvasToolbar — the top-right floating glass control group: undo / redo,
  * background style cycle, asset-library toggle, add-node, and the shortcuts
  * help. Rendered inside a react-flow `<Panel>` so it floats over the graph.
  */

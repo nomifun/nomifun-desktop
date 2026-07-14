@@ -33,6 +33,7 @@ const AcpChat: React.FC<{
   agent_name?: string;
   cron_job_id?: string;
   hideSendBox?: boolean;
+  readOnly?: boolean;
   emptySlot?: React.ReactNode;
   loadedSkills?: string[];
   loadedMcpServers?: string[];
@@ -46,20 +47,22 @@ const AcpChat: React.FC<{
   agent_name,
   cron_job_id,
   hideSendBox,
+  readOnly,
   emptySlot,
   loadedSkills,
   loadedMcpServers,
   loadedMcpStatuses,
 }) => {
   useMessageLstCache(conversation_id);
-  usePendingConfirmationsRecovery(conversation_id);
+  usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly });
   const { checkAndUpdateTitle } = useAutoTitle();
   const addOrUpdateMessage = useAddOrUpdateMessage();
-  const messageState = useAcpMessage(conversation_id, { skipWarmup: false });
+  const messageState = useAcpMessage(conversation_id, { skipWarmup: readOnly === true });
   useAcpInitialMessage({
     conversation_id,
     backend,
     workspacePath: workspace,
+    enabled: !readOnly,
     setAiProcessing: messageState.setAiProcessing,
     checkAndUpdateTitle,
     addOrUpdateMessage,
@@ -73,6 +76,7 @@ const AcpChat: React.FC<{
         type: 'acp',
         cron_job_id,
         hideSendBox,
+        readOnly,
         isProcessing: messageState.running,
         loadedSkills,
         loadedMcpServers,
@@ -85,7 +89,7 @@ const AcpChat: React.FC<{
             <MessageList className='flex-1' emptySlot={emptySlot} />
           </FlexFullContainer>
           <AcpE2EStreamInjector conversationId={conversation_id} />
-          {!hideSendBox && (
+          {!readOnly && !hideSendBox && (
             <AcpSendBox
               conversation_id={conversation_id}
               backend={backend}

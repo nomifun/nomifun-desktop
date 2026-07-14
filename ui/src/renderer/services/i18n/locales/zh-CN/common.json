@@ -14,6 +14,10 @@
   "confirm": "确定",
   "file": "文件",
   "folder": "文件夹",
+  "filePicker": {
+    "recent": "最近使用",
+    "chooseDifferentFolder": "选择其他目录"
+  },
   "upload": "上传",
   "model": "模型",
   "skills": "技能",

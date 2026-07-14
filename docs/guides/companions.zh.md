@@ -61,15 +61,15 @@ NomiFun 的数字伙伴从「单个 nomi」升级为**多伙伴家庭**：你可
   - **direct（直写）**——跳过暂存直接写入知识库正文。
 - **AI 自动生成**：知识库页面的「AI 生成」按钮（列表编辑 Modal 与详情页都有）调 `POST /api/knowledge/bases/{id}/autogen`，生成库的描述与 `README.md`；`.zip` 导入会自动补全空描述。需要已配置 AI Provider（否则返回 `409`）。
 - **URL 知识源**：创建知识库时可给出最多 16 条 URL。*snapshot* 模式在创建时抓取并把每页转为 markdown 落入库的 `snapshots/`（超过 32 KB 的页面由 AI 压缩），并自动生成梗概——详情页可刷新快照；*live* 模式留给 agent 运行期实时抓取（无网络工具的引擎可调网关工具 `nomi_knowledge_fetch_url`）。仅接受公网 `http/https` URL（SSRF 防护）。
-- 伙伴也能**自己养库**：Desktop Gateway 提供 7 个知识工具（列表 / 绑定 / 建库 / 写文件 / AI 生成 / 抓取 URL），且伙伴系统提示里内置了「知识沉淀技巧」——陪伴或渠道聊天中它可以不经吩咐就建库并把心得沉淀进去。注意 `nomi_knowledge_create_base` 带 `urls` 建库时，URL 抓取在**后台异步**执行——工具立即返回，agent 勿因快照尚未出现而重复建库；库描述（description）生成出来即代表抓取与梗概流水线已完成。
+- 伙伴也能**自己养库**：平台 Gateway 提供 7 个知识工具（列表 / 绑定 / 建库 / 写文件 / AI 生成 / 抓取 URL），且伙伴系统提示里内置了「知识沉淀技巧」——陪伴或渠道聊天中它可以不经吩咐就建库并把心得沉淀进去。注意 `nomi_knowledge_create_base` 带 `urls` 建库时，URL 抓取在**后台异步**执行——工具立即返回，Agent 勿因快照尚未出现而重复建库；库描述（description）生成出来即代表抓取与梗概流水线已完成。
 
 给不同的伙伴绑不同的库，就得到了「金融伙伴」「文学伙伴」「coding 伙伴」——人格、模型、知识三件套都按伙伴独立，记忆共享。
 
 ## 渠道绑定伙伴
 
-每个 IM 平台（Telegram / Lark / 钉钉 / 微信）可以各绑一个伙伴来接待远程消息：打开该伙伴的 **Remote** tab（`/nomi?companion=<id>&tab=remote`），在那里连接或改绑 bot。平台级绑定写入 `channels.{platform}.companionId`。未绑定时回退**默认伙伴**；切换绑定会重置该渠道的活跃会话（下一条消息由新伙伴接待）；被绑定的伙伴若被删除，自动回退默认伙伴并同样重置会话。详见 [Channels 指南](./channels.zh.md)的「主 Agent 模式」一节。
+每个 IM 平台（Telegram / Lark / 钉钉 / 微信）都可以绑定接待远程消息的伙伴：打开该伙伴的 **Remote** tab（`/nomi?companion=<id>&tab=remote`），在那里连接或改绑 bot。渠道行可以保存直接绑定；未直接绑定时才读取平台偏好 `channels.{platform}.companionId`。两级都没有解析到存活伙伴时，渠道保持未绑定，不会隐式取得另一个身份。切换或删除绑定会重置受影响的活跃会话，使下一条消息重新解析归属。详见 [Channels 指南](./channels.zh.md)的「渠道 Agent 接入」一节。
 
-> companionId 不授予任何权限（记忆本就共享）：它只决定 persona / 模型 / 知识库挂载，与授予网关工具的 `desktopGateway` 标记性质不同。
+> companionId 不授予任何权限（记忆本就共享）：它只决定 persona / 模型 / 知识库挂载。平台 Gateway 是否可用由后端根据已认证的实例所有者边界派生，伙伴或 Conversation 元数据都不能授予该能力。
 
 ## 导出 / 导入：换机迁移
 
@@ -123,5 +123,5 @@ NomiFun 的数字伙伴从「单个 nomi」升级为**多伙伴家庭**：你可
 
 ## 相关
 
-- [Channels](./channels.zh.md) —— 渠道主 Agent 模式与每平台伙伴绑定。
+- [Channels](./channels.zh.md) —— 渠道 Agent 接入与每平台伙伴绑定。
 - [数据与存储](../architecture/data-and-storage.zh.md) —— `companion/` 数据目录布局。

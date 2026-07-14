@@ -31,6 +31,7 @@ const NomiChat: React.FC<{
   session_mode?: string;
   cron_job_id?: string;
   hideSendBox?: boolean;
+  readOnly?: boolean;
   emptySlot?: React.ReactNode;
   loadedSkills?: string[];
   loadedMcpServers?: string[];
@@ -39,9 +40,9 @@ const NomiChat: React.FC<{
   isProcessing?: boolean;
   /** Hide the permission/agent-mode selector in the send box (locked surfaces). */
   hideModeSelector?: boolean;
-  /** 会话内「协作模型」选择器节点，透传给 send box 紧跟主模型选择器渲染（锁定表面不传）。 */
+  /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
-  /** 额外的右侧工具节点，透传给 send box 的 rightTools（编排节点投影把「预置要求」pill 折进 composer）。 */
+  /** Extra right-side tools used by projected task transcripts. */
   extraRightTools?: React.ReactNode;
 }> = ({
   conversation_id,
@@ -50,6 +51,7 @@ const NomiChat: React.FC<{
   session_mode,
   cron_job_id,
   hideSendBox,
+  readOnly,
   emptySlot,
   loadedSkills,
   loadedMcpServers,
@@ -65,9 +67,10 @@ const NomiChat: React.FC<{
   // companion's single session (which also absorbs every IM-channel turn and can
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
   const historyPaging = useMessageLstCache(conversation_id, { windowed: true });
-  usePendingConfirmationsRecovery(conversation_id);
+  usePendingConfirmationsRecovery(conversation_id, { enabled: !readOnly });
   const [dynamicModes, setDynamicModes] = useState<AgentModeOption[]>([]);
   const turnActivity = useNomiMessage(conversation_id, {
+    readOnly,
     onConfigChanged: (capabilities) => {
       const modes = (capabilities as { modes?: string[] })?.modes;
       if (modes && modes.length > 0) {
@@ -86,6 +89,7 @@ const NomiChat: React.FC<{
       type: 'nomi',
       cron_job_id,
       hideSendBox,
+      readOnly,
       isProcessing: isProcessing === true || turnActivity.running,
       loadedSkills,
       loadedMcpServers,
@@ -96,6 +100,7 @@ const NomiChat: React.FC<{
     workspace,
     cron_job_id,
     hideSendBox,
+    readOnly,
     isProcessing,
     turnActivity.running,
     loadedSkills,
@@ -116,7 +121,7 @@ const NomiChat: React.FC<{
               loadingOlder={historyPaging.loadingOlder}
             />
           </FlexFullContainer>
-          {!hideSendBox && (
+          {!readOnly && !hideSendBox && (
             <NomiSendBox
               conversation_id={conversation_id}
               modelSelection={modelSelection}

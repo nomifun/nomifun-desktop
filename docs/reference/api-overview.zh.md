@@ -86,9 +86,8 @@ NomiFun 启动时进入三种鉴权策略之一：
 | Webhook + 标签设置 | `/api/webhooks/*`、`/api/tags/{tag}/settings` | 已鉴权 | [`nomifun-webhook/src/routes.rs`](../../crates/backend/nomifun-webhook/src/routes.rs) |
 | 需求（项目看板） | `/api/requirements/*` | 已鉴权 | [`nomifun-requirement/src/routes.rs`](../../crates/backend/nomifun-requirement/src/routes.rs) |
 | AutoWork / IDMM | `/api/idmm/*`、`/api/requirements/autowork*` | 已鉴权 | [`nomifun-idmm/src/routes.rs`](../../crates/backend/nomifun-idmm/src/routes.rs) |
-| 团队（后端实现面；当前没有对应用户指南路由） | `/api/teams/*` | 已鉴权 | [`nomifun-team/src/routes.rs`](../../crates/backend/nomifun-team/src/routes.rs) |
+| Agent Execution | `/api/agent-executions/*` | 已鉴权 | [`nomifun-agent-execution/src/routes.rs`](../../crates/backend/nomifun-agent-execution/src/routes.rs) |
 | 终端 | `/api/terminals/*` | 已鉴权 | [`nomifun-terminal/src/routes.rs`](../../crates/backend/nomifun-terminal/src/routes.rs) |
-| 终端 knowledge 注册辅助 | `/api/terminals/mcp-register-template`、`/api/terminals/register-knowledge*`、`/api/terminals/knowledge-global-status` | 已鉴权 | [`router/health.rs`](../../crates/backend/nomifun-app/src/router/health.rs) |
 | 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | WebUI/public 能力 companion token | `/api/webui/companions/{id}/access-token` | 已鉴权 / 本地 WebUI admin 流 | [`router/companion_token_routes.rs`](../../crates/backend/nomifun-app/src/router/companion_token_routes.rs) |
@@ -129,7 +128,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 ## WebSocket 事件模型
 
 `/ws` 是用于流式更新的单一双向通道：智能体 token 流、终端输出，
-需求/计划任务/团队的状态变化等等。
+以及需求、计划任务和协作任务的状态变化。
 
 - 鉴权：通过 `GET /api/ws-token` 获得的 JWT，放在 WebSocket 的
   `Sec-WebSocket-Protocol` 请求头中（或 `Authorization`）。token 无效或

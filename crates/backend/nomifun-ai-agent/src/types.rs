@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use nomifun_common::{AgentType, ProviderWithModel};
+use nomifun_common::{AgentType, DelegationPolicy, ProviderWithModel};
 
 /// Data payload for sending a user message to an Agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,17 +26,26 @@ pub struct SendMessageData {
     pub origin: Option<String>,
 }
 
-/// Options for building (creating or resuming) an Agent task.
+/// Options for creating or resuming a per-conversation Agent runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildTaskOptions {
+pub struct AgentRuntimeBuildOptions {
+    /// First-class owner of the runtime. Production callers copy this from the
+    /// authoritative Conversation/Cron target row; factories fail closed when
+    /// it is empty and never accept an identity from type-specific `extra`.
+    pub user_id: String,
     /// Type of agent to create.
     pub agent_type: AgentType,
     /// Working directory for the agent.
     pub workspace: String,
     /// Model selection config.
     pub model: ProviderWithModel,
-    /// Conversation ID this task belongs to.
+    /// Conversation ID this runtime belongs to.
     pub conversation_id: String,
+    /// Typed conversation-level delegation policy. This is sourced from the
+    /// first-class conversation column and takes precedence over type-specific
+    /// JSON so execution policy never has two authorities.
+    #[serde(default)]
+    pub delegation_policy: DelegationPolicy,
     /// Type-specific extra parameters (JSON object).
     #[serde(default)]
     pub extra: serde_json::Value,
@@ -84,8 +93,11 @@ pub struct NomiResolvedConfig {
     pub session_directory: PathBuf,
     /// Session mode (default, auto_edit, yolo).
     pub session_mode: Option<String>,
-    /// Extra MCP servers to inject (team coordination or guide).
+    /// Session-scoped MCP servers to inject.
     pub extra_mcp_servers: HashMap<String, nomi_config::config::McpServerConfig>,
+    /// Process-local guards for renewable loopback MCP capabilities. These are
+    /// never serialized; the Nomi manager holds them until runtime teardown.
+    pub loopback_capability_leases: nomifun_common::LoopbackCapabilityLeaseSet,
     /// AWS Bedrock credentials (region + access key or profile).
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     /// Enable the Computer tool (screen/mouse/keyboard control).
@@ -146,9 +158,11 @@ pub struct NomiResolvedConfig {
     /// session left by a prior conversation that reused this integer id. `None`
     /// = caller did not supply it (validation skipped — legacy/safe).
     pub owner_token: Option<String>,
-    /// 是否注册进程内 Spawn 工具（工厂按 `engine_spawn_enabled` 计算：本地桌面
-    /// 网关会话 false —— 改走可视化的 nomi_spawn 编排扇出；其余 true）。
-    pub in_process_spawn: bool,
+    /// Backend-authoritative host composition switch. Platform Gateway,
+    /// secondary-user, and PublicService sessions leave embedded AgentExecution
+    /// uninstalled; trusted no-gateway standalone sessions install it. This is
+    /// internal runtime state and is never serialized as user configuration.
+    pub install_embedded_agent_execution: bool,
     /// Per-session 工具白名单（空 = 不限制），源自 `NomiBuildExtra.allowed_tools`，
     /// 由 manager 灌进 `config.tools.builtin_allowlist`。
     pub allowed_tools: Vec<String>,
@@ -238,8 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn build_task_options_serde() {
-        let opts = BuildTaskOptions {
+    fn agent_runtime_build_options_serde() {
+        let opts = AgentRuntimeBuildOptions {
+            user_id: "user-1".into(),
             agent_type: AgentType::Acp,
             workspace: "/project".into(),
             model: ProviderWithModel {
@@ -248,13 +263,16 @@ mod tests {
                 use_model: None,
             },
             conversation_id: "conv-1".into(),
+            delegation_policy: DelegationPolicy::Automatic,
             extra: json!({ "backend": "claude" }),
             conversation_created_at: None,
         };
         let json = serde_json::to_value(&opts).unwrap();
         assert_eq!(json["agent_type"], "acp");
+        assert_eq!(json["user_id"], "user-1");
         assert_eq!(json["workspace"], "/project");
         assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["delegation_policy"], "automatic");
     }
 
     #[test]

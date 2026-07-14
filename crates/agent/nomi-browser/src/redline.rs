@@ -2,26 +2,26 @@
 //!
 //! # 为什么需要一道**独立**门（设计裁决⑧）
 //!
-//! orchestration 的审批闸（`category_for` → 普通会话弹审批）会被三条路径**旁路**：
-//! `auto_approve`（orchestration.rs:271）、`SessionMode::Yolo`（lib.rs:100-104）、companion
+//! approval pipeline 的审批闸（`category_for` → 普通会话弹审批）会被三条路径**旁路**：
+//! `auto_approve`（tool_execution.rs:271）、`SessionMode::Yolo`（lib.rs:100-104）、companion
 //! 强制 yolo（companion.rs:281-287）。yolo 下**一切自动批准**。若一个 IRREVERSIBLE 浏览器
-//! 动作（提交支付表单 / 删除 / 发送）只靠普通 orchestration 审批，yolo 下会**静默自动执行**——
+//! 动作（提交支付表单 / 删除 / 发送）只靠普通 tool-execution 审批，yolo 下会**静默自动执行**——
 //! 这是红线事故。
 //!
-//! 故 E2 在 facade（[`crate::tool::BrowserTool::execute`]）里加一道**不经 orchestration** 的
+//! 故 E2 在 facade（[`crate::tool::BrowserTool::execute`]）里加一道**不经 approval pipeline** 的
 //! 强制门 [`enforce_redline`]：
 //!
 //! - **普通会话（非 yolo，审批未旁路）**：IRREVERSIBLE 动作经 [`classify_action`] 判
 //!   [`ApprovalTier::Irreversible`] → `category_for` 返 [`ToolCategory::Irreversible`] →
-//!   orchestration 正常弹审批（用户确认）。facade 门**不拦**（`session_bypasses_approval==false`）。
-//! - **yolo / companion 会话（orchestration 审批被旁路）**：facade 门**拦截** IRREVERSIBLE 动作 →
+//!   approval pipeline 正常弹审批（用户确认）。facade 门**不拦**（`session_bypasses_approval==false`）。
+//! - **yolo / companion 会话（tool-execution 审批被旁路）**：facade 门**拦截** IRREVERSIBLE 动作 →
 //!   **hard-deny [`BrowserError::Blocked`]**（因为正常审批被旁路了，不能让它静默执行）。
 //!
 //! **带外确认**（headful takeover 原生 dialog / 网关手机审批）是 yolo 下唯一放行路径——但那是
 //! **P3**。P2 没有带外确认机制，故 yolo 下 IRREVERSIBLE 恒 = Blocked（fail-closed）。
 //!
-//! 即：**红线动作只在 yolo/companion 下 hard-deny，不靠被旁路的 orchestration 闸**——门拦的是
-//! 「审批被旁路的会话里的不可逆动作」，**不是**「所有不可逆动作」（普通会话交 orchestration）。
+//! 即：**红线动作只在 yolo/companion 下 hard-deny，不靠被旁路的 tool-execution 闸**——门拦的是
+//! 「审批被旁路的会话里的不可逆动作」，**不是**「所有不可逆动作」（普通会话交 approval pipeline）。
 //!
 //! 镜像 IDMM [`PermissionConfirm{safe_value:None}`](nomifun-idmm::signal)：不可逆动作**无**
 //! `safe_value` 自动放行（只有 Read 类才有 safe_value）。这里同构——IRREVERSIBLE 在审批旁路会话
@@ -35,7 +35,7 @@ use nomi_protocol::events::ToolCategory;
 /// 一次动作的审批等级（与 [`ToolCategory`] 对齐，加 [`ApprovalTier::Irreversible`] 最高级）。
 ///
 /// 分类器 [`classify_action`] 产出本枚举；[`ApprovalTier::to_category`] 把它投影回
-/// [`ToolCategory`]（让 orchestration 普通会话能据类别审批），[`enforce_redline`] 据它决定
+/// [`ToolCategory`]（让 approval pipeline 普通会话能据类别审批），[`enforce_redline`] 据它决定
 /// 是否在审批旁路会话里 hard-deny。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalTier {
@@ -51,7 +51,7 @@ pub enum ApprovalTier {
 }
 
 impl ApprovalTier {
-    /// 投影回 [`ToolCategory`]（orchestration 据类别审批；普通会话 Irreversible→用户确认）。
+    /// 投影回 [`ToolCategory`]（approval pipeline 据类别审批；普通会话 Irreversible→用户确认）。
     pub fn to_category(self) -> ToolCategory {
         match self {
             ApprovalTier::Info => ToolCategory::Info,
@@ -243,16 +243,16 @@ pub fn classify_action(action: &str, ctx: &ActionContext) -> ApprovalTier {
 /// **[纯逻辑] facade 独立 fail-closed 强制门**（设计裁决⑧关键）。
 ///
 /// `tier`：[`classify_action`] 判出的动作审批级。
-/// `session_bypasses_approval`：本会话的 orchestration 审批闸是否被旁路——
+/// `session_bypasses_approval`：本会话的 tool-execution 审批闸是否被旁路——
 /// `yolo || companion-forced-yolo || auto_approve`（见模块级文档的三条旁路）。
 /// `out_of_band_confirmed`：是否已获**带外确认**（headful takeover 原生 dialog / 网关手机审批）。
 /// **P2 恒 `false`**（带外确认机制 P3 才接）。
 ///
 /// 门逻辑（**只**拦审批旁路会话里的不可逆动作）：
 /// - `tier == Irreversible && session_bypasses_approval && !out_of_band_confirmed`
-///   → `Err(BrowserError::Blocked{reason})`（hard-deny，**不经 orchestration**）。
+///   → `Err(BrowserError::Blocked{reason})`（hard-deny，**不经 approval pipeline**）。
 /// - 其它一切 → `Ok(())`：
-///   - **普通会话**（`!session_bypasses_approval`）的 Irreversible → Ok（交 orchestration 正常审批，
+///   - **普通会话**（`!session_bypasses_approval`）的 Irreversible → Ok（交 approval pipeline 正常审批，
 ///     facade 门不拦）；
 ///   - **任何会话**的非 Irreversible（Info/Edit/Exec）→ Ok（良性/可逆动作不拦）；
 ///   - 已**带外确认**的 Irreversible → Ok（P3 放行路径）。
@@ -266,7 +266,7 @@ pub fn enforce_redline(
     if tier == ApprovalTier::Irreversible && session_bypasses_approval && !out_of_band_confirmed {
         return Err(BrowserError::Blocked {
             reason: "irreversible browser action (submit / payment / delete / send) blocked in an \
-                     auto-approving session (yolo/companion): orchestration approval is bypassed \
+                     auto-approving session (yolo/companion): tool-execution approval is bypassed \
                      here, so this fail-closed gate denies it. Out-of-band confirmation (headful \
                      takeover dialog / gateway phone approval) is the only way to allow it — that \
                      lands in P3."
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn enforce_redline_blocks_irreversible_in_bypassing_session() {
-        // yolo/companion（审批旁路）+ 不可逆 + 无带外确认 → Blocked（hard-deny，不经 orchestration）。
+        // yolo/companion（审批旁路）+ 不可逆 + 无带外确认 → Blocked（hard-deny，不经 approval pipeline）。
         let r = enforce_redline(ApprovalTier::Irreversible, true, false);
         assert!(
             matches!(r, Err(BrowserError::Blocked { .. })),
@@ -542,11 +542,11 @@ mod tests {
 
     #[test]
     fn enforce_redline_allows_irreversible_in_normal_session() {
-        // 普通会话（审批未旁路）+ 不可逆 → Ok：facade 门不拦，交 orchestration 正常审批。
+        // 普通会话（审批未旁路）+ 不可逆 → Ok：facade 门不拦，交 approval pipeline 正常审批。
         let r = enforce_redline(ApprovalTier::Irreversible, false, false);
         assert!(
             r.is_ok(),
-            "irreversible in a normal session must pass the facade gate (orchestration approves), \
+            "irreversible in a normal session must pass the facade gate (approval pipeline approves), \
              got {r:?}"
         );
     }
@@ -578,7 +578,7 @@ mod tests {
                 assert!(enforce_redline(ApprovalTier::Exec, bypass, confirmed).is_ok());
             }
         }
-        // 普通会话的不可逆（未确认）也放行（交 orchestration）。
+        // 普通会话的不可逆（未确认）也放行（交 approval pipeline）。
         assert!(enforce_redline(ApprovalTier::Irreversible, false, false).is_ok());
     }
 

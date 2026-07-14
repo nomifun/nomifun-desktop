@@ -72,9 +72,9 @@ export const FEEDBACK_MODULES: readonly FeedbackModule[] = [
     tag: 'scheduled-task',
   },
   {
-    i18nKey: 'settings.bugReportModuleAgentTeam',
-    descriptionI18nKey: 'settings.bugReportModuleAgentTeamDescription',
-    tag: 'agent-team',
+    i18nKey: 'settings.bugReportModuleCollaboration',
+    descriptionI18nKey: 'settings.bugReportModuleCollaborationDescription',
+    tag: 'agent-collaboration',
   },
   {
     i18nKey: 'settings.bugReportModuleDisplaySettings',

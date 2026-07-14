@@ -50,7 +50,7 @@ export const formatMessageTime = (timestamp: number): string => {
 };
 import MessageCronBadge from './MessageCronBadge';
 import { getAgentLogo } from '@/renderer/utils/model/agentLogo';
-import TeammateMessageAvatar from './TeammateMessageAvatar';
+import AgentMessageAvatar from './AgentMessageAvatar';
 
 const CODE_STYLE = { marginTop: 4, marginBlock: 4 };
 
@@ -202,7 +202,7 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
   const { t } = useTranslation();
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
-  const isTeammateMessage = message.position === 'left' && message.content.teammateMessage === true;
+  const isAgentMessage = message.position === 'left' && message.content.agentMessage === true;
   const writebackState = !isUserMessage ? message.content.knowledge_writeback : undefined;
   const shouldRenderPlainText = isUserMessage;
   const conversationContext = useConversationContextSafe();
@@ -287,9 +287,9 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
     <>
       <div className={classNames('min-w-0 flex flex-col group', isUserMessage ? 'items-end' : 'items-start')}>
         {cronMeta && <MessageCronBadge meta={cronMeta} />}
-        {isTeammateMessage && senderName && (
+        {isAgentMessage && senderName && (
           <div className='flex items-center gap-6px mb-4px'>
-            <TeammateMessageAvatar
+            <AgentMessageAvatar
               senderName={senderName}
               senderConversationId={senderConversationId}
               backendLogo={fallbackBackendLogo}
@@ -316,13 +316,13 @@ const MessageText: React.FC<{ message: IMessageText; hideActions?: boolean }> = 
           <div
             className={classNames('min-w-0 [&>p:first-child]:mt-0px [&>p:last-child]:mb-0px md:max-w-780px', {
               'bg-aou-2 p-6px md:p-8px': isUserMessage || cronMeta,
-              'bg-3 p-6px md:p-8px': isTeammateMessage,
-              'w-full': !(isUserMessage || cronMeta || isTeammateMessage),
+              'bg-3 p-6px md:p-8px': isAgentMessage,
+              'w-full': !(isUserMessage || cronMeta || isAgentMessage),
             })}
             style={{
               ...(isUserMessage || cronMeta
                 ? { borderRadius: '8px 0 8px 8px', color: 'var(--text-primary)' }
-                : isTeammateMessage
+                : isAgentMessage
                   ? { borderRadius: '0 8px 8px 8px' }
                   : undefined),
             }}

@@ -6,7 +6,7 @@
 
 import type { TMessage } from '../chat/chatLib';
 import type { TChatConversation } from '../config/storage';
-import type { IMessageSearchItem } from '../types/team/database';
+import type { IMessageSearchItem } from '../types/conversationSearch';
 import type { PaginatedResult } from './ipcBridge';
 import { fromApiConversation } from './apiModelMapper';
 
@@ -25,6 +25,8 @@ export interface ApiMessageSearchItem {
     pinned: boolean;
     pinned_at?: number | null;
     channel_chat_id?: string | null;
+    /** First-class Conversation field; never sourced from `extra`. */
+    execution_template_id?: string | null;
     created_at: number;
     modified_at: number;
     extra: Record<string, unknown>;

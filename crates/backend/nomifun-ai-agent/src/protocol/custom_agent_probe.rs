@@ -120,8 +120,8 @@ async fn acp_initialize(
         res = connect => {
             let protocol = res.map_err(|e| format!("ACP initialize failed: {e}"))?;
             // Dropping `protocol` fires the shutdown oneshot; the child
-            // process was spawned with `kill_on_drop(true)` via
-            // `nomifun_runtime::Builder` so CPU stays clean.
+            // process was spawned with `kill_on_drop(true)` via the shared
+            // child-process builder so CPU stays clean.
             drop(protocol);
             Ok(())
         }

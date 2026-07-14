@@ -87,12 +87,17 @@ fn build_test_office_state(data_dir: &std::path::Path, allowed_roots: Vec<std::p
     }
 
     struct NoopBroadcaster;
-    impl nomifun_realtime::EventBroadcaster for NoopBroadcaster {
-        fn broadcast(&self, _msg: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    impl nomifun_realtime::UserEventSink for NoopBroadcaster {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
     }
 
     let spawner: Arc<dyn ProcessSpawner> = Arc::new(NoopSpawner);
-    let bc: Arc<dyn nomifun_realtime::EventBroadcaster> = Arc::new(NoopBroadcaster);
+    let bc: Arc<dyn nomifun_realtime::UserEventSink> = Arc::new(NoopBroadcaster);
     let wm = Arc::new(OfficecliWatchManager::new(spawner, bc));
 
     let snapshot = Arc::new(SnapshotService::new(data_dir));
@@ -163,7 +168,7 @@ async fn au2_unauthenticated_all_office_endpoints() {
 #[tokio::test]
 async fn wp4_word_preview_officecli_not_available() {
     let (mut app, services, tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let file_path = tmp.path().join("test.docx");
     std::fs::write(&file_path, b"docx").unwrap();
@@ -188,7 +193,7 @@ async fn wp5_word_preview_with_workspace_accepts_non_sandbox_path() {
     std::fs::write(&file_path, b"docx").unwrap();
 
     let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user2", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": file_path.to_str().unwrap(),
@@ -211,7 +216,7 @@ async fn wp6_word_preview_without_workspace_rejects_non_sandbox_path() {
     std::fs::write(&file_path, b"docx").unwrap();
 
     let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user3", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": file_path.to_str().unwrap()
@@ -232,7 +237,7 @@ async fn ep1_excel_preview_with_workspace_accepts_non_sandbox_path() {
     std::fs::write(&file_path, b"xlsx").unwrap();
 
     let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user4", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": file_path.to_str().unwrap(),
@@ -255,7 +260,7 @@ async fn pp1_ppt_preview_with_workspace_accepts_non_sandbox_path() {
     std::fs::write(&file_path, b"pptx").unwrap();
 
     let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user5", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": file_path.to_str().unwrap(),
@@ -275,7 +280,7 @@ async fn pp1_ppt_preview_with_workspace_accepts_non_sandbox_path() {
 #[tokio::test]
 async fn sh1_save_snapshot() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "target": snapshot_target(),
@@ -301,7 +306,7 @@ async fn sh1_save_snapshot() {
 #[tokio::test]
 async fn sh2_list_snapshots() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     for i in 0..3 {
         let body = json!({
@@ -330,7 +335,7 @@ async fn sh2_list_snapshots() {
 #[tokio::test]
 async fn sh3_get_snapshot_content() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let save_body = json!({
         "target": snapshot_target(),
@@ -360,7 +365,7 @@ async fn sh3_get_snapshot_content() {
 #[tokio::test]
 async fn sh4_get_nonexistent_snapshot() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "target": snapshot_target(),
@@ -380,7 +385,7 @@ async fn sh4_get_nonexistent_snapshot() {
 #[tokio::test]
 async fn sh5_snapshot_trim_at_limit() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     for i in 0..52 {
         let body = json!({
@@ -410,7 +415,7 @@ async fn sh5_snapshot_trim_at_limit() {
 #[tokio::test]
 async fn sh6_different_targets_isolated() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let target_a = json!({"content_type": "markdown", "file_path": "/a.md"});
     let target_b = json!({"content_type": "code", "file_path": "/b.rs"});
@@ -441,7 +446,7 @@ async fn sh6_different_targets_isolated() {
 #[tokio::test]
 async fn sh7_target_field_combination_different_hash() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let target_simple = json!({"content_type": "markdown", "file_path": "/a.md"});
     let target_complex = json!({
@@ -485,7 +490,7 @@ async fn sh7_target_field_combination_different_hash() {
 #[tokio::test]
 async fn so1_detect_no_service() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({});
     let req = json_with_token("POST", "/api/star-office/detect", body, &token, &csrf);
@@ -502,7 +507,7 @@ async fn so1_detect_no_service() {
 #[tokio::test]
 async fn so2_detect_with_preferred_url() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({"preferred_url": "http://localhost:19000"});
     let req = json_with_token("POST", "/api/star-office/detect", body, &token, &csrf);
@@ -519,7 +524,7 @@ async fn so2_detect_with_preferred_url() {
 #[tokio::test]
 async fn dc1_excel_to_json() {
     let (mut app, services, tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let xlsx_path = tmp.path().join("test.xlsx");
     create_test_xlsx(&xlsx_path);
@@ -548,7 +553,7 @@ async fn dc1_excel_to_json() {
 #[tokio::test]
 async fn dc4_excel_file_not_found() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": "/nonexistent/file.xlsx",
@@ -570,7 +575,7 @@ async fn dc5_document_convert_rejects_outside_sandbox() {
     create_test_xlsx(&xlsx_path);
 
     let (mut app, services, _tmp) = build_office_app_with_roots(vec![sandbox.path().to_path_buf()]).await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user6", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": xlsx_path.to_str().unwrap(),
@@ -589,7 +594,7 @@ async fn dc5_document_convert_rejects_outside_sandbox() {
 #[tokio::test]
 async fn dc9_invalid_conversion_target() {
     let (mut app, services, _tmp) = build_office_app().await;
-    let (token, csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "pass123").await;
 
     let body = json!({
         "file_path": "/path/to/file.txt",

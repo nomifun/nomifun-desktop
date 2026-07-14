@@ -5,16 +5,16 @@
  */
 
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
-import type { MasterAgentPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
+import type { ChannelPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 
 export interface EnabledChannelStatusQuery {
-  platform: MasterAgentPlatform;
+  platform: ChannelPlatform;
   enabledPluginId?: string;
   companionId?: string;
   publicAgentId?: string;
 }
 
-export type ChannelConfigTarget = { platform: MasterAgentPlatform; channelId?: string } | null;
+export type ChannelConfigTarget = { platform: ChannelPlatform; channelId?: string } | null;
 
 export interface ChannelOwnerQuery {
   companionId?: string;

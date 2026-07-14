@@ -18,7 +18,7 @@ import ChannelTelegramLogo from '@/renderer/assets/channel-logos/telegram.svg';
 import ChannelTwitchLogo from '@/renderer/assets/channel-logos/twitch.svg';
 import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
 import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
-import type { ChannelTarget, MasterAgentPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
+import type { ChannelPlatform, ChannelTarget } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 import DingTalkConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/DingTalkConfigForm';
 import DiscordConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/DiscordConfigForm';
 import LarkConfigForm from '@/renderer/components/settings/SettingsModal/contents/channels/LarkConfigForm';
@@ -44,8 +44,8 @@ import { findEnabledChannelStatus } from './channelStatusSelection';
  * `channelTarget.publicAgentId`).
  */
 
-/** Builtin IM platforms a bot can greet (same set as channel master-agent mode). */
-export const CHANNEL_PLATFORMS: ReadonlyArray<{ id: MasterAgentPlatform; logo: string; titleKey: string; fallback: string }> = [
+/** Builtin IM platforms supported by the channel Agent integration. */
+export const CHANNEL_PLATFORMS: ReadonlyArray<{ id: ChannelPlatform; logo: string; titleKey: string; fallback: string }> = [
   { id: 'weixin', logo: ChannelWeixinLogo, titleKey: 'settings.channels.weixinTitle', fallback: 'WeChat' },
   { id: 'lark', logo: ChannelLarkLogo, titleKey: 'settings.channels.larkTitle', fallback: 'Lark / Feishu' },
   { id: 'wecom', logo: ChannelWecomLogo, titleKey: 'settings.channels.wecomTitle', fallback: 'WeCom' },
@@ -61,7 +61,7 @@ export const CHANNEL_PLATFORMS: ReadonlyArray<{ id: MasterAgentPlatform; logo: s
 ];
 
 /** Per-platform i18n keys reused from the legacy channel settings page. */
-export const CREDENTIALS_REQUIRED_KEY: Record<MasterAgentPlatform, string> = {
+export const CREDENTIALS_REQUIRED_KEY: Record<ChannelPlatform, string> = {
   telegram: 'settings.channels.tokenRequired',
   discord: 'settings.discord.tokenRequired',
   slack: 'settings.slack.credentialsRequired',
@@ -76,7 +76,7 @@ export const CREDENTIALS_REQUIRED_KEY: Record<MasterAgentPlatform, string> = {
   wecom: 'settings.wecom.configureFirst',
 };
 
-export const PLUGIN_ENABLED_KEY: Record<MasterAgentPlatform, string> = {
+export const PLUGIN_ENABLED_KEY: Record<ChannelPlatform, string> = {
   telegram: 'settings.channels.pluginEnabled',
   discord: 'settings.discord.pluginEnabled',
   slack: 'settings.slack.pluginEnabled',
@@ -91,7 +91,7 @@ export const PLUGIN_ENABLED_KEY: Record<MasterAgentPlatform, string> = {
   wecom: 'settings.wecom.pluginEnabled',
 };
 
-export const PLUGIN_DISABLED_KEY: Record<MasterAgentPlatform, string> = {
+export const PLUGIN_DISABLED_KEY: Record<ChannelPlatform, string> = {
   telegram: 'settings.channels.pluginDisabled',
   discord: 'settings.discord.pluginDisabled',
   slack: 'settings.slack.pluginDisabled',
@@ -108,12 +108,10 @@ export const PLUGIN_DISABLED_KEY: Record<MasterAgentPlatform, string> = {
 
 /**
  * Channel config modal body: enable/disable switch + the platform's full
- * config form (credentials, connection test, master-agent switch, pairing
- * approvals, authorized users).
+ * config form (credentials, connection test, pairing approvals, authorized users).
  *
- * 模型选择器在这里**不渲染**:机器人复用所绑定对象(桌面伙伴 / 对外伙伴)的对话
- * 模型(后端按绑定对象的 profile.model 解析),故这里不向各平台表单传
- * `modelSelection`,表单据此隐藏「默认模型」下拉。
+ * 这里不渲染模型选择器：机器人复用所绑定对象（桌面伙伴 / 对外伙伴）的
+ * 对话模型，后端按绑定对象的 `profile.model` 解析；各平台表单只负责渠道连接。
  *
  * `channelTarget` addresses one channel row (multi-bot model). When
  * `channelTarget.channelId` is missing the form runs in create mode: the
@@ -121,7 +119,7 @@ export const PLUGIN_DISABLED_KEY: Record<MasterAgentPlatform, string> = {
  * `channelTarget.publicAgentId` (whichever is set — mutually exclusive).
  */
 export const PlatformConfigBody: React.FC<{
-  platform: MasterAgentPlatform;
+  platform: ChannelPlatform;
   status: IChannelPluginStatus | null;
   channelTarget?: ChannelTarget;
   onStatusChange: (status: IChannelPluginStatus | null) => void;

@@ -4,31 +4,31 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{IdmmState, InterventionRecord, WebSocketMessage};
-use nomifun_realtime::EventBroadcaster;
+use nomifun_realtime::UserEventSink;
 use tracing::error;
 
 /// Emits IDMM status + intervention events through the shared broadcaster.
 #[derive(Clone)]
 pub struct IdmmEventEmitter {
-    broadcaster: Arc<dyn EventBroadcaster>,
+    user_events: Arc<dyn UserEventSink>,
 }
 
 impl IdmmEventEmitter {
-    pub fn new(broadcaster: Arc<dyn EventBroadcaster>) -> Self {
-        Self { broadcaster }
+    pub fn new(user_events: Arc<dyn UserEventSink>) -> Self {
+        Self { user_events }
     }
 
     /// `idmm.statusChanged` — armed/disabled/intervening transitions.
-    pub fn emit_status_changed(&self, state: &IdmmState) {
-        self.broadcast("idmm.statusChanged", state);
+    pub fn emit_status_changed(&self, owner_id: &str, state: &IdmmState) {
+        self.send(owner_id, "idmm.statusChanged", state);
     }
 
     /// `idmm.intervention` — one intervention happened (detected → action → outcome).
-    pub fn emit_intervention(&self, record: &InterventionRecord) {
-        self.broadcast("idmm.intervention", record);
+    pub fn emit_intervention(&self, owner_id: &str, record: &InterventionRecord) {
+        self.send(owner_id, "idmm.intervention", record);
     }
 
-    fn broadcast<T: serde::Serialize>(&self, event_name: &str, payload: &T) {
+    fn send<T: serde::Serialize>(&self, owner_id: &str, event_name: &str, payload: &T) {
         let value = match serde_json::to_value(payload) {
             Ok(v) => v,
             Err(e) => {
@@ -36,7 +36,8 @@ impl IdmmEventEmitter {
                 return;
             }
         };
-        self.broadcaster.broadcast(WebSocketMessage::new(event_name, value));
+        self.user_events
+            .send_to_user(owner_id, WebSocketMessage::new(event_name, value));
     }
 }
 
@@ -48,11 +49,11 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingBroadcaster {
-        events: Mutex<Vec<WebSocketMessage<serde_json::Value>>>,
+        events: Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>,
     }
-    impl EventBroadcaster for CapturingBroadcaster {
-        fn broadcast(&self, event: WebSocketMessage<serde_json::Value>) {
-            self.events.lock().unwrap().push(event);
+    impl UserEventSink for CapturingBroadcaster {
+        fn send_to_user(&self, user_id: &str, event: WebSocketMessage<serde_json::Value>) {
+            self.events.lock().unwrap().push((user_id.to_owned(), event));
         }
     }
 
@@ -73,12 +74,13 @@ mod tests {
             sidecar_provider_resolved: false,
             config: None,
         };
-        emitter.emit_status_changed(&st);
+        emitter.emit_status_changed("owner-a", &st);
         let evs = bc.events.lock().unwrap();
         assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].name, "idmm.statusChanged");
-        assert_eq!(evs[0].data["target_id"], "c1");
-        assert_eq!(evs[0].data["run_state"], "armed");
+        assert_eq!(evs[0].0, "owner-a");
+        assert_eq!(evs[0].1.name, "idmm.statusChanged");
+        assert_eq!(evs[0].1.data["target_id"], "c1");
+        assert_eq!(evs[0].1.data["run_state"], "armed");
     }
 
     #[test]
@@ -101,9 +103,10 @@ mod tests {
             confidence: None,
             bypass_model: None,
         };
-        emitter.emit_intervention(&rec);
+        emitter.emit_intervention("owner-b", &rec);
         let evs = bc.events.lock().unwrap();
-        assert_eq!(evs[0].name, "idmm.intervention");
-        assert_eq!(evs[0].data["action"], "retry");
+        assert_eq!(evs[0].0, "owner-b");
+        assert_eq!(evs[0].1.name, "idmm.intervention");
+        assert_eq!(evs[0].1.data["action"], "retry");
     }
 }
