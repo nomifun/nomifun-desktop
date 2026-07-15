@@ -10,6 +10,14 @@
     "linux-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODArOXdwd3kvOWtIaFhjWTlPblRZcWIvZXB5dkd5d3Z6alpUMk12MC9TVGNnUDI5SjJPdnl0b3IxT1grbDRRVGdkS1gzVGE5YkxyMFNjYzRTS2JrRUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTM5NjQxCWZpbGU6Tm9taUZ1bl8wLjIuMjBfYW1kNjQuQXBwSW1hZ2UKaGVNUU56cTBXdjM1OEErblNLSzJEKzhMazl2TUI0cldkVExhcGczMFByWDhvZThiY2lSL1FNMHV0OWNXOEozbDdDdEsvMm1HZE1WSkpaMzMzSTAxQmc9PQo=",
       "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun_0.2.20_amd64.AppImage"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODE4WUxFbUtkZDBYZGN2V1NzdmtXQVhGYXRwRXBqbW1VU01CSjdRbnAxaWNZRGpOdWhWRGNsMEpSN0NjaWdDd1lJVnUxS0VyRi92OTdXS09IWE5LNVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTQwMzY3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cm5vdlptU3dmN0R0azJ4WlRKUncySGxrMFFDRFppdyt4ekpkMEZ6ZHo5YXdYTUdNdHJWa0ozcVQraEJ2VFFBblZKOHgvUS9pbHNVOStpS1JkQU5QS0JnPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun.app.tar.gz"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODE4WUxFbUtkZDBYZGN2V1NzdmtXQVhGYXRwRXBqbW1VU01CSjdRbnAxaWNZRGpOdWhWRGNsMEpSN0NjaWdDd1lJVnUxS0VyRi92OTdXS09IWE5LNVE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTQwMzY3CWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cm5vdlptU3dmN0R0azJ4WlRKUncySGxrMFFDRFppdyt4ekpkMEZ6ZHo5YXdYTUdNdHJWa0ozcVQraEJ2VFFBblZKOHgvUS9pbHNVOStpS1JkQU5QS0JnPT0K",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun.app.tar.gz"
     }
   }
 }
