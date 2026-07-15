@@ -1,23 +1,11 @@
 {
-  "version": "0.2.19",
-  "notes": "## Highlights\n\n- Improved OpenAI- and Anthropic-compatible provider reliability for Bedrock-style gateways, including automatic tool-schema compatibility fallback and safer retry behavior.\n- Added multiple API key rotation for OpenAI and Anthropic providers when a key is rejected or rate-limited.\n- Improved session recovery after transient provider failures and kept provider health probes tool-free for broader gateway compatibility.\n- Refined the requirements experience with clearer checkbox selection, a viewport-fixed progress rail, and improved dark-mode control contrast.\n- Restored project workpath deletion and fixed cross-platform file listing behavior.\n\n## Upgrade notes\n\n- No configuration or data migration is required.\n- This Windows-first release includes the Windows x64 installer and signed Tauri updater assets. macOS and Linux packages will be appended from their native build machines.\n- The Windows installer is protected by the Tauri updater signature but is not Authenticode-signed, so manual downloads may show a SmartScreen or unknown-publisher warning.",
-  "pub_date": "2026-07-13T14:48:10.081Z",
+  "version": "0.2.20",
+  "notes": "## Highlights\n\n- Added a full Skill Market with ClawHub and SkillHub rankings, search/tag filtering, localized descriptions, skill detail views, and a reviewed installation handoff to Nomi.\n- Replaced one-off assistants with reusable presets and unified the agent execution architecture for more consistent conversations and orchestration.\n- Restored OpenClaw remote control and added safer remote integration validation.\n- Improved Windows reliability by isolating shell consoles, while fixing sidebar scrolling, linked-skill removal, MCP session ID normalization, stale completion/thinking states, and canonical UUIDv7 identifiers.\n- Refined figure-library cards, themed checkbox selection, compact controls, and dark-mode capability readability.\n\n## Upgrade notes\n\n- No known manual configuration change is required for this release.\n- This Windows-first release includes the Windows x64 installer and signed Tauri updater assets. macOS and Linux packages will be appended from their native build machines.\n- The Windows installer is protected by the Tauri updater signature but is not Authenticode-signed, so manual downloads may show a SmartScreen or unknown-publisher warning.",
+  "pub_date": "2026-07-15T18:08:53.449Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVLOTBhbUgxQmtvb1RYYlFuc1pHSGdzZHBMRkNkS0o3NG4vZWt2VS9Wd0F1OXNoWUliRTZWelZiUGcvbWVSWkdBNDVEaEFabHQrZ0tmSEF5REIyc0FBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTUyNjk1CWZpbGU6Tm9taUZ1bl8wLjIuMTlfeDY0LXNldHVwLmV4ZQpMa0ZyV20zaGRtU1VSOXczanFBYTN3c0hFUEN1cytXMnhzRlZmL0lNendzdVNwcUZkeStsT2JvcGt3ak1wb2NGRmVaMEc1VnNtaU1NV3FZKzFwdWdEdz09Cg==",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.19/NomiFun_0.2.19_x64-setup.exe"
-    },
-    "linux-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODNpN1B3YlZxczVERFFjN0RCZnRhYWFOZ0RpKzBSUVdqc2NQak90aTc3bTM2Tmc4YzNNZ3lsOE9RM2JXMEpQcHBxQjdFMDIvcnJUUU5GN0hLRUk4SXdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTUzNDk5CWZpbGU6Tm9taUZ1bl8wLjIuMTlfYW1kNjQuQXBwSW1hZ2UKUnRCbHY2WXhpWmhvWTV6Q2ZPMW9ldEpYMmxLcVN2bmhPT3ZkVnBwRVY5VEtFMm9WVWluRVhBcWNreGRpTEhGWFFMNmJScll5bzd6QnR5SnNOb01jRHc9PQo=",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.19/NomiFun_0.2.19_amd64.AppImage"
-    },
-    "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdHRlp4dEtpVDhNeE9jeFVyd2lXbUE2RE9OTE9MN1gySDVFRjNMbFU1eDBjZzRaN3BydWh0aXAwejZKMTA5b2FycEV4aFkvYS82ZkZkd0UxZi9zRlE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTUzOTcxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnQwNUZzSStJWHo2ekRocHhUZVpHVkVyUGtvay9Vb2EvWjgwclVNdjJJNXBUZVFRTmQraUprY0FYSy9Qc21GNDliM3NWa1RnSk1BcDhoY0l3bEZ3K0FnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.19/NomiFun.app.tar.gz"
-    },
-    "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODdHRlp4dEtpVDhNeE9jeFVyd2lXbUE2RE9OTE9MN1gySDVFRjNMbFU1eDBjZzRaN3BydWh0aXAwejZKMTA5b2FycEV4aFkvYS82ZkZkd0UxZi9zRlE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgzOTUzOTcxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6CnQwNUZzSStJWHo2ekRocHhUZVpHVkVyUGtvay9Vb2EvWjgwclVNdjJJNXBUZVFRTmQraUprY0FYSy9Qc21GNDliM3NWa1RnSk1BcDhoY0l3bEZ3K0FnPT0K",
-      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.19/NomiFun.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODMrdTM2allHTWYyYUFSc21DajRvbmd4YWNONjBCUjN6RW4vQzBGTUN4clJlSkgyU1JuSmtzdmV0WGczN3A2eHpiSDRwWWJLMXM5dnI1cVZHOFRMOGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg0MTM4OTMwCWZpbGU6Tm9taUZ1bl8wLjIuMjBfeDY0LXNldHVwLmV4ZQo4ckd3M1dXVDM5V21GcUZRR0E1dXh4dGozZE5BMDhrRzJpVytLMUZjTzR6Q0p4dHZlWEMyeVFpaGdoNytQaDFBeWZsck9HeStaWFpTUzFqZDRITGNDQT09Cg==",
+      "url": "https://github.com/nomifun/nomifun-tauri/releases/download/v0.2.20/NomiFun_0.2.20_x64-setup.exe"
     }
   }
 }
