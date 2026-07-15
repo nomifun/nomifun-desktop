@@ -4,7 +4,7 @@ use std::str::FromStr;
 use nomifun_api_types::{
     CronAgentConfigDto, CronJobMetadataDto, CronJobResponse, CronJobStateDto, CronScheduleDto,
 };
-use nomifun_common::TimestampMs;
+use nomifun_common::{ConversationId, CronJobId, PresetId, ProviderId, TimestampMs, UserId};
 use nomifun_db::models::CronJobRow;
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +168,7 @@ pub struct CronJob {
     pub message: String,
     pub execution_mode: ExecutionMode,
     pub agent_config: Option<CronAgentConfig>,
-    pub conversation_id: String,
+    pub conversation_id: Option<String>,
     pub conversation_title: Option<String>,
     pub agent_type: String,
     pub created_by: CreatedBy,
@@ -186,15 +186,23 @@ pub struct CronJob {
 }
 
 // ---------------------------------------------------------------------------
-// DB → Domain conversion
+// DB ↔ Domain conversion
 // ---------------------------------------------------------------------------
 
 pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
-    if row.user_id.trim().is_empty() {
-        return Err(CronError::Scheduler(format!(
-            "cron job {} has no owner",
-            row.id
-        )));
+    CronJobId::parse(&row.id).map_err(|error| {
+        CronError::Scheduler(format!("invalid cron job id {}: {error}", row.id))
+    })?;
+    UserId::parse(&row.user_id).map_err(|error| {
+        CronError::Scheduler(format!("cron job {} has invalid owner: {error}", row.id))
+    })?;
+    if let Some(conversation_id) = row.conversation_id.as_deref() {
+        ConversationId::parse(conversation_id).map_err(|error| {
+            CronError::Scheduler(format!(
+                "cron job {} has invalid conversation id: {error}",
+                row.id
+            ))
+        })?;
     }
     let schedule = parse_schedule(
         &row.schedule_kind,
@@ -212,11 +220,14 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
         .map(serde_json::from_str::<CronAgentConfig>)
         .transpose()?;
     if let Some(config) = agent_config.as_mut() {
-        config.preset_id = row.preset_id.clone().or_else(|| config.preset_id.clone());
-        config.preset_revision = row.preset_revision.or(config.preset_revision);
-        if let Some(raw) = row.preset_snapshot.as_deref() {
-            config.preset_snapshot = Some(serde_json::from_str(raw)?);
-        }
+        config.preset_id = row.preset_id.clone();
+        config.preset_revision = row.preset_revision;
+        config.preset_snapshot = row
+            .preset_snapshot
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        validate_agent_config_ids(&row.id, &row.agent_type, config)?;
     }
 
     let last_status = row
@@ -234,14 +245,7 @@ pub fn cron_job_from_row(row: CronJobRow) -> Result<CronJob, CronError> {
         message: row.payload_message,
         execution_mode,
         agent_config,
-        // The DB column is nullable (a `new_conversation` job has no anchor
-        // conversation until its first fire) and integer-keyed; the domain model
-        // keeps the empty-string convention for "unbound", stringifying the key
-        // otherwise.
-        conversation_id: row
-            .conversation_id
-            .map(|id| id.to_string())
-            .unwrap_or_default(),
+        conversation_id: row.conversation_id,
         conversation_title: row.conversation_title,
         agent_type: row.agent_type,
         created_by,
@@ -296,15 +300,26 @@ fn parse_schedule(
 }
 
 // ---------------------------------------------------------------------------
-// Domain → DB conversion
+// Domain ↔ DB conversion
 // ---------------------------------------------------------------------------
 
 pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
-    if job.user_id.trim().is_empty() {
-        return Err(CronError::Scheduler(format!(
-            "cron job {} has no owner",
-            job.id
-        )));
+    CronJobId::parse(&job.id).map_err(|error| {
+        CronError::Scheduler(format!("invalid cron job id {}: {error}", job.id))
+    })?;
+    UserId::parse(&job.user_id).map_err(|error| {
+        CronError::Scheduler(format!("cron job {} has invalid owner: {error}", job.id))
+    })?;
+    if let Some(conversation_id) = job.conversation_id.as_deref() {
+        ConversationId::parse(conversation_id).map_err(|error| {
+            CronError::Scheduler(format!(
+                "cron job {} has invalid conversation id: {error}",
+                job.id
+            ))
+        })?;
+    }
+    if let Some(config) = job.agent_config.as_ref() {
+        validate_agent_config_ids(&job.id, &job.agent_type, config)?;
     }
     let (schedule_kind, schedule_value, schedule_tz, schedule_description) =
         schedule_to_row_fields(&job.schedule);
@@ -335,17 +350,7 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
             .and_then(|config| config.preset_snapshot.as_ref())
             .map(serde_json::to_string)
             .transpose()?,
-        // Map the empty-string "unbound" convention to a NULL FK so the
-        // circular conversations↔cron_jobs FK is satisfied. The column is
-        // integer-keyed; a bound id is a positive key. Empty/`0`/non-integer
-        // all mean "unbound" → NULL (a `0` FK would violate the FK to
-        // conversations, which AUTOINCREMENTs from 1).
-        conversation_id: job
-            .conversation_id
-            .trim()
-            .parse::<i64>()
-            .ok()
-            .filter(|id| *id > 0),
+        conversation_id: job.conversation_id.clone(),
         conversation_title: job.conversation_title.clone(),
         agent_type: job.agent_type.clone(),
         created_by: job.created_by.as_str().to_owned(),
@@ -361,6 +366,41 @@ pub fn cron_job_to_row(job: &CronJob) -> Result<CronJobRow, CronError> {
         retry_count: job.retry_count,
         max_retries: job.max_retries,
     })
+}
+
+fn validate_agent_config_ids(
+    job_id: &str,
+    agent_type: &str,
+    config: &CronAgentConfig,
+) -> Result<(), CronError> {
+    if let Some(preset_id) = config.preset_id.as_deref() {
+        if preset_id.starts_with("preset_") {
+            PresetId::try_from(preset_id).map_err(|error| {
+                CronError::Scheduler(format!(
+                    "cron job {job_id} has invalid preset id: {error}"
+                ))
+            })?;
+        } else if preset_id.is_empty()
+            || preset_id.len() > 255
+            || !preset_id.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'.' | b':')
+            })
+        {
+            return Err(CronError::Scheduler(format!(
+                "cron job {job_id} has invalid preset catalog key"
+            )));
+        }
+    }
+    if agent_type == "nomi" && !config.backend.is_empty() {
+        ProviderId::try_from(config.backend.as_str()).map_err(|error| {
+            CronError::Scheduler(format!(
+                "cron job {job_id} has invalid nomi provider id: {error}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn schedule_to_row_fields(
@@ -396,7 +436,7 @@ fn schedule_to_row_fields(
 }
 
 // ---------------------------------------------------------------------------
-// Domain → DTO conversion
+// Domain ↔ DTO conversion
 // ---------------------------------------------------------------------------
 
 pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
@@ -447,9 +487,7 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
         message: job.message.clone(),
         execution_mode: job.execution_mode.as_str().to_owned(),
         metadata: CronJobMetadataDto {
-            // DTO field is the integer key; the domain holds it as a String
-            // (empty == unbound → `0` sentinel on the wire).
-            conversation_id: job.conversation_id.parse::<i64>().unwrap_or(0),
+            conversation_id: job.conversation_id.clone(),
             conversation_title: job.conversation_title.clone(),
             agent_type: job.agent_type.clone(),
             created_by: job.created_by.as_str().to_owned(),
@@ -470,7 +508,7 @@ pub fn cron_job_to_response(job: &CronJob) -> CronJobResponse {
 }
 
 // ---------------------------------------------------------------------------
-// DTO → Domain schedule conversion (for create/update)
+// DTO ↔ Domain schedule conversion (for create/update)
 // ---------------------------------------------------------------------------
 
 pub fn schedule_from_dto(dto: &CronScheduleDto) -> CronSchedule {
@@ -505,6 +543,9 @@ pub fn schedule_from_dto(dto: &CronScheduleDto) -> CronSchedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
 
     // -- Enum parsing ---------------------------------------------------------
 
@@ -658,8 +699,8 @@ mod tests {
 
     fn sample_row() -> CronJobRow {
         CronJobRow {
-            id: "cron_test1".into(),
-            user_id: "user_1".into(),
+            id: JOB_ID.into(),
+            user_id: USER_ID.into(),
             name: "Test Job".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -672,7 +713,7 @@ mod tests {
             preset_id: None,
             preset_revision: None,
             preset_snapshot: None,
-            conversation_id: Some(1),
+            conversation_id: Some("conv_0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),
             created_by: "user".into(),
@@ -692,8 +733,8 @@ mod tests {
 
     fn sample_job() -> CronJob {
         CronJob {
-            id: "cron_test1".into(),
-            user_id: "user_1".into(),
+            id: JOB_ID.into(),
+            user_id: USER_ID.into(),
             name: "Test Job".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -716,7 +757,7 @@ mod tests {
                 workspace: None,
                 clear_context_each_run: false,
             }),
-            conversation_id: "1".into(),
+            conversation_id: Some("conv_0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),
             created_by: CreatedBy::User,
@@ -738,7 +779,7 @@ mod tests {
     fn row_to_domain_roundtrip() {
         let row = sample_row();
         let job = cron_job_from_row(row).unwrap();
-        assert_eq!(job.id, "cron_test1");
+        assert_eq!(job.id, JOB_ID);
         assert_eq!(job.name, "Test Job");
         assert!(job.enabled);
         assert_eq!(
@@ -759,7 +800,7 @@ mod tests {
     fn domain_to_row_roundtrip() {
         let job = sample_job();
         let row = cron_job_to_row(&job).unwrap();
-        assert_eq!(row.id, "cron_test1");
+        assert_eq!(row.id, JOB_ID);
         assert_eq!(row.schedule_kind, "every");
         assert_eq!(row.schedule_value, "60000");
         assert_eq!(row.execution_mode, "existing");
@@ -872,13 +913,13 @@ mod tests {
         assert!(matches!(err, CronError::Json(_)));
     }
 
-    // -- Domain → DTO ---------------------------------------------------------
+    // -- Domain ↔ DTO ---------------------------------------------------------
 
     #[test]
     fn domain_to_dto_every() {
         let job = sample_job();
         let resp = cron_job_to_response(&job);
-        assert_eq!(resp.id, "cron_test1");
+        assert_eq!(resp.id, JOB_ID);
         assert_eq!(resp.name, "Test Job");
         assert!(resp.enabled);
         assert!(matches!(
@@ -890,7 +931,10 @@ mod tests {
         ));
         assert_eq!(resp.message, "do something");
         assert_eq!(resp.execution_mode, "existing");
-        assert_eq!(resp.metadata.conversation_id, 1);
+        assert_eq!(
+            resp.metadata.conversation_id.as_deref(),
+            Some("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+        );
         assert_eq!(resp.metadata.agent_type, "acp");
         assert_eq!(resp.metadata.created_by, "user");
         assert_eq!(resp.state.run_count, 5);
@@ -950,7 +994,7 @@ mod tests {
         assert_eq!(resp.execution_mode, "new_conversation");
     }
 
-    // -- DTO → Domain schedule ------------------------------------------------
+    // -- DTO ↔ Domain schedule ------------------------------------------------
 
     #[test]
     fn schedule_from_dto_at() {

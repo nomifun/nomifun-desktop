@@ -23,6 +23,7 @@ use nomifun_api_types::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use nomifun_common::RemoteAgentId;
 
 use crate::deps::GatewayDeps;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
@@ -145,7 +146,8 @@ struct RemoteAgentListParams {}
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentGetParams {
     /// Remote agent id returned by `nomi_remote_agent_list`.
-    id: i64,
+    #[schemars(with = "String")]
+    id: RemoteAgentId,
 }
 
 /// Register a new remote agent.
@@ -177,7 +179,8 @@ struct RemoteAgentCreateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentUpdateParams {
     /// Remote agent id to update.
-    id: i64,
+    #[schemars(with = "String")]
+    id: RemoteAgentId,
     /// New display name.
     #[serde(default)]
     name: Option<String>,
@@ -208,7 +211,8 @@ struct RemoteAgentUpdateParams {
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentDeleteParams {
     /// Remote agent id to permanently delete.
-    id: i64,
+    #[schemars(with = "String")]
+    id: RemoteAgentId,
 }
 
 /// Test connectivity to a remote agent endpoint without persisting it.
@@ -231,7 +235,8 @@ struct RemoteAgentTestParams {
 #[derive(Deserialize, JsonSchema)]
 struct RemoteAgentHandshakeParams {
     /// Remote agent id to connect and authenticate.
-    id: i64,
+    #[schemars(with = "String")]
+    id: RemoteAgentId,
 }
 
 // ── Model failover param structs ────────────────────────────────────────
@@ -397,7 +402,7 @@ async fn remote_agent_list(deps: Arc<GatewayDeps>, _p: RemoteAgentListParams) ->
 }
 
 async fn remote_agent_get(deps: Arc<GatewayDeps>, p: RemoteAgentGetParams) -> Value {
-    match deps.remote_agent_service.get(&p.id.to_string()).await {
+    match deps.remote_agent_service.get(&p.id).await {
         Ok(resp) => ok(resp),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -454,14 +459,14 @@ async fn remote_agent_update(deps: Arc<GatewayDeps>, p: RemoteAgentUpdateParams)
         avatar: p.avatar,
         description: p.description,
     };
-    match deps.remote_agent_service.update(&p.id.to_string(), req).await {
+    match deps.remote_agent_service.update(&p.id, req).await {
         Ok(resp) => ok(resp),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
 async fn remote_agent_delete(deps: Arc<GatewayDeps>, p: RemoteAgentDeleteParams) -> Value {
-    match deps.remote_agent_service.delete(&p.id.to_string()).await {
+    match deps.remote_agent_service.delete(&p.id).await {
         Ok(()) => ok(json!({ "deleted": p.id })),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -490,7 +495,7 @@ async fn remote_agent_test(deps: Arc<GatewayDeps>, p: RemoteAgentTestParams) -> 
 // ── model failover handlers ─────────────────────────────────────────────
 
 async fn remote_agent_handshake(deps: Arc<GatewayDeps>, p: RemoteAgentHandshakeParams) -> Value {
-    match deps.remote_agent_service.handshake(&p.id.to_string()).await {
+    match deps.remote_agent_service.handshake(&p.id).await {
         Ok(response) => ok(response),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -746,13 +751,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_agent_ids_use_the_numeric_list_contract() {
-        let get: RemoteAgentGetParams = serde_json::from_value(json!({ "id": 12 })).unwrap();
+    fn remote_agent_ids_are_canonical_strings() {
+        let id = "ragent_0190f5fe-7c00-7a00-8000-000000000012";
+        let get: RemoteAgentGetParams =
+            serde_json::from_value(json!({ "id": id })).unwrap();
         let handshake: RemoteAgentHandshakeParams =
-            serde_json::from_value(json!({ "id": 12 })).unwrap();
+            serde_json::from_value(json!({ "id": id })).unwrap();
 
-        assert_eq!(get.id, 12);
-        assert_eq!(handshake.id, 12);
+        assert_eq!(get.id.as_str(), id);
+        assert_eq!(handshake.id.as_str(), id);
+        assert!(serde_json::from_value::<RemoteAgentGetParams>(json!({ "id": "1" })).is_err());
     }
 
     #[test]

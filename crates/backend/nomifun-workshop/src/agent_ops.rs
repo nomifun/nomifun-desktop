@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{WorkshopEdgeId, WorkshopNodeId, generate_prefixed_id, now_ms};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -96,27 +96,26 @@ impl AgentOp {
                 from_node_id,
                 to_node_id,
             } => {
-                if from_node_id.trim().is_empty() || to_node_id.trim().is_empty() {
-                    return Err("connect requires non-empty from_node_id and to_node_id".into());
-                }
+                WorkshopNodeId::parse(from_node_id.as_str())
+                    .map_err(|error| format!("connect.from_node_id is not canonical: {error}"))?;
+                WorkshopNodeId::parse(to_node_id.as_str())
+                    .map_err(|error| format!("connect.to_node_id is not canonical: {error}"))?;
                 if from_node_id == to_node_id {
                     return Err("connect from_node_id and to_node_id must differ".into());
                 }
                 Ok(())
             }
             AgentOp::UpdateNodeData { node_id, patch } => {
-                if node_id.trim().is_empty() {
-                    return Err("update_node_data requires a non-empty node_id".into());
-                }
+                WorkshopNodeId::parse(node_id.as_str())
+                    .map_err(|error| format!("update_node_data.node_id is not canonical: {error}"))?;
                 if !patch.is_object() {
                     return Err("update_node_data.patch must be a JSON object".into());
                 }
                 Ok(())
             }
             AgentOp::DeleteNode { node_id } => {
-                if node_id.trim().is_empty() {
-                    return Err("delete_node requires a non-empty node_id".into());
-                }
+                WorkshopNodeId::parse(node_id.as_str())
+                    .map_err(|error| format!("delete_node.node_id is not canonical: {error}"))?;
                 Ok(())
             }
         }
@@ -304,7 +303,7 @@ pub fn apply_add_node(doc: &mut Value, spec: &AddNodeSpec) -> String {
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    let id = generate_prefixed_id("wsn");
+    let id = WorkshopNodeId::new().into_string();
     let (dw, dh) = default_size(&spec.kind);
     let x = spec.x.unwrap_or(80.0 + (count % 8) as f64 * 40.0);
     let y = spec.y.unwrap_or(80.0 + (count % 8) as f64 * 40.0);
@@ -329,6 +328,10 @@ pub fn apply_add_node(doc: &mut Value, spec: &AddNodeSpec) -> String {
 /// Apply a `connect` op. `Ok(Some(edge_id))` on a new edge, `Ok(None)` if it
 /// already existed, `Err(reason)` if a referenced node is missing.
 pub fn apply_connect(doc: &mut Value, from: &str, to: &str) -> Result<Option<String>, String> {
+    WorkshopNodeId::parse(from)
+        .map_err(|error| format!("connect: from_node_id is not canonical: {error}"))?;
+    WorkshopNodeId::parse(to)
+        .map_err(|error| format!("connect: to_node_id is not canonical: {error}"))?;
     let node_ids: HashSet<String> = doc
         .get("nodes")
         .and_then(Value::as_array)
@@ -352,7 +355,7 @@ pub fn apply_connect(doc: &mut Value, from: &str, to: &str) -> Result<Option<Str
     if exists {
         return Ok(None);
     }
-    let id = generate_prefixed_id("wse");
+    let id = WorkshopEdgeId::new().into_string();
     edges.push(json!({ "id": id, "from": from, "to": to }));
     Ok(Some(id))
 }
@@ -392,20 +395,22 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_ops() {
+        let first = WorkshopNodeId::new().into_string();
+        let second = WorkshopNodeId::new().into_string();
         assert!(add_op("image").validate().is_ok());
         assert!(add_op("loop").validate().is_err()); // not a creatable kind
         assert!(
             AgentOp::Connect {
-                from_node_id: "a".into(),
-                to_node_id: "a".into()
+                from_node_id: first.clone(),
+                to_node_id: first.clone()
             }
             .validate()
             .is_err()
         );
         assert!(
             AgentOp::Connect {
-                from_node_id: "a".into(),
-                to_node_id: "b".into()
+                from_node_id: first.clone(),
+                to_node_id: second.clone()
             }
             .validate()
             .is_ok()
@@ -420,7 +425,7 @@ mod tests {
         );
         assert!(
             AgentOp::UpdateNodeData {
-                node_id: "n".into(),
+                node_id: first,
                 patch: json!([1, 2])
             }
             .validate()
@@ -445,7 +450,7 @@ mod tests {
             data: Some(json!({ "prompt": "a fox", "mode": "image" })),
         };
         let id = apply_add_node(&mut doc, &spec);
-        assert!(id.starts_with("wsn_"));
+        assert!(WorkshopNodeId::parse(&id).is_ok());
         let node = &doc["nodes"][0];
         assert_eq!(node["id"], json!(id));
         assert_eq!(node["kind"], "generator");
@@ -457,18 +462,21 @@ mod tests {
 
     #[test]
     fn connect_validates_nodes_and_dedupes() {
+        let first = WorkshopNodeId::new().into_string();
+        let second = WorkshopNodeId::new().into_string();
         let mut doc = json!({
-            "nodes": [{ "id": "a" }, { "id": "b" }],
+            "nodes": [{ "id": first }, { "id": second }],
             "edges": []
         });
         // missing node → Err
-        assert!(apply_connect(&mut doc, "a", "zzz").is_err());
+        assert!(apply_connect(&mut doc, &first, WorkshopNodeId::new().as_str()).is_err());
         // fresh edge
-        let e1 = apply_connect(&mut doc, "a", "b").unwrap();
+        let e1 = apply_connect(&mut doc, &first, &second).unwrap();
         assert!(e1.is_some());
+        assert!(WorkshopEdgeId::parse(e1.as_deref().unwrap()).is_ok());
         assert_eq!(doc["edges"].as_array().unwrap().len(), 1);
         // duplicate → Ok(None), no new edge
-        let e2 = apply_connect(&mut doc, "a", "b").unwrap();
+        let e2 = apply_connect(&mut doc, &first, &second).unwrap();
         assert!(e2.is_none());
         assert_eq!(doc["edges"].as_array().unwrap().len(), 1);
     }

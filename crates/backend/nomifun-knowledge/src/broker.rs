@@ -675,6 +675,7 @@ mod platform {
                 .await
                 .unwrap()
                 .id
+                .into_string()
         }
 
         async fn wait_until_revoked(
@@ -711,7 +712,7 @@ mod platform {
             let service = Arc::new(make_service(&data));
             let (config, _) = test_config();
             let socket = socket_path(&temp);
-            let broker = start_at(socket.clone(), config, Arc::downgrade(&service), "owner".into())
+            let broker = start_at(socket.clone(), config, Arc::downgrade(&service), "user_019abcde-f012-7abc-8abc-0123456789ab".into())
                 .await
                 .unwrap();
             assert_eq!(std::fs::metadata(socket.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
@@ -735,6 +736,8 @@ mod platform {
             let service = Arc::new(make_service(&data));
             let kb_a = create_base(&service, temp.path(), "base-a").await;
             let kb_b = create_base(&service, temp.path(), "base-b").await;
+            let kb_a_id = nomifun_common::KnowledgeBaseId::parse(kb_a).unwrap();
+            let kb_b_id = nomifun_common::KnowledgeBaseId::parse(kb_b).unwrap();
             service
                 .set_binding(
                     "workpath",
@@ -743,7 +746,7 @@ mod platform {
                         enabled: true,
                         writeback: true,
                         writeback_mode: "staged".into(),
-                        kb_ids: vec![kb_a.clone()],
+                        kb_ids: vec![kb_a_id.clone()],
                         ..KnowledgeBinding::default()
                     },
                 )
@@ -756,7 +759,7 @@ mod platform {
                     KnowledgeBinding {
                         enabled: true,
                         writeback: false,
-                        kb_ids: vec![kb_b.clone()],
+                        kb_ids: vec![kb_b_id.clone()],
                         ..KnowledgeBinding::default()
                     },
                 )
@@ -782,25 +785,25 @@ mod platform {
                 socket.clone(),
                 config,
                 Arc::downgrade(&service),
-                "installation-owner".into(),
+                "user_019abcde-f012-7abc-8abc-0123456789ab".into(),
             )
             .await
             .unwrap();
             let connection_a = connect_at(&socket, &workspace_a).await.unwrap();
             let claims_a = &connection_a.bootstrap().access.claims;
-            assert_eq!(claims_a.user_id, "installation-owner");
+            assert_eq!(claims_a.user_id.as_str(), "user_019abcde-f012-7abc-8abc-0123456789ab");
             assert_eq!(claims_a.session.kind, LoopbackSessionKind::ExternalProcess);
-            assert_eq!(claims_a.scope.kb_ids, vec![kb_a.clone()]);
+            assert_eq!(claims_a.scope.kb_ids, vec![kb_a_id.clone()]);
             assert!(claims_a.allows(KNOWLEDGE_WRITE_TOOL));
 
             let connection_b = connect_at(&socket, &workspace_b).await.unwrap();
             let claims_b = &connection_b.bootstrap().access.claims;
-            assert_eq!(claims_b.scope.kb_ids, vec![kb_b.clone()]);
+            assert_eq!(claims_b.scope.kb_ids, vec![kb_b_id.clone()]);
             assert!(!claims_b.allows(KNOWLEDGE_WRITE_TOOL));
 
             let unbound_connection = connect_at(&socket, &unbound).await.unwrap();
             let unbound_claims = &unbound_connection.bootstrap().access.claims;
-            assert_eq!(unbound_claims.scope.kb_ids, vec![kb_a, kb_b]);
+            assert_eq!(unbound_claims.scope.kb_ids, vec![kb_a_id, kb_b_id]);
             assert!(!unbound_claims.allows(KNOWLEDGE_WRITE_TOOL));
         }
 
@@ -824,7 +827,7 @@ mod platform {
                     canonical_workspace.to_str().unwrap(),
                     KnowledgeBinding {
                         enabled: true,
-                        kb_ids: vec![kb],
+                        kb_ids: vec![nomifun_common::KnowledgeBaseId::parse(kb).unwrap()],
                         ..KnowledgeBinding::default()
                     },
                 )
@@ -836,7 +839,7 @@ mod platform {
                 socket.clone(),
                 config,
                 Arc::downgrade(&service),
-                "owner".into(),
+                "user_019abcde-f012-7abc-8abc-0123456789ab".into(),
             )
             .await
             .unwrap();
@@ -1361,7 +1364,7 @@ mod platform {
                 current_sid.clone(),
                 config,
                 Arc::downgrade(&service),
-                "installation-owner".into(),
+                "user_019abcde-f012-7abc-8abc-0123456789ab".into(),
             )
             .await
             .unwrap();
@@ -1372,7 +1375,7 @@ mod platform {
                 .await
                 .unwrap();
             let claims = &connection.bootstrap().access.claims;
-            assert_eq!(claims.user_id, "installation-owner");
+            assert_eq!(claims.user_id.as_str(), "user_019abcde-f012-7abc-8abc-0123456789ab");
             assert_eq!(claims.session.kind, LoopbackSessionKind::ExternalProcess);
             assert_eq!(
                 claims.scope.workspace_path,

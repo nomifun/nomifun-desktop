@@ -49,7 +49,7 @@ const MAX_SOM_LABELS: usize = 50;
 /// allowlist) on the first action.
 ///
 /// Carries the shared vault file path (`{data_dir}/browser-secrets/shared/secrets.json`,
-/// resolved by `nomifun_secret::pet_vault_path` which — 去 per-pet 键化, browser identity
+/// resolved by `nomifun_secret::shared_vault_path`; browser identity
 /// globally shared — ignores its key and routes to the one shared vault) + the
 /// machine-bound 32-byte key (the app's `encryption_key`, the same one the registration
 /// endpoint used to encrypt the values). `Clone` so it can ride through `NomiResolvedConfig`
@@ -3447,7 +3447,7 @@ mod tests {
         // allowed_origins 派生 firewall.allow_etld1。
         let dir = tempfile::tempdir().expect("tempdir");
         let key = [0x42u8; nomifun_secret::KEY_SIZE];
-        let vault_path = nomifun_secret::pet_vault_path(dir.path(), "pet-1");
+        let vault_path = nomifun_secret::shared_vault_path(dir.path());
         let mut store = nomifun_secret::SecretStore::new(key);
         store.register("pw", "the-secret", vec!["x.com".into()]).unwrap();
         store.register("tok", "ghp", vec!["github.com".into()]).unwrap();
@@ -3489,7 +3489,7 @@ mod tests {
     fn ensure_secret_store_and_firewall_missing_vault_degrades_gracefully() {
         // secret_source 指向不存在的 vault（首次注册前）→ 空 store + 空 allowlist（绝不 panic）。
         let dir = tempfile::tempdir().expect("tempdir");
-        let vault_path = nomifun_secret::pet_vault_path(dir.path(), "never-registered");
+        let vault_path = nomifun_secret::shared_vault_path(dir.path());
         let t = BrowserTool::with_data_dir(dir.path().join("bdata"), false)
             .secret_source(BrowserSecretSource { vault_path, key: [0x42; nomifun_secret::KEY_SIZE] });
         t.ensure_secret_store_and_firewall();

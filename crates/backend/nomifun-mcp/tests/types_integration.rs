@@ -15,7 +15,7 @@ use nomifun_mcp::{McpServer, McpServerTransport, McpTool};
 
 fn row(transport_type: &str, transport_config: &str, tools: Option<&str>, status: &str) -> McpServerRow {
     McpServerRow {
-        id: 42,
+        id: nomifun_common::McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000042").unwrap(),
         name: "integration-test".into(),
         description: Some("Integration test server".into()),
         enabled: true,
@@ -48,7 +48,7 @@ fn stdio_server_full_pipeline() {
     let server = McpServer::from_row(r).unwrap();
 
     // Verify all fields
-    assert_eq!(server.id, 42);
+    assert_eq!(server.id.as_str(), "mcp_0190f5fe-7c00-7a00-8000-000000000042");
     assert_eq!(server.name, "integration-test");
     assert_eq!(server.description.as_deref(), Some("Integration test server"));
     assert!(server.enabled);
@@ -74,7 +74,7 @@ fn stdio_server_full_pipeline() {
 
     // Convert to API response and verify
     let resp = server.into_response();
-    assert_eq!(resp.id, 42);
+    assert_eq!(resp.id.as_str(), "mcp_0190f5fe-7c00-7a00-8000-000000000042");
     assert_eq!(resp.last_test_status, McpServerStatus::Connected);
     assert!(resp.tools.is_some());
     assert_eq!(resp.tools.unwrap().len(), 2);

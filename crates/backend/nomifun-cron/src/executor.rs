@@ -9,8 +9,8 @@ use nomifun_ai_agent::types::SendMessageData;
 use nomifun_ai_agent::{AgentRegistry, AgentStreamEvent};
 use nomifun_api_types::{CreateConversationRequest, SendMessageRequest};
 use nomifun_common::{
-    AgentType, AppError, ExecutionAuthority, ProviderWithModel, now_ms,
-    workspace_path_has_edge_whitespace_segment,
+    AgentType, AppError, ConversationId, CronJobId, ExecutionAuthority, ProviderWithModel, UserId,
+    now_ms, validate_prefixed_id, workspace_path_has_edge_whitespace_segment,
 };
 use nomifun_conversation::ConversationService;
 use nomifun_db::models::MessageRow;
@@ -32,31 +32,16 @@ use crate::skill_file::{
     cron_skill_name, read_skill_content, write_raw_skill_file, write_skill_file,
 };
 use crate::skill_suggest::SkillSuggestDetector;
-use crate::types::{CronJob, ExecutionMode};
+use crate::types::{CronJob, ExecutionMode, cron_job_to_row};
 
 pub const RETRY_INTERVAL_MS: u64 = 30_000;
 const SKILL_SUGGEST_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 const TEMP_WORKSPACE_ID_EXTRA_KEY: &str = "temp_workspace_id";
 
-/// Parse a string-keyed conversation id into the integer DB/service key. Cron
-/// keeps ids as `String`/`&str` through its agent path and converts only at the
-/// repository boundary. A `NotFound` is the right failure for an id that cannot
-/// be an integer key.
-fn parse_i64_id(id: &str) -> Result<i64, AppError> {
-    id.parse::<i64>()
-        .map_err(|_| AppError::NotFound(format!("session {id}")))
-}
-
-/// Resolve a conversation id string to its integer key, treating empty / `0` /
-/// non-integer values as "unbound" (`None`) rather than an error. Cron's lazy
-/// and `new_conversation` jobs legitimately carry an unbound conversation id
-/// until their first run materializes a conversation.
-fn parse_conversation_key(conversation_id: &str) -> Option<i64> {
-    conversation_id
-        .trim()
-        .parse::<i64>()
-        .ok()
-        .filter(|id| *id > 0)
+fn parse_conversation_id(id: &str) -> Result<&str, AppError> {
+    ConversationId::try_from(id)
+        .map(|_| id)
+        .map_err(|_| AppError::NotFound(format!("conversation {id}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,9 +135,16 @@ impl JobExecutor {
     }
 
     pub async fn execute(&self, job: &CronJob) -> ExecutionResult {
-        let conversation_id = &job.conversation_id;
-
-        if self.busy_guard.is_busy(conversation_id) {
+        if let Err(error) = cron_job_to_row(job) {
+            return ExecutionResult::Error {
+                message: error.to_string(),
+            };
+        }
+        if job
+            .conversation_id
+            .as_deref()
+            .is_some_and(|conversation_id| self.busy_guard.is_busy(conversation_id))
+        {
             return self.handle_busy(job);
         }
 
@@ -161,7 +153,7 @@ impl JobExecutor {
         // mutation; new-conversation mode receives a new ordinary Conversation
         // and is checked again after resolution below.
         if matches!(job.execution_mode, ExecutionMode::Existing)
-            && !conversation_id.trim().is_empty()
+            && let Some(conversation_id) = job.conversation_id.as_deref()
             && let Err(error) = self
                 .ensure_public_conversation_mutable(job, conversation_id)
                 .await
@@ -225,10 +217,11 @@ impl JobExecutor {
         &self,
         job: &CronJob,
     ) -> Result<PreparedExecution, CronError> {
+        cron_job_to_row(job)?;
         if matches!(job.execution_mode, ExecutionMode::Existing)
-            && !job.conversation_id.trim().is_empty()
+            && let Some(conversation_id) = job.conversation_id.as_deref()
         {
-            self.ensure_public_conversation_mutable(job, &job.conversation_id)
+            self.ensure_public_conversation_mutable(job, conversation_id)
                 .await?;
         }
         let saved_skill = match self.prepare_authorized_saved_skill(job).await {
@@ -305,12 +298,7 @@ impl JobExecutor {
         &self,
         conversation_id: &str,
     ) -> Result<Option<nomifun_db::models::ConversationRow>, CronError> {
-        // Unbound/empty conversation ids resolve to "no row" rather than an
-        // error — lazy-bind and new_conversation jobs legitimately carry one
-        // until their first run materializes a conversation.
-        let Some(key) = parse_conversation_key(conversation_id) else {
-            return Ok(None);
-        };
+        let key = parse_conversation_id(conversation_id)?;
         self.conversation_repo
             .get(key)
             .await
@@ -321,7 +309,7 @@ impl JobExecutor {
         &self,
         job: &CronJob,
     ) -> Result<String, CronError> {
-        self.resolve_execution_workspace_raw(job, &job.conversation_id)
+        self.resolve_execution_workspace_raw(job, job.conversation_id.as_deref())
             .await
     }
 
@@ -350,6 +338,8 @@ impl JobExecutor {
         content: &str,
         tip_type: &str,
     ) -> Result<(), CronError> {
+        UserId::try_from(owner_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
         let row = self
             .get_conversation_row(conversation_id)
             .await?
@@ -360,14 +350,11 @@ impl JobExecutor {
                 ))
             })?;
         debug_assert_eq!(row.user_id, owner_id);
-        // `id` must stay in the short-id family so the frontend message list
-        // sees a uniform shape across all sources (see ConversationService's
-        // mint_msg_id contract). A follow-up PR will move this insert behind
-        // ConversationService entirely; for now we reuse the mint function to
-        // keep the id format consistent without reshuffling ownership.
+        // Reuse the conversation service's canonical message-ID minting
+        // boundary so every source persists the same `msg_*` contract.
         let row = MessageRow {
             id: ConversationService::mint_msg_id(),
-            conversation_id: parse_i64_id(conversation_id)?,
+            conversation_id: parse_conversation_id(conversation_id)?.to_owned(),
             msg_id: None,
             r#type: "tips".into(),
             content: serde_json::json!({
@@ -402,6 +389,10 @@ impl JobExecutor {
         conversation_id: &str,
         cron_job_id: &str,
     ) -> Result<(), CronError> {
+        UserId::try_from(owner_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
+        CronJobId::try_from(cron_job_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid cron job id: {error}")))?;
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
             return Err(CronError::Scheduler(format!(
                 "conversation {conversation_id} not found while binding cron job {cron_job_id}"
@@ -423,79 +414,11 @@ impl JobExecutor {
             ..Default::default()
         };
         self.conversation_repo
-            .update(parse_i64_id(conversation_id)?, &update)
+            .update(parse_conversation_id(conversation_id)?, &update)
             .await
             .map_err(CronError::Database)
     }
 
-    pub async fn persist_workspace_if_missing(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        resolved_workspace: &str,
-    ) -> Result<(), CronError> {
-        let resolved_workspace = resolved_workspace.trim();
-        if resolved_workspace.is_empty() {
-            return Ok(());
-        }
-
-        let conversation_key = parse_i64_id(conversation_id)?;
-        let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} not found while persisting cron workspace"
-            )));
-        };
-        if row.user_id != owner_id {
-            return Err(CronError::Scheduler(format!(
-                "conversation {conversation_id} owner does not match cron owner {owner_id}"
-            )));
-        }
-
-        let mut extra: serde_json::Value =
-            serde_json::from_str(&row.extra).unwrap_or_else(|_| serde_json::json!({}));
-        let Some(obj) = extra.as_object_mut() else {
-            extra = serde_json::json!({});
-            extra.as_object_mut().expect("json object").insert(
-                "workspace".to_owned(),
-                serde_json::Value::String(resolved_workspace.to_owned()),
-            );
-            let update = ConversationRowUpdate {
-                extra: Some(extra.to_string()),
-                updated_at: Some(now_ms()),
-                ..Default::default()
-            };
-            return self
-                .conversation_repo
-                .update(conversation_key, &update)
-                .await
-                .map_err(CronError::Database);
-        };
-
-        let current_workspace = obj
-            .get("workspace")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .unwrap_or_default();
-
-        if !current_workspace.is_empty() {
-            return Ok(());
-        }
-
-        obj.insert(
-            "workspace".to_owned(),
-            serde_json::Value::String(resolved_workspace.to_owned()),
-        );
-
-        let update = ConversationRowUpdate {
-            extra: Some(extra.to_string()),
-            updated_at: Some(now_ms()),
-            ..Default::default()
-        };
-        self.conversation_repo
-            .update(conversation_key, &update)
-            .await
-            .map_err(CronError::Database)
-    }
 }
 
 impl JobExecutor {
@@ -532,15 +455,14 @@ impl JobExecutor {
                 // A job created without an anchor conversation (the frontend
                 // creates "continue-this-conversation" jobs from the cron page
                 // before any conversation exists) keeps `conversation_id`
-                // empty until the first run. Treat that first run as a new
+                // absent until the first run. Treat that first run as a new
                 // conversation; the service layer then persists the new id
                 // back onto the job so subsequent runs reuse it.
-                if job.conversation_id.trim().is_empty() {
+                let Some(conversation_id) = job.conversation_id.as_deref() else {
                     return self.create_new_conversation(job, saved_skill).await;
-                }
-                self.verify_target_conversation_owner(job, &job.conversation_id)
-                    .await?;
-                Ok(job.conversation_id.clone())
+                };
+                self.verify_target_conversation_owner(job, conversation_id).await?;
+                Ok(conversation_id.to_owned())
             }
             ExecutionMode::NewConversation => self.create_new_conversation(job, saved_skill).await,
         }
@@ -583,11 +505,9 @@ impl JobExecutor {
             self.conversation_service.create(&job.user_id, req).await
         }
         .map_err(CronError::from_conversation_create)?;
-
-        // The service returns the integer key; cron carries conversation ids as
-        // `String` through the rest of its agent path (Option A), so stringify
-        // once here and reuse it for the workspace/persist boundaries below.
-        let conversation_id = response.id.to_string();
+        // Preserve the canonical conversation entity ID through all cron
+        // workspace and persistence boundaries.
+        let conversation_id = response.id;
 
         let response_workspace = response
             .extra
@@ -597,26 +517,9 @@ impl JobExecutor {
             .unwrap_or_default();
 
         if response_workspace.is_empty() {
-            let fallback_workspace = default_temp_workspace_path(
-                &self.work_dir,
-                &agent_type,
-                job,
-                &conversation_id,
-                Some(response.created_at),
-                &response.extra,
-            );
-            std::fs::create_dir_all(&fallback_workspace).map_err(|err| {
-                CronError::Scheduler(format!(
-                    "create fallback cron workspace {}: {err}",
-                    fallback_workspace.display()
-                ))
-            })?;
-            self.persist_workspace_if_missing(
-                &job.user_id,
-                &conversation_id,
-                &fallback_workspace.to_string_lossy(),
-            )
-            .await?;
+            return Err(CronError::Scheduler(format!(
+                "new conversation {conversation_id} did not persist a canonical managed workspace"
+            )));
         }
 
         info!(
@@ -672,10 +575,17 @@ impl JobExecutor {
                 };
             }
         };
-        let model =
-            nomifun_conversation::runtime_options::provider_model_from_conversation_row(
-                &conversation_row,
-            );
+        let model = match nomifun_conversation::runtime_options::provider_model_from_conversation_row(
+            &conversation_row,
+        ) {
+            Ok(model) => model,
+            Err(error) => {
+                error!(job_id = %job.id, conversation_id, error = %error, "Failed to resolve canonical conversation model");
+                return ExecutionResult::Error {
+                    message: error.to_string(),
+                };
+            }
+        };
         let delegation_policy = match nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&conversation_row) {
             Ok(policy) => policy,
             Err(error) => {
@@ -690,18 +600,60 @@ impl JobExecutor {
                 };
             }
         };
-        let workspace = match self.resolve_execution_workspace(job, conversation_id).await {
-            Ok(workspace) => workspace,
-            Err(e) => {
-                error!(
-                    job_id = %job.id,
-                    conversation_id,
-                    error = %e,
-                    "Failed to resolve cron execution workspace"
-                );
-                return ExecutionResult::Error {
-                    message: e.to_string(),
-                };
+        let row_extra =
+            match serde_json::from_str::<serde_json::Value>(&conversation_row.extra) {
+                Ok(extra) => extra,
+                Err(error) => {
+                    return ExecutionResult::Error {
+                        message: format!(
+                            "conversation {conversation_id} has invalid extra JSON: {error}"
+                        ),
+                    };
+                }
+            };
+        let managed_workspace = row_extra.get(TEMP_WORKSPACE_ID_EXTRA_KEY).is_some();
+        let workspace = if managed_workspace {
+            match default_temp_workspace_path(
+                &self.work_dir,
+                &agent_type,
+                job,
+                conversation_id,
+                &row_extra,
+            ) {
+                Ok(workspace) => workspace.to_string_lossy().into_owned(),
+                Err(error) => {
+                    error!(
+                        job_id = %job.id,
+                        conversation_id,
+                        error = %error,
+                        "Failed to resolve managed cron workspace"
+                    );
+                    return ExecutionResult::Error {
+                        message: error.to_string(),
+                    };
+                }
+            }
+        } else {
+            match self.resolve_execution_workspace(job, conversation_id).await {
+                Ok(workspace) if !workspace.trim().is_empty() => workspace,
+                Ok(_) => {
+                    return ExecutionResult::Error {
+                        message: format!(
+                            "conversation {conversation_id} has neither a custom workspace nor a canonical temp_workspace_id"
+                        ),
+                    };
+                }
+                Err(e) => {
+                    error!(
+                        job_id = %job.id,
+                        conversation_id,
+                        error = %e,
+                        "Failed to resolve cron execution workspace"
+                    );
+                    return ExecutionResult::Error {
+                        message: e.to_string(),
+                    };
+                }
             }
         };
 
@@ -721,9 +673,21 @@ impl JobExecutor {
         } else {
             Vec::new()
         };
-        let build_extra = build_task_extra(&self.agent_registry, job, &skill_names).await;
-        let requested_workspace_missing = workspace.trim().is_empty();
-
+        let mut build_extra =
+            build_task_extra(&self.agent_registry, job, &skill_names).await;
+        if managed_workspace {
+            let temp_workspace_id = row_extra
+                .get(TEMP_WORKSPACE_ID_EXTRA_KEY)
+                .cloned()
+                .expect("managed workspace marker checked above");
+            build_extra[TEMP_WORKSPACE_ID_EXTRA_KEY] = temp_workspace_id;
+            // The conversation row is the source of truth for the backend
+            // label that was used when its managed workspace was minted.
+            // Cron job configuration may be stale after restore/import.
+            if let Some(backend) = row_extra.get("backend").and_then(serde_json::Value::as_str) {
+                build_extra["backend"] = serde_json::Value::String(backend.to_owned());
+            }
+        }
         // Resolve this conversation instance's identity (row `created_at`) for
         // nomi session ownership validation; best-effort (None skips it).
         let conversation_created_at = Some(conversation_row.created_at);
@@ -756,22 +720,6 @@ impl JobExecutor {
                 };
             }
         };
-
-        if requested_workspace_missing
-            && let Err(e) = self
-                .persist_workspace_if_missing(&job.user_id, conversation_id, agent.workspace())
-                .await
-        {
-            error!(
-                job_id = %job.id,
-                conversation_id,
-                error = %e,
-                "Failed to persist resolved cron workspace back to conversation"
-            );
-            return ExecutionResult::Error {
-                message: e.to_string(),
-            };
-        }
 
         if let Err(e) = self.ensure_agent_session_mode(job, &agent).await {
             error!(
@@ -905,7 +853,7 @@ impl JobExecutor {
         job: &CronJob,
     ) -> Result<(), CronError> {
         let created_at = now_ms();
-        let row = build_cron_trigger_artifact(conversation_id, job, created_at);
+        let row = build_cron_trigger_artifact(conversation_id, job, created_at)?;
         let row = self
             .conversation_repo
             .upsert_artifact(&row)
@@ -921,6 +869,10 @@ impl JobExecutor {
         owner_id: &str,
         job_id: &str,
     ) -> Result<(), CronError> {
+        UserId::try_from(owner_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid cron owner id: {error}")))?;
+        CronJobId::try_from(job_id)
+            .map_err(|error| CronError::Scheduler(format!("invalid cron job id: {error}")))?;
         let rows = self
             .conversation_repo
             .mark_skill_suggest_artifacts_saved(owner_id, job_id, now_ms())
@@ -937,7 +889,7 @@ impl JobExecutor {
     async fn resolve_execution_workspace_raw(
         &self,
         job: &CronJob,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
     ) -> Result<String, CronError> {
         if let Some(workspace) = job
             .agent_config
@@ -947,10 +899,10 @@ impl JobExecutor {
             return Ok(workspace.to_owned());
         }
 
+        let Some(conversation_id) = conversation_id else {
+            return Ok(String::new());
+        };
         let Some(row) = self.get_conversation_row(conversation_id).await? else {
-            if conversation_id.trim().is_empty() {
-                return Ok(String::new());
-            }
             return Err(CronError::Scheduler(format!(
                 "conversation {conversation_id} not found while resolving cron workspace"
             )));
@@ -976,7 +928,7 @@ impl JobExecutor {
         conversation_id: &str,
     ) -> Result<String, CronError> {
         Ok(self
-            .resolve_execution_workspace_raw(job, conversation_id)
+            .resolve_execution_workspace_raw(job, Some(conversation_id))
             .await?
             .trim()
             .to_owned())
@@ -1156,7 +1108,7 @@ impl JobExecutor {
     ) -> Result<Vec<String>, CronError> {
         let Some(row) = self
             .conversation_repo
-            .get(parse_i64_id(conversation_id)?)
+            .get(parse_conversation_id(conversation_id)?)
             .await
             .map_err(CronError::Database)?
         else {
@@ -1236,14 +1188,14 @@ async fn parse_agent_type(registry: &AgentRegistry, agent_type_str: &str) -> Age
 ///
 /// For nomi, `agent_config.backend` holds the provider_id (a DB hash, not a
 /// vendor label). `CronService::add_job`/`update_job` already rejects nomi
-/// jobs lacking this field, so the `None` return here is defensive for any
-/// legacy in-memory row that somehow slipped through.
+/// jobs lacking a canonical provider ID, so the `None` return here is a
+/// defensive check for invalid in-memory values.
 fn resolve_model(job: &CronJob) -> Option<ProviderWithModel> {
     if job.agent_type != "nomi" {
         return None;
     }
     let config = job.agent_config.as_ref()?;
-    if config.backend.trim().is_empty() {
+    if nomifun_common::ProviderId::try_from(config.backend.as_str()).is_err() {
         return None;
     }
     Some(ProviderWithModel {
@@ -1343,10 +1295,6 @@ async fn build_task_extra(
     let mut extra = serde_json::Map::new();
     extra.insert(
         "cron_job_id".to_owned(),
-        serde_json::Value::String(job.id.clone()),
-    );
-    extra.insert(
-        "cronJobId".to_owned(),
         serde_json::Value::String(job.id.clone()),
     );
     if !skills.is_empty() {
@@ -1450,10 +1398,6 @@ async fn build_conversation_extra(
         serde_json::Value::String(job.id.clone()),
     );
     extra.insert(
-        "cronJobId".to_owned(),
-        serde_json::Value::String(job.id.clone()),
-    );
-    extra.insert(
         "exclude_auto_inject_skills".to_owned(),
         serde_json::Value::Array(vec![serde_json::Value::String("cron".to_owned())]),
     );
@@ -1544,14 +1488,20 @@ fn default_temp_workspace_path(
     agent_type: &AgentType,
     job: &CronJob,
     conversation_id: &str,
-    conversation_created_at: Option<i64>,
     extra: &serde_json::Value,
-) -> std::path::PathBuf {
+) -> Result<std::path::PathBuf, CronError> {
     let label = if *agent_type == AgentType::Acp {
-        job.agent_config
-            .as_ref()
-            .map(|config| config.backend.trim())
+        extra
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
             .filter(|backend| !backend.is_empty())
+            .or_else(|| {
+                job.agent_config
+                    .as_ref()
+                    .map(|config| config.backend.trim())
+                    .filter(|backend| !backend.is_empty())
+            })
             .unwrap_or("acp")
             .to_owned()
     } else {
@@ -1563,15 +1513,20 @@ fn default_temp_workspace_path(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| match conversation_created_at {
-            Some(created_at) => format!("legacy-{conversation_id}-{created_at}"),
-            None => format!("legacy-{conversation_id}"),
-        });
+        .ok_or_else(|| {
+            CronError::Scheduler(format!(
+                "conversation {conversation_id} has no canonical temp_workspace_id"
+            ))
+        })?;
+    validate_prefixed_id(temp_workspace_id, "ws").map_err(|error| {
+        CronError::Scheduler(format!(
+            "conversation {conversation_id} has invalid temp_workspace_id '{temp_workspace_id}': {error}"
+        ))
+    })?;
 
-    data_dir
+    Ok(data_dir
         .join("conversations")
-        .join(format!("{label}-temp-{temp_workspace_id}"))
+        .join(format!("{label}-temp-{temp_workspace_id}")))
 }
 
 fn schedule_description_ref(schedule: &crate::types::CronSchedule) -> Option<&str> {
@@ -1625,10 +1580,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::{RwLock, broadcast};
 
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const JOB_SKILL_NAME: &str = "cron-cron_0190f5fe-7c00-7a00-8000-000000000001";
+
     fn sample_job() -> CronJob {
         CronJob {
-            id: "cron_test1".into(),
-            user_id: "user_1".into(),
+            id: JOB_ID.into(),
+            user_id: USER_ID.into(),
             name: "Test Job".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -1651,7 +1611,7 @@ mod tests {
                 workspace: Some("/home/user/project".into()),
                 clear_context_each_run: false,
             }),
-            conversation_id: "1".into(),
+            conversation_id: Some("conv_0190f5fe-7c00-7a00-8abc-012345678901".into()),
             conversation_title: Some("Test Conv".into()),
             agent_type: "acp".into(),
             created_by: CreatedBy::User,
@@ -1689,43 +1649,38 @@ mod tests {
             Path::new("/work"),
             &AgentType::Acp,
             &job,
-            "1",
-            Some(1000),
-            &serde_json::json!({ "temp_workspace_id": "ws_abc" }),
-        );
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+            &serde_json::json!({
+                "temp_workspace_id": "ws_0190f5fe-7c00-7a00-8abc-012345678901"
+            }),
+        )
+        .unwrap();
 
         assert_eq!(
             path,
             Path::new("/work")
                 .join("conversations")
-                .join("acp-temp-ws_abc")
+                .join("acp-temp-ws_0190f5fe-7c00-7a00-8abc-012345678901")
         );
     }
 
     #[test]
-    fn default_temp_workspace_path_legacy_fallback_includes_created_at() {
+    fn default_temp_workspace_path_missing_or_malformed_token_fails_closed() {
         let job = sample_job();
-        let first = default_temp_workspace_path(
-            Path::new("/work"),
-            &AgentType::Acp,
-            &job,
-            "1",
-            Some(1000),
-            &serde_json::json!({}),
-        );
-        let second = default_temp_workspace_path(
-            Path::new("/work"),
-            &AgentType::Acp,
-            &job,
-            "1",
-            Some(2000),
-            &serde_json::json!({}),
-        );
-
-        assert_ne!(
-            first, second,
-            "cron fallback workspace must not be derived solely from reusable conversation_id"
-        );
+        for extra in [
+            serde_json::json!({}),
+            serde_json::json!({ "temp_workspace_id": "ws_abc" }),
+            serde_json::json!({ "temp_workspace_id": 7 }),
+        ] {
+            let result = default_temp_workspace_path(
+                Path::new("/work"),
+                &AgentType::Acp,
+                &job,
+                "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+                &extra,
+            );
+            assert!(result.is_err());
+        }
     }
 
     // -- handle_busy tests ---------------------------------------------------
@@ -1802,7 +1757,7 @@ mod tests {
         let prompt = build_prompt(
             &job,
             Some(&SavedSkillContext {
-                name: "cron-cron_test1".into(),
+                name: JOB_SKILL_NAME.into(),
                 raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
             true,
@@ -1821,7 +1776,7 @@ mod tests {
         let prompt = build_prompt(
             &job,
             Some(&SavedSkillContext {
-                name: "cron-cron_test1".into(),
+                name: JOB_SKILL_NAME.into(),
                 raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
             true,
@@ -1940,7 +1895,7 @@ mod tests {
         let job = CronJob {
             agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
-                backend: "4056cdea".into(),
+                backend: PROVIDER_ID.into(),
                 name: "OpenAI".into(),
                 cli_path: None,
                 custom_agent_id: None,
@@ -1956,7 +1911,7 @@ mod tests {
             ..sample_job()
         };
         let model = resolve_model(&job).expect("nomi + full config returns Some");
-        assert_eq!(model.provider_id, "4056cdea");
+        assert_eq!(model.provider_id, PROVIDER_ID);
         assert_eq!(model.model, "gpt-5");
     }
 
@@ -1965,7 +1920,7 @@ mod tests {
         let job = CronJob {
             agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
-                backend: "4056cdea".into(),
+                backend: PROVIDER_ID.into(),
                 name: "OpenAI".into(),
                 cli_path: None,
                 custom_agent_id: None,
@@ -1981,7 +1936,7 @@ mod tests {
             ..sample_job()
         };
         let model = resolve_model(&job).expect("nomi without model_id still returns Some");
-        assert_eq!(model.provider_id, "4056cdea");
+        assert_eq!(model.provider_id, PROVIDER_ID);
         assert_eq!(model.model, "default");
     }
 
@@ -2027,18 +1982,18 @@ mod tests {
         let registry = hydrated_registry().await;
         let job = sample_job();
         let extra = build_task_extra(&registry, &job, &[]).await;
-        assert_eq!(extra["cron_job_id"], "cron_test1");
+        assert_eq!(extra["cron_job_id"], JOB_ID);
     }
 
     #[tokio::test]
     async fn build_task_extra_with_config_fields() {
         let registry = hydrated_registry().await;
         let job = sample_job();
-        let extra = build_task_extra(&registry, &job, &["cron-cron_test1".into()]).await;
+        let extra = build_task_extra(&registry, &job, &[JOB_SKILL_NAME.into()]).await;
         assert_eq!(extra["backend"], "acp");
         assert_eq!(extra["cli_path"], "/usr/bin/claude");
         assert_eq!(extra["agent_name"], "Claude");
-        assert_eq!(extra["skills"], serde_json::json!(["cron-cron_test1"]));
+        assert_eq!(extra["skills"], serde_json::json!([JOB_SKILL_NAME]));
     }
 
     #[tokio::test]
@@ -2049,7 +2004,7 @@ mod tests {
             ..sample_job()
         };
         let extra = build_task_extra(&registry, &job, &[]).await;
-        assert_eq!(extra["cron_job_id"], "cron_test1");
+        assert_eq!(extra["cron_job_id"], JOB_ID);
         assert!(extra.get("backend").is_none());
     }
 
@@ -2105,7 +2060,7 @@ mod tests {
         let job = CronJob {
             agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
-                backend: "4056cdea".into(),
+                backend: PROVIDER_ID.into(),
                 name: "OpenAI".into(),
                 cli_path: None,
                 custom_agent_id: None,
@@ -2134,7 +2089,7 @@ mod tests {
 
         let extra = build_conversation_extra(&registry, &job, None).await;
 
-        assert_eq!(extra["cron_job_id"], "cron_test1");
+        assert_eq!(extra["cron_job_id"], JOB_ID);
         assert_eq!(
             extra["exclude_auto_inject_skills"],
             serde_json::json!(["cron"])
@@ -2150,7 +2105,7 @@ mod tests {
             ..sample_job()
         };
         let saved_skill = SavedSkillContext {
-            name: "cron-cron_test1".into(),
+            name: JOB_SKILL_NAME.into(),
             raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
@@ -2162,7 +2117,7 @@ mod tests {
         );
         assert_eq!(
             extra["preset_enabled_skills"],
-            serde_json::json!(["cron-cron_test1"])
+            serde_json::json!([JOB_SKILL_NAME])
         );
     }
 
@@ -2234,7 +2189,7 @@ mod tests {
             execution_mode: ExecutionMode::NewConversation,
             agent_type: "nomi".into(),
             agent_config: Some(CronAgentConfig {
-                backend: "4056cdea".into(),
+                backend: PROVIDER_ID.into(),
                 name: "OpenAI".into(),
                 cli_path: None,
                 custom_agent_id: None,
@@ -2290,12 +2245,12 @@ mod tests {
     #[test]
     fn execution_result_variants() {
         let success = ExecutionResult::Success {
-            conversation_id: "1".into(),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
         };
         assert_eq!(
             success,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
 
@@ -2317,17 +2272,17 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_applies_desired_session_mode_before_sending() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2338,17 +2293,17 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_applies_mode_even_for_uninitialized_agent() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", false));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", false));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2359,17 +2314,17 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_skips_mode_update_when_already_matching() {
-        let agent = Arc::new(RecordingAgent::new("1", "yolo", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "yolo", true));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let mut job = sample_job();
         job.agent_config.as_mut().unwrap().mode = Some("yolo".into());
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2380,7 +2335,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_new_conversation_without_saved_skill_requests_skill_suggest() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -2390,12 +2345,12 @@ mod tests {
             ..sample_job()
         };
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2422,7 +2377,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_new_conversation_with_saved_skill_injects_saved_skill() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -2432,16 +2387,16 @@ mod tests {
             ..sample_job()
         };
         let saved_skill = SavedSkillContext {
-            name: "cron-cron_test1".into(),
+            name: JOB_SKILL_NAME.into(),
             raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
-        let result = executor.execute_inner(&job, "1", Some(&saved_skill)).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", Some(&saved_skill)).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2455,7 +2410,7 @@ mod tests {
         assert!(!sent_messages[0].content.contains("SKILL_SUGGEST.md"));
         assert_eq!(
             sent_messages[0].inject_skills,
-            vec!["cron-cron_test1".to_owned()]
+            vec![JOB_SKILL_NAME.to_owned()]
         );
 
         let options = runtime_registry
@@ -2465,26 +2420,26 @@ mod tests {
             .expect("runtime registry should capture build options");
         assert_eq!(
             options.extra["skills"],
-            serde_json::json!(["cron-cron_test1"])
+            serde_json::json!([JOB_SKILL_NAME])
         );
     }
 
     #[tokio::test]
     async fn execute_inner_existing_with_saved_skill_keeps_saved_skill_out_of_prompt_and_turn() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
         let saved_skill = SavedSkillContext {
-            name: "cron-cron_test1".into(),
+            name: JOB_SKILL_NAME.into(),
             raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
-        let result = executor.execute_inner(&job, "1", Some(&saved_skill)).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", Some(&saved_skill)).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2497,16 +2452,16 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_existing_without_saved_skill_does_not_send_skill_suggest_follow_up() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(agent.clone()));
         let job = sample_job();
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2527,7 +2482,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_uses_conversation_workspace_when_job_workspace_missing() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
@@ -2538,12 +2493,12 @@ mod tests {
         };
         job.agent_config.as_mut().unwrap().workspace = None;
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2554,13 +2509,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_inner_persists_agent_workspace_when_conversation_workspace_missing() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+    async fn execute_inner_missing_workspace_identity_fails_closed() {
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
-            "1",
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({}),
         ));
         let executor = make_executor_with_runtime_registry_and_repo(runtime_registry.clone(), repo.clone());
@@ -2570,36 +2525,82 @@ mod tests {
         };
         job.agent_config.as_mut().unwrap().workspace = None;
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
-        assert_eq!(
+        assert!(matches!(
             result,
-            ExecutionResult::Success {
-                conversation_id: "1".into()
-            }
+            ExecutionResult::Error { message }
+                if message.contains("neither a custom workspace nor a canonical temp_workspace_id")
+        ));
+        assert_eq!(agent.send_calls(), 0);
+        assert!(runtime_registry.last_options().is_none());
+        assert!(repo.last_update_with_extra().is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_inner_rebases_managed_workspace_and_ignores_source_absolute_path() {
+        const WORKSPACE_ID: &str =
+            "ws_0190f5fe-7c00-7a00-8abc-012345678901";
+        let agent = Arc::new(RecordingAgent::new(
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+            "default",
+            true,
+        ));
+        let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(
+            AgentRuntimeHandle::Mock(agent.clone()),
+        ));
+        let repo = Arc::new(MissingWorkspaceConversationRepo::new(
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+            serde_json::json!({
+                "backend": "claude",
+                "temp_workspace_id": WORKSPACE_ID,
+                "workspace": "/source-install/conversations/claude-temp-old"
+            }),
+        ));
+        let executor = make_executor_with_runtime_registry_and_repo(
+            runtime_registry.clone(),
+            repo,
         );
+        let mut job = CronJob {
+            execution_mode: ExecutionMode::NewConversation,
+            ..sample_job()
+        };
+        job.agent_config.as_mut().unwrap().workspace = None;
+
+        let result = executor
+            .execute_inner(
+                &job,
+                "conv_0190f5fe-7c00-7a00-8abc-012345678901",
+                None,
+            )
+            .await;
+
+        assert!(matches!(result, ExecutionResult::Success { .. }));
         wait_for_agent_send(&agent, 1).await;
         let options = runtime_registry
             .last_options()
             .expect("runtime registry should capture build options");
-        assert_eq!(options.workspace, "");
-
-        let update = repo
-            .last_update_with_extra()
-            .expect("conversation workspace should be persisted");
-        let extra = update.extra.expect("workspace update should write extra");
-        let value: serde_json::Value = serde_json::from_str(&extra).expect("valid extra json");
-        assert_eq!(value["workspace"], "/tmp/cron-test");
+        let expected = std::env::temp_dir()
+            .join("conversations")
+            .join(format!("claude-temp-{WORKSPACE_ID}"))
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(options.workspace, expected);
+        assert_eq!(options.extra["temp_workspace_id"], WORKSPACE_ID);
+        assert_ne!(
+            options.workspace,
+            "/source-install/conversations/claude-temp-old"
+        );
     }
 
     #[tokio::test]
     async fn execute_inner_inserts_right_side_user_message_for_cron_prompt() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
-            "1",
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({ "workspace": "/tmp/existing-conversation-workspace" }),
         ));
         let executor = make_executor_with_runtime_registry_and_repo(runtime_registry, repo.clone());
@@ -2608,12 +2609,12 @@ mod tests {
             ..sample_job()
         };
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2634,12 +2635,12 @@ mod tests {
 
     #[tokio::test]
     async fn execute_inner_upserts_cron_trigger_artifact_and_broadcasts_event() {
-        let agent = Arc::new(RecordingAgent::new("1", "default", true));
+        let agent = Arc::new(RecordingAgent::new("conv_0190f5fe-7c00-7a00-8abc-012345678901", "default", true));
         let runtime_registry = Arc::new(RecordingAgentRuntimeRegistry::new(AgentRuntimeHandle::Mock(
             agent.clone(),
         )));
         let repo = Arc::new(MissingWorkspaceConversationRepo::new(
-            "1",
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901",
             serde_json::json!({ "workspace": "/tmp/existing-conversation-workspace" }),
         ));
         let broadcaster = Arc::new(RecordingBroadcaster::new());
@@ -2653,12 +2654,12 @@ mod tests {
             ..sample_job()
         };
 
-        let result = executor.execute_inner(&job, "1", None).await;
+        let result = executor.execute_inner(&job, "conv_0190f5fe-7c00-7a00-8abc-012345678901", None).await;
 
         assert_eq!(
             result,
             ExecutionResult::Success {
-                conversation_id: "1".into()
+                conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into()
             }
         );
         wait_for_agent_send(&agent, 1).await;
@@ -2678,10 +2679,13 @@ mod tests {
                 event["name"] == "conversation.artifact" && event["data"]["kind"] == "cron_trigger"
             })
             .expect("cron execution should broadcast cron trigger artifact");
-        assert_eq!(trigger_event["data"]["conversation_id"], 1);
+        assert_eq!(
+            trigger_event["data"]["conversation_id"],
+            "conv_0190f5fe-7c00-7a00-8abc-012345678901"
+        );
         assert_eq!(
             trigger_event["data"]["payload"]["cron_job_id"],
-            "cron_test1"
+            JOB_ID
         );
         assert_eq!(
             trigger_event["data"]["payload"]["cron_job_name"],
@@ -2739,7 +2743,7 @@ mod tests {
         impl IConversationRepository for StubConvRepo {
             async fn get(
                 &self,
-                _id: i64,
+                _id: &str,
             ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError>
             {
                 Ok(None)
@@ -2747,17 +2751,17 @@ mod tests {
             async fn create(
                 &self,
                 _row: &nomifun_db::models::ConversationRow,
-            ) -> Result<i64, nomifun_db::DbError> {
-                Ok(0)
+            ) -> Result<String, nomifun_db::DbError> {
+                Ok("conv_0190f5fe-7c00-7a00-8abc-012345678901".into())
             }
             async fn update(
                 &self,
-                _id: i64,
+                _id: &str,
                 _updates: &ConversationRowUpdate,
             ) -> Result<(), nomifun_db::DbError> {
                 Ok(())
             }
-            async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+            async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
                 Ok(())
             }
             async fn list_paginated(
@@ -2792,13 +2796,13 @@ mod tests {
             async fn list_associated(
                 &self,
                 _user_id: &str,
-                _conversation_id: i64,
+                _conversation_id: &str,
             ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
                 Ok(vec![])
             }
             async fn get_messages(
                 &self,
-                _conv_id: i64,
+                _conv_id: &str,
                 _page: u32,
                 _page_size: u32,
                 _order: SortOrder,
@@ -2825,13 +2829,13 @@ mod tests {
             }
             async fn delete_messages_by_conversation(
                 &self,
-                _conv_id: i64,
+                _conv_id: &str,
             ) -> Result<(), nomifun_db::DbError> {
                 Ok(())
             }
             async fn get_message_by_msg_id(
                 &self,
-                _conv_id: i64,
+                _conv_id: &str,
                 _msg_id: &str,
                 _msg_type: &str,
             ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
@@ -2888,7 +2892,7 @@ mod tests {
         let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
             Arc::new(StubAcpSessionRepo);
         let conv_service = Arc::new(ConversationService::new(
-            Arc::<str>::from("user_1"),
+            Arc::<str>::from(USER_ID),
             std::env::temp_dir(),
             stub_broadcaster.clone(),
             Arc::new(StubSkillResolver),
@@ -2902,7 +2906,7 @@ mod tests {
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
         JobExecutor::new(
-            Arc::<str>::from("user_1"),
+            Arc::<str>::from(USER_ID),
             Arc::new(StubAgentRuntimeRegistry),
             stub_repo,
             conv_service,
@@ -3139,11 +3143,11 @@ mod tests {
     impl IConversationRepository for ExistingConversationRepo {
         async fn get(
             &self,
-            id: i64,
+            id: &str,
         ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(Some(nomifun_db::models::ConversationRow {
-                id,
-                user_id: "user_1".into(),
+                id: id.to_owned(),
+                user_id: USER_ID.into(),
                 name: "Cron Conversation".into(),
                 r#type: "acp".into(),
                 extra: serde_json::json!({
@@ -3172,19 +3176,19 @@ mod tests {
         async fn create(
             &self,
             _row: &nomifun_db::models::ConversationRow,
-        ) -> Result<i64, nomifun_db::DbError> {
-            Ok(0)
+        ) -> Result<String, nomifun_db::DbError> {
+            Ok("conv_0190f5fe-7c00-7a00-8abc-012345678901".into())
         }
 
         async fn update(
             &self,
-            _id: i64,
+            _id: &str,
             _updates: &ConversationRowUpdate,
         ) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
 
-        async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+        async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
 
@@ -3222,14 +3226,14 @@ mod tests {
         async fn list_associated(
             &self,
             _user_id: &str,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(vec![])
         }
 
         async fn get_messages(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _page: u32,
             _page_size: u32,
             _order: SortOrder,
@@ -3258,14 +3262,14 @@ mod tests {
 
         async fn delete_messages_by_conversation(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
         ) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
 
         async fn get_message_by_msg_id(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _msg_id: &str,
             _msg_type: &str,
         ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
@@ -3298,8 +3302,8 @@ mod tests {
         fn new(conversation_id: &str, extra: serde_json::Value) -> Self {
             Self {
                 row: nomifun_db::models::ConversationRow {
-                    id: conversation_id.parse::<i64>().unwrap_or_default(),
-                    user_id: "user_1".into(),
+                    id: conversation_id.to_owned(),
+                    user_id: USER_ID.into(),
                     name: "Cron Conversation".into(),
                     r#type: "acp".into(),
                     extra: extra.to_string(),
@@ -3382,7 +3386,7 @@ mod tests {
     impl IConversationRepository for MissingWorkspaceConversationRepo {
         async fn get(
             &self,
-            _id: i64,
+            _id: &str,
         ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(Some(self.row.clone()))
         }
@@ -3390,20 +3394,20 @@ mod tests {
         async fn create(
             &self,
             _row: &nomifun_db::models::ConversationRow,
-        ) -> Result<i64, nomifun_db::DbError> {
-            Ok(0)
+        ) -> Result<String, nomifun_db::DbError> {
+            Ok("conv_0190f5fe-7c00-7a00-8abc-012345678901".into())
         }
 
         async fn update(
             &self,
-            _id: i64,
+            _id: &str,
             updates: &ConversationRowUpdate,
         ) -> Result<(), nomifun_db::DbError> {
             self.updates.lock().unwrap().push(updates.clone());
             Ok(())
         }
 
-        async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+        async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
 
@@ -3441,14 +3445,14 @@ mod tests {
         async fn list_associated(
             &self,
             _user_id: &str,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(vec![])
         }
 
         async fn get_messages(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _page: u32,
             _page_size: u32,
             _order: SortOrder,
@@ -3478,14 +3482,14 @@ mod tests {
 
         async fn delete_messages_by_conversation(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
         ) -> Result<(), nomifun_db::DbError> {
             Ok(())
         }
 
         async fn get_message_by_msg_id(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _msg_id: &str,
             _msg_type: &str,
         ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
@@ -3574,7 +3578,7 @@ mod tests {
         let acp_session_repo: Arc<dyn nomifun_db::IAcpSessionRepository> =
             Arc::new(StubAcpSessionRepo);
         let conversation_service = Arc::new(ConversationService::new(
-            Arc::<str>::from("user_1"),
+            Arc::<str>::from(USER_ID),
             std::env::temp_dir(),
             broadcaster.clone(),
             Arc::new(StubSkillResolver),
@@ -3588,7 +3592,7 @@ mod tests {
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
 
         JobExecutor::new(
-            Arc::<str>::from("user_1"),
+            Arc::<str>::from(USER_ID),
             runtime_registry,
             repo,
             conversation_service,
@@ -3606,7 +3610,7 @@ mod tests {
     impl nomifun_db::IAcpSessionRepository for StubAcpSessionRepo {
         async fn get(
             &self,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<Option<nomifun_db::models::AcpSessionRow>, nomifun_db::DbError> {
             Ok(None)
         }
@@ -3618,29 +3622,29 @@ mod tests {
         }
         async fn update_session_id(
             &self,
-            _conversation_id: i64,
+            _conversation_id: &str,
             _session_id: &str,
         ) -> Result<bool, nomifun_db::DbError> {
             Ok(false)
         }
         async fn clear_session_id(
             &self,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<bool, nomifun_db::DbError> {
             Ok(false)
         }
-        async fn delete(&self, _conversation_id: i64) -> Result<bool, nomifun_db::DbError> {
+        async fn delete(&self, _conversation_id: &str) -> Result<bool, nomifun_db::DbError> {
             Ok(false)
         }
         async fn load_runtime_state(
             &self,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<Option<nomifun_db::PersistedSessionState>, nomifun_db::DbError> {
             Ok(None)
         }
         async fn save_runtime_state(
             &self,
-            _conversation_id: i64,
+            _conversation_id: &str,
             _params: &nomifun_db::SaveRuntimeStateParams<'_>,
         ) -> Result<bool, nomifun_db::DbError> {
             Ok(false)

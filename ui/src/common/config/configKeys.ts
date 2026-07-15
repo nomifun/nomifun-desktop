@@ -1,6 +1,7 @@
 import type { AcpInitializeResult, AcpSessionConfigOption, AcpSessionModes } from '@/common/types/platform/acpTypes';
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
 import type { ICssTheme, IMcpServer, TProviderWithModel } from '@/common/config/storage';
+import type { CompanionId, ProviderId } from '@/common/types/ids';
 
 export type ConfigKeyMap = {
   'google.config': {
@@ -39,14 +40,14 @@ export type ConfigKeyMap = {
   'css.themes': ICssTheme[];
   'css.activeThemeId': string;
   'nomi.config': { preferredMode?: string } | undefined;
-  'nomi.defaultModel': { id: string; use_model: string } | undefined;
+  'nomi.defaultModel': { id: ProviderId; use_model: string } | undefined;
   // 智能协作的模型偏好：除主模型（nomi.defaultModel）外，可为不同任务选择的
   // 额外模型。仅创建 Nomi 对话时使用；空数组表示只使用主模型。
-  'nomi.collaborationModels': { provider_id: string; model: string }[] | undefined;
+  'nomi.collaborationModels': { provider_id: ProviderId; model: string }[] | undefined;
   // Default provider+model for the knowledge-base AI description/overview
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.
-  'knowledge.autogenModel': { provider_id: string; model: string } | undefined;
+  'knowledge.autogenModel': { provider_id: ProviderId; model: string } | undefined;
   'tools.imageGenerationModel': TProviderWithModel & { switch?: boolean };
   'tools.speechToText': SpeechToTextConfig | undefined;
   'workspace.pasteConfirm': boolean | undefined;
@@ -105,23 +106,23 @@ export type ConfigKeyMap = {
   // Companion binding per IM channel platform (mirror of the backend
   // client-preference written by POST /api/channel/settings/companion).
   // Empty/missing = no binding → no companion greets this platform's channel.
-  'channels.telegram.companionId': string | undefined;
+  'channels.telegram.companion_id': CompanionId | undefined;
   'channels.lark.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'channels.lark.companionId': string | undefined;
+  'channels.lark.companion_id': CompanionId | undefined;
   'channels.dingtalk.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'channels.dingtalk.companionId': string | undefined;
+  'channels.dingtalk.companion_id': CompanionId | undefined;
   'channels.weixin.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'channels.weixin.companionId': string | undefined;
+  'channels.weixin.companion_id': CompanionId | undefined;
   'channels.wecom.agent':
     | { agent_type: string; backend?: string; id?: string; custom_agent_id?: string; name?: string }
     | undefined;
-  'channels.wecom.companionId': string | undefined;
+  'channels.wecom.companion_id': CompanionId | undefined;
   'skillsMarket.enabled': boolean | undefined;
   // One-shot completion flags for legacy → backend migrations. Kept in the
   // local config file (not the backend client-preferences bag) so a downgrade

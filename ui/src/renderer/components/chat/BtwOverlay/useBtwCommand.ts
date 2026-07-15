@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,7 +18,7 @@ const INITIAL_STATE: BtwCommandState = {
   question: '',
 };
 
-export function useBtwCommand(conversation_id?: number, enabled = true) {
+export function useBtwCommand(conversation_id?: ConversationId, enabled = true) {
   const { t } = useTranslation();
   const requestIdRef = useRef(0);
   const previousConversationIdRef = useRef(conversation_id);

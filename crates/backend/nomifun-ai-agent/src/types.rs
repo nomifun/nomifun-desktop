@@ -3,7 +3,25 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use nomifun_common::{AgentType, DelegationPolicy, ProviderWithModel};
+use nomifun_common::{AgentType, ConversationId, DelegationPolicy, ProviderWithModel, UserId};
+
+fn deserialize_user_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    UserId::parse(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_conversation_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    ConversationId::parse(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
 
 /// Data payload for sending a user message to an Agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,14 +50,18 @@ pub struct AgentRuntimeBuildOptions {
     /// First-class owner of the runtime. Production callers copy this from the
     /// authoritative Conversation/Cron target row; factories fail closed when
     /// it is empty and never accept an identity from type-specific `extra`.
+    #[serde(deserialize_with = "deserialize_user_id")]
     pub user_id: String,
     /// Type of agent to create.
     pub agent_type: AgentType,
     /// Working directory for the agent.
     pub workspace: String,
-    /// Model selection config.
-    pub model: ProviderWithModel,
+    /// Model selection config. Nomi runtimes require this; runtimes whose
+    /// backend owns model selection (for example ACP) keep it absent instead
+    /// of using an empty provider/model sentinel.
+    pub model: Option<ProviderWithModel>,
     /// Conversation ID this runtime belongs to.
+    #[serde(deserialize_with = "deserialize_conversation_id")]
     pub conversation_id: String,
     /// Typed conversation-level delegation policy. This is sourced from the
     /// first-class conversation column and takes precedence over type-specific
@@ -254,24 +276,24 @@ mod tests {
     #[test]
     fn agent_runtime_build_options_serde() {
         let opts = AgentRuntimeBuildOptions {
-            user_id: "user-1".into(),
+            user_id: "user_0190f5fe-7c00-7a00-8000-000000000001".into(),
             agent_type: AgentType::Acp,
             workspace: "/project".into(),
-            model: ProviderWithModel {
-                provider_id: "p1".into(),
+            model: Some(ProviderWithModel {
+                provider_id: "prov_0190f5fe-7c00-7a00-8000-000000000001".into(),
                 model: "claude-sonnet".into(),
                 use_model: None,
-            },
-            conversation_id: "conv-1".into(),
+            }),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8000-000000000001".into(),
             delegation_policy: DelegationPolicy::Automatic,
             extra: json!({ "backend": "claude" }),
             conversation_created_at: None,
         };
         let json = serde_json::to_value(&opts).unwrap();
         assert_eq!(json["agent_type"], "acp");
-        assert_eq!(json["user_id"], "user-1");
+        assert_eq!(json["user_id"], "user_0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(json["workspace"], "/project");
-        assert_eq!(json["conversation_id"], "conv-1");
+        assert_eq!(json["conversation_id"], "conv_0190f5fe-7c00-7a00-8000-000000000001");
         assert_eq!(json["delegation_policy"], "automatic");
     }
 
@@ -338,5 +360,23 @@ mod tests {
         let extra: NomiBuildExtra = serde_json::from_value(json).unwrap();
         assert!(extra.system_prompt.is_none());
         assert_eq!(extra.preset_rules.unwrap(), "You are a data analyst.");
+    }
+
+    #[test]
+    fn runtime_options_deserialization_rejects_noncanonical_entity_ids() {
+        let base = serde_json::json!({
+            "user_id": "user_0190f5fe-7c00-7a00-8000-000000000001",
+            "agent_type": "nomi",
+            "workspace": "/tmp",
+            "model": null,
+            "conversation_id": "conv_0190f5fe-7c00-7a00-8000-000000000001"
+        });
+        assert!(serde_json::from_value::<AgentRuntimeBuildOptions>(base.clone()).is_ok());
+        let mut invalid_user = base.clone();
+        invalid_user["user_id"] = serde_json::json!("1");
+        assert!(serde_json::from_value::<AgentRuntimeBuildOptions>(invalid_user).is_err());
+        let mut invalid_conversation = base;
+        invalid_conversation["conversation_id"] = serde_json::json!("1");
+        assert!(serde_json::from_value::<AgentRuntimeBuildOptions>(invalid_conversation).is_err());
     }
 }

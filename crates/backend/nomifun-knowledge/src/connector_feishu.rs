@@ -488,7 +488,7 @@ mod tests {
 
     fn test_credential() -> ConnectorCredential {
         ConnectorCredential {
-            id: "cred-1".into(),
+            id: None,
             kind: "feishu".into(),
             name: "test".into(),
             payload: json!({
@@ -864,7 +864,7 @@ mod tests {
     async fn test_missing_app_id_errors() {
         let connector = FeishuConnector::new();
         let cred = ConnectorCredential {
-            id: "x".into(),
+            id: None,
             kind: "feishu".into(),
             name: "bad".into(),
             payload: json!({"app_secret": "s"}),

@@ -22,11 +22,12 @@ import type { WorkshopAssetKind } from '../types';
 import type { GenMode, MentionCandidate } from './genTypes';
 import { collectNodeCandidates, mentionRefForAsset } from './pipeline';
 import Floating from './Floating';
+import type { WorkshopNodeId } from '@/common/types/ids';
 
 export interface PromptFieldProps {
   value: string;
   mode: GenMode;
-  selfId: string;
+  selfId: WorkshopNodeId;
   onChange: (text: string) => void;
   onAddMention: (ref: string) => void;
 }

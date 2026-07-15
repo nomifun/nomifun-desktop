@@ -146,7 +146,7 @@ pub struct ExtPreset {
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "preferredAgentId")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enabledSkills")]
     pub enabled_skills: Vec<String>,

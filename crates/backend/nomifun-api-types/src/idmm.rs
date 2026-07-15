@@ -1,4 +1,4 @@
-//! Public DTOs for IDMM (Intelligent Decision-Making Mode) — a per-session,
+﻿//! Public DTOs for IDMM (Intelligent Decision-Making Mode) — a per-session,
 //! opt-in supervision capability that keeps agent/terminal sessions alive
 //! through provider faults and decision stalls. Pure serde — no axum.
 //!
@@ -6,11 +6,11 @@
 //! (`fault_watch`)与决策值守(`decision_watch`),各持一套 [`WatchBase`] 旋钮 +
 //! 旁路模型;决策值守额外带结构化决策策略([`DecisionStrategy`])与纯问答开关。
 
+use nomifun_common::IdmmInterventionId;
 use serde::{Deserialize, Serialize};
 
-/// Which kind of session IDMM supervises. The integer conversation/terminal
-/// ids CAN collide numerically, so a target is keyed by `(kind, id)` — see the
-/// IDMM supervisor's domain-qualified handle/shared maps (spec §2.2 C3).
+/// Which kind of session IDMM supervises.
+/// conversation ID can never be interpreted as a terminal ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdmmTargetKind {
@@ -429,22 +429,15 @@ impl IdmmState {
 
 /// One row of the intervention audit log + the `idmm.intervention` payload.
 ///
-/// 向后兼容:新增字段全部带 `#[serde(default)]`,旧 WS 消费方(只看
-/// stall_class/tier_used/action/outcome)发来的精简对象仍能反序列化,新字段取
-/// 默认值。`Option` 字段额外 `skip_serializing_if` 在缺省时不入 wire。
-///
 /// **Phase-2 不变量**:本类型字段与 `outcome` 文档**逐字沿用 Phase-1**,勿改。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InterventionRecord {
-    /// `idmmrec_{uuidv7}` — 落库主键。旧消费方不带,故 `default`。
-    #[serde(default)]
-    pub id: String,
-    /// "conversation" | "terminal"。旧消费方不带,故 `default`。
-    #[serde(default)]
+    /// `idmmrec_{uuidv7}` — durable audit-row primary key.
+    pub id: IdmmInterventionId,
+    /// "conversation" | "terminal".
     pub target_kind: String,
     pub target_id: String,
-    /// "fault" | "decision"。旧消费方不带,故 `default`。
-    #[serde(default)]
+    /// "fault" | "decision".
     pub watch: String,
     pub at: i64,
     /// "provider_error" | "idle" | "decision" | "scheduled".
@@ -478,12 +471,8 @@ pub struct InterventionRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetIdmmRequest {
     pub kind: IdmmTargetKind,
-    /// Session id handle. Accepts both a JSON integer (what the frontend sends —
-    /// ids are numeric) and a JSON string; see
-    /// [`crate::serde_util::deserialize_target_id`]. Without this, enabling
-    /// 会话→智能决策 (which POSTs a numeric `target_id`) is rejected by serde
-    /// and surfaces as a 400.
-    #[serde(deserialize_with = "crate::serde_util::deserialize_target_id")]
+    /// Canonical conversation or terminal entity ID. JSON numbers are rejected.
+    #[serde(deserialize_with = "crate::serde_util::deserialize_session_target_id")]
     pub target_id: String,
     #[serde(flatten)]
     pub config: IdmmConfig,
@@ -688,15 +677,16 @@ mod tests {
     /// flatten 让 `SetIdmmRequest` 与值守配置在同一对象里共存(真实 payload 形态)。
     #[test]
     fn set_idmm_request_flattens_config() {
+        let target_id = "term_0190f5fe-7c00-7a00-8000-000000000001";
         let json = serde_json::json!({
             "kind": "terminal",
-            "target_id": "t1",
+            "target_id": target_id,
             "fault_watch": {"enabled": true, "tier": "rule_plus_model"},
             "decision_watch": {"enabled": true, "answer_open_questions": true}
         });
         let req: SetIdmmRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.kind, IdmmTargetKind::Terminal);
-        assert_eq!(req.target_id, "t1");
+        assert_eq!(req.target_id, target_id);
         assert!(req.config.any_enabled());
         assert!(req.config.fault_watch.base.enabled);
         assert_eq!(req.config.fault_watch.base.tier, WatchTier::RulePlusModel);
@@ -736,52 +726,50 @@ mod tests {
     /// (the frontend models session ids numerically). The backend keeps it as a
     /// String handle; deserialization must accept the integer instead of
     /// rejecting it with "invalid type: integer N, expected a string" (the 400
-    /// testers hit). Mirrors the AutoWork fix in `requirement.rs`.
     #[test]
-    fn set_idmm_request_accepts_numeric_target_id() {
+    fn set_idmm_request_rejects_numeric_target_id() {
         let body = r#"{"kind":"conversation","target_id":2,"fault_watch":{"enabled":true}}"#;
-        let req: SetIdmmRequest =
-            serde_json::from_str(body).expect("numeric target_id must deserialize");
-        assert_eq!(req.target_id, "2");
-        assert_eq!(req.kind, IdmmTargetKind::Conversation);
-        assert!(req.config.fault_watch.base.enabled);
+        assert!(serde_json::from_str::<SetIdmmRequest>(body).is_err());
     }
 
-    /// A numeric `target_id` coexists with the flattened `IdmmConfig`.
     #[test]
-    fn set_idmm_request_accepts_numeric_target_id_with_flattened_config() {
+    fn set_idmm_request_rejects_numeric_target_id_with_flattened_config() {
         let json = serde_json::json!({
             "kind": "conversation",
             "target_id": 12345,
             "decision_watch": {"enabled": true, "strategy": {"tendency": "conservative"}}
         });
-        let req: SetIdmmRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.target_id, "12345");
-        assert_eq!(req.kind, IdmmTargetKind::Conversation);
-        assert!(req.config.decision_watch.base.enabled);
-        assert_eq!(
-            req.config.decision_watch.strategy.tendency,
-            Tendency::Conservative
-        );
+        assert!(serde_json::from_value::<SetIdmmRequest>(json).is_err());
     }
 
-    /// A string `target_id` (forward-compatible / other clients) still works.
     #[test]
     fn set_idmm_request_accepts_string_target_id() {
-        let body = r#"{"kind":"terminal","target_id":"term_7"}"#;
+        let body = r#"{"kind":"terminal","target_id":"term_0190f5fe-7c00-7a00-8000-000000000007"}"#;
         let req: SetIdmmRequest =
             serde_json::from_str(body).expect("string target_id must deserialize");
-        assert_eq!(req.target_id, "term_7");
+        assert_eq!(
+            req.target_id,
+            "term_0190f5fe-7c00-7a00-8000-000000000007"
+        );
         assert_eq!(req.kind, IdmmTargetKind::Terminal);
         assert!(!req.config.any_enabled());
     }
 
     #[test]
+    fn set_idmm_request_rejects_non_canonical_entity_string() {
+        let body = r#"{"kind":"terminal","target_id":"term_7"}"#;
+        assert!(serde_json::from_str::<SetIdmmRequest>(body).is_err());
+    }
+
+    #[test]
     fn intervention_record_enriched_fields_roundtrip() {
         let r = InterventionRecord {
-            id: "idmmrec_x".into(),
+            id: IdmmInterventionId::parse(
+                "idmmrec_0190f5fe-7c00-7a00-8000-000000000001",
+            )
+            .unwrap(),
             target_kind: "conversation".into(),
-            target_id: "c1".into(),
+            target_id: "conv_0190f5fe-7c00-7a00-8000-000000000001".into(),
             watch: "decision".into(),
             at: 1,
             stall_class: "decision".into(),
@@ -802,15 +790,12 @@ mod tests {
     }
 
     #[test]
-    fn intervention_record_back_compat_minimal_object() {
-        // 旧 WS 消费方只看 stall_class/tier_used/action/outcome;新增字段 default。
+    fn intervention_record_requires_a_canonical_durable_id() {
         let j = serde_json::json!({
-            "id":"x","target_kind":"terminal","target_id":"t1","watch":"fault","at":2,
+            "id":"x","target_kind":"terminal","target_id":"term_0190f5fe-7c00-7a00-8000-000000000001","watch":"fault","at":2,
             "stall_class":"provider_error","tier_used":"rule","action":"retry","outcome":"applied"
         });
-        let r: InterventionRecord = serde_json::from_value(j).unwrap();
-        assert!(r.category.is_none());
-        assert!(r.confidence.is_none());
+        assert!(serde_json::from_value::<InterventionRecord>(j).is_err());
     }
 
     #[test]
@@ -853,8 +838,8 @@ mod tests {
         let json = serde_json::json!({
             "enabled": true,
             "queue": [
-                {"provider_id": "openrouter", "model": "gpt-x", "use_model": null},
-                {"provider_id": "anthropic", "model": "claude", "use_model": "claude-alias"}
+                {"provider_id": "prov_019b0000-0000-7000-8000-000000000001", "model": "gpt-x", "use_model": null},
+                {"provider_id": "prov_019b0000-0000-7000-8000-000000000002", "model": "claude", "use_model": "claude-alias"}
             ],
             "max_switches": 2,
             "stamp_unhealthy": false
@@ -862,7 +847,10 @@ mod tests {
         let cfg: ModelFailoverConfig = serde_json::from_value(json).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.queue.len(), 2);
-        assert_eq!(cfg.queue[0].provider_id, "openrouter");
+        assert_eq!(
+            cfg.queue[0].provider_id.as_str(),
+            "prov_019b0000-0000-7000-8000-000000000001"
+        );
         assert_eq!(cfg.queue[1].use_model.as_deref(), Some("claude-alias"));
         assert_eq!(cfg.max_switches, 2);
         assert!(!cfg.stamp_unhealthy);

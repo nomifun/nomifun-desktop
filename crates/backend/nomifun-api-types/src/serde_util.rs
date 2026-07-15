@@ -1,112 +1,294 @@
-//! Small shared serde helpers for the DTO layer.
+//! Strict serde helpers shared by public DTOs.
 
-/// Deserialize a session `target_id` from EITHER a JSON string or a JSON
-/// integer, always yielding a `String`.
-///
-/// The frontend models conversation/terminal ids as numbers (the numeric-id
-/// spec) and POSTs `{"target_id": 123, ...}` on the discriminated-target
-/// endpoints (会话→自动工作 `POST /api/requirements/autowork`, 会话→智能决策
-/// `POST /api/idmm`), while the backend keeps `target_id` as an opaque string
-/// handle. Without this, serde rejects the integer with "invalid type: integer
-/// N, expected a string" — which the handlers map to `AppError::BadRequest`,
-/// surfacing as the 400 users hit when enabling either feature. Accepting both
-/// shapes keeps every already-shipped client working and is forward-compatible
-/// with clients that send a string.
-///
-/// Shared by [`crate::requirement::AutoWorkConfigRequest`] and
-/// [`crate::idmm::SetIdmmRequest`]; keep it the single source of truth so the
-/// two endpoints never drift.
-pub(crate) fn deserialize_target_id<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct TargetIdVisitor;
-    impl<'de> serde::de::Visitor<'de> for TargetIdVisitor {
-        type Value = String;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a session id as a string or integer")
+use nomifun_common::{
+    AgentExecutionAttemptId, AgentExecutionEventId, AgentExecutionId, AgentExecutionParticipantId,
+    AgentExecutionStepId, AgentExecutionTemplateId, AgentExecutionTemplateParticipantId, AgentId,
+    AttachmentId, ChannelId, ChannelSessionId, ChannelUserId, CompanionId,
+    ConversationArtifactId, ConversationId, CronJobId, CronJobRunId, MessageId, PresetId,
+    PresetTagId, ProviderId, PublicAgentId, RequirementId, TerminalId, UserId,
+};
+
+macro_rules! string_id_deserializers {
+    ($required:ident, $optional:ident, $id:ty) => {
+        #[allow(dead_code)]
+        pub(crate) fn $required<'de, D>(deserializer: D) -> Result<String, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+            <$id>::parse(value.clone())
+                .map(|_| value)
+                .map_err(serde::de::Error::custom)
         }
-        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
-            Ok(v.to_owned())
+
+        #[allow(dead_code)]
+        pub(crate) fn $optional<'de, D>(
+            deserializer: D,
+        ) -> Result<Option<String>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+            value
+                .map(|value| {
+                    <$id>::parse(value.clone())
+                        .map(|_| value)
+                        .map_err(serde::de::Error::custom)
+                })
+                .transpose()
         }
-        fn visit_string<E: serde::de::Error>(self, v: String) -> Result<String, E> {
-            Ok(v)
-        }
-        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
-            Ok(v.to_string())
-        }
-    }
-    deserializer.deserialize_any(TargetIdVisitor)
+    };
 }
 
-/// Deserialize an optional numeric database id from either a JSON integer or
-/// a legacy decimal string. Missing fields are handled by `#[serde(default)]`;
-/// explicit JSON null is normalized to `None`.
-pub(crate) fn deserialize_optional_i64_from_string_or_integer<'de, D>(
+string_id_deserializers!(
+    deserialize_conversation_id,
+    deserialize_optional_conversation_id,
+    ConversationId
+);
+string_id_deserializers!(
+    deserialize_terminal_id,
+    deserialize_optional_terminal_id,
+    TerminalId
+);
+string_id_deserializers!(
+    deserialize_cron_job_id,
+    deserialize_optional_cron_job_id,
+    CronJobId
+);
+string_id_deserializers!(
+    deserialize_execution_participant_id,
+    deserialize_optional_execution_participant_id,
+    AgentExecutionParticipantId
+);
+string_id_deserializers!(
+    deserialize_execution_id,
+    deserialize_optional_execution_id,
+    AgentExecutionId
+);
+string_id_deserializers!(
+    deserialize_execution_step_id,
+    deserialize_optional_execution_step_id,
+    AgentExecutionStepId
+);
+string_id_deserializers!(
+    deserialize_execution_attempt_id,
+    deserialize_optional_execution_attempt_id,
+    AgentExecutionAttemptId
+);
+string_id_deserializers!(
+    deserialize_execution_event_id,
+    deserialize_optional_execution_event_id,
+    AgentExecutionEventId
+);
+string_id_deserializers!(
+    deserialize_execution_template_id,
+    deserialize_optional_execution_template_id,
+    AgentExecutionTemplateId
+);
+string_id_deserializers!(
+    deserialize_execution_template_participant_id,
+    deserialize_optional_execution_template_participant_id,
+    AgentExecutionTemplateParticipantId
+);
+string_id_deserializers!(
+    deserialize_message_id,
+    deserialize_optional_message_id,
+    MessageId
+);
+string_id_deserializers!(
+    deserialize_conversation_artifact_id,
+    deserialize_optional_conversation_artifact_id,
+    ConversationArtifactId
+);
+string_id_deserializers!(deserialize_user_id, deserialize_optional_user_id, UserId);
+string_id_deserializers!(
+    deserialize_provider_id,
+    deserialize_optional_provider_id,
+    ProviderId
+);
+string_id_deserializers!(
+    deserialize_channel_id,
+    deserialize_optional_channel_id,
+    ChannelId
+);
+string_id_deserializers!(
+    deserialize_channel_user_id,
+    deserialize_optional_channel_user_id,
+    ChannelUserId
+);
+string_id_deserializers!(
+    deserialize_channel_session_id,
+    deserialize_optional_channel_session_id,
+    ChannelSessionId
+);
+string_id_deserializers!(
+    deserialize_companion_id,
+    deserialize_optional_companion_id,
+    CompanionId
+);
+string_id_deserializers!(
+    deserialize_public_agent_id,
+    deserialize_optional_public_agent_id,
+    PublicAgentId
+);
+string_id_deserializers!(
+    deserialize_preset_id,
+    deserialize_optional_preset_id,
+    PresetId
+);
+string_id_deserializers!(
+    deserialize_requirement_id,
+    deserialize_optional_requirement_id,
+    RequirementId
+);
+string_id_deserializers!(
+    deserialize_attachment_id,
+    deserialize_optional_attachment_id,
+    AttachmentId
+);
+string_id_deserializers!(
+    deserialize_cron_job_run_id,
+    deserialize_optional_cron_job_run_id,
+    CronJobRunId
+);
+
+macro_rules! string_id_vec_deserializer {
+    ($name:ident, $id:ty) => {
+        pub(crate) fn $name<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            <Vec<String> as serde::Deserialize>::deserialize(deserializer)?
+                .into_iter()
+                .map(|value| {
+                    <$id>::parse(value.clone())
+                        .map(|_| value)
+                        .map_err(serde::de::Error::custom)
+                })
+                .collect()
+        }
+    };
+}
+
+string_id_vec_deserializer!(deserialize_requirement_ids, RequirementId);
+string_id_vec_deserializer!(deserialize_attachment_ids, AttachmentId);
+
+/// Preset references are either durable user preset IDs or stable catalog
+/// natural keys supplied by builtin/extension manifests. A value claiming the
+/// `preset_` entity namespace must always satisfy the UUIDv7 contract.
+pub(crate) fn deserialize_optional_preset_reference<'de, D>(
     deserializer: D,
-) -> Result<Option<i64>, D::Error>
+) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    struct OptionalI64Visitor;
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    value.map(validate_preset_reference::<D::Error>).transpose()
+}
 
-    impl<'de> serde::de::Visitor<'de> for OptionalI64Visitor {
-        type Value = Option<i64>;
+pub(crate) fn deserialize_preset_reference<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    validate_preset_reference::<D::Error>(value)
+}
 
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a numeric id as an integer, decimal string, or null")
-        }
-
-        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(Some(value))
-        }
-
-        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            i64::try_from(value)
-                .map(Some)
-                .map_err(|_| E::custom("numeric id exceeds the signed 64-bit range"))
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            value
-                .parse::<i64>()
-                .map(Some)
-                .map_err(|_| E::custom("numeric id string must contain a decimal integer"))
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            self.visit_str(&value)
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(None)
-        }
-
-        fn visit_unit<E>(self) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(None)
-        }
+fn validate_preset_reference<E>(value: String) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    if value.starts_with("preset_") {
+        PresetId::parse(value.clone())
+            .map(|_| value)
+            .map_err(E::custom)
+    } else if is_catalog_natural_key(&value) {
+        Ok(value)
+    } else {
+        Err(E::custom(
+            "expected a canonical preset ID or stable catalog natural key",
+        ))
     }
+}
 
-    deserializer.deserialize_any(OptionalI64Visitor)
+pub(crate) fn deserialize_preset_tag_reference<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if value.starts_with("presettag_") {
+        PresetTagId::parse(value.clone())
+            .map(|_| value)
+            .map_err(serde::de::Error::custom)
+    } else if is_catalog_natural_key(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a canonical preset tag ID or stable catalog natural key",
+        ))
+    }
+}
+
+pub(crate) fn deserialize_agent_reference<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    validate_agent_reference::<D::Error>(value)
+}
+
+pub(crate) fn deserialize_optional_agent_reference<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    value.map(validate_agent_reference::<D::Error>).transpose()
+}
+
+fn validate_agent_reference<E>(value: String) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    if AgentId::parse(value.clone()).is_ok()
+        || (is_catalog_natural_key(&value)
+            && (!value.starts_with("agent_") || value.starts_with("agent_builtin_")))
+    {
+        Ok(value)
+    } else {
+        Err(E::custom(
+            "expected a canonical custom-agent ID or stable builtin/extension agent key",
+        ))
+    }
+}
+
+fn is_catalog_natural_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+/// Deserialize a canonical conversation-or-terminal entity ID.
+///
+/// The wire representation is string-only. Numeric JSON values, malformed
+/// UUIDs, and IDs from any other entity namespace are rejected.
+pub(crate) fn deserialize_session_target_id<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if ConversationId::parse(value.clone()).is_ok() || TerminalId::parse(value.clone()).is_ok() {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a canonical conversation or terminal entity ID",
+        ))
+    }
 }

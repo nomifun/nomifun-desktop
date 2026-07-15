@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { WORKSPACE_HEADER_HEIGHT } from '@/renderer/pages/conversation/utils/layoutCalc';
 import { ExpandLeft, ExpandRight } from '@icon-park/react';
 import React from 'react';
@@ -23,7 +24,7 @@ type WorkspaceHeaderProps = {
    * Conversation this panel belongs to. Required by {@link WorkspaceBindButton}
    * to redirect a temporary session's workspace via a PATCH.
    */
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   activeTab?: WorkspaceTab;
 };
 

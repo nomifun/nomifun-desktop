@@ -5,8 +5,11 @@ mod common;
 use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
+use nomifun_common::{ConversationId, RequirementId};
 
 use common::{body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login};
+
+const MISSING_TERMINAL_ID: &str = "term_0190f5fe-7c00-7a00-8abc-012345679995";
 
 #[tokio::test]
 async fn unauthenticated_list_is_rejected() {
@@ -34,7 +37,8 @@ async fn create_list_get_update_delete_happy_path() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
     assert_eq!(json["data"]["status"], "pending");
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
+    assert!(id.parse::<RequirementId>().is_ok());
 
     // list (filtered by tag)
     let resp = app
@@ -136,7 +140,10 @@ async fn get_unknown_is_404() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let resp = app
-        .oneshot(get_with_token("/api/requirements/999999", &token))
+        .oneshot(get_with_token(
+            "/api/requirements/req_0190f5fe-7c00-7a00-8abc-012345679999",
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -144,12 +151,13 @@ async fn get_unknown_is_404() {
 }
 
 /// Seed a conversation row so `requirements.conversation_id` FK (set by claim) holds.
-async fn seed_conversation(services: &nomifun_app::AppServices, conv_id: i64) {
+async fn seed_conversation(services: &nomifun_app::AppServices, conv_id: &str) {
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, extra, created_at, updated_at) \
-         VALUES (?, 'system_default_user', 'Dispatch Conv', 'nomi', '{}', 0, 0)",
+         VALUES (?, ?, 'Dispatch Conv', 'nomi', '{}', 0, 0)",
     )
     .bind(conv_id)
+    .bind(services.authoritative_user_id.as_ref())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -159,8 +167,8 @@ async fn seed_conversation(services: &nomifun_app::AppServices, conv_id: i64) {
 async fn claim_complete_and_drain() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv = 1;
-    seed_conversation(&services, conv).await;
+    let conv = ConversationId::new().into_string();
+    seed_conversation(&services, &conv).await;
 
     // Seed two requirements in tag "disp".
     for (title, order) in [("A", "1"), ("B", "2")] {
@@ -194,7 +202,7 @@ async fn claim_complete_and_drain() {
     let json = body_json(resp).await;
     assert_eq!(json["data"]["title"], "A");
     assert_eq!(json["data"]["status"], "in_progress");
-    let a_id = json["data"]["id"].as_i64().unwrap();
+    let a_id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Complete A.
     let resp = app
@@ -245,8 +253,8 @@ async fn claim_complete_and_drain() {
 async fn set_autowork_requires_tag_when_enabled() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    let conv = "1";
-    seed_conversation(&services, conv.parse().unwrap()).await;
+    let conv = ConversationId::new().into_string();
+    seed_conversation(&services, &conv).await;
 
     // enabled without tag → 400.
     let resp = app
@@ -303,7 +311,7 @@ async fn terminal_autowork_unknown_terminal_is_not_found() {
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/autowork",
-            json!({ "kind": "terminal", "target_id": "term_missing", "enabled": true, "tag": "x" }),
+            json!({ "kind": "terminal", "target_id": MISSING_TERMINAL_ID, "enabled": true, "tag": "x" }),
             &token,
             &csrf,
         ))
@@ -342,7 +350,10 @@ async fn terminal_autowork_rejects_plain_shell() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let term_id = body_json(resp).await["data"]["id"].as_i64().unwrap().to_string();
+    let term_id = body_json(resp).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     // Enabling AutoWork on a plain shell → eligibility check 400.
     let resp = app
@@ -390,17 +401,21 @@ async fn batch_delete_removes_selected() {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let id = body_json(resp).await["data"]["id"].as_i64().unwrap();
+        let id = body_json(resp).await["data"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         ids.push(id);
     }
 
-    // Batch-delete the first two (plus a non-existent id, which is skipped).
+    // Batch-delete the first two (plus a non-existent canonical id, which is skipped).
+    let missing = RequirementId::new().into_string();
     let resp = app
         .clone()
         .oneshot(json_with_token(
             "POST",
             "/api/requirements/batch-delete",
-            json!({ "ids": [ids[0], ids[1], 999999] }),
+            json!({ "ids": [ids[0], ids[1], missing] }),
             &token,
             &csrf,
         ))

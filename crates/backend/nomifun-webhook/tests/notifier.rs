@@ -35,7 +35,7 @@ impl WebhookSender for RecordingSender {
 
 fn requirement(tag: &str) -> RequirementRow {
     RequirementRow {
-        id: 1,
+        id: nomifun_common::RequirementId::new().into_string(),
         title: "Build the thing".into(),
         content: "Implement feature X".into(),
         tag: tag.into(),
@@ -44,8 +44,8 @@ fn requirement(tag: &str) -> RequirementRow {
         status: "done".into(),
         priority: 0,
         completion_note: Some("did it".into()),
-        owner_session_id: None,
-        owner_kind: None,
+        owner_conversation_id: None,
+        owner_terminal_id: None,
         active_turn_started_at: None,
         lease_expires_at: None,
         started_at: None,
@@ -76,10 +76,10 @@ async fn ctx() -> Ctx {
     }
 }
 
-async fn add_webhook(ctx: &Ctx, enabled: bool) -> i64 {
+async fn add_webhook(ctx: &Ctx, enabled: bool) -> nomifun_common::WebhookId {
     ctx.webhooks
         .insert(&WebhookRow {
-            id: 0, // ignored by insert(); DB assigns the real id
+            id: nomifun_common::WebhookId::new(),
             name: "bot".into(),
             platform: "lark".into(),
             url: "https://example.com/hook".into(),
@@ -93,7 +93,7 @@ async fn add_webhook(ctx: &Ctx, enabled: bool) -> i64 {
         .unwrap()
 }
 
-async fn bind_tag(ctx: &Ctx, tag: &str, webhook_id: Option<i64>) {
+async fn bind_tag(ctx: &Ctx, tag: &str, webhook_id: Option<nomifun_common::WebhookId>) {
     ctx.tags
         .upsert(&TagSettingRow {
             tag: tag.into(),

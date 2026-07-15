@@ -14,6 +14,7 @@
  */
 
 import { createContext, useContext } from 'react';
+import type { AssetId, WorkshopNodeId } from '@/common/types/ids';
 import type { ImageEditorMode } from '../editor';
 import type { ThemeMode } from './theme';
 
@@ -22,30 +23,30 @@ export interface CanvasNodeApi {
   /** Whether canvas interactions are enabled (false while panning/connecting). */
   interactive: boolean;
   /** Shallow-merge a patch into a node's `data` (records history + autosaves). */
-  updateNodeData: (nodeId: string, patch: Record<string, unknown>) => void;
+  updateNodeData: (nodeId: WorkshopNodeId, patch: Record<string, unknown>) => void;
   /** Update a node's box size (used by aspect-lock toggle / fit-to-image). */
-  resizeNode: (nodeId: string, size: { width: number; height: number }) => void;
-  removeNode: (nodeId: string) => void;
-  duplicateNode: (nodeId: string) => void;
+  resizeNode: (nodeId: WorkshopNodeId, size: { width: number; height: number }) => void;
+  removeNode: (nodeId: WorkshopNodeId) => void;
+  duplicateNode: (nodeId: WorkshopNodeId) => void;
   /** Upload a local file into an (empty) media node, replacing its asset. */
-  fillNodeFromFile: (nodeId: string, file: File) => void;
+  fillNodeFromFile: (nodeId: WorkshopNodeId, file: File) => void;
   /** Open the big-image preview, seeded at this image node's asset. */
-  previewImageNode: (nodeId: string) => void;
+  previewImageNode: (nodeId: WorkshopNodeId) => void;
   /** Persist an asset into the library (in_library=1) with a toast. */
-  saveAssetToLibrary: (assetId: string) => void;
+  saveAssetToLibrary: (assetId: AssetId) => void;
   /** Download an asset to disk. */
-  downloadAsset: (assetId: string, filename?: string) => void;
+  downloadAsset: (assetId: AssetId, filename?: string) => void;
   /** Open the image editor for an image node in a specific mode. */
-  editImageNode: (nodeId: string, mode: ImageEditorMode) => void;
+  editImageNode: (nodeId: WorkshopNodeId, mode: ImageEditorMode) => void;
   /**
    * Append-only (M8): open the big-image lightbox on an explicit asset list
    * (used by the output / compare nodes to preview a specific upstream result).
    */
-  openImagePreview: (assetIds: string[], startIndex?: number) => void;
+  openImagePreview: (assetIds: AssetId[], startIndex?: number) => void;
   /** Append-only (M8): dissolve a group, keeping its members (absolute coords restored). */
-  ungroupNode: (groupId: string) => void;
+  ungroupNode: (groupId: WorkshopNodeId) => void;
   /** Append-only (M8): delete a group together with every member node. */
-  deleteGroupWithChildren: (groupId: string) => void;
+  deleteGroupWithChildren: (groupId: WorkshopNodeId) => void;
   /** Record a discrete history step + schedule a save (e.g. after resize end). */
   commitInteraction: () => void;
   beginInteraction: () => void;

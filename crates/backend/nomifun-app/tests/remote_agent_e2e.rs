@@ -8,6 +8,8 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, delete_with_token, get_with_token, json_with_token, setup_and_login};
 
+const MISSING_REMOTE_AGENT_ID: &str = "ragent_0190f5fe-7c00-7a00-8abc-012345679996";
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn bearer_agent_body() -> serde_json::Value {
@@ -49,7 +51,7 @@ async fn t1_1_create_bearer_agent() {
     let json = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
 
     let data = &json["data"];
-    assert!(data["id"].as_i64().is_some());
+    assert!(data["id"].as_str().is_some_and(|id| id.starts_with("ragent_")));
     assert_eq!(data["name"], "Test Remote Server");
     assert_eq!(data["protocol"], "openclaw");
     assert_eq!(data["url"], "wss://remote.example.com");
@@ -148,7 +150,7 @@ async fn t3_1_get_single_agent_with_masked_token() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
 
     let req = get_with_token(&format!("/api/remote-agents/{id}"), &token);
     let resp = app.oneshot(req).await.unwrap();
@@ -166,7 +168,10 @@ async fn t3_2_get_nonexistent_agent() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = get_with_token("/api/remote-agents/nonexistent-uuid", &token);
+    let req = get_with_token(
+        &format!("/api/remote-agents/{MISSING_REMOTE_AGENT_ID}"),
+        &token,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -179,7 +184,7 @@ async fn t4_1_update_name_only() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
 
     let body = json!({ "name": "Updated Name" });
     let req = json_with_token("PUT", &format!("/api/remote-agents/{id}"), body, &token, &csrf);
@@ -199,7 +204,7 @@ async fn t4_2_update_multiple_fields() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
 
     let body = json!({
         "name": "Updated",
@@ -222,7 +227,13 @@ async fn t4_3_update_nonexistent_agent() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let body = json!({ "name": "Doesn't Matter" });
-    let req = json_with_token("PUT", "/api/remote-agents/nonexistent-uuid", body, &token, &csrf);
+    let req = json_with_token(
+        "PUT",
+        &format!("/api/remote-agents/{MISSING_REMOTE_AGENT_ID}"),
+        body,
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -235,7 +246,7 @@ async fn t5_1_delete_agent() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
 
     let req = delete_with_token(&format!("/api/remote-agents/{id}"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -252,7 +263,11 @@ async fn t5_2_delete_nonexistent_agent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = delete_with_token("/api/remote-agents/nonexistent-uuid", &token, &csrf);
+    let req = delete_with_token(
+        &format!("/api/remote-agents/{MISSING_REMOTE_AGENT_ID}"),
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -324,7 +339,7 @@ async fn t7_2_handshake_nonexistent_agent() {
 
     let req = json_with_token(
         "POST",
-        "/api/remote-agents/nonexistent-uuid/handshake",
+        &format!("/api/remote-agents/{MISSING_REMOTE_AGENT_ID}/handshake"),
         json!({}),
         &token,
         &csrf,
@@ -342,7 +357,7 @@ async fn t8_full_crud_lifecycle() {
 
     // Create
     let created = create_agent(&mut app, &token, &csrf, bearer_agent_body()).await;
-    let id = created["data"]["id"].as_i64().unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
 
     // Read list
     let req = get_with_token("/api/remote-agents", &token);

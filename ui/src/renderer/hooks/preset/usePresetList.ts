@@ -1,6 +1,6 @@
 import { ipcBridge } from '@/common';
 import { resolveLocaleKey } from '@/common/utils';
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
 import { sortPresets as sortPresetsUtil } from '@/renderer/pages/settings/PresetSettings/presetUtils';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -19,7 +19,7 @@ export const isExtensionPreset = (preset: Preset | null | undefined): boolean =>
 export const usePresetList = () => {
   const { i18n } = useTranslation();
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [activePresetId, setActivePresetId] = useState<string | null>(null);
+  const [activePresetId, setActivePresetId] = useState<PresetReference | null>(null);
   const localeKey = resolveLocaleKey(i18n.language);
 
   const loadPresets = useCallback(async () => {

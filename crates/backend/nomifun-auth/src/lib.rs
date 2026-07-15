@@ -60,7 +60,7 @@ pub use middleware::{
 
 // Trust resolution (local-trust secret, auth policy)
 pub use trust::{
-    AuthPolicy, LOCAL_TRUST_HEADER, LocalTrusted, SYSTEM_USER_ID, TrustState, is_locally_trusted,
+    AuthPolicy, LOCAL_TRUST_HEADER, LocalTrusted, TrustState, is_locally_trusted,
     require_local_trust_middleware, trust_resolve_middleware,
 };
 

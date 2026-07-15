@@ -66,7 +66,7 @@ impl TranscriptTurn {
 /// 只读的转录来源：按 [`TranscriptAnchor`] 拉取相关窗口。
 ///
 /// 实现者（P-D 的 `ConversationTranscriptSource`）走会话库仓储层
-/// `get_messages(conv_id)`（user 无关），把 wire conversation_id 解析为 i64，
+/// `get_messages(conv_id)`（user 无关），直接使用 canonical conversation ID，
 /// 读 full content（非 compact），脱敏后返回。会话已删/无法定位 → `Ok(None)`。
 #[async_trait]
 pub trait TranscriptSource: Send + Sync {

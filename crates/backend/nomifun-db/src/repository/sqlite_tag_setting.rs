@@ -1,4 +1,5 @@
 use sqlx::SqlitePool;
+use nomifun_common::WebhookId;
 
 use crate::error::DbError;
 use crate::models::TagSettingRow;
@@ -36,7 +37,7 @@ impl ITagSettingRepository for SqliteTagSettingRepository {
                 updated_at = excluded.updated_at",
         )
         .bind(&row.tag)
-        .bind(&row.webhook_id)
+        .bind(row.webhook_id.as_ref().map(WebhookId::as_str))
         .bind(&row.description)
         .bind(&row.notify_events)
         .bind(row.updated_at)

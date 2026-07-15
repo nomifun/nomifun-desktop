@@ -96,7 +96,7 @@ async fn get_agent_configs_returns_installed_agents() {
     assert_eq!(configs.len(), 2);
     assert_eq!(configs[0].source, McpSource::Claude);
     assert_eq!(configs[0].servers.len(), 1);
-    assert_eq!(configs[0].servers[0].server.name, "existing-srv");
+    assert_eq!(configs[0].servers[0].name, "existing-srv");
     assert_eq!(configs[1].source, McpSource::Qwen);
     assert!(configs[1].servers.is_empty());
 }

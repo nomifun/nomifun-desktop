@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import { uuid } from '@/common/utils';
@@ -52,7 +54,7 @@ const useOpenClawSendBoxDraft = getSendBoxDraftHook('openclaw-gateway', {
 
 const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
-const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id }) => {
+const OpenClawSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
@@ -75,7 +77,7 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
   // Track whether the current turn was triggered by a Star Office install request
   const starOfficeInstallInFlightRef = useRef(false);
 
-  const { data: draftData, mutate: mutateDraft } = useOpenClawSendBoxDraft(String(conversation_id));
+  const { data: draftData, mutate: mutateDraft } = useOpenClawSendBoxDraft(conversation_id);
   const atPath = draftData?.atPath ?? EMPTY_AT_PATH;
   const uploadFile = draftData?.uploadFile ?? EMPTY_UPLOAD_FILES;
   const content = draftData?.content ?? '';
@@ -182,7 +184,7 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
             // Notify StarOfficeMonitorCard to re-detect and auto-open panel
             if (starOfficeInstallInFlightRef.current) {
               starOfficeInstallInFlightRef.current = false;
-              emitter.emit('staroffice.install.finished', { conversation_id: String(conversation_id) });
+              emitter.emit('staroffice.install.finished', { conversation_id });
             }
             hasContentInTurnRef.current = false;
           }
@@ -214,7 +216,7 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
   useAddEventListener(
     'staroffice.install.request',
     ({ conversation_id: eventConversationId, text }) => {
-      if (Number(eventConversationId) !== conversation_id) return;
+      if (eventConversationId !== conversation_id) return;
       // Show the simplified prompt to user, inject star-office-helper skill via main process
       setAiProcessing(true);
       aiProcessingRef.current = true;
@@ -278,7 +280,7 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
 
       setAiProcessing(true);
       aiProcessingRef.current = true;
-      let msg_id: string | null = null;
+      let msg_id: MessageId | null = null;
       try {
         void checkAndUpdateTitle(conversation_id, input);
         // Wait for the server-assigned msg_id before rendering the optimistic
@@ -391,8 +393,9 @@ const OpenClawSendBox: React.FC<{ conversation_id: number }> = ({ conversation_i
   useEffect(() => {
     if (!conversation_id || !hasHydratedRunningState) return;
 
-    const storageKey = `openclaw_initial_message_${conversation_id}`;
-    const processedKey = `openclaw_initial_processed_${conversation_id}`;
+    const target = conversationTarget(conversation_id);
+    const storageKey = sessionStorageKey('initial-message-openclaw', target);
+    const processedKey = sessionStorageKey('initial-message-processed-openclaw', target);
 
     const processInitialMessage = async () => {
       const stored = sessionStorage.getItem(storageKey);

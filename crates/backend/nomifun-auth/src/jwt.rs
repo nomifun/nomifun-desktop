@@ -6,6 +6,7 @@ use base64::Engine as _;
 use dashmap::DashMap;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use nomifun_common::constants::SESSION_MAX_AGE_SECONDS;
+use nomifun_common::UserId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,7 +25,7 @@ const JWT_AUDIENCE: &str = "nomifun-webui";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPayload {
     /// User ID.
-    pub user_id: String,
+    pub user_id: UserId,
     /// Username.
     pub username: String,
     /// Issued-at timestamp (seconds since UNIX epoch).
@@ -63,8 +64,10 @@ impl JwtService {
         let now = now_secs()?;
         let exp = now + TOKEN_EXPIRY.as_secs();
 
+        let user_id = UserId::parse(user_id)
+            .map_err(|error| AuthError::TokenInvalid(format!("invalid user id: {error}")))?;
         let claims = TokenPayload {
-            user_id: user_id.to_owned(),
+            user_id,
             username: username.to_owned(),
             iat: now,
             exp,
@@ -233,10 +236,13 @@ mod tests {
         JwtService::new("test_secret_key_for_testing".into())
     }
 
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_USER_ID_2: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+
     #[test]
     fn sign_produces_valid_jwt_format() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         assert!(!token.is_empty());
         assert_eq!(token.split('.').count(), 3);
     }
@@ -244,9 +250,9 @@ mod tests {
     #[test]
     fn sign_and_verify_roundtrip() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         let payload = service.verify(&token).unwrap();
-        assert_eq!(payload.user_id, "user_1");
+        assert_eq!(payload.user_id.as_str(), TEST_USER_ID);
         assert_eq!(payload.username, "admin");
         assert_eq!(payload.iss, JWT_ISSUER);
         assert_eq!(payload.aud, JWT_AUDIENCE);
@@ -261,7 +267,7 @@ mod tests {
     #[test]
     fn verify_tampered_token_fails() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         let tampered = format!("{token}x");
         assert!(matches!(service.verify(&tampered), Err(AuthError::TokenInvalid(_))));
     }
@@ -270,7 +276,7 @@ mod tests {
     fn verify_wrong_secret_fails() {
         let service1 = JwtService::new("secret_1".into());
         let service2 = JwtService::new("secret_2".into());
-        let token = service1.sign("user_1", "admin").unwrap();
+        let token = service1.sign(TEST_USER_ID, "admin").unwrap();
         assert!(service2.verify(&token).is_err());
     }
 
@@ -280,7 +286,7 @@ mod tests {
         let secret = service.secret.read().unwrap();
 
         let claims = TokenPayload {
-            user_id: "user_1".into(),
+            user_id: UserId::parse(TEST_USER_ID).unwrap(),
             username: "admin".into(),
             iat: 1000,
             exp: 1001,
@@ -301,7 +307,7 @@ mod tests {
     #[test]
     fn blacklist_token_then_verify_fails() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         assert!(service.verify(&token).is_ok());
 
         service.blacklist_token(&token);
@@ -313,8 +319,8 @@ mod tests {
         let service = test_service();
         assert_eq!(service.blacklist_size(), 0);
 
-        let token1 = service.sign("user_1", "admin").unwrap();
-        let token2 = service.sign("user_2", "user").unwrap();
+        let token1 = service.sign(TEST_USER_ID, "admin").unwrap();
+        let token2 = service.sign(TEST_USER_ID_2, "user").unwrap();
 
         service.blacklist_token(&token1);
         assert_eq!(service.blacklist_size(), 1);
@@ -326,7 +332,7 @@ mod tests {
     #[test]
     fn rotate_secret_invalidates_old_tokens() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         assert!(service.verify(&token).is_ok());
 
         service.rotate_secret().unwrap();
@@ -336,7 +342,7 @@ mod tests {
     #[test]
     fn rotate_secret_clears_blacklist() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         service.blacklist_token(&token);
         assert_eq!(service.blacklist_size(), 1);
 
@@ -349,9 +355,9 @@ mod tests {
         let service = test_service();
         service.rotate_secret().unwrap();
 
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         let payload = service.verify(&token).unwrap();
-        assert_eq!(payload.user_id, "user_1");
+        assert_eq!(payload.user_id.as_str(), TEST_USER_ID);
     }
 
     #[test]
@@ -361,7 +367,7 @@ mod tests {
 
         // Create a token with an already-past expiry
         let claims = TokenPayload {
-            user_id: "user_1".into(),
+            user_id: UserId::parse(TEST_USER_ID).unwrap(),
             username: "admin".into(),
             iat: 1000,
             exp: 1001,
@@ -386,7 +392,7 @@ mod tests {
     #[test]
     fn cleanup_keeps_valid_entries() {
         let service = test_service();
-        let token = service.sign("user_1", "admin").unwrap();
+        let token = service.sign(TEST_USER_ID, "admin").unwrap();
         service.blacklist_token(&token);
         assert_eq!(service.blacklist_size(), 1);
 

@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { IMcpServer } from '@/common/config/storage';
+import type { McpServerId } from '@/common/types/ids';
 import {
   MAX_AGENT_EXECUTION_MODELS,
   type TDecisionPolicy,
@@ -102,7 +103,7 @@ const GuidPage: React.FC = () => {
   const [guidDisabledBuiltinSkills, setGuidDisabledBuiltinSkills] = useState<string[] | undefined>(undefined);
   const [guidEnabledSkills, setGuidEnabledSkills] = useState<string[] | undefined>(undefined);
   const [availableMcpServers, setAvailableMcpServers] = useState<IMcpServer[]>([]);
-  const [guidSelectedMcpServerIds, setGuidSelectedMcpServerIds] = useState<number[] | undefined>(undefined);
+  const [guidSelectedMcpServerIds, setGuidSelectedMcpServerIds] = useState<McpServerId[] | undefined>(undefined);
 
   useEffect(() => {
     Promise.all([ipcBridge.fs.listBuiltinAutoSkills.invoke(), ipcBridge.fs.listAvailableSkills.invoke()])
@@ -158,7 +159,7 @@ const GuidPage: React.FC = () => {
     }
   }, []);
 
-  const handleToggleMcpServer = useCallback((serverId: number) => {
+  const handleToggleMcpServer = useCallback((serverId: McpServerId) => {
     setGuidSelectedMcpServerIds((prev) => {
       const current = prev ?? [];
       return current.includes(serverId) ? current.filter((id) => id !== serverId) : [...current, serverId];
@@ -411,9 +412,9 @@ const GuidPage: React.FC = () => {
     ],
   );
 
-  const handleSelectPreset = useCallback(
-    (presetId: string) => {
-      agentSelection.setSelectedAgentKey(presetId);
+  const handleSelectPresetKey = useCallback(
+    (selectedAgentKey: string) => {
+      agentSelection.setSelectedAgentKey(selectedAgentKey);
       mention.setMentionOpen(false);
       mention.setMentionQuery(null);
       mention.setMentionSelectorOpen(false);
@@ -560,7 +561,7 @@ const GuidPage: React.FC = () => {
   );
   const handlePresetAgentSwitch = useCallback(
     async (nextAgentId: string) => {
-      const presetId = agentSelection.selectedAgentInfo?.preset_id;
+      const presetId = selectedPresetRecord?.id;
       if (!presetId || nextAgentId === currentPresetAgentId) return;
       try {
         await swrMutate(
@@ -856,7 +857,7 @@ const GuidPage: React.FC = () => {
           presets={agentSelection.presets}
           localeKey={localeKey}
           onSelectPreset={(id) => {
-            handleSelectPreset(`preset:${id}`);
+            handleSelectPresetKey(`preset:${id}`);
             setDrawerOpen(false);
           }}
           onFree={() => {

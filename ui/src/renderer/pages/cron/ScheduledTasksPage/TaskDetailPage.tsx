@@ -22,6 +22,7 @@ import { useCronJobRuns } from '@renderer/pages/cron/useCronJobs';
 import { repairCronJobTimeZone } from '@renderer/pages/cron/repairCronJobTimeZone';
 import { mutate } from 'swr';
 import { getConversationRuntimeWorkspaceErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
+import { parseCronJobId } from '@/common/types/ids';
 
 const RUN_STATUS_CLASS_NAMES: Record<ICronJobRunStatus, string> = {
   ok: 'bg-success-light-1 text-success-6',
@@ -33,7 +34,8 @@ const RUN_STATUS_CLASS_NAMES: Record<ICronJobRunStatus, string> = {
 const TaskDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { job_id } = useParams<{ job_id: string }>();
+  const { job_id: rawJobId } = useParams<{ job_id: string }>();
+  const job_id = rawJobId == null ? undefined : parseCronJobId(rawJobId);
   const [job, setJob] = useState<ICronJob | null>(null);
   const [loading, setLoading] = useState(true);
   const [editDialogVisible, setEditDialogVisible] = useState(false);
@@ -124,25 +126,6 @@ const TaskDetailPage: React.FC = () => {
         }
 
         if (latestConversation) {
-          const latestExtra = (latestConversation.extra ?? {}) as Record<string, unknown> & {
-            cron_job_id?: string;
-            cronJobId?: string;
-          };
-          const normalizedCronJobId =
-            typeof latestExtra.cron_job_id === 'string' && latestExtra.cron_job_id.trim()
-              ? latestExtra.cron_job_id
-              : job.id;
-          latestConversation = {
-            ...latestConversation,
-            extra: {
-              ...latestExtra,
-              cron_job_id: normalizedCronJobId,
-              cronJobId:
-                typeof latestExtra.cronJobId === 'string' && latestExtra.cronJobId.trim()
-                  ? latestExtra.cronJobId
-                  : normalizedCronJobId,
-            } as TChatConversation['extra'],
-          } as TChatConversation;
           await mutate<TChatConversation>(conversationKey, latestConversation, false);
         }
 

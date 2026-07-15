@@ -11,11 +11,12 @@ import { ipcBridge } from '@/common';
 import { httpRequest, isBackendHttpError } from '@/common/adapter/httpBridge';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import type { ICompanionExportResult, ICompanionWithStatus } from '@/common/adapter/ipcBridge';
+import type { CompanionId, KnowledgeBaseId } from '@/common/types/ids';
 
 /** Tagged import result of POST /api/companion/import (backend `ImportOutcome`). */
 type ImportOutcome =
   | { kind: 'memory'; imported: number; skipped_duplicates: number }
-  | { kind: 'companion'; companion_id: string; name: string; knowledge_names: string[] };
+  | { kind: 'companion'; companion_id: CompanionId; name: string; knowledge_names: string[] };
 
 const ZIP_FILTERS = [{ name: 'Zip', extensions: ['zip'] }];
 
@@ -151,7 +152,7 @@ const MigrateTab: React.FC<Props> = ({ companions }) => {
     try {
       const bases = await ipcBridge.knowledge.listBases.invoke();
       const idByName = new Map(bases.map((b) => [b.name, b.id]));
-      const matchedIds: string[] = [];
+      const matchedIds: KnowledgeBaseId[] = [];
       const missing: string[] = [];
       for (const name of outcome.knowledge_names) {
         const id = idByName.get(name);

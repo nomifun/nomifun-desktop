@@ -15,6 +15,17 @@ use nomifun_db::{ICronRepository, SqliteCronRepository};
 
 use common::{body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login};
 
+// Deterministic canonical IDs keep fixtures readable while exercising the
+// production string-only entity-ID contract. Each test gets an isolated
+// database, so reusing these values across tests cannot collide.
+const TEST_CONV_1: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
+const TEST_CONV_2: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678902";
+const TEST_CONV_3: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678903";
+const MISSING_CRON_JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8abc-012345679991";
+const WHITESPACE_CRON_JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8abc-012345679992";
+const SECONDARY_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8abc-012345679993";
+const FORGED_CUSTOM_AGENT_ID: &str = "agent_0190f5fe-7c00-7a00-8abc-012345679994";
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 fn create_job_body(name: &str) -> serde_json::Value {
@@ -22,7 +33,7 @@ fn create_job_body(name: &str) -> serde_json::Value {
         "name": name,
         "schedule": { "kind": "every", "every_ms": 60000, "description": "every minute" },
         "message": "test message",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "conversation_title": "Test Conv",
         "agent_type": "acp",
         "created_by": "user"
@@ -34,7 +45,7 @@ fn create_at_job_body(name: &str, at_ms: i64) -> serde_json::Value {
         "name": name,
         "schedule": { "kind": "at", "at_ms": at_ms, "description": "once" },
         "message": "at message",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "agent_type": "acp",
         "created_by": "user"
     })
@@ -45,7 +56,7 @@ fn create_cron_job_body(name: &str, expr: &str) -> serde_json::Value {
         "name": name,
         "schedule": { "kind": "cron", "expr": expr },
         "message": "cron message",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "agent_type": "acp",
         "created_by": "user"
     })
@@ -62,13 +73,15 @@ async fn create_job(app: &mut axum::Router, token: &str, csrf: &str, body: serde
 
 /// Seed a minimal `conversations` parent row so a cron job carrying this
 /// `conversation_id` satisfies the `cron_jobs.conversation_id -> conversations`
-/// foreign key. `system_default_user` is already seeded by the migration.
-async fn seed_conversation(services: &nomifun_app::AppServices, id: i64) {
+/// foreign key. The owner is resolved by application bootstrap from the
+/// database's `installation_identity` singleton.
+async fn seed_conversation(services: &nomifun_app::AppServices, id: &str) {
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-         VALUES (?, 'system_default_user', 'Seeded Conv', 'acp', 0, 0)",
+         VALUES (?, ?, 'Seeded Conv', 'acp', 0, 0)",
     )
     .bind(id)
+    .bind(services.authoritative_user_id.as_ref())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -133,7 +146,10 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     );
     let response = app.clone().oneshot(create_conversation).await.unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
-    let conversation_id = body_json(response).await["data"]["id"].as_i64().unwrap();
+    let conversation_id = body_json(response).await["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let mut body = create_job_body("Private Owner Job");
     body["conversation_id"] = json!(conversation_id);
@@ -203,10 +219,11 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
         "INSERT INTO providers (\
             id, platform, name, base_url, api_key_encrypted, models, enabled, \
             capabilities, created_at, updated_at\
-         ) VALUES ('provider_secondary', 'openai', 'secondary-safe', \
+         ) VALUES (?, 'openai', 'secondary-safe', \
                    'https://example.invalid', 'encrypted', \
                    '[\"model-secondary\"]', 1, '[]', 1, 1)",
     )
+    .bind(SECONDARY_PROVIDER_ID)
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -223,16 +240,15 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
                     "description": "every ten minutes"
                 },
                 "message": "model-only scheduled work",
-                "conversation_id": 0,
                 "agent_type": "nomi",
                 "created_by": "user",
                 "execution_mode": "new_conversation",
                 "agent_config": {
-                    "backend": "provider_secondary",
+                    "backend": SECONDARY_PROVIDER_ID,
                     "name": "Nomi",
                     "model_id": "model-secondary",
                     "cli_path": "/bin/sh",
-                    "custom_agent_id": "forged-host-agent",
+                    "custom_agent_id": FORGED_CUSTOM_AGENT_ID,
                     "mode": "yolo",
                     "config_options": { "host": "true" },
                     "workspace": "/unsafe",
@@ -249,7 +265,7 @@ async fn au3_authenticated_users_cannot_observe_or_mutate_each_others_cron_jobs(
     let secondary_job_id = secondary_job["id"].as_str().unwrap().to_owned();
     let config = &secondary_job["metadata"]["agent_config"];
     assert_eq!(secondary_job["metadata"]["agent_type"], "nomi");
-    assert_eq!(config["backend"], "provider_secondary");
+    assert_eq!(config["backend"], SECONDARY_PROVIDER_ID);
     assert_eq!(config["model_id"], "model-secondary");
     for removed in [
         "cli_path",
@@ -346,7 +362,7 @@ async fn cj1_create_cron_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let data = create_job(&mut app, &token, &csrf, create_job_body("Daily Report")).await;
 
     assert!(data["id"].as_str().unwrap().starts_with("cron_"));
@@ -356,7 +372,7 @@ async fn cj1_create_cron_job() {
     assert_eq!(data["state"]["run_count"], 0);
     assert_eq!(data["message"], "test message");
     assert_eq!(data["execution_mode"], "existing");
-    assert_eq!(data["metadata"]["conversation_id"], 1);
+    assert_eq!(data["metadata"]["conversation_id"], TEST_CONV_1);
     assert_eq!(data["metadata"]["agent_type"], "acp");
     assert_eq!(data["metadata"]["created_by"], "user");
 }
@@ -370,7 +386,7 @@ async fn cj2_create_three_schedule_types() {
 
     let now = nomifun_common::now_ms();
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let at = create_job(&mut app, &token, &csrf, create_at_job_body("At Job", now + 3_600_000)).await;
     assert_eq!(at["schedule"]["kind"], "at");
     assert!(at["state"]["next_run_at_ms"].as_i64().unwrap() > now);
@@ -399,19 +415,31 @@ async fn cj3_create_missing_required_fields() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let invalid_bodies = vec![
-        json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": 1, "agent_type": "acp", "created_by": "user"}),
-        json!({"name": "X", "conversation_id": 1, "agent_type": "acp", "created_by": "user"}),
-        json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "agent_type": "acp", "created_by": "user"}),
-        json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": 1, "created_by": "user"}),
+        (
+            "name",
+            json!({"schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "acp", "created_by": "user"}),
+        ),
+        (
+            "schedule",
+            json!({"name": "X", "conversation_id": TEST_CONV_1, "agent_type": "acp", "created_by": "user"}),
+        ),
+        (
+            "agent_type",
+            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "created_by": "user"}),
+        ),
+        (
+            "created_by",
+            json!({"name": "X", "schedule": {"kind": "every", "every_ms": 60000}, "conversation_id": TEST_CONV_1, "agent_type": "acp"}),
+        ),
     ];
 
-    for body in invalid_bodies {
+    for (missing_field, body) in invalid_bodies {
         let req = json_with_token("POST", "/api/cron/jobs", body, &token, &csrf);
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::BAD_REQUEST,
-            "missing field should return 400"
+            "missing {missing_field} should return 400"
         );
     }
 }
@@ -425,7 +453,6 @@ async fn cj3b_create_rejects_workspace_with_edge_whitespace_segment() {
         "name": "Whitespace Workspace",
         "schedule": { "kind": "every", "every_ms": 60000, "description": "every minute" },
         "message": "test message",
-        "conversation_id": 0,
         "agent_type": "acp",
         "created_by": "user",
         "execution_mode": "new_conversation",
@@ -457,7 +484,7 @@ async fn cj4_get_single_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Get Test")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -477,7 +504,7 @@ async fn cj5_get_nonexistent() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = get_with_token("/api/cron/jobs/cron_nonexistent", &token);
+    let req = get_with_token(&format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}"), &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -491,8 +518,8 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
 
     cron_repo
         .insert(&nomifun_db::models::CronJobRow {
-            id: "cron_whitespace_workspace".into(),
-            user_id: nomifun_auth::SYSTEM_USER_ID.into(),
+            id: WHITESPACE_CRON_JOB_ID.into(),
+            user_id: services.authoritative_user_id.to_string(),
             name: "Legacy Workspace".into(),
             enabled: true,
             schedule_kind: "every".into(),
@@ -533,7 +560,7 @@ async fn cj5b_run_now_legacy_workspace_uses_runtime_edge_whitespace_code() {
 
     let req = json_with_token(
         "POST",
-        "/api/cron/jobs/cron_whitespace_workspace/run",
+        &format!("/api/cron/jobs/{WHITESPACE_CRON_JOB_ID}/run"),
         json!({}),
         &token,
         &csrf,
@@ -559,7 +586,7 @@ async fn cj6_list_all_jobs() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     for i in 0..3 {
         create_job(&mut app, &token, &csrf, create_job_body(&format!("Job {i}"))).await;
     }
@@ -580,21 +607,21 @@ async fn cj7_list_by_conversation() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 2).await;
-    seed_conversation(&services, 3).await;
+    seed_conversation(&services, TEST_CONV_2).await;
+    seed_conversation(&services, TEST_CONV_3).await;
     let mut body_a = create_job_body("Job A");
-    body_a["conversation_id"] = json!(2);
+    body_a["conversation_id"] = json!(TEST_CONV_2);
     create_job(&mut app, &token, &csrf, body_a).await;
 
     let mut body_b = create_job_body("Job B");
-    body_b["conversation_id"] = json!(2);
+    body_b["conversation_id"] = json!(TEST_CONV_2);
     create_job(&mut app, &token, &csrf, body_b).await;
 
     let mut body_c = create_job_body("Job C");
-    body_c["conversation_id"] = json!(3);
+    body_c["conversation_id"] = json!(TEST_CONV_3);
     create_job(&mut app, &token, &csrf, body_c).await;
 
-    let req = get_with_token("/api/cron/jobs?conversation_id=2", &token);
+    let req = get_with_token(&format!("/api/cron/jobs?conversation_id={TEST_CONV_2}"), &token);
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -610,7 +637,7 @@ async fn cj8_update_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Original")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -634,7 +661,7 @@ async fn cj9_update_schedule_type() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Schedule Change")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -653,7 +680,7 @@ async fn cj9b_update_schedule_preserves_existing_timezone_when_omitted() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(
         &mut app,
         &token,
@@ -662,7 +689,7 @@ async fn cj9b_update_schedule_preserves_existing_timezone_when_omitted() {
             "name": "Schedule Change With Timezone",
             "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
             "message": "cron message",
-            "conversation_id": 1,
+            "conversation_id": TEST_CONV_1,
             "agent_type": "acp",
             "created_by": "user"
         }),
@@ -689,7 +716,13 @@ async fn cj10_update_nonexistent() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let update_body = json!({"name": "X"});
-    let req = json_with_token("PUT", "/api/cron/jobs/cron_nonexistent", update_body, &token, &csrf);
+    let req = json_with_token(
+        "PUT",
+        &format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}"),
+        update_body,
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -701,7 +734,7 @@ async fn cj11_delete_job() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("To Delete")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -721,7 +754,11 @@ async fn cj12_delete_nonexistent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = delete_with_token("/api/cron/jobs/cron_nonexistent", &token, &csrf);
+    let req = delete_with_token(
+        &format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}"),
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -747,7 +784,10 @@ async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
     let create_conv_resp = app.clone().oneshot(create_conv_req).await.unwrap();
     assert_eq!(create_conv_resp.status(), StatusCode::CREATED);
     let created_conv = body_json(create_conv_resp).await;
-    let conversation_id = created_conv["data"]["id"].as_i64().unwrap();
+    let conversation_id = created_conv["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
     let mut body = create_job_body("Run Now Job");
     body["conversation_id"] = json!(conversation_id);
@@ -773,7 +813,13 @@ async fn rn2_run_now_nonexistent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = json_with_token("POST", "/api/cron/jobs/cron_nonexistent/run", json!({}), &token, &csrf);
+    let req = json_with_token(
+        "POST",
+        &format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}/run"),
+        json!({}),
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -785,7 +831,7 @@ async fn sk1_save_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Skill Job")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -808,7 +854,7 @@ async fn sk2_has_skill_true() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Skill Check")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -837,7 +883,7 @@ async fn sk3_has_skill_false() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("No Skill")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -856,7 +902,7 @@ async fn sk4_save_empty_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Empty Skill")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -879,7 +925,7 @@ async fn sk5_save_placeholder_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Placeholder Skill")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -905,7 +951,7 @@ async fn sk6_save_skill_nonexistent() {
     let skill_body = json!({"content": "---\nname: x\n---\nOk"});
     let req = json_with_token(
         "POST",
-        "/api/cron/jobs/cron_nonexistent/skill",
+        &format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}/skill"),
         skill_body,
         &token,
         &csrf,
@@ -921,7 +967,7 @@ async fn sk7_delete_skill() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let created = create_job(&mut app, &token, &csrf, create_job_body("Delete Skill Job")).await;
     let job_id = created["id"].as_str().unwrap();
 
@@ -954,7 +1000,11 @@ async fn sk8_delete_skill_nonexistent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = delete_with_token("/api/cron/jobs/cron_nonexistent/skill", &token, &csrf);
+    let req = delete_with_token(
+        &format!("/api/cron/jobs/{MISSING_CRON_JOB_ID}/skill"),
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -983,12 +1033,12 @@ async fn sc6_cron_with_timezone() {
         "name": "Shanghai Job",
         "schedule": { "kind": "cron", "expr": "0 0 9 * * *", "tz": "Asia/Shanghai" },
         "message": "hello",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "agent_type": "acp",
         "created_by": "user"
     });
 
-    seed_conversation(&services, 1).await;
+    seed_conversation(&services, TEST_CONV_1).await;
     let data = create_job(&mut app, &token, &csrf, body).await;
     let now = nomifun_common::now_ms();
     assert!(data["state"]["next_run_at_ms"].as_i64().unwrap() > now);
@@ -1005,7 +1055,7 @@ async fn sc7_every_zero_interval() {
         "name": "Zero Interval",
         "schedule": { "kind": "every", "every_ms": 0 },
         "message": "x",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "agent_type": "acp",
         "created_by": "user"
     });
@@ -1025,7 +1075,7 @@ async fn sc8_every_negative_interval() {
         "name": "Negative Interval",
         "schedule": { "kind": "every", "every_ms": -1000 },
         "message": "x",
-        "conversation_id": 1,
+        "conversation_id": TEST_CONV_1,
         "agent_type": "acp",
         "created_by": "user"
     });

@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import type { AssetId } from '@/common/types/ids';
 import { loadWorkshopMedia } from '../lib/media';
 
 export type MediaState =
@@ -23,7 +24,7 @@ export type MediaState =
  * Resolve an asset id to an object URL. Re-runs when `assetId` or `nonce`
  * changes (bump `nonce` after replacing an asset's binary to bust the cache).
  */
-export function useWorkshopMedia(assetId: string | null | undefined, nonce = 0): MediaState {
+export function useWorkshopMedia(assetId: AssetId | null | undefined, nonce = 0): MediaState {
   const [state, setState] = useState<MediaState>({ status: assetId ? 'loading' : 'idle' });
   const reqRef = useRef(0);
 

@@ -46,7 +46,7 @@ import CreateTextAssetModal from './CreateTextAssetModal';
 
 export interface AssetsPanelProps {
   /** Canvas the panel is opened from (used to scope "insert" actions). */
-  canvasId: string;
+  canvasId: import('@/common/types/ids').CanvasId;
   open: boolean;
   onClose: () => void;
   /** Called when the user picks "insert into canvas" on an asset. */

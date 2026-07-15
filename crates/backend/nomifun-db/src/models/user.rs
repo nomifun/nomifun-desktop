@@ -1,4 +1,4 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{TimestampMs, UserId};
 use serde::{Deserialize, Serialize};
 
 /// Row mapping for the `users` table.
@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 /// Optional fields correspond to nullable columns.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
-    pub id: String,
+    #[sqlx(try_from = "String")]
+    pub id: UserId,
     pub username: String,
     pub email: Option<String>,
     pub password_hash: String,

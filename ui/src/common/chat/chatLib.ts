@@ -11,8 +11,31 @@ import type {
   ToolCallUpdate,
 } from '@/common/types/platform/acpTypes';
 import type { IKnowledgeWritebackEvent, IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
+import {
+  parseConversationId,
+  parseCronJobId,
+  parseKnowledgeBaseId,
+  type ConversationId,
+  type CronJobId,
+  type KnowledgeBaseId,
+  type MessageId,
+} from '../types/ids';
 import { uuid } from '../utils';
 import { optionalDisplayText, toDisplayText } from './displayText';
+
+declare const confirmationCorrelationBrand: unique symbol;
+
+/** ACP confirmation correlation key; transient protocol identity, never a DB entity ID. */
+export type ConfirmationCorrelationId = string & {
+  readonly [confirmationCorrelationBrand]: true;
+};
+
+export const parseConfirmationCorrelationId = (value: unknown): ConfirmationCorrelationId => {
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+    throw new TypeError('confirmation correlation id must be non-empty canonical text');
+  }
+  return value as ConfirmationCorrelationId;
+};
 
 /**
  * 安全的路径拼接函数，兼容Windows和Mac
@@ -79,10 +102,10 @@ interface IMessage<T extends TMessageType, Content extends Record<string, any>> 
   /**
    * 消息来源ID，— backend messages.id, stays TEXT (`msg_…`).
    */
-  msg_id?: string;
+  msg_id?: MessageId;
 
-  /** 消息会话ID — conversation primary key, INTEGER (numeric-id spec). */
-  conversation_id: number;
+  /** Owning canonical Conversation entity id. */
+  conversation_id: ConversationId;
   /**
    * 消息类型
    */
@@ -111,7 +134,7 @@ interface IMessage<T extends TMessageType, Content extends Record<string, any>> 
 
 export type CronMessageMeta = {
   source: 'cron';
-  cron_job_id: string;
+  cron_job_id: CronJobId;
   cron_job_name: string;
   triggered_at: number;
 };
@@ -129,13 +152,13 @@ export type KnowledgeWritebackStatus =
   | 'interrupted';
 
 export type KnowledgeWritebackFile = {
-  kb_id?: string | null;
+  kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
   staged?: boolean;
 };
 
 export type KnowledgeWritebackFailure = {
-  kb_id?: string | null;
+  kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
   error?: string;
 };
@@ -165,7 +188,7 @@ export type IMessageText = IMessage<
     senderName?: string;
     senderAgentType?: string;
     /** Sender Agent's conversation id — lets the renderer resolve preset avatars via conversation extras. */
-    senderConversationId?: number;
+    senderConversationId?: ConversationId;
     /** Turn-final knowledge write-back state, rendered under the assistant message. */
     knowledge_writeback?: KnowledgeWritebackState;
   }
@@ -303,7 +326,7 @@ export type IMessageAgentStatus = IMessage<
       | 'error';
     /** Display name for the agent (e.g. extension-contributed adapter name) / Agent 显示名称 */
     agent_name?: string;
-    // Optional legacy fields for backward compatibility
+    // Optional runtime metadata supplied by some ACP agents.
     session_id?: string;
     is_connected?: boolean;
     has_active_session?: boolean;
@@ -336,13 +359,28 @@ type ResponseTextData = {
   teammate_message?: unknown;
   sender_name?: unknown;
   sender_backend?: unknown;
-  sender_conversation_id?: unknown;
+  /**
+   * Untrusted ACP wire field. It is validated into `ConversationId` by
+   * `normalizeWireAgentMessageMetadata` before entering renderer state.
+   */
+  sender_conversation_id?: string;
 };
 
 type AgentMessageMetadata = Pick<
   IMessageText['content'],
   'agentMessage' | 'senderName' | 'senderAgentType' | 'senderConversationId'
 >;
+
+const normalizeCronMessageMeta = (value: unknown): CronMessageMeta | undefined => {
+  if (!isObject(value) || value.source !== 'cron') return undefined;
+  if (typeof value.cron_job_name !== 'string' || typeof value.triggered_at !== 'number') return undefined;
+  return {
+    source: value.source,
+    cron_job_id: parseCronJobId(value.cron_job_id),
+    cron_job_name: value.cron_job_name,
+    triggered_at: value.triggered_at,
+  };
+};
 
 /** External ACP event name; normalized immediately at the message boundary. */
 export const ACP_AGENT_MESSAGE_EVENT = 'teammate_message' as const;
@@ -354,14 +392,23 @@ export const ACP_AGENT_MESSAGE_EVENT = 'teammate_message' as const;
  */
 export const normalizeWireAgentMessageMetadata = (
   data: Record<string, unknown>
-): Partial<AgentMessageMetadata> => ({
-  ...(data.teammate_message ? { agentMessage: true } : {}),
-  ...(typeof data.sender_name === 'string' ? { senderName: data.sender_name } : {}),
-  ...(typeof data.sender_backend === 'string' ? { senderAgentType: data.sender_backend } : {}),
-  ...(typeof data.sender_conversation_id === 'number'
-    ? { senderConversationId: data.sender_conversation_id }
-    : {}),
-});
+): Partial<AgentMessageMetadata> => {
+  let senderConversationId: ConversationId | undefined;
+  if (typeof data.sender_conversation_id === 'string') {
+    try {
+      senderConversationId = parseConversationId(data.sender_conversation_id);
+    } catch {
+      // Malformed external metadata must not poison an otherwise valid message.
+      senderConversationId = undefined;
+    }
+  }
+  return {
+    ...(data.teammate_message ? { agentMessage: true } : {}),
+    ...(typeof data.sender_name === 'string' ? { senderName: data.sender_name } : {}),
+    ...(typeof data.sender_backend === 'string' ? { senderAgentType: data.sender_backend } : {}),
+    ...(senderConversationId ? { senderConversationId } : {}),
+  };
+};
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -384,7 +431,11 @@ const normalizeKnowledgeWritebackFiles = (value: unknown): KnowledgeWritebackFil
   return value
     .filter(isObject)
     .map((file) => ({
-      ...(typeof file.kb_id === 'string' || file.kb_id === null ? { kb_id: file.kb_id } : {}),
+      ...(file.kb_id === null
+        ? { kb_id: null }
+        : typeof file.kb_id === 'string'
+          ? { kb_id: parseKnowledgeBaseId(file.kb_id) }
+          : {}),
       ...(typeof file.rel_path === 'string' || file.rel_path === null ? { rel_path: file.rel_path } : {}),
       ...(typeof file.staged === 'boolean' ? { staged: file.staged } : {}),
     }));
@@ -395,7 +446,11 @@ const normalizeKnowledgeWritebackFailures = (value: unknown): KnowledgeWriteback
   return value
     .filter(isObject)
     .map((failure) => ({
-      ...(typeof failure.kb_id === 'string' || failure.kb_id === null ? { kb_id: failure.kb_id } : {}),
+      ...(failure.kb_id === null
+        ? { kb_id: null }
+        : typeof failure.kb_id === 'string'
+          ? { kb_id: parseKnowledgeBaseId(failure.kb_id) }
+          : {}),
       ...(typeof failure.rel_path === 'string' || failure.rel_path === null ? { rel_path: failure.rel_path } : {}),
       ...(typeof failure.error === 'string' ? { error: failure.error } : {}),
     }));
@@ -960,7 +1015,7 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
         content: isRichData
           ? {
               content: toDisplayText(data.content),
-              cronMeta: data.cronMeta,
+              cronMeta: normalizeCronMessageMeta(data.cronMeta),
               ...(shouldReplace ? { replace: true } : {}),
               ...(persistedWriteback ? { knowledge_writeback: persistedWriteback } : {}),
               ...normalizeWireAgentMessageMetadata(data as Record<string, unknown>),
@@ -1092,14 +1147,12 @@ export const transformMessage = (message: IResponseMessage): TMessage | undefine
 
 export const transformKnowledgeWritebackEvent = (event: IKnowledgeWritebackEvent): IMessageText | undefined => {
   if (!event.msg_id) return undefined;
-  const conversationId = Number(event.conversation_id);
-  if (!Number.isFinite(conversationId)) return undefined;
   return {
     id: uuid(),
     type: 'text',
     msg_id: event.msg_id,
     position: 'left',
-    conversation_id: conversationId,
+    conversation_id: event.conversation_id,
     content: {
       content: '',
       knowledge_writeback: {
@@ -1124,7 +1177,7 @@ const normalizeMessageStatus = (value: string | undefined): TMessage['status'] =
 
 export const transformUserCreatedEvent = (
   event: IUserMessageCreatedEvent,
-  conversationId: number
+  conversationId: ConversationId
 ): IMessageText | undefined => {
   if (event.hidden || event.conversation_id !== conversationId || !event.msg_id) return undefined;
   return {

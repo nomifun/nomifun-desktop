@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { LocalModelServiceStatus, LocalModelState } from '@/common/types/provider/localModelService';
+import { parseProviderId } from '@/common/types/ids';
 import {
   canDeleteLocalModel,
   emptyLocalModelState,
@@ -23,7 +24,7 @@ const status = (model: LocalModelState, runtimePhase: LocalModelServiceStatus['r
   LocalModelServiceStatus => ({
     kind: 'local',
     protocolVersion: '1',
-    providerId: 'nomifun-local-model',
+    providerId: parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000001'),
     enabled: false,
     ready: false,
     activeModelId: null,

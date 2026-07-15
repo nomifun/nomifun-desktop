@@ -7,6 +7,7 @@
 import type { FileMetadata } from './FileService';
 import { getFileExtension, UPLOAD_ABORTED_ERROR, uploadFileViaHttp } from './FileService';
 import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
+import type { ConversationId } from '@/common/types/ids';
 
 /**
  * Upload pasted bytes to the backend via HTTP multipart and return the absolute
@@ -21,7 +22,7 @@ async function createTempFile(
   file_name: string,
   data: Uint8Array,
   contentType: string,
-  conversation_id?: string,
+  conversation_id?: ConversationId,
   source: UploadSource = 'sendbox'
 ): Promise<string | null> {
   const arrayBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
@@ -31,11 +32,11 @@ async function createTempFile(
   const tracker = trackUpload(file.size, {
     source,
     name: file_name,
-    conversationId: conversation_id || undefined,
+    conversationId: conversation_id,
     onAbort: () => controller.abort(),
   });
   try {
-    return await uploadFileViaHttp(file, conversation_id || '', tracker.onProgress, undefined, {
+    return await uploadFileViaHttp(file, conversation_id, tracker.onProgress, undefined, {
       signal: controller.signal,
     });
   } catch (error) {
@@ -161,7 +162,7 @@ class PasteServiceClass {
     supportedExts: string[],
     onFilesAdded: (files: FileMetadata[]) => void,
     onTextPaste?: (text: string) => void,
-    conversation_id?: string,
+    conversation_id?: ConversationId,
     source: UploadSource = 'sendbox',
     imageCounter?: ImageCounter
   ): Promise<boolean> {

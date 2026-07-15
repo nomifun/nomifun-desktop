@@ -4,6 +4,7 @@ use nomifun_api_types::{
     AuthStatusResponse, ChangePasswordRequest, LoginRequest, LoginResponse, PublicUser, QrLoginRequest,
     RefreshTokenRequest,
 };
+use nomifun_common::UserId;
 
 // --- LoginRequest ---
 
@@ -44,9 +45,10 @@ fn login_request_extra_fields_ignored() {
 
 #[test]
 fn login_response_serialization_matches_spec() {
+    let user_id = UserId::new();
     let resp = LoginResponse::new(
         PublicUser {
-            id: "auth_1712345678_abc".into(),
+            id: user_id.clone(),
             username: "admin".into(),
         },
         "eyJhbGciOiJIUzI1NiJ9".into(),
@@ -55,7 +57,7 @@ fn login_response_serialization_matches_spec() {
 
     assert_eq!(json["success"], true);
     assert_eq!(json["message"], "Login successful");
-    assert_eq!(json["user"]["id"], "auth_1712345678_abc");
+    assert_eq!(json["user"]["id"], user_id.as_str());
     assert_eq!(json["user"]["username"], "admin");
     assert_eq!(json["token"], "eyJhbGciOiJIUzI1NiJ9");
 }

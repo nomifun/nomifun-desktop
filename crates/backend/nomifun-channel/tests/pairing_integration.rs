@@ -19,14 +19,15 @@ use nomifun_channel::pairing::PairingService;
 /// Telegram bot channel id used by the integration tests. `channel_pairing_codes`
 /// and `channel_users` carry an FK channel_id → channel_plugins(id), so the
 /// plugin rows must exist before any pairing is created.
-const CH_TG: &str = "tg-1";
+const CH_TG: &str = "chn_018f1234-5678-7abc-8def-012345678910";
 /// Lark bot channel id (second platform exercised by these tests).
-const CH_LARK: &str = "lark-1";
+const CH_LARK: &str = "chn_018f1234-5678-7abc-8def-012345678911";
 /// A second lark bot channel id. Same platform as `CH_LARK`, different bot —
 /// used to prove pairing/auth are scoped per bot (channel), not per platform.
 /// `setup()` does not seed this; the multi-bot test seeds it itself so the
 /// channel_id FK is satisfied.
-const CH_LARK2: &str = "lark-2";
+const CH_LARK2: &str = "chn_018f1234-5678-7abc-8def-012345678912";
+const OWNER_ID: &str = "user_018f1234-5678-7abc-8def-012345678913";
 
 // ── Test infrastructure ─────────────────────────────────────────────
 
@@ -57,7 +58,7 @@ async fn setup() -> (PairingService, Arc<dyn IChannelRepository>, Arc<MockBroadc
     let db = init_database_memory().await.unwrap();
     let repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(db.pool().clone()));
     let bc = Arc::new(MockBroadcaster::new());
-    let svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
+    let svc = PairingService::new(repo.clone(), bc.clone(), OWNER_ID);
 
     // Seed the bot channels the tests pair against. channel_pairing_codes /
     // channel_users have an FK channel_id → channel_plugins(id), so these
@@ -216,7 +217,7 @@ async fn ap3_approve_nonexistent_code() {
 #[tokio::test]
 async fn ap4_approve_expired_code() {
     let (_svc, repo, bc) = setup().await;
-    let svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
+    let svc = PairingService::new(repo.clone(), bc.clone(), OWNER_ID);
 
     let expired_row = ChannelPairingCodeRow {
         code: "999999".into(),
@@ -306,7 +307,7 @@ async fn rp4_reject_already_approved() {
 #[tokio::test]
 async fn ec1_expired_codes_cleaned_up() {
     let (_svc, repo, bc) = setup().await;
-    let _svc = PairingService::new(repo.clone(), bc.clone(), "owner-a");
+    let _svc = PairingService::new(repo.clone(), bc.clone(), OWNER_ID);
 
     let expired_row = ChannelPairingCodeRow {
         code: "111111".into(),
@@ -432,7 +433,7 @@ async fn is_user_authorized_different_platform_false() {
 async fn two_lark_bots_pair_independently() {
     let (svc, repo, _bc) = setup().await;
 
-    // setup() seeds CH_LARK (lark-1). Seed a second lark bot so the
+    // setup() seeds one canonical Lark channel. Seed a second lark bot so the
     // channel_id FK (channel_pairing_codes/channel_users → channel_plugins)
     // is satisfied for bot 2. Same upsert_plugin pattern setup() uses.
     repo.upsert_plugin(&ChannelPluginRow {

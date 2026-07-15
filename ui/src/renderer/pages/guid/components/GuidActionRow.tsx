@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { IMcpServer } from '@/common/config/storage';
+import type { McpServerId } from '@/common/types/ids';
 import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
 import { supportsModeSwitch, type AgentModeOption } from '@/renderer/utils/model/agentModes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
@@ -53,8 +54,8 @@ type GuidActionRowProps = {
 
   // MCP management
   mcpServers: IMcpServer[];
-  selectedMcpServerIds: number[];
-  onToggleMcpServer: (serverId: number) => void;
+  selectedMcpServerIds: McpServerId[];
+  onToggleMcpServer: (serverId: McpServerId) => void;
 
   // Send button
   loading: boolean;

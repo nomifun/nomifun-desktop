@@ -24,30 +24,27 @@ pub struct CompanionSkillStoreSink {
 
 impl CompanionSkillStoreSink {
     /// The companion that owns mined skills (default companion).
-    async fn owner(&self) -> String {
+    async fn owner(&self) -> Option<String> {
         self.config.read().await.default_companion_id.clone()
     }
 
-    fn scope_of(companion_id: &str) -> SkillScope {
-        if companion_id.is_empty() {
-            SkillScope::Shared
-        } else {
-            SkillScope::Companion(companion_id.to_owned())
-        }
+    fn scope_of(companion_id: Option<&str>) -> SkillScope {
+        companion_id
+            .map(|id| SkillScope::Companion(id.to_owned()))
+            .unwrap_or(SkillScope::Shared)
     }
 }
 
 #[async_trait]
 impl CompanionSkillSink for CompanionSkillStoreSink {
     async fn active_skills(&self) -> Vec<SkillListing> {
-        let owner = self.owner().await;
-        if owner.is_empty() {
+        let Some(owner) = self.owner().await else {
             return Vec::new();
-        }
+        };
         let skills = self.store.list_skills(&owner, true).await.unwrap_or_default();
         let mut out = Vec::new();
         for s in skills.into_iter().filter(|s| s.status == "active") {
-            let scope = Self::scope_of(&s.scope_companion_id);
+            let scope = Self::scope_of(s.scope_companion_id.as_deref());
             // when_to_use index uses the SKILL.md description (what the skill does).
             if let Ok(dir) = skill_service::skill_dir_for(&self.skill_paths, &scope, &s.skill_name, false) {
                 let desc = skill_service::read_skill_info(&dir).await.map(|(_, d)| d).unwrap_or_default();
@@ -60,18 +57,21 @@ impl CompanionSkillSink for CompanionSkillStoreSink {
     async fn load_skill_body(&self, name: &str) -> Option<String> {
         let owner = self.owner().await;
         // Prefer the owner's companion-scoped skill (record usage against the owner),
-        // then fall back to shared (recorded against the shared "" scope).
-        if !owner.is_empty() {
+        // then fall back to the ownerless shared scope.
+        if let Some(owner) = owner {
             if let Ok(dir) = skill_service::skill_dir_for(&self.skill_paths, &SkillScope::Companion(owner.clone()), name, false) {
                 if let Ok(body) = tokio::fs::read_to_string(dir.join(SKILL_MANIFEST_FILE)).await {
-                    let _ = self.store.record_skill_usage(&owner, name, nomifun_common::now_ms()).await;
+                    let _ = self
+                        .store
+                        .record_skill_usage(Some(&owner), name, nomifun_common::now_ms())
+                        .await;
                     return Some(body);
                 }
             }
         }
         if let Ok(dir) = skill_service::skill_dir_for(&self.skill_paths, &SkillScope::Shared, name, false) {
             if let Ok(body) = tokio::fs::read_to_string(dir.join(SKILL_MANIFEST_FILE)).await {
-                let _ = self.store.record_skill_usage("", name, nomifun_common::now_ms()).await;
+                let _ = self.store.record_skill_usage(None, name, nomifun_common::now_ms()).await;
                 return Some(body);
             }
         }

@@ -40,7 +40,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
-    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
+    KnowledgeBaseId, LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -258,7 +258,7 @@ async fn handle_tool_request(
             let (resolved_kb_ids, binding, wp_key) = service
                 .resolve_write_context_for_cwd(workspace_path)
                 .await;
-            let bound_kb_ids: Vec<String> = resolved_kb_ids
+            let bound_kb_ids: Vec<KnowledgeBaseId> = resolved_kb_ids
                 .into_iter()
                 .filter(|id| kb_ids.contains(id))
                 .collect();
@@ -332,13 +332,21 @@ fn finish(body: Value) -> axum::response::Response {
 /// Testable dispatch core: run `search_bases` and render the result envelope.
 /// Returns `{"result": …}` on success / `{"error": …}` on failure, matching the
 /// requirement server's envelope.
-pub(crate) async fn dispatch_search(
+pub(crate) async fn dispatch_search<I: AsRef<str>>(
     service: &KnowledgeService,
-    kb_ids: &[String],
+    kb_ids: &[I],
     query: &str,
     limit: usize,
 ) -> serde_json::Value {
-    match service.search_bases(kb_ids, query, limit).await {
+    let kb_ids = match kb_ids
+        .iter()
+        .map(|id| KnowledgeBaseId::parse(id.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ids) => ids,
+        Err(error) => return serde_json::json!({ "error": format!("invalid knowledge base id: {error}") }),
+    };
+    match service.search_bases(&kb_ids, query, limit).await {
         Ok(hits) => serde_json::json!({ "result": render_hits(query, &hits) }),
         Err(e) => serde_json::json!({ "error": e.to_string() }),
     }
@@ -346,14 +354,14 @@ pub(crate) async fn dispatch_search(
 
 /// Read a full document by opaque `handle`, scoped to `kb_ids`. A handle whose
 /// kb_id is outside the resolved scope is rejected — the model cannot widen it.
-pub(crate) async fn dispatch_read(service: &KnowledgeService, kb_ids: &[String], handle: &str) -> Value {
+pub(crate) async fn dispatch_read<I: AsRef<str>>(service: &KnowledgeService, kb_ids: &[I], handle: &str) -> Value {
     let Some((kb_id, rel_path)) = decode_doc_handle(handle) else {
         return json!({ "error": format!("invalid document handle: {handle}") });
     };
-    if !kb_ids.iter().any(|b| b == &kb_id) {
+    if !kb_ids.iter().any(|b| b.as_ref() == kb_id.as_str()) {
         return json!({ "error": "handle points to a base not in scope" });
     }
-    match service.read_file(&kb_id, &rel_path).await {
+    match service.read_file(kb_id.as_str(), &rel_path).await {
         Ok(content) => json!({ "result": content.content }),
         Err(e) => json!({ "error": e.to_string() }),
     }
@@ -363,9 +371,9 @@ pub(crate) async fn dispatch_read(service: &KnowledgeService, kb_ids: &[String],
 /// always `TerminalAcp` (this server serves ACP/terminal CLIs); the placement
 /// policy is resolved server-side from the caller's workpath binding — the model
 /// supplies only `handle | base+rel_path` + `content`, never the policy/scope.
-pub(crate) async fn dispatch_write(
+pub(crate) async fn dispatch_write<I: AsRef<str>>(
     service: &KnowledgeService,
-    bound_kb_ids: &[String],
+    bound_kb_ids: &[I],
     binding: &KnowledgeBinding,
     scope: &str,
     args: &Value,
@@ -389,7 +397,20 @@ pub(crate) async fn dispatch_write(
         WriteTargetSpec::Path { kb_id, rel_path: rel_path.to_owned() }
     };
     let policy = resolve_write_policy(WriteSurface::TerminalAcp, binding, scope);
-    let req = WriteRequest { spec, content: content.to_owned(), policy, bound_kb_ids: bound_kb_ids.to_vec() };
+    let bound_kb_ids = match bound_kb_ids
+        .iter()
+        .map(|id| KnowledgeBaseId::parse(id.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(ids) => ids,
+        Err(error) => return json!({ "error": format!("invalid knowledge base id: {error}") }),
+    };
+    let req = WriteRequest {
+        spec,
+        content: content.to_owned(),
+        policy,
+        bound_kb_ids,
+    };
     match service.write_document(req).await {
         Ok(out) => json!({ "result": {
             "kb_id": out.kb_id,
@@ -403,13 +424,17 @@ pub(crate) async fn dispatch_write(
 
 /// Resolve a model-supplied base NAME to a bound kb_id (create path). When
 /// `requested` is omitted and exactly one base is in scope, that base is used.
-async fn resolve_base_id(service: &KnowledgeService, bound_kb_ids: &[String], requested: Option<&str>) -> Result<String, String> {
-    let bases: Vec<(String, String)> = service
+async fn resolve_base_id<I: AsRef<str>>(
+    service: &KnowledgeService,
+    bound_kb_ids: &[I],
+    requested: Option<&str>,
+) -> Result<KnowledgeBaseId, String> {
+    let bases: Vec<(KnowledgeBaseId, String)> = service
         .list_bases()
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|b| bound_kb_ids.contains(&b.id))
+        .filter(|b| bound_kb_ids.iter().any(|id| id.as_ref() == b.id.as_str()))
         .map(|b| (b.id, b.name))
         .collect();
     if bases.is_empty() {
@@ -462,6 +487,11 @@ fn render_hits(query: &str, hits: &[KnowledgeSearchHit]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_OWNER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000017";
+    const TEST_KB_ID_A: &str = "kb_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_KB_ID_B: &str = "kb_0190f5fe-7c00-7a00-8000-000000000002";
     use crate::events::KnowledgeEventEmitter;
 
     #[derive(Default)]
@@ -477,7 +507,7 @@ mod tests {
 
     fn hit(kb_name: &str, rel_path: &str, heading: &str, snippet: &str) -> KnowledgeSearchHit {
         KnowledgeSearchHit {
-            kb_id: "kb_1".into(),
+            kb_id: nomifun_common::KnowledgeBaseId::new(),
             kb_name: kb_name.into(),
             rel_path: rel_path.into(),
             heading: heading.into(),
@@ -516,11 +546,14 @@ mod tests {
     /// service and the `TempDir` (keep it alive for the test's duration).
     async fn build_service() -> (Arc<KnowledgeService>, tempfile::TempDir) {
         let db = nomifun_db::init_database_memory().await.expect("in-memory db");
+        let installation_owner = nomifun_db::installation_owner_id(db.pool())
+            .await
+            .expect("installation owner");
         let repo = Arc::new(nomifun_db::SqliteKnowledgeRepository::new(db.pool().clone()));
         let tmp = tempfile::tempdir().unwrap();
         let emitter = KnowledgeEventEmitter::new(
             Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
+            Arc::from(installation_owner),
         );
         let svc = Arc::new(KnowledgeService::new(repo, tmp.path(), emitter));
         (svc, tmp)
@@ -530,7 +563,7 @@ mod tests {
     async fn dispatch_search_finds_doc_and_wraps_result() {
         let (svc, _tmp) = build_service().await;
         let info = svc.create_base("运维手册", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
+        let root = svc.data_dir().join("knowledge").join(info.id.as_str());
         // The self-ignore the mount writes — must NOT blind the search.
         std::fs::write(root.join(".gitignore"), "*\n").unwrap();
         std::fs::write(root.join("rollback.md"), "# 回滚流程\n回滚分三步\n").unwrap();
@@ -548,7 +581,7 @@ mod tests {
     async fn dispatch_search_no_match_reports_cleanly() {
         let (svc, _tmp) = build_service().await;
         let info = svc.create_base("库", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
+        let root = svc.data_dir().join("knowledge").join(info.id.as_str());
         std::fs::write(root.join("a.md"), "# A\nunrelated content\n").unwrap();
 
         let out = dispatch_search(&svc, &[info.id], "完全不存在的主题词", 8).await;
@@ -567,20 +600,24 @@ mod tests {
         (server, svc, tmp)
     }
 
-    fn conversation_child(
+    fn conversation_child<I: AsRef<str>>(
         server: &KnowledgeMcpServer,
         conversation_id: &str,
         workspace: &str,
-        kb_ids: &[String],
+        kb_ids: &[I],
         allow_write: bool,
     ) -> nomifun_api_types::KnowledgeMcpChildConfig {
+        let kb_ids = kb_ids
+            .iter()
+            .map(|id| KnowledgeBaseId::parse(id.as_ref()).expect("canonical knowledge-base test ID"))
+            .collect::<Vec<_>>();
         server
             .issuer_config("/bin/nomicore".into())
             .issue_for_conversation(
-                "system_default_user",
+                TEST_OWNER_ID,
                 conversation_id,
                 workspace,
-                kb_ids,
+                &kb_ids,
                 allow_write,
             )
             .unwrap()
@@ -664,9 +701,9 @@ mod tests {
         let server = KnowledgeMcpServer::start().await.unwrap();
         let child = conversation_child(
             &server,
-            "17",
+            TEST_CONVERSATION_ID,
             "/workspace",
-            &["kb_1".to_owned(), "kb_2".to_owned()],
+            &[TEST_KB_ID_A, TEST_KB_ID_B],
             true,
         );
 
@@ -702,12 +739,17 @@ mod tests {
     async fn renewal_rejects_registry_authorization_with_invalid_knowledge_scope() {
         let server = KnowledgeMcpServer::start().await.unwrap();
         let claims = KnowledgeCapabilityClaims::issue(
-            "system_default_user",
-            nomifun_common::LoopbackSessionBinding::conversation("17"),
+            TEST_OWNER_ID,
+            nomifun_common::LoopbackSessionBinding::conversation(
+                "conv_0190f5fe-7c00-7a00-8000-000000000017",
+            ),
             ["knowledge_search"],
             KnowledgeCapabilityScope {
                 workspace_path: " /not-canonical".to_owned(),
-                kb_ids: vec!["kb_1".to_owned()],
+                kb_ids: vec![KnowledgeBaseId::parse(
+                    "kb_0190f5fe-7c00-7a00-8000-000000000001",
+                )
+                .unwrap()],
             },
         )
         .unwrap();
@@ -727,15 +769,15 @@ mod tests {
         let (server, svc, _tmp) = start_wired_server().await;
 
         let info = svc.create_base("项目库", "", None, None).await.unwrap();
-        let root = svc.data_dir().join("knowledge").join(&info.id);
+        let root = svc.data_dir().join("knowledge").join(info.id.as_str());
         std::fs::write(root.join("api.md"), "# API\n接口文档内容\n").unwrap();
         let other = svc.create_base("无关库", "", None, None).await.unwrap();
-        let other_root = svc.data_dir().join("knowledge").join(&other.id);
+        let other_root = svc.data_dir().join("knowledge").join(other.id.as_str());
         std::fs::write(other_root.join("secret.md"), "# Secret\n接口隐藏内容\n").unwrap();
 
         let child = conversation_child(
             &server,
-            "17",
+            TEST_CONVERSATION_ID,
             "/Users/test/myproject",
             std::slice::from_ref(&info.id),
             false,
@@ -760,14 +802,16 @@ mod tests {
         let info = svc.create_base("库", "", None, None).await.unwrap();
         let child = conversation_child(
             &server,
-            "17",
+            TEST_CONVERSATION_ID,
             "/workspace",
             std::slice::from_ref(&info.id),
             false,
         );
 
         let mut forged = child.bootstrap.access.claims.clone();
-        forged.session = nomifun_common::LoopbackSessionBinding::conversation("99");
+        forged.session = nomifun_common::LoopbackSessionBinding::conversation(
+            "conv_0190f5fe-7c00-7a00-8000-000000000099",
+        );
         let (status, _) = post_tool(
             &server,
             &child.bootstrap.access.token,
@@ -817,7 +861,7 @@ mod tests {
         let ok = dispatch_read(&svc, std::slice::from_ref(&info.id), &h).await;
         assert!(ok.get("result").and_then(Value::as_str).unwrap_or("").contains("BODY-市盈率"), "{ok}");
         // Out of scope (empty kb_ids) → denied.
-        let denied = dispatch_read(&svc, &[], &h).await;
+        let denied = dispatch_read(&svc, &[] as &[String], &h).await;
         assert!(denied.get("error").is_some(), "out-of-scope handle must be denied: {denied}");
         // Malformed handle → error.
         let bad = dispatch_read(&svc, std::slice::from_ref(&info.id), "not-a-handle").await;
@@ -840,16 +884,28 @@ mod tests {
             &svc,
             std::slice::from_ref(&info.id),
             &binding,
-            "conv-x",
+            TEST_CONVERSATION_ID,
             &json!({ "handle": encode_doc_handle(&info.id, "terms.md"), "content": "PROPOSED" }),
         )
         .await;
         let r = out.get("result").unwrap_or_else(|| panic!("{out}"));
-        assert_eq!(r.get("rel_path").and_then(Value::as_str), Some("_inbox/conv-x/terms.md"));
+        assert_eq!(
+            r.get("rel_path").and_then(Value::as_str),
+            Some("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000017/terms.md")
+        );
         assert_eq!(r.get("staged").and_then(Value::as_bool), Some(true));
         // Original untouched; proposal staged.
         assert_eq!(svc.read_file(&info.id, "terms.md").await.unwrap().content, "ORIGINAL");
-        assert_eq!(svc.read_file(&info.id, "_inbox/conv-x/terms.md").await.unwrap().content, "PROPOSED");
+        assert_eq!(
+            svc.read_file(
+                &info.id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000017/terms.md",
+            )
+            .await
+            .unwrap()
+            .content,
+            "PROPOSED"
+        );
     }
 
     #[tokio::test]
@@ -892,7 +948,7 @@ mod tests {
         .unwrap();
         let child = conversation_child(
             &server,
-            "conv-write",
+            TEST_CONVERSATION_ID,
             ws,
             std::slice::from_ref(&info.id),
             true,

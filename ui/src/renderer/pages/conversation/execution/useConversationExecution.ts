@@ -2,6 +2,7 @@ import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import type { TAgentExecutionChangedEvent } from '@/common/types/agentExecution/agentExecutionEvents';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { ExecutionId } from '@/common/types/ids';
 import { getConversationOrNull, seedConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useExecutionLive } from './useExecutionLive';
@@ -10,7 +11,7 @@ import { useLeadThinking, type LeadThinkingState } from './useLeadThinking';
 const RELATION_REFETCH_DEBOUNCE_MS = 120;
 
 export interface ConversationExecutionState {
-  executionId: string | null;
+  executionId: ExecutionId | null;
   detail: TAgentExecutionDetail | null;
   refetch: () => Promise<void>;
   leadThinking: LeadThinkingState;
@@ -18,7 +19,7 @@ export interface ConversationExecutionState {
 }
 
 export function shouldDiscoverExecutionRelation(
-  currentExecutionId: string | null,
+  currentExecutionId: ExecutionId | null,
   event: Pick<TAgentExecutionChangedEvent, 'execution_id' | 'change_kind'>,
 ): boolean {
   return event.execution_id !== currentExecutionId || event.change_kind === 'deleted';
@@ -31,7 +32,7 @@ export function useConversationExecution(conversation: TChatConversation | null 
   // conversation type would create an
   // execution that exists in the backend but cannot be observed or controlled.
   const conversationId = conversation?.id;
-  const [executionId, setExecutionId] = useState<string | null>(conversation?.linked_execution_id ?? null);
+  const [executionId, setExecutionId] = useState<ExecutionId | null>(conversation?.linked_execution_id ?? null);
   const relationRequestSequence = useRef(0);
   const relationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 

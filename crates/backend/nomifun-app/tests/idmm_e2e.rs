@@ -12,6 +12,7 @@ mod common;
 use axum::http::StatusCode;
 use serde_json::json;
 use tower::ServiceExt;
+use nomifun_common::{IdmmInterventionId, ProviderId};
 
 use common::{
     body_json, build_app, delete_with_token, get_request, get_with_token, json_with_token, setup_and_login,
@@ -25,7 +26,7 @@ async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str) ->
         .await
         .unwrap();
     let json = body_json(resp).await;
-    json["data"]["id"].as_i64().unwrap().to_string()
+    json["data"]["id"].as_str().unwrap().to_owned()
 }
 
 async fn create_terminal(app: &mut axum::Router, token: &str, csrf: &str) -> String {
@@ -47,9 +48,9 @@ async fn create_terminal(app: &mut axum::Router, token: &str, csrf: &str) -> Str
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     body_json(response).await["data"]["id"]
-        .as_i64()
+        .as_str()
         .unwrap()
-        .to_string()
+        .to_owned()
 }
 
 /// IDMM's global backup provider is a hard executable binding. Seed the
@@ -196,10 +197,11 @@ async fn model_tier_without_freeform_policy_is_allowed() {
     // backup provider, enabling the model tier with no freeform must SUCCEED.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-1", "m1").await;
+    let provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
-    let settings = json!({ "backup_provider_id": "prov-1", "default_steering_prompt": "" });
+    let settings = json!({ "backup_provider_id": provider_id, "default_steering_prompt": "" });
     let resp = app
         .clone()
         .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
@@ -277,11 +279,12 @@ async fn fault_watch_model_tier_without_backup_is_rejected() {
 async fn model_tier_with_global_backup_succeeds() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-1", "m1").await;
+    let provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
     // Configure a global backup provider.
-    let settings = json!({ "backup_provider_id": "prov-1", "backup_model": "m1", "default_steering_prompt": "" });
+    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
     let resp = app
         .clone()
         .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
@@ -317,10 +320,11 @@ async fn model_tier_with_global_backup_succeeds() {
 async fn settings_roundtrip() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-xyz", "model-xyz").await;
+    let provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "model-xyz").await;
 
     let settings = json!({
-        "backup_provider_id": "prov-xyz",
+        "backup_provider_id": provider_id,
         "backup_model": "model-xyz",
         "default_steering_prompt": "be conservative"
     });
@@ -338,7 +342,7 @@ async fn settings_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let j = body_json(resp).await;
-    assert_eq!(j["data"]["backup_provider_id"], "prov-xyz");
+    assert_eq!(j["data"]["backup_provider_id"], provider_id);
     assert_eq!(j["data"]["backup_model"], "model-xyz");
     assert_eq!(j["data"]["default_steering_prompt"], "be conservative");
 }
@@ -347,10 +351,11 @@ async fn settings_roundtrip() {
 async fn settings_update_clears_optional_backup_fields_when_absent() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-old", "model-old").await;
+    let provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "model-old").await;
 
     let initial = json!({
-        "backup_provider_id": "prov-old",
+        "backup_provider_id": provider_id,
         "backup_model": "model-old",
         "default_steering_prompt": "old policy"
     });
@@ -472,9 +477,10 @@ async fn enabled_to_disabled_transition_succeeds_without_validation() {
     // The disable POST must succeed even without the backup still resolving.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-1", "m1").await;
+    let provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "m1").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
-    let settings = json!({ "backup_provider_id": "prov-1", "backup_model": "m1", "default_steering_prompt": "" });
+    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
     let resp = app
         .clone()
         .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
@@ -517,10 +523,13 @@ async fn get_status_round_trips_persisted_config() {
     // tiers, bypass model, strategy) so the frontend can rehydrate its form.
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
-    seed_provider(&services, "prov-1", "m1").await;
+    let provider_id = ProviderId::new().into_string();
+    let watch_provider_id = ProviderId::new().into_string();
+    seed_provider(&services, &provider_id, "m1").await;
+    seed_provider(&services, &watch_provider_id, "m-watch").await;
     let conv = create_conversation(&mut app, &token, &csrf).await;
 
-    let settings = json!({ "backup_provider_id": "prov-1", "backup_model": "m1", "default_steering_prompt": "" });
+    let settings = json!({ "backup_provider_id": provider_id, "backup_model": "m1", "default_steering_prompt": "" });
     let resp = app
         .clone()
         .oneshot(json_with_token("PUT", "/api/idmm/settings", settings, &token, &csrf))
@@ -536,7 +545,7 @@ async fn get_status_round_trips_persisted_config() {
             "enabled": true,
             "tier": "rule_plus_model",
             "answer_open_questions": true,
-            "bypass_model": { "provider_id": "prov-watch", "model": "m-watch" },
+            "bypass_model": { "provider_id": watch_provider_id, "model": "m-watch" },
             "strategy": { "freeform_policy": "round-trip me", "tendency": "aggressive" }
         }
     });
@@ -566,7 +575,10 @@ async fn get_status_round_trips_persisted_config() {
     assert_eq!(cfg["decision_watch"]["enabled"], true);
     assert_eq!(cfg["decision_watch"]["tier"], "rule_plus_model");
     assert_eq!(cfg["decision_watch"]["answer_open_questions"], true);
-    assert_eq!(cfg["decision_watch"]["bypass_model"]["provider_id"], "prov-watch");
+    assert_eq!(
+        cfg["decision_watch"]["bypass_model"]["provider_id"],
+        watch_provider_id
+    );
     assert_eq!(cfg["decision_watch"]["bypass_model"]["model"], "m-watch");
     assert_eq!(cfg["decision_watch"]["strategy"]["freeform_policy"], "round-trip me");
     assert_eq!(cfg["decision_watch"]["strategy"]["tendency"], "aggressive");
@@ -653,8 +665,8 @@ async fn deleting_conversation_cascades_idmm_records() {
         SqliteIdmmInterventionRepository::new(services.database.pool().clone());
 
     let row = IdmmInterventionRow {
-        id: "idmmrec_cascade_test".into(),
-        user_id: owner_user_id.clone(),
+        id: IdmmInterventionId::new().into_string(),
+        user_id: owner_user_id.to_string(),
         target_kind: "conversation".into(),
         target_id: conv.clone(),
         watch: "decision".into(),
@@ -731,6 +743,11 @@ async fn cross_session_activity_feed_round_trips() {
     let records: SqliteIdmmInterventionRepository =
         SqliteIdmmInterventionRepository::new(services.database.pool().clone());
 
+    let activity_a = IdmmInterventionId::new().into_string();
+    let activity_b = IdmmInterventionId::new().into_string();
+    let activity_c = IdmmInterventionId::new().into_string();
+    let other_activity = IdmmInterventionId::new().into_string();
+
     let make_row = |user_id: &str, id: &str, target_kind: &str, target_id: &str, at: i64| IdmmInterventionRow {
         id: id.into(),
         user_id: user_id.into(),
@@ -753,7 +770,7 @@ async fn cross_session_activity_feed_round_trips() {
     records
         .insert(&make_row(
             &owner_user_id,
-            "idmmrec_act_a",
+            &activity_a,
             "conversation",
             &owner_conversation_a,
             10,
@@ -763,7 +780,7 @@ async fn cross_session_activity_feed_round_trips() {
     records
         .insert(&make_row(
             &owner_user_id,
-            "idmmrec_act_b",
+            &activity_b,
             "terminal",
             &owner_terminal,
             30,
@@ -773,7 +790,7 @@ async fn cross_session_activity_feed_round_trips() {
     records
         .insert(&make_row(
             &owner_user_id,
-            "idmmrec_act_c",
+            &activity_c,
             "conversation",
             &owner_conversation_b,
             20,
@@ -783,7 +800,7 @@ async fn cross_session_activity_feed_round_trips() {
     records
         .insert(&make_row(
             &other_user_id,
-            "idmmrec_other_private",
+            &other_activity,
             "conversation",
             &other_conversation,
             40,
@@ -801,7 +818,7 @@ async fn cross_session_activity_feed_round_trips() {
     let j = body_json(resp).await;
     let items = j["data"].as_array().expect("activity feed is an array");
     let ids: Vec<&str> = items.iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec!["idmmrec_act_b", "idmmrec_act_c", "idmmrec_act_a"]);
+    assert_eq!(ids, vec![activity_b.as_str(), activity_c.as_str(), activity_a.as_str()]);
     // Spans both targets.
     assert_eq!(items[0]["target_kind"], "terminal");
     assert_eq!(items[1]["target_kind"], "conversation");
@@ -841,7 +858,7 @@ async fn cross_session_activity_feed_round_trips() {
     // user, even though that user cannot access IDMM over HTTP.
     let other_rows = records.list_recent(&other_user_id, 100).await.unwrap();
     assert_eq!(other_rows.len(), 1);
-    assert_eq!(other_rows[0].id, "idmmrec_other_private");
+    assert_eq!(other_rows[0].id, other_activity);
 
     // The owner-only boundary remains enforced after the owner's mutation.
     let resp = app

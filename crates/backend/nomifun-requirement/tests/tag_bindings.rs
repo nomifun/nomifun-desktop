@@ -10,6 +10,7 @@ use nomifun_db::{
 };
 use nomifun_realtime::UserEventSink;
 use nomifun_requirement::{RequirementEventEmitter, RequirementService};
+use nomifun_common::{ConversationId, TerminalId, UserId};
 
 #[derive(Default)]
 struct NoopBroadcaster;
@@ -22,10 +23,10 @@ impl UserEventSink for NoopBroadcaster {
     }
 }
 
-fn conv(id: i64, name: &str, autowork_json: &str) -> ConversationRow {
+fn conv(name: &str, autowork_json: &str) -> ConversationRow {
     ConversationRow {
-        id,
-        user_id: "user_1".into(),
+        id: ConversationId::new().into_string(),
+        user_id: String::new(),
         name: name.into(),
         r#type: "nomi".into(),
         extra: autowork_json.into(),
@@ -52,41 +53,37 @@ fn conv(id: i64, name: &str, autowork_json: &str) -> ConversationRow {
 async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-         VALUES ('user_1', 'tester', 'h', 0, 0)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
+    let installation_owner = nomifun_db::installation_owner_id(&pool).await.unwrap();
+    let typed_installation_owner = UserId::parse(&installation_owner).unwrap();
     let conv_repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(pool.clone()));
     let term_repo: Arc<dyn ITerminalRepository> = Arc::new(SqliteTerminalRepository::new(pool.clone()));
     let req_repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(pool.clone()));
 
     // Two conversations enabled on tag "x", one disabled, one with no autowork.
     // The id field is ignored on insert (SQLite mints the PK).
-    conv_repo
-        .create(&conv(1, "Alpha A", r#"{"autowork":{"enabled":true,"tag":"x"}}"#))
+    let mut c = conv("Alpha A", r#"{"autowork":{"enabled":true,"tag":"x"}}"#);
+    c.user_id = installation_owner.clone();
+    conv_repo.create(&c)
         .await
         .unwrap();
-    conv_repo
-        .create(&conv(2, "Alpha B", r#"{"autowork":{"enabled":true,"tag":"x"}}"#))
+    let mut c = conv("Alpha B", r#"{"autowork":{"enabled":true,"tag":"x"}}"#);
+    c.user_id = installation_owner.clone();
+    conv_repo.create(&c)
         .await
         .unwrap();
-    conv_repo
-        .create(&conv(
-            3,
-            "Disabled",
-            r#"{"autowork":{"enabled":false,"tag":"x"}}"#,
-        ))
+    let mut c = conv("Disabled", r#"{"autowork":{"enabled":false,"tag":"x"}}"#);
+    c.user_id = installation_owner.clone();
+    conv_repo.create(&c)
         .await
         .unwrap();
-    conv_repo.create(&conv(4, "No autowork", "{}")).await.unwrap();
+    let mut c = conv("No autowork", "{}");
+    c.user_id = installation_owner.clone();
+    conv_repo.create(&c).await.unwrap();
 
     // One terminal enabled on tag "y". The id is minted by SQLite and returned.
     let term = term_repo
         .create(&CreateTerminalParams {
+            id: TerminalId::new(),
             name: "Term One".into(),
             cwd: "/tmp".into(),
             command: "claude".into(),
@@ -96,28 +93,25 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
             mode: None,
             cols: 80,
             rows: 24,
-            user_id: "user_1".into(),
+            user_id: typed_installation_owner,
         })
         .await
         .unwrap();
     let term_id = term.id;
     term_repo
-        .update_autowork(term_id, Some(r#"{"enabled":true,"tag":"y"}"#))
+        .update_autowork(&term_id, Some(r#"{"enabled":true,"tag":"y"}"#))
         .await
         .unwrap();
 
     let svc = RequirementService::new(
         req_repo,
-        RequirementEventEmitter::new(
-            Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
-        ),
+        RequirementEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from(installation_owner.clone())),
     )
         .with_conversation_repo(conv_repo)
         .with_terminal_repo(term_repo);
     Box::leak(Box::new(db));
 
-    let groups = svc.tag_bindings("user_1").await.unwrap();
+    let groups = svc.tag_bindings(&installation_owner).await.unwrap();
 
     // tag "x" has the two enabled conversations; "y" has the terminal. Disabled +
     // no-autowork conversations are excluded.

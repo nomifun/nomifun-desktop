@@ -5,12 +5,21 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import {
+  parseCompanionId,
+  parseConversationId,
+  parseKnowledgeBaseId,
+  parseMessageId,
+} from '@/common/types/ids';
 import { composeMessage, transformKnowledgeWritebackEvent, transformMessage, transformUserCreatedEvent } from './chatLib';
+
+const MESSAGE_ID = parseMessageId('msg_019b0000-0000-7000-8000-000000000001');
+const COMPANION_ID = parseCompanionId('companion_019b0000-0000-7000-8000-000000000001');
 
 const baseWire = (overrides: Record<string, unknown>) =>
   ({
     msg_id: 'msg-1',
-    conversation_id: 1,
+    conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000001'),
     ...overrides,
   }) as any;
 
@@ -73,7 +82,7 @@ describe('transformMessage runtime field normalization', () => {
           teammate_message: true,
           sender_name: 'Researcher',
           sender_backend: 'nomi',
-          sender_conversation_id: 42,
+          sender_conversation_id: 'conv_0190f5fe-7c00-7a00-8000-000000000007',
         },
       })
     );
@@ -85,7 +94,7 @@ describe('transformMessage runtime field normalization', () => {
       agentMessage: true,
       senderName: 'Researcher',
       senderAgentType: 'nomi',
-      senderConversationId: 42,
+      senderConversationId: 'conv_0190f5fe-7c00-7a00-8000-000000000007',
     });
   });
 
@@ -159,8 +168,8 @@ describe('transformMessage runtime field normalization', () => {
 
   test('converts knowledge writeback events into assistant message status updates', () => {
     const message = transformKnowledgeWritebackEvent({
-      conversation_id: 1,
-      msg_id: 'assistant-turn-1',
+      conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000001'),
+      msg_id: MESSAGE_ID,
       status: 'writing',
       attempt_id: 'attempt-1',
       started_at: 1000,
@@ -170,7 +179,7 @@ describe('transformMessage runtime field normalization', () => {
     });
 
     expect(message?.type).toBe('text');
-    expect(message?.msg_id).toBe('assistant-turn-1');
+    expect(message?.msg_id).toBe(MESSAGE_ID);
     expect(message?.content.content).toBe('');
     expect(message?.content.knowledge_writeback?.status).toBe('writing');
     expect(message?.content.knowledge_writeback?.attempt_id).toBe('attempt-1');
@@ -186,7 +195,11 @@ describe('transformMessage runtime field normalization', () => {
             status: 'failed',
             attempt_id: 'attempt-1',
             retryable: true,
-            failures: [{ kb_id: 'kb_1', rel_path: 'notes.md', error: 'disk full' }],
+            failures: [{
+              kb_id: parseKnowledgeBaseId('kb_019b0000-0000-7000-8000-000000000001'),
+              rel_path: 'notes.md',
+              error: 'disk full',
+            }],
           },
         },
       })
@@ -203,23 +216,23 @@ describe('transformMessage runtime field normalization', () => {
   test('converts live user-created events into right-side messages for the active conversation', () => {
     const message = transformUserCreatedEvent(
       {
-        conversation_id: 7,
-        msg_id: 'msg-im-1',
+        conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000002'),
+        msg_id: MESSAGE_ID,
         content: 'from IM',
         position: 'right',
         status: 'finish',
         channel_platform: 'telegram',
         companion: true,
-        companion_id: 'companion-1',
+        companion_id: COMPANION_ID,
         created_at: 1234,
       },
-      7
+      parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000002')
     );
 
     expect(message?.type).toBe('text');
     if (message?.type !== 'text') throw new Error('expected text message');
-    expect(message.conversation_id).toBe(7);
-    expect(message.msg_id).toBe('msg-im-1');
+    expect(message.conversation_id).toBe('conv_0190f5fe-7c00-7a00-8000-000000000002');
+    expect(message.msg_id).toBe(MESSAGE_ID);
     expect(message.position).toBe('right');
     expect(message.status).toBe('finish');
     expect(message.created_at).toBe(1234);
@@ -228,15 +241,15 @@ describe('transformMessage runtime field normalization', () => {
 
   test('ignores user-created events for other conversations and hidden messages', () => {
     const baseEvent = {
-      conversation_id: 7,
-      msg_id: 'msg-im-1',
+      conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000002'),
+      msg_id: MESSAGE_ID,
       content: 'from IM',
       position: 'right' as const,
       status: 'finish',
       created_at: 1234,
     };
 
-    expect(transformUserCreatedEvent(baseEvent, 8)).toBeUndefined();
-    expect(transformUserCreatedEvent({ ...baseEvent, hidden: true }, 7)).toBeUndefined();
+    expect(transformUserCreatedEvent(baseEvent, parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000003'))).toBeUndefined();
+    expect(transformUserCreatedEvent({ ...baseEvent, hidden: true }, parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000002'))).toBeUndefined();
   });
 });

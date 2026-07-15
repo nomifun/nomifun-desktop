@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{PublicAgentAuditEntryId, now_ms};
 use serde::{Deserialize, Serialize};
 
 /// Sub-directory (under the agent's config dir) holding the day-files.
@@ -29,7 +29,7 @@ const MS_PER_DAY: i64 = 86_400_000;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditEntry {
     /// Unique per entry (`audit_<uuidv7>`).
-    pub id: String,
+    pub id: PublicAgentAuditEntryId,
     /// Epoch milliseconds.
     pub at: i64,
     /// Origin surface: `"channel"` | `"desktop"` | `"remote"`.
@@ -70,7 +70,7 @@ pub struct AuditQuery {
 impl AuditEntry {
     fn new(surface: &str, channel_platform: Option<String>, kind: &str, detail: String) -> Self {
         Self {
-            id: generate_prefixed_id("audit"),
+            id: PublicAgentAuditEntryId::new(),
             at: now_ms(),
             surface: surface.to_owned(),
             channel_platform,
@@ -224,7 +224,9 @@ mod tests {
 
     fn entry_at(at: i64, kind: &str, detail: &str) -> AuditEntry {
         AuditEntry {
-            id: format!("audit_{at}_{detail}"),
+            // Keep fixtures on the same canonical wire contract as production;
+            // audit ids are durable JSONL record identities, not display keys.
+            id: PublicAgentAuditEntryId::new(),
             at,
             surface: "channel".into(),
             channel_platform: Some("telegram".into()),
@@ -320,5 +322,11 @@ mod tests {
         let all = search(d.path(), &AuditQuery { limit: 50, ..Default::default() });
         assert!(all.entries.iter().all(|e| e.detail != "old"), "20-day-old file pruned at retention=7");
         assert!(all.entries.iter().any(|e| e.detail == "new"));
+    }
+
+    #[test]
+    fn newly_minted_audit_entry_has_a_canonical_durable_id() {
+        let entry = AuditEntry::turn("desktop", None, "hello");
+        assert!(entry.id.as_str().starts_with("audit_"));
     }
 }

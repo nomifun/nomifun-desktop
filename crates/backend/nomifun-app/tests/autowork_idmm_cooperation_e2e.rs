@@ -33,7 +33,9 @@ use nomifun_ai_agent::{
 };
 use nomifun_api_types::AutoWorkTargetKind;
 use nomifun_app::{AppConfig, AppServices, create_router};
-use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs, now_ms};
+use nomifun_common::{
+    AgentKillReason, AgentType, AppError, ConversationStatus, ProviderId, TimestampMs, now_ms,
+};
 
 use common::{body_json, get_with_token, json_with_token, setup_and_login};
 
@@ -111,24 +113,52 @@ async fn build_app_completing() -> (axum::Router, AppServices) {
     (router, services)
 }
 
+/// AutoWork reaches the same production runtime-options boundary as an
+/// interactive Nomi turn, so its fixture must carry a real canonical model
+/// binding even though the runtime implementation itself is mocked.
+async fn seed_mock_provider(services: &AppServices) -> String {
+    let provider_id = ProviderId::new().into_string();
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers \
+         (id, platform, name, base_url, api_key_encrypted, models, enabled, \
+          capabilities, created_at, updated_at) \
+         VALUES (?, 'openai', 'AutoWork IDMM mock', 'https://example.invalid', \
+                 'encrypted', '[\"mock-model\"]', 1, '[]', 1, 1)",
+    )
+    .bind(&provider_id)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    provider_id
+}
+
 #[tokio::test]
 async fn autowork_and_idmm_enable_auto_resumes_paused_tag_and_runs_requirement() {
     let (mut app, services) = build_app_completing().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let provider_id = seed_mock_provider(&services).await;
     let tag = "coop";
 
     // A plain desktop nomi conversation (no channel markers → IDMM may act).
     let conv = {
-        let body = json!({ "type": "nomi", "name": "coop", "extra": { "workspace": "/project" } });
+        let body = json!({
+            "type": "nomi",
+            "name": "coop",
+            "model": {
+                "provider_id": provider_id,
+                "model": "mock-model",
+                "use_model": null
+            },
+            "extra": { "workspace": "/project" }
+        });
         let resp = app
             .clone()
             .oneshot(json_with_token("POST", "/api/conversations", body, &token, &csrf))
             .await
             .unwrap();
         assert!(resp.status().is_success(), "create conversation failed: {}", resp.status());
-        body_json(resp).await["data"]["id"].as_i64().unwrap().to_string()
+        body_json(resp).await["data"]["id"].as_str().unwrap().to_owned()
     };
-    let conv_i64: i64 = conv.parse().unwrap();
 
     // One requirement in `tag`.
     let req_id = {
@@ -139,7 +169,7 @@ async fn autowork_and_idmm_enable_auto_resumes_paused_tag_and_runs_requirement()
             .await
             .unwrap();
         assert!(resp.status().is_success(), "create requirement failed: {}", resp.status());
-        body_json(resp).await["data"]["id"].as_i64().unwrap()
+        body_json(resp).await["data"]["id"].as_str().unwrap().to_owned()
     };
 
     // Drive the requirement to failure MAX_ATTEMPTS (=3) times so its tag PAUSES —
@@ -148,11 +178,11 @@ async fn autowork_and_idmm_enable_auto_resumes_paused_tag_and_runs_requirement()
     for _ in 0..3 {
         services
             .requirement_service
-            .claim_next(tag, conv_i64, AutoWorkTargetKind::Conversation, 60_000)
+            .claim_next(tag, &conv, AutoWorkTargetKind::Conversation, 60_000)
             .await
             .unwrap()
             .expect("claimable during pause setup");
-        services.requirement_service.finalize_if_needed(req_id, true, None, false).await.unwrap();
+        services.requirement_service.finalize_if_needed(&req_id, true, None, false).await.unwrap();
     }
     assert!(
         services.requirement_service.is_tag_paused(tag).await.unwrap(),
@@ -234,17 +264,27 @@ async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
     // and run_state=idle on finish so both surfaces land on the same colour.
     let (mut app, services) = build_app_completing().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let provider_id = seed_mock_provider(&services).await;
     let tag = "rs-sync";
 
     let conv = {
-        let body = json!({ "type": "nomi", "name": "rs", "extra": { "workspace": "/project" } });
+        let body = json!({
+            "type": "nomi",
+            "name": "rs",
+            "model": {
+                "provider_id": provider_id,
+                "model": "mock-model",
+                "use_model": null
+            },
+            "extra": { "workspace": "/project" }
+        });
         let resp = app
             .clone()
             .oneshot(json_with_token("POST", "/api/conversations", body, &token, &csrf))
             .await
             .unwrap();
         assert!(resp.status().is_success(), "create conversation failed: {}", resp.status());
-        body_json(resp).await["data"]["id"].as_i64().unwrap().to_string()
+        body_json(resp).await["data"]["id"].as_str().unwrap().to_owned()
     };
     let req_id = {
         let body = json!({ "title": "需求", "content": "做点事", "tag": tag, "order_key": "1" });
@@ -254,7 +294,7 @@ async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
             .await
             .unwrap();
         assert!(resp.status().is_success(), "create requirement failed: {}", resp.status());
-        body_json(resp).await["data"]["id"].as_i64().unwrap()
+        body_json(resp).await["data"]["id"].as_str().unwrap().to_owned()
     };
 
     // Capture owner-scoped events BEFORE enabling, so the loop's emits are
@@ -289,7 +329,7 @@ async fn autowork_broadcasts_run_state_transitions_for_session_list_sync() {
                     {
                         assert_eq!(
                             envelope.user_id,
-                            nomifun_auth::SYSTEM_USER_ID,
+                            services.authoritative_user_id.as_ref(),
                             "AutoWork runtime state must remain scoped to the canonical owner"
                         );
                         if let Some(rs) = msg.data.get("run_state").and_then(|v| v.as_str()) {

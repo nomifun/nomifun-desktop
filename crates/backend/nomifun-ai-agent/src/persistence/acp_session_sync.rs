@@ -5,7 +5,7 @@
 //!
 //! The consumer listens to `Observed*` events (mode, model, config,
 //! context_usage). The `session_config.runtime` columns record what the
-//! session last had — i.e. what resume needs to restore — which is by
+//! session last had —i.e. what resume needs to restore —which is by
 //! definition observation-shaped, not intent-shaped. Desired events are
 //! kept inside the aggregate for reconcile/UI broadcast only; they are
 //! intentionally not persisted so that an invalid user pick (which the
@@ -44,10 +44,7 @@ impl AcpSessionSyncService {
 
     /// Read the persisted per-session state for `conversation_id`.
     pub async fn load_persisted(&self, conversation_id: &str) -> Option<nomifun_db::PersistedSessionState> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            return None;
-        };
-        match self.repo.load_runtime_state(conv_id).await {
+        match self.repo.load_runtime_state(conversation_id).await {
             Ok(state) => state,
             Err(err) => {
                 warn!(
@@ -65,10 +62,7 @@ impl AcpSessionSyncService {
     /// not exist or the JSON payload is empty. Errors are logged and
     /// swallowed so the caller can proceed with a fresh session.
     pub async fn load_snapshot_state(&self, conversation_id: &str) -> Option<PersistedSessionState> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            return None;
-        };
-        let row = match self.repo.load_runtime_state(conv_id).await {
+        let row = match self.repo.load_runtime_state(conversation_id).await {
             Ok(Some(row)) => row,
             Ok(None) => return None,
             Err(err) => {
@@ -106,10 +100,7 @@ impl AcpSessionSyncService {
     /// Used by the factory on resume paths to seed the aggregate before
     /// the first prompt.
     pub async fn load_session_id(&self, conversation_id: &str) -> Option<String> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            return None;
-        };
-        match self.repo.get(conv_id).await {
+        match self.repo.get(conversation_id).await {
             Ok(Some(row)) => row.session_id,
             Ok(None) => None,
             Err(err) => {
@@ -226,8 +217,10 @@ async fn domain_event_consumer(
         match recv {
             Some(event) => {
                 if let AcpSessionEvent::SessionAssigned { session_id } = &event {
-                    let conv_id: i64 = conversation_id.parse().unwrap_or_default();
-                    match repo.update_session_id(conv_id, session_id.as_str()).await {
+                    match repo
+                        .update_session_id(&conversation_id, session_id.as_str())
+                        .await
+                    {
                         Ok(true) => {}
                         Ok(false) => debug!(
                             conversation_id,
@@ -259,8 +252,7 @@ async fn flush(repo: &Arc<dyn IAcpSessionRepository>, conversation_id: &str, pen
         return;
     }
     let params = pending.as_save_params();
-    let conv_id: i64 = conversation_id.parse().unwrap_or_default();
-    match repo.save_runtime_state(conv_id, &params).await {
+    match repo.save_runtime_state(conversation_id, &params).await {
         Ok(true) => {}
         Ok(false) => {
             debug!(conversation_id, "session sync: acp_session row missing; update dropped");
@@ -285,21 +277,23 @@ mod tests {
 
     async fn setup() -> (Arc<AcpSessionSyncService>, Arc<dyn IAcpSessionRepository>) {
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         // Satisfy the `acp_session.conversation_id` FK (REFERENCES
         // conversations(id) ON DELETE CASCADE) before create() inserts the
-        // session row. `system_default_user` is seeded by init_database_memory
-        // (satisfies conversations.user_id FK); `agent_builtin_claude` is
-        // likewise seeded (satisfies acp_session.agent_id FK).
+        // session row. The dynamically resolved installation owner satisfies
+        // conversations.user_id; `agent_builtin_claude` is likewise seeded and
+        // satisfies acp_session.agent_id.
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
-             VALUES (1, 'system_default_user', 'c', 'normal', 'pending', 1, 1)",
+             VALUES ('conv_0190f5fe-7c00-7a00-8000-000000000001', ?, 'c', 'normal', 'pending', 1, 1)",
         )
+        .bind(&installation_owner)
         .execute(db.pool())
         .await
         .unwrap();
         let repo: Arc<dyn IAcpSessionRepository> = Arc::new(SqliteAcpSessionRepository::new(db.pool().clone()));
         repo.create(&CreateAcpSessionParams {
-            conversation_id: 1,
+            conversation_id: "conv_0190f5fe-7c00-7a00-8000-000000000001",
             agent_backend: "claude",
             agent_source: "builtin",
             agent_id: "agent_builtin_claude",
@@ -314,7 +308,7 @@ mod tests {
     async fn load_persisted_round_trips() {
         let (svc, repo) = setup().await;
         repo.save_runtime_state(
-            1,
+            "conv_0190f5fe-7c00-7a00-8000-000000000001",
             &SaveRuntimeStateParams {
                 current_mode_id: Some(Some("plan")),
                 ..Default::default()
@@ -323,7 +317,7 @@ mod tests {
         .await
         .unwrap();
 
-        let state = svc.load_persisted("1").await.unwrap();
+        let state = svc.load_persisted("conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap();
         assert_eq!(state.current_mode_id.as_deref(), Some("plan"));
     }
 
@@ -333,7 +327,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::ObservedModeSynced { mode: "plan".into() })
@@ -341,11 +335,11 @@ mod tests {
             .unwrap();
 
         sleep(Duration::from_millis(200)).await;
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert!(state.current_mode_id.is_none(), "debounce not yet elapsed");
 
         sleep(Duration::from_millis(400)).await;
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert_eq!(state.current_mode_id.as_deref(), Some("plan"));
     }
 
@@ -355,7 +349,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         for label in ["code", "plan", "ask"] {
@@ -366,7 +360,7 @@ mod tests {
         }
         sleep(Duration::from_millis(600)).await;
 
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert_eq!(state.current_mode_id.as_deref(), Some("ask"));
     }
 
@@ -376,13 +370,13 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::SessionOpened).await.unwrap();
         sleep(Duration::from_millis(600)).await;
 
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert!(state.current_mode_id.is_none());
     }
 
@@ -392,7 +386,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::ObservedModeSynced { mode: "plan".into() })
@@ -401,7 +395,7 @@ mod tests {
         drop(tx);
         sleep(Duration::from_millis(50)).await;
 
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert_eq!(
             state.current_mode_id.as_deref(),
             Some("plan"),
@@ -410,8 +404,7 @@ mod tests {
     }
 
     /// ObservedModelSynced drives current_model_id persistence (mirrors
-    /// ObservedModeSynced). DesiredModelChanged must NOT write the DB —
-    /// the DB stores what the CLI actually ran with, not what the user
+    /// ObservedModeSynced). DesiredModelChanged must NOT write the DB —    /// the DB stores what the CLI actually ran with, not what the user
     /// asked for (an invalid desired value the CLI rejects must not
     /// leave a stale row).
     #[tokio::test(flavor = "current_thread")]
@@ -419,7 +412,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::ObservedModelSynced {
@@ -429,7 +422,7 @@ mod tests {
         .unwrap();
 
         sleep(Duration::from_millis(700)).await;
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert_eq!(state.current_model_id.as_deref(), Some("claude-opus-4"));
     }
 
@@ -438,7 +431,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::DesiredModelChanged {
@@ -448,7 +441,7 @@ mod tests {
         .unwrap();
 
         sleep(Duration::from_millis(700)).await;
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert!(
             state.current_model_id.is_none(),
             "DesiredModelChanged is reconcile/UI-only; persistence only follows Observed*",
@@ -463,7 +456,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::ObservedContextUsageChanged {
@@ -473,7 +466,7 @@ mod tests {
         .unwrap();
 
         sleep(Duration::from_millis(700)).await;
-        let state = repo.load_runtime_state(1).await.unwrap().unwrap();
+        let state = repo.load_runtime_state(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         let raw = state.context_usage_json.expect("usage must be persisted");
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["used"], 12345);
@@ -487,7 +480,7 @@ mod tests {
         let (_svc, repo) = setup().await;
         let (tx, rx) = mpsc::channel(64);
 
-        let cid = "1".to_owned();
+        let cid = "conv_0190f5fe-7c00-7a00-8000-000000000001".to_owned();
         tokio::spawn(domain_event_consumer(cid, rx, repo.clone()));
 
         tx.send(AcpSessionEvent::SessionAssigned {
@@ -496,10 +489,10 @@ mod tests {
         .await
         .unwrap();
 
-        // Well under the debounce window — the event must have already
+        // Well under the debounce window —the event must have already
         // been written.
         sleep(Duration::from_millis(100)).await;
-        let row = repo.get(1).await.unwrap().unwrap();
+        let row = repo.get(&"conv_0190f5fe-7c00-7a00-8000-000000000001").await.unwrap().unwrap();
         assert_eq!(row.session_id.as_deref(), Some("sess-42"));
     }
 }

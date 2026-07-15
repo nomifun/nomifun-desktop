@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// deserialized by the service layer.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConversationRow {
-    pub id: i64,
+    pub id: String,
     pub user_id: String,
     pub name: String,
     /// Agent type string (e.g. "gemini", "acp", "remote").
@@ -53,7 +53,8 @@ pub struct ConversationRow {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConversationDeliveryReceiptRow {
     pub operation_id: String,
-    pub conversation_id: i64,
+    pub message_id: String,
+    pub conversation_id: String,
     pub user_id: String,
     pub kind: String,
     pub request_payload: String,

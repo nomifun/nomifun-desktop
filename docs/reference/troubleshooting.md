@@ -40,7 +40,12 @@ A second cause: clock skew on the server. If the system clock is far off, the JW
 
 ### `Current password is incorrect` on change-password despite a correct password
 
-The endpoint runs a constant-time bcrypt compare against the stored hash. If you suspect data corruption: stop the server, back up the data dir, and inspect the `system_default_user.password_hash` column. A surgical fix is possible (`/api/auth/internal/users/{id}/password` in local mode) but the easiest path is to restore from backup or re-bootstrap.
+The endpoint runs a constant-time bcrypt compare against the stored hash. If
+you suspect data corruption: stop the server, back up the data dir, resolve the
+installation owner through `installation_identity.owner_user_id`, and inspect
+that user's `password_hash`. A surgical fix is possible
+(`/api/auth/internal/users/{id}/password` in local mode) but the easiest path is
+to restore from backup or re-bootstrap.
 
 ### "Username/password rejected" with a vaguely worded validation error
 

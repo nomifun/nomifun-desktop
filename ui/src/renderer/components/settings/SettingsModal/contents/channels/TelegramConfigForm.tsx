@@ -154,7 +154,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
     try {
       // testPlugin returns { success, botUsername?, error? } directly
       const result = await channel.testPlugin.invoke({
-        plugin_id: 'telegram',
+        plugin_type: 'telegram',
         token: telegramToken.trim(),
       });
 
@@ -189,7 +189,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
       const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'telegram', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-          : { plugin_id: 'telegram', config }
+          : { plugin_type: 'telegram', config }
       );
       if (!result.success) {
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
@@ -245,7 +245,7 @@ const TelegramConfigForm: React.FC<TelegramConfigFormProps> = ({
   };
 
   // Revoke user
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));

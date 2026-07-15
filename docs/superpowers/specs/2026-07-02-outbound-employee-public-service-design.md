@@ -38,7 +38,7 @@
 | C3 | `KnowledgeSearch/RecallMemories/SaveMemory` 在 `bootstrap.build()` 之后直接注册到 `engine.registry_mut()` | `nomifun-ai-agent/src/manager/nomi/agent.rs:371` | 它们**连 `retain_named` 都绕过**——任何原生白名单方案的**必修前置 bug** |
 | C4 | 网关 `nomi_knowledge_list_bases/search` **全局**（列 owner 全部库），Read=所有 surface 放行 | `nomifun-gateway/src/caps_knowledge.rs:135,211` | 网关层**无数据隔离** |
 | C5 | Remote 面 `nomi_agent_run`（Write=放行）内部 `create()` 直建 `yolo + desktopGateway` 的 **Desktop-surface** 全原生工具 agent | `nomifun-gateway/src/caps_conversation.rs:426-503,680` | **一个放行 Write 击穿整个 Remote 矩阵** |
-| C6 | 所有 companion 令牌 → `SYSTEM_USER_ID`；`companion_id` 仅"归属标注非访问范围" | `nomifun-gateway/src/deps.rs:128` | **无 per-caller 数据分区** |
+| C6（历史） | 当时所有 companion 令牌都映射到固定系统用户；`companion_id` 仅作“归属标注非访问范围” | `nomifun-gateway/src/deps.rs:128`（历史位置） | **旧设计无 per-caller 数据分区；当前实现从数据库解析 installation owner** |
 | C7 | 网关档白名单仅在 stdio bridge（广告层）过滤，权威 in-process server 只按 surface×danger 复核 | `nomifun-app/src/commands/gateway_stdio.rs` vs `nomifun-gateway/src/registry/mod.rs:164` | 档位是"广告式防御"，非硬边界 |
 
 **判断**：现状安全边界是"提示词复述确认 + yolo"，对陌生人**等于零**。必须换成**"工具与数据物理不可达"**——假设提示注入 100% 控制 agent 意图，它仍无害。这是新增一等抽象，不是加开关。

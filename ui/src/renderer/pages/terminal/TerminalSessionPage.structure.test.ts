@@ -12,7 +12,7 @@ const source = readFileSync(new URL('./TerminalSessionPage.tsx', import.meta.url
 describe('TerminalSessionPage workspace rail collapse wiring', () => {
   test('keeps terminal file auto-expand scoped to the current terminal session', () => {
     expect(source.includes('autoExpandOnFiles: true')).toBe(true);
-    expect(source.includes('workspaceEventKey: String(session.id)')).toBe(true);
+    expect(source.includes('target: workspaceTarget')).toBe(true);
   });
 
   test('keeps the workspace tool rail at the far right of the expanded panel', () => {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use nomifun_common::ProviderId;
 use nomifun_db::{
     IProviderRepository, SqliteClientPreferenceRepository, SqliteModelProfileRepository,
     SqliteProviderRepository, SqliteSettingsRepository, init_database_memory,
@@ -107,14 +108,15 @@ async fn catalog_status_and_reserved_provider_are_ready_without_downloads() {
     assert_eq!(status.status(), StatusCode::OK);
     let status = json_body(status).await;
     assert_eq!(status["data"]["kind"], "local");
-    assert_eq!(status["data"]["providerId"], "nomifun-local-model");
+    let provider_id = status["data"]["providerId"].as_str().unwrap();
+    ProviderId::parse(provider_id).unwrap();
     assert_eq!(status["data"]["enabled"], false);
     assert_eq!(status["data"]["activeModelId"], Value::Null);
     assert_eq!(status["data"]["models"].as_array().unwrap().len(), 2);
 
     let repo = SqliteProviderRepository::new(db.pool().clone());
     let row = repo
-        .find_by_id("nomifun-local-model")
+        .find_by_id(provider_id)
         .await
         .unwrap()
         .unwrap();

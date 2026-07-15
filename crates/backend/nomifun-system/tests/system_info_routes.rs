@@ -129,6 +129,11 @@ async fn test_system_info_returns_all_fields() {
     assert!(data["cache_dir"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(data["work_dir"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(data["log_dir"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(
+        data["storage_generation"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
     assert!(data["platform"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(data["arch"].as_str().is_some_and(|s| !s.is_empty()));
 }
@@ -163,6 +168,7 @@ async fn test_system_info_snake_case_keys() {
     assert!(data.get("cache_dir").is_some());
     assert!(data.get("work_dir").is_some());
     assert!(data.get("log_dir").is_some());
+    assert!(data.get("storage_generation").is_some());
     assert!(data.get("cacheDir").is_none());
     assert!(data.get("workDir").is_none());
     assert!(data.get("logDir").is_none());

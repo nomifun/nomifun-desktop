@@ -8,8 +8,8 @@ use nomifun_api_types::{
     ListCronJobsQuery, RunNowResponse, SaveCronSkillRequest, UpdateCronJobRequest,
 };
 use nomifun_common::{
-    AgentType, AppError, ExecutionAuthority, generate_prefixed_id, now_ms,
-    workspace_path_has_edge_whitespace_segment,
+    AgentType, AppError, ConversationId, CronJobId, CronJobRunId, ExecutionAuthority, ProviderId,
+    UserId, now_ms, workspace_path_has_edge_whitespace_segment,
 };
 use nomifun_db::{CRON_RUN_HISTORY_LIMIT, CronJobRunRow, ICronRepository, UpdateCronJobParams};
 use tracing::{error, info, warn};
@@ -40,6 +40,28 @@ const PLACEHOLDER_PATTERNS: &[&str] = &[
     "write your",
     "put your",
 ];
+
+fn validate_cron_job_id(job_id: &str) -> Result<&str, CronError> {
+    CronJobId::try_from(job_id)
+        .map(|_| job_id)
+        .map_err(|error| CronError::App(AppError::BadRequest(format!("invalid cron job id: {error}"))))
+}
+
+fn validate_cron_user_id(user_id: &str) -> Result<&str, CronError> {
+    UserId::try_from(user_id)
+        .map(|_| user_id)
+        .map_err(|error| CronError::App(AppError::Forbidden(format!("invalid cron caller: {error}"))))
+}
+
+fn validate_conversation_id(conversation_id: &str) -> Result<&str, CronError> {
+    ConversationId::try_from(conversation_id)
+        .map(|_| conversation_id)
+        .map_err(|error| {
+            CronError::App(AppError::BadRequest(format!(
+                "invalid conversation id: {error}"
+            )))
+        })
+}
 
 #[derive(Clone)]
 pub struct CronService {
@@ -167,12 +189,7 @@ impl CronService {
         user_id: &str,
         mut req: CreateCronJobRequest,
     ) -> Result<CronJob, CronError> {
-        let user_id = user_id.trim();
-        if user_id.is_empty() {
-            return Err(CronError::App(AppError::Forbidden(
-                "cron job owner is required".into(),
-            )));
-        }
+        let user_id = validate_cron_user_id(user_id)?;
         let controls_host = self.execution_authority(user_id).controls_host();
         if !controls_host {
             if req.agent_type != AgentType::Nomi.serde_name() {
@@ -195,19 +212,15 @@ impl CronService {
         validate_schedule(&schedule)?;
 
         let execution_mode = parse_execution_mode(req.execution_mode.as_deref())?;
-        // The DTO carries the conversation key as `i64`; the domain keeps the
-        // empty-string "unbound" convention. A non-positive key (`0`, used by
-        // lazy-bind jobs and some legacy rows) maps to unbound.
-        let conversation_id = if req.conversation_id > 0 {
-            req.conversation_id.to_string()
-        } else {
-            String::new()
-        };
+        let conversation_id = req.conversation_id;
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            validate_conversation_id(conversation_id)?;
+        }
 
-        if !conversation_id.is_empty() {
+        if let Some(conversation_id) = conversation_id.as_deref() {
             let row = self
                 .executor
-                .get_conversation_row(&conversation_id)
+                .get_conversation_row(conversation_id)
                 .await?
                 .filter(|row| row.user_id == user_id)
                 .ok_or_else(|| {
@@ -226,7 +239,7 @@ impl CronService {
         self.validate_nomi_job_model(
             &req.agent_type,
             execution_mode,
-            &conversation_id,
+            conversation_id.as_deref(),
             req.agent_config.as_ref().map(|config| config.backend.as_str()),
         )
         .await?;
@@ -253,7 +266,7 @@ impl CronService {
         let next_run_at = compute_next_run(&schedule, now);
 
         let job = CronJob {
-            id: generate_prefixed_id("cron"),
+            id: CronJobId::new().into_string(),
             user_id: user_id.to_owned(),
             name: req.name,
             enabled: true,
@@ -296,6 +309,8 @@ impl CronService {
         job_id: &str,
         mut req: UpdateCronJobRequest,
     ) -> Result<CronJob, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let existing_row = self
             .repo
             .get_by_id(user_id, job_id)
@@ -371,7 +386,7 @@ impl CronService {
             self.validate_nomi_job_model(
                 &job.agent_type,
                 job.execution_mode,
-                &job.conversation_id,
+                job.conversation_id.as_deref(),
                 job.agent_config
                     .as_ref()
                     .map(|config| config.backend.as_str()),
@@ -419,7 +434,7 @@ impl CronService {
         &self,
         agent_type: &str,
         execution_mode: ExecutionMode,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
         agent_backend: Option<&str>,
     ) -> Result<(), CronError> {
         match nomi_model_check(agent_type, execution_mode, conversation_id) {
@@ -428,17 +443,20 @@ impl CronService {
                 validate_nomi_agent_backend(agent_type, agent_backend)
             }
             NomiModelCheck::BoundConversation => {
+                let conversation_id = conversation_id.expect("bound conversation check requires an ID");
                 match self.executor.get_conversation_row(conversation_id).await {
                     Ok(Some(row)) => {
-                        let model = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
-                        if model.provider_id.trim().is_empty() {
-                            return Err(CronError::InvalidAgentConfig(
+                        match nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row) {
+                            Ok(Some(_)) => Ok(()),
+                            Ok(None) => Err(CronError::InvalidAgentConfig(
                                 "the bound nomi conversation has no model configured; \
                              open the conversation and choose a model first, then create the job"
                                     .into(),
-                            ));
+                            )),
+                            Err(error) => Err(CronError::InvalidAgentConfig(format!(
+                                "the bound nomi conversation has an invalid model: {error}"
+                            ))),
                         }
-                        Ok(())
                     }
                     // Row missing/unreadable at creation time: don't block here. The
                     // executor verifies the conversation exists and resolves the
@@ -459,6 +477,8 @@ impl CronService {
     }
 
     pub async fn remove_job(&self, user_id: &str, job_id: &str) -> Result<(), CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let job = self.get_job(user_id, job_id).await?;
         self.scheduler.cancel_job(job_id);
         if let Err(err) = delete_skill_file(&self.data_dir, job_id).await {
@@ -471,6 +491,8 @@ impl CronService {
     }
 
     pub async fn get_job(&self, user_id: &str, job_id: &str) -> Result<CronJob, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let row = self
             .repo
             .get_by_id(user_id, job_id)
@@ -484,8 +506,12 @@ impl CronService {
         user_id: &str,
         query: &ListCronJobsQuery,
     ) -> Result<Vec<CronJob>, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        if let Some(conversation_id) = query.conversation_id.as_deref() {
+            validate_conversation_id(conversation_id)?;
+        }
         let rows = if let Some(conv_id) = &query.conversation_id {
-            self.repo.list_by_conversation(user_id, *conv_id).await?
+            self.repo.list_by_conversation(user_id, conv_id).await?
         } else {
             self.repo.list_all(user_id).await?
         };
@@ -498,6 +524,8 @@ impl CronService {
         user_id: &str,
         job_id: &str,
     ) -> Result<Vec<CronJobRunResponse>, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         self.repo
             .get_by_id(user_id, job_id)
             .await?
@@ -508,7 +536,7 @@ impl CronService {
             .list_runs_by_job(user_id, job_id, CRON_RUN_HISTORY_LIMIT)
             .await?;
 
-        Ok(rows.into_iter().map(cron_run_to_response).collect())
+        rows.into_iter().map(cron_run_to_response).collect()
     }
 
     // -----------------------------------------------------------------------
@@ -542,7 +570,7 @@ impl CronService {
                 warn!(
                     job_id = %job.id,
                     job_name = %job.name,
-                    conversation_id = %job.conversation_id,
+                    conversation_id = ?job.conversation_id,
                     execution_mode = job.execution_mode.as_str(),
                     "Deleting orphan cron job whose bound conversation no longer exists"
                 );
@@ -602,7 +630,13 @@ impl CronService {
             let Some(job_id) = name.strip_prefix(CRON_SKILL_DIR_PREFIX) else {
                 continue;
             };
-            if job_id.is_empty() {
+            if CronJobId::try_from(job_id).is_err() {
+                match tokio::fs::remove_dir_all(entry.path()).await {
+                    Ok(()) => removed += 1,
+                    Err(error) => {
+                        warn!(path = %entry.path().display(), error = %error, "Failed to remove invalid cron skill directory");
+                    }
+                }
                 continue;
             }
 
@@ -631,6 +665,20 @@ impl CronService {
     }
 
     pub async fn tick(&self, expected_user_id: &str, job_id: &str) {
+        let expected_user_id = match validate_cron_user_id(expected_user_id) {
+            Ok(user_id) => user_id,
+            Err(error) => {
+                error!(job_id, error = %error, "Tick: invalid timer owner");
+                return;
+            }
+        };
+        let job_id = match validate_cron_job_id(job_id) {
+            Ok(job_id) => job_id,
+            Err(error) => {
+                error!(job_id, error = %error, "Tick: invalid cron job id");
+                return;
+            }
+        };
         let row = match self.repo.get_by_id_for_scheduler(job_id).await {
             Ok(Some(r)) => r,
             Ok(None) => {
@@ -704,7 +752,7 @@ impl CronService {
             {
                 info!(
                     job_id = %job.id,
-                    conversation_id = %job.conversation_id,
+                    conversation_id = ?job.conversation_id,
                     "Resume: missed job detected, marking missed without auto-execution"
                 );
                 self.record_missed_execution(&job).await;
@@ -721,6 +769,8 @@ impl CronService {
     }
 
     pub async fn run_now(&self, user_id: &str, job_id: &str) -> Result<RunNowResponse, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let row = self
             .repo
             .get_by_id(user_id, job_id)
@@ -730,6 +780,7 @@ impl CronService {
 
         let prepared = self.executor.prepare_run_now(&job).await?;
         let conversation_id = prepared.conversation_id.clone();
+        validate_conversation_id(&conversation_id)?;
         let service = self.clone();
 
         tokio::spawn(async move {
@@ -737,12 +788,8 @@ impl CronService {
             service.handle_run_now_result(&job, result).await;
         });
 
-        // `conversation_id` was produced from an integer conversation key by the
-        // executor; parse it back for the i64 wire field (defensive `0` if a
-        // legacy/empty id somehow reaches here).
-        Ok(RunNowResponse {
-            conversation_id: conversation_id.parse::<i64>().unwrap_or(0),
-        })
+        // The executor returns the canonical conversation entity ID unchanged.
+        Ok(RunNowResponse { conversation_id })
     }
 
     // -----------------------------------------------------------------------
@@ -755,6 +802,8 @@ impl CronService {
         job_id: &str,
         req: SaveCronSkillRequest,
     ) -> Result<(), CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let row = self
             .repo
             .get_by_id(user_id, job_id)
@@ -788,6 +837,8 @@ impl CronService {
         user_id: &str,
         job_id: &str,
     ) -> Result<HasSkillResponse, CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         let row = self
             .repo
             .get_by_id(user_id, job_id)
@@ -805,6 +856,8 @@ impl CronService {
     }
 
     pub async fn delete_skill(&self, user_id: &str, job_id: &str) -> Result<(), CronError> {
+        let user_id = validate_cron_user_id(user_id)?;
+        let job_id = validate_cron_job_id(job_id)?;
         self.repo
             .get_by_id(user_id, job_id)
             .await?
@@ -832,19 +885,18 @@ impl CronService {
     }
 
     async fn bind_existing_conversation_if_needed(&self, job: &CronJob) {
-        if !matches!(job.execution_mode, ExecutionMode::Existing)
-            || job.conversation_id.trim().is_empty()
-        {
+        if !matches!(job.execution_mode, ExecutionMode::Existing) {
             return;
         }
+        let Some(conversation_id) = job.conversation_id.as_deref() else { return };
 
         if let Err(err) = self
             .executor
-            .bind_cron_job_to_conversation(&job.user_id, &job.conversation_id, &job.id)
+            .bind_cron_job_to_conversation(&job.user_id, conversation_id, &job.id)
             .await
         {
             warn!(
-                conversation_id = %job.conversation_id,
+                conversation_id,
                 job_id = %job.id,
                 error = %err,
                 "Failed to bind existing-conversation cron job to conversation"
@@ -860,25 +912,22 @@ impl CronService {
             return false;
         }
 
-        // Existing-mode jobs can legitimately carry an empty conversation_id
-        // until the first run performs lazy binding. Leave them alone.
-        if job.conversation_id.trim().is_empty() {
-            return false;
-        }
+        // Existing-mode jobs can be unbound until their first lazy-binding run.
+        let Some(conversation_id) = job.conversation_id.as_deref() else { return false };
 
-        if self.executor.busy_guard().is_busy(&job.conversation_id) {
+        if self.executor.busy_guard().is_busy(conversation_id) {
             return false;
         }
 
         // Only true orphan case: Existing + bound conversation_id, but that
         // conversation has been deleted.
-        match self.executor.get_conversation_row(&job.conversation_id).await {
+        match self.executor.get_conversation_row(conversation_id).await {
             Ok(Some(row)) => row.user_id != job.user_id,
             Ok(None) => true,
             Err(err) => {
                 warn!(
                     job_id = %job.id,
-                    conversation_id = %job.conversation_id,
+                    conversation_id,
                     error = %err,
                     "Failed to verify cron conversation during orphan cleanup"
                 );
@@ -1021,8 +1070,14 @@ impl CronService {
         // Persist the conversation_id back onto the job the first time an
         // "existing" job is materialized (lazy binding). Subsequent runs then
         // reuse the same conversation, matching the UX where the job is the
-        // continuation anchor. The DB FK is `Option<i64>`: unbound == `None`.
-        let new_conversation_key = conversation_id.trim().parse::<i64>().ok();
+        // continuation anchor. Unbound is represented only by `None`.
+        let new_conversation_key = match ConversationId::parse(conversation_id) {
+            Ok(conversation_id) => Some(conversation_id.into_string()),
+            Err(error) => {
+                error!(job_id, error = %error, "refusing to persist an invalid cron conversation id");
+                return;
+            }
+        };
         let needs_conversation_bind =
             existing_row.conversation_id.is_none() && new_conversation_key.is_some();
         let params = UpdateCronJobParams {
@@ -1034,7 +1089,7 @@ impl CronService {
             // `Some(Some(id))` sets the FK; `None` leaves it unchanged. Only
             // bind on the first materialization of a lazy "existing" job.
             conversation_id: needs_conversation_bind
-                .then_some(Some(new_conversation_key.unwrap_or_default())),
+                .then_some(new_conversation_key),
             ..Default::default()
         };
         if let Err(e) = self.repo.update(&job.user_id, job_id, &params).await {
@@ -1139,9 +1194,7 @@ impl CronService {
     }
 
     async fn insert_missed_job_tips(&self, job: &CronJob) {
-        if job.conversation_id.trim().is_empty() {
-            return;
-        }
+        let Some(conversation_id) = job.conversation_id.as_deref() else { return };
 
         let content = format!(
             "Scheduled task \"{}\" was missed while the system was unavailable. It was not run automatically.",
@@ -1152,7 +1205,7 @@ impl CronService {
             .executor
             .insert_tips_message(
                 &job.user_id,
-                &job.conversation_id,
+                conversation_id,
                 &content,
                 "warning",
             )
@@ -1161,7 +1214,7 @@ impl CronService {
             Ok(()) => {
                 self.emitter.emit_conversation_tips(
                     &job.user_id,
-                    &job.conversation_id,
+                    conversation_id,
                     &content,
                     "warning",
                 );
@@ -1169,7 +1222,7 @@ impl CronService {
             Err(err) => {
                 warn!(
                     job_id = %job.id,
-                    conversation_id = %job.conversation_id,
+                    conversation_id,
                     error = %err,
                     "Failed to persist missed-job tips message"
                 );
@@ -1230,7 +1283,21 @@ impl CronService {
         self.scheduler.schedule_job(&retry_job);
     }
 
-    pub async fn delete_jobs_by_conversation(&self, user_id: &str, conversation_id: i64) {
+    pub async fn delete_jobs_by_conversation(&self, user_id: &str, conversation_id: &str) {
+        let user_id = match validate_cron_user_id(user_id) {
+            Ok(user_id) => user_id,
+            Err(error) => {
+                error!(conversation_id, error = %error, "refusing cron cascade for invalid caller");
+                return;
+            }
+        };
+        let conversation_id = match validate_conversation_id(conversation_id) {
+            Ok(conversation_id) => conversation_id,
+            Err(error) => {
+                error!(conversation_id, error = %error, "refusing cron cascade for invalid conversation id");
+                return;
+            }
+        };
         let jobs = match self.repo.list_by_conversation(user_id, conversation_id).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -1271,7 +1338,7 @@ impl CronService {
 
 #[async_trait::async_trait]
 impl nomifun_common::OnConversationDelete for CronService {
-    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, user_id: &str, conversation_id: &str) {
         self.delete_jobs_by_conversation(user_id, conversation_id).await;
     }
 }
@@ -1288,15 +1355,12 @@ impl nomifun_conversation::response_middleware::ICronService for CronService {
         conversation_id: &str,
         params: &nomifun_conversation::response_middleware::CronCreateParams,
     ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        // The trait carries the conversation id as `&str`; the DTO field is the
-        // integer key. Reject a non-integer id up front rather than failing
-        // deeper in `add_job`.
-        let Ok(conversation_key) = conversation_id.parse::<i64>() else {
+        if nomifun_common::ConversationId::try_from(conversation_id).is_err() {
             return nomifun_conversation::response_middleware::CronCommandResult {
                 success: false,
                 message: format!("invalid conversation id '{conversation_id}'"),
             };
-        };
+        }
 
         let schedule_dto = CronScheduleDto::Cron {
             expr: params.schedule.clone(),
@@ -1311,7 +1375,15 @@ impl nomifun_conversation::response_middleware::ICronService for CronService {
         {
             Ok(Some(row)) if row.user_id == user_id => {
                 let title = Some(row.name.clone());
-                let (agent_type, agent_config) = build_agent_config_from_conversation(&row);
+                let (agent_type, agent_config) = match build_agent_config_from_conversation(&row) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        return nomifun_conversation::response_middleware::CronCommandResult {
+                            success: false,
+                            message: error.to_string(),
+                        };
+                    }
+                };
                 (agent_type, title, agent_config)
             }
             Ok(Some(_)) | Ok(None) => {
@@ -1336,7 +1408,7 @@ impl nomifun_conversation::response_middleware::ICronService for CronService {
             schedule: schedule_dto,
             prompt: None,
             message: Some(params.message.clone()),
-            conversation_id: conversation_key,
+            conversation_id: Some(conversation_id.to_owned()),
             conversation_title,
             agent_type,
             created_by: "agent".to_owned(),
@@ -1425,15 +1497,14 @@ impl nomifun_conversation::response_middleware::ICronService for CronService {
         user_id: &str,
         conversation_id: &str,
     ) -> nomifun_conversation::response_middleware::CronCommandResult {
-        // A non-integer conversation id can never scope to real jobs.
-        let Ok(conversation_key) = conversation_id.parse::<i64>() else {
+        if nomifun_common::ConversationId::try_from(conversation_id).is_err() {
             return nomifun_conversation::response_middleware::CronCommandResult {
                 success: true,
                 message: format!("No cron jobs found for conversation '{}'.", conversation_id),
             };
-        };
+        }
         let query = ListCronJobsQuery {
-            conversation_id: Some(conversation_key),
+            conversation_id: Some(conversation_id.to_owned()),
         };
         match self.list_jobs(user_id, &query).await {
             Ok(jobs) => {
@@ -1492,7 +1563,7 @@ impl nomifun_conversation::response_middleware::ICronService for CronService {
 
 fn build_agent_config_from_conversation(
     row: &nomifun_db::models::ConversationRow,
-) -> (String, Option<nomifun_api_types::CronAgentConfigDto>) {
+) -> Result<(String, Option<nomifun_api_types::CronAgentConfigDto>), nomifun_common::AppError> {
     let extra = serde_json::from_str::<serde_json::Value>(&row.extra)
         .unwrap_or_else(|_| serde_json::json!({}));
     // Both interactive `send_message` and the cron executor parse
@@ -1501,17 +1572,17 @@ fn build_agent_config_from_conversation(
     // prevents the cached vendor-label fallback (`"nomi"`) from
     // sneaking back in (Sentry ELECTRON-1HM).
     let model_resolved =
-        nomifun_conversation::runtime_options::provider_model_from_conversation_row(row);
-    let model = (!model_resolved.provider_id.is_empty()).then_some(&model_resolved);
+        nomifun_conversation::runtime_options::provider_model_from_conversation_row(row)?;
+    let model = model_resolved.as_ref();
 
     let backend = if row.r#type == "nomi" {
         model
             .map(|value| value.provider_id.clone())
             .filter(|value| !value.is_empty())
-            .or_else(|| get_string(&extra, &["backend"]))
+            .or_else(|| get_string(&extra, "backend"))
             .unwrap_or_else(|| "nomi".to_owned())
     } else {
-        get_string(&extra, &["backend"])
+        get_string(&extra, "backend")
             .or_else(|| {
                 model
                     .map(|value| value.provider_id.clone())
@@ -1520,8 +1591,8 @@ fn build_agent_config_from_conversation(
             .unwrap_or_else(|| row.r#type.clone())
     };
 
-    let preset_id = get_string(&extra, &["preset_id", "presetId"]);
-    let custom_agent_id = get_string(&extra, &["custom_agent_id", "customAgentId"]);
+    let preset_id = get_string(&extra, "preset_id");
+    let custom_agent_id = get_string(&extra, "custom_agent_id");
     let preset_revision = extra.get("preset_revision").and_then(serde_json::Value::as_i64);
     let preset_snapshot = extra
         .get("preset_snapshot")
@@ -1538,11 +1609,11 @@ fn build_agent_config_from_conversation(
         .to_owned();
     let agent_config = nomifun_api_types::CronAgentConfigDto {
         backend,
-        name: get_string(&extra, &["agent_name", "agentName"]).unwrap_or_else(|| row.name.clone()),
-        cli_path: get_string(&extra, &["cli_path", "cliPath"]).or_else(|| {
+        name: get_string(&extra, "agent_name").unwrap_or_else(|| row.name.clone()),
+        cli_path: get_string(&extra, "cli_path").or_else(|| {
             extra
                 .get("gateway")
-                .and_then(|gateway| gateway.get("cli_path").or_else(|| gateway.get("cliPath")))
+                .and_then(|gateway| gateway.get("cli_path"))
                 .and_then(|value| value.as_str())
                 .map(ToOwned::to_owned)
         }),
@@ -1551,7 +1622,7 @@ fn build_agent_config_from_conversation(
         preset_revision,
         preset_snapshot,
         mode: Some(full_auto_mode),
-        model_id: get_string(&extra, &["current_model_id", "currentModelId"]).or_else(|| {
+        model_id: get_string(&extra, "current_model_id").or_else(|| {
             model.and_then(|value| {
                 value
                     .use_model
@@ -1560,20 +1631,18 @@ fn build_agent_config_from_conversation(
             })
         }),
         config_options: None,
-        workspace: get_string(&extra, &["workspace"]),
+        workspace: get_string(&extra, "workspace"),
         clear_context_each_run: false,
     };
 
-    (row.r#type.clone(), Some(agent_config))
+    Ok((row.r#type.clone(), Some(agent_config)))
 }
-fn get_string(extra: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        extra
-            .get(*key)
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned)
-            .filter(|value| !value.is_empty())
-    })
+fn get_string(extra: &serde_json::Value, key: &str) -> Option<String> {
+    extra
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .filter(|value| !value.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,6 +1684,11 @@ fn validate_nomi_agent_backend(
                 .into(),
         ));
     }
+    ProviderId::try_from(backend).map_err(|error| {
+        CronError::InvalidAgentConfig(format!(
+            "agent_config.backend must be a canonical provider_id for nomi jobs: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -1642,12 +1716,12 @@ enum NomiModelCheck {
 fn nomi_model_check(
     agent_type: &str,
     execution_mode: ExecutionMode,
-    conversation_id: &str,
+    conversation_id: Option<&str>,
 ) -> NomiModelCheck {
     if agent_type != "nomi" {
         return NomiModelCheck::Skip;
     }
-    if matches!(execution_mode, ExecutionMode::Existing) && !conversation_id.trim().is_empty() {
+    if matches!(execution_mode, ExecutionMode::Existing) && conversation_id.is_some() {
         NomiModelCheck::BoundConversation
     } else {
         NomiModelCheck::AgentConfig
@@ -1802,9 +1876,10 @@ fn build_update_params(job: &CronJob, req: &UpdateCronJobRequest) -> UpdateCronJ
 }
 
 fn build_run_row(job_id: &str, status: &str) -> CronJobRunRow {
+    debug_assert!(CronJobId::try_from(job_id).is_ok());
     let now = now_ms();
     CronJobRunRow {
-        id: generate_prefixed_id("cron_run"),
+        id: CronJobRunId::new().into_string(),
         job_id: job_id.to_owned(),
         executed_at_ms: now,
         status: status.to_owned(),
@@ -1812,13 +1887,19 @@ fn build_run_row(job_id: &str, status: &str) -> CronJobRunRow {
     }
 }
 
-fn cron_run_to_response(row: CronJobRunRow) -> CronJobRunResponse {
-    CronJobRunResponse {
+fn cron_run_to_response(row: CronJobRunRow) -> Result<CronJobRunResponse, CronError> {
+    CronJobRunId::try_from(row.id.as_str()).map_err(|error| {
+        CronError::Scheduler(format!("invalid cron run id {}: {error}", row.id))
+    })?;
+    CronJobId::try_from(row.job_id.as_str()).map_err(|error| {
+        CronError::Scheduler(format!("invalid cron run job id {}: {error}", row.job_id))
+    })?;
+    Ok(CronJobRunResponse {
         id: row.id,
         job_id: row.job_id,
         executed_at_ms: row.executed_at_ms,
         status: row.status,
-    }
+    })
 }
 
 fn schedule_from_dto_with_existing_timezone(
@@ -1881,6 +1962,11 @@ fn schedule_to_row_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
 
     // -- validate_skill_body_content -------------------------------------------
 
@@ -1945,7 +2031,7 @@ mod tests {
 
     #[test]
     fn validate_nomi_accepts_valid_config() {
-        let cfg = agent_cfg_dto("4056cdea");
+        let cfg = agent_cfg_dto(PROVIDER_ID);
         assert!(validate_nomi_agent_config("nomi", Some(&cfg)).is_ok());
     }
 
@@ -1965,6 +2051,13 @@ mod tests {
     #[test]
     fn validate_nomi_rejects_whitespace_backend() {
         let cfg = agent_cfg_dto("   ");
+        let err = validate_nomi_agent_config("nomi", Some(&cfg)).unwrap_err();
+        assert!(matches!(err, CronError::InvalidAgentConfig(_)));
+    }
+
+    #[test]
+    fn validate_nomi_rejects_noncanonical_provider_id() {
+        let cfg = agent_cfg_dto("provider-safe");
         let err = validate_nomi_agent_config("nomi", Some(&cfg)).unwrap_err();
         assert!(matches!(err, CronError::InvalidAgentConfig(_)));
     }
@@ -2000,34 +2093,41 @@ mod tests {
 
     #[test]
     fn nomi_model_check_skips_non_nomi() {
+        const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
         // Non-nomi jobs never carry a nomi model requirement, regardless of mode.
         assert_eq!(
-            nomi_model_check("acp", ExecutionMode::Existing, "42"),
+            nomi_model_check("acp", ExecutionMode::Existing, Some(CONVERSATION_ID)),
             NomiModelCheck::Skip
         );
         assert_eq!(
-            nomi_model_check("claude", ExecutionMode::NewConversation, ""),
+            nomi_model_check("claude", ExecutionMode::NewConversation, None),
             NomiModelCheck::Skip
         );
     }
 
     #[test]
     fn nomi_existing_bound_conversation_is_model_source() {
+        const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
         // 指定会话 / reuse an existing conversation: the model comes from the
         // bound conversation at run time, so agent_config is NOT what we check.
         // This is the case the desktop create flow hit (agent_config omitted).
         assert_eq!(
-            nomi_model_check("nomi", ExecutionMode::Existing, "42"),
+            nomi_model_check("nomi", ExecutionMode::Existing, Some(CONVERSATION_ID)),
             NomiModelCheck::BoundConversation
         );
     }
 
     #[test]
     fn nomi_new_conversation_requires_agent_config() {
+        const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
         // A fresh conversation is created from agent_config, so its backend
         // (provider_id) must be present.
         assert_eq!(
-            nomi_model_check("nomi", ExecutionMode::NewConversation, "42"),
+            nomi_model_check(
+                "nomi",
+                ExecutionMode::NewConversation,
+                Some(CONVERSATION_ID),
+            ),
             NomiModelCheck::AgentConfig
         );
     }
@@ -2037,11 +2137,7 @@ mod tests {
         // Lazy-bind Existing job (no conversation yet): the first run creates a
         // new conversation from agent_config, so agent_config.backend is required.
         assert_eq!(
-            nomi_model_check("nomi", ExecutionMode::Existing, ""),
-            NomiModelCheck::AgentConfig
-        );
-        assert_eq!(
-            nomi_model_check("nomi", ExecutionMode::Existing, "   "),
+            nomi_model_check("nomi", ExecutionMode::Existing, None),
             NomiModelCheck::AgentConfig
         );
     }
@@ -2079,8 +2175,8 @@ mod tests {
 
     fn sample_job() -> CronJob {
         CronJob {
-            id: "cron_test".into(),
-            user_id: "user_1".into(),
+            id: JOB_ID.into(),
+            user_id: USER_ID.into(),
             name: "Test".into(),
             enabled: true,
             schedule: CronSchedule::Every {
@@ -2090,7 +2186,7 @@ mod tests {
             message: "do something".into(),
             execution_mode: ExecutionMode::Existing,
             agent_config: None,
-            conversation_id: "conv_1".into(),
+            conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
             agent_type: "acp".into(),
             created_by: CreatedBy::User,
@@ -2111,11 +2207,11 @@ mod tests {
     #[test]
     fn build_run_row_records_minimal_execution_fact() {
         let before = now_ms();
-        let row = build_run_row("cron_test", "ok");
+        let row = build_run_row(JOB_ID, "ok");
         let after = now_ms();
 
-        assert!(row.id.starts_with("cron_run_"));
-        assert_eq!(row.job_id, "cron_test");
+        assert!(row.id.starts_with("cronrun_"));
+        assert_eq!(row.job_id, JOB_ID);
         assert_eq!(row.status, "ok");
         assert!(row.executed_at_ms >= before);
         assert!(row.executed_at_ms <= after);

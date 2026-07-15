@@ -520,16 +520,21 @@ type ProviderLike<Data, Params> = {
   invoke: Params extends undefined ? () => Promise<Data> : (params: Params) => Promise<Data>;
 };
 
-export function withResponseMap<Raw, Mapped, Params>(
-  inner: ProviderLike<Raw, Params>,
+type ResponseMapInvoker<Data, Args extends unknown[]> = {
+  provider: (...args: never[]) => void;
+  invoke: (...args: Args) => Promise<Data>;
+};
+
+export function withResponseMap<Raw, Mapped, Args extends unknown[]>(
+  inner: ResponseMapInvoker<Raw, Args>,
   map: (data: Raw) => Mapped
-): ProviderLike<Mapped, Params> {
+): ResponseMapInvoker<Mapped, Args> {
   return {
     provider: () => {},
-    invoke: (async (params?: Params) => {
-      const raw = await (inner.invoke as (p?: Params) => Promise<Raw>)(params);
+    invoke: async (...args: Args) => {
+      const raw = await inner.invoke(...args);
       return map(raw);
-    }) as ProviderLike<Mapped, Params>['invoke'],
+    },
   };
 }
 
@@ -777,14 +782,14 @@ export function wsEmitter<Params = undefined>(eventName: string): EmitterLike<Pa
   };
 }
 
-export function wsMappedEmitter<Params = undefined>(
+export function wsMappedEmitter<Params = undefined, Raw = Params>(
   eventName: string,
-  transform: (raw: unknown) => Params
+  transform: (raw: Raw) => Params
 ): EmitterLike<Params> {
-  const inner = wsEmitter<unknown>(eventName);
+  const inner = wsEmitter<Raw>(eventName);
   return {
     on: (callback: (params: Params) => void) => {
-      return inner.on((raw) => {
+      return (inner.on as (callback: (raw: Raw) => void) => () => void)((raw) => {
         callback(transform(raw));
       });
     },

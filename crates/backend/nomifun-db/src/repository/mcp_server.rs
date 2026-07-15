@@ -1,5 +1,6 @@
 use crate::error::DbError;
 use crate::models::McpServerRow;
+use nomifun_common::McpServerId;
 
 /// MCP server configuration data access abstraction.
 ///
@@ -15,13 +16,13 @@ pub trait IMcpServerRepository: Send + Sync {
     async fn list(&self) -> Result<Vec<McpServerRow>, DbError>;
 
     /// Finds an MCP server by ID, or `None` if not found.
-    async fn find_by_id(&self, id: i64) -> Result<Option<McpServerRow>, DbError>;
+    async fn find_by_id(&self, id: &McpServerId) -> Result<Option<McpServerRow>, DbError>;
 
     /// Finds an MCP server by name, or `None` if not found.
     async fn find_by_name(&self, name: &str) -> Result<Option<McpServerRow>, DbError>;
 
     /// Finds an MCP server by ID, including soft-deleted rows.
-    async fn find_by_id_any(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
+    async fn find_by_id_any(&self, id: &McpServerId) -> Result<Option<McpServerRow>, DbError> {
         self.find_by_id(id).await
     }
 
@@ -31,9 +32,9 @@ pub trait IMcpServerRepository: Send + Sync {
     }
 
     /// Finds a set of MCP servers by ID, including soft-deleted rows.
-    async fn list_by_ids_any(&self, ids: &[i64]) -> Result<Vec<McpServerRow>, DbError> {
+    async fn list_by_ids_any(&self, ids: &[McpServerId]) -> Result<Vec<McpServerRow>, DbError> {
         let mut rows = Vec::with_capacity(ids.len());
-        for &id in ids {
+        for id in ids {
             if let Some(row) = self.find_by_id_any(id).await? {
                 rows.push(row);
             }
@@ -47,11 +48,11 @@ pub trait IMcpServerRepository: Send + Sync {
 
     /// Updates an existing MCP server. Returns `DbError::NotFound` if the ID
     /// doesn't exist, `DbError::Conflict` if the new name collides with another.
-    async fn update(&self, id: i64, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError>;
+    async fn update(&self, id: &McpServerId, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError>;
 
     /// Soft-deletes an MCP server by ID. Returns `DbError::NotFound` if the ID
     /// doesn't exist.
-    async fn delete(&self, id: i64) -> Result<(), DbError>;
+    async fn delete(&self, id: &McpServerId) -> Result<(), DbError>;
 
     /// Upserts multiple servers by name: existing names are updated,
     /// new names are inserted. Returns the count of affected rows.
@@ -62,14 +63,14 @@ pub trait IMcpServerRepository: Send + Sync {
     /// Returns `DbError::NotFound` if the ID doesn't exist.
     async fn update_status(
         &self,
-        id: i64,
+        id: &McpServerId,
         status: &str,
         last_connected: Option<nomifun_common::TimestampMs>,
     ) -> Result<(), DbError>;
 
     /// Updates only the tools JSON for a server.
     /// Returns `DbError::NotFound` if the ID doesn't exist.
-    async fn update_tools(&self, id: i64, tools: Option<&str>) -> Result<(), DbError>;
+    async fn update_tools(&self, id: &McpServerId, tools: Option<&str>) -> Result<(), DbError>;
 }
 
 /// Parameters for creating a new MCP server.

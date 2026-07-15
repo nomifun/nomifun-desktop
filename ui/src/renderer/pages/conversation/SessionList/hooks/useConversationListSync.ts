@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 import { isCompleteMessageProjection } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
@@ -80,18 +81,18 @@ const isTerminalTurnState = (state: string): boolean => {
 
 type ConversationListSyncSnapshot = {
   conversations: TChatConversation[];
-  generatingConversationIds: Set<number>;
-  completionUnreadConversationIds: Set<number>;
+  generatingConversationIds: Set<ConversationId>;
+  completionUnreadConversationIds: Set<ConversationId>;
 };
 
 const listeners = new Set<() => void>();
 
 let isStoreInitialized = false;
 let conversationsState: TChatConversation[] = [];
-let generatingConversationIdsState = new Set<number>();
-let completionUnreadConversationIdsState = new Set<number>();
-let conversation_idsState = new Set<number>();
-let activeConversationIdState: number | null = null;
+let generatingConversationIdsState = new Set<ConversationId>();
+let completionUnreadConversationIdsState = new Set<ConversationId>();
+let conversation_idsState = new Set<ConversationId>();
+let activeConversationIdState: ConversationId | null = null;
 let snapshotState: ConversationListSyncSnapshot = {
   conversations: conversationsState,
   generatingConversationIds: generatingConversationIdsState,
@@ -156,7 +157,7 @@ const refreshConversations = () => {
     });
 };
 
-const markGenerating = (conversation_id: number) => {
+const markGenerating = (conversation_id: ConversationId) => {
   if (generatingConversationIdsState.has(conversation_id)) {
     return;
   }
@@ -165,7 +166,7 @@ const markGenerating = (conversation_id: number) => {
   emitStoreChange();
 };
 
-const clearGenerating = (conversation_id: number) => {
+const clearGenerating = (conversation_id: ConversationId) => {
   if (!generatingConversationIdsState.has(conversation_id)) {
     return;
   }
@@ -176,7 +177,7 @@ const clearGenerating = (conversation_id: number) => {
   emitStoreChange();
 };
 
-const markCompletionUnread = (conversation_id: number) => {
+const markCompletionUnread = (conversation_id: ConversationId) => {
   if (completionUnreadConversationIdsState.has(conversation_id)) {
     return;
   }
@@ -185,7 +186,7 @@ const markCompletionUnread = (conversation_id: number) => {
   emitStoreChange();
 };
 
-const clearCompletionUnreadState = (conversation_id: number) => {
+const clearCompletionUnreadState = (conversation_id: ConversationId) => {
   if (!completionUnreadConversationIdsState.has(conversation_id)) {
     return;
   }
@@ -196,7 +197,7 @@ const clearCompletionUnreadState = (conversation_id: number) => {
   emitStoreChange();
 };
 
-const setActiveConversationState = (conversation_id: number | null) => {
+const setActiveConversationState = (conversation_id: ConversationId | null) => {
   activeConversationIdState = conversation_id;
 };
 
@@ -240,10 +241,10 @@ const initializeConversationListSyncStore = () => {
     }
   });
   ipcBridge.conversation.turnCompleted.on((event) => {
-    if (isTerminalTurnState(event.state) && activeConversationIdState !== event.session_id) {
-      markCompletionUnread(event.session_id);
+    if (isTerminalTurnState(event.state) && activeConversationIdState !== event.conversation_id) {
+      markCompletionUnread(event.conversation_id);
     }
-    clearGenerating(event.session_id);
+    clearGenerating(event.conversation_id);
     refreshConversations();
   });
 };
@@ -259,23 +260,23 @@ export const useConversationListSync = () => {
     getConversationListSyncSnapshot
   );
 
-  const clearCompletionUnread = useCallback((conversation_id: number) => {
+  const clearCompletionUnread = useCallback((conversation_id: ConversationId) => {
     clearCompletionUnreadState(conversation_id);
   }, []);
 
-  const setActiveConversation = useCallback((conversation_id: number | null) => {
+  const setActiveConversation = useCallback((conversation_id: ConversationId | null) => {
     setActiveConversationState(conversation_id);
   }, []);
 
   const isConversationGenerating = useCallback(
-    (conversation_id: number) => {
+    (conversation_id: ConversationId) => {
       return generatingConversationIds.has(conversation_id);
     },
     [generatingConversationIds]
   );
 
   const hasCompletionUnread = useCallback(
-    (conversation_id: number) => {
+    (conversation_id: ConversationId) => {
       return completionUnreadConversationIds.has(conversation_id);
     },
     [completionUnreadConversationIds]

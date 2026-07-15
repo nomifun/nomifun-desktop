@@ -1,6 +1,7 @@
+import type { ConversationId } from '@/common/types/ids';
 import type { TMessage } from '@/common/chat/chatLib';
 
-export function getConversationInputHistory(messages: TMessage[], conversation_id?: number): string[] {
+export function getConversationInputHistory(messages: TMessage[], conversation_id?: ConversationId): string[] {
   if (!conversation_id) {
     return [];
   }

@@ -9,7 +9,7 @@ use nomi_config::config::{CliArgs, Config};
 use nomi_providers::{LlmProvider, ProviderError, create_provider};
 use nomi_types::llm::{LlmEvent, LlmRequest};
 use nomi_types::message::{ContentBlock, Message, Role};
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ProviderId};
 use nomifun_db::IProviderRepository;
 
 use crate::types::NomiCompatOverrides;
@@ -92,13 +92,13 @@ pub(crate) async fn resolve_provider_fields(
     })
 }
 
-/// Resolve provider fields for a conversation send, never hard-failing on a
-/// deleted/empty provider: fall back to the first enabled provider/model.
+/// Resolve provider fields for a conversation send, falling back only when a
+/// canonical provider reference names a row that has since been deleted.
 /// Only `AppError::ProviderUnavailable` when NOTHING is configured.
 ///
 /// This is the send-time counterpart to [`resolve_provider_fields`]: a
-/// conversation may reference a provider that has since been deleted (or carry
-/// an empty provider id). Rather than surfacing a hard `BadRequest`/crash to the
+/// conversation may reference a provider that has since been deleted. Rather
+/// than surfacing a hard `BadRequest`/crash to the
 /// user mid-send, we fall back to the app default (first enabled provider +
 /// model, via [`crate::resolve_default_model`]). The returned
 /// [`ResolvedProviderFields`] carries the ACTUAL resolved provider/model, so
@@ -109,12 +109,19 @@ pub(crate) async fn resolve_provider_fields_with_fallback(
     provider_id: &str,
     model: &str,
 ) -> Result<ResolvedProviderFields, AppError> {
-    let stored_ok = !provider_id.is_empty()
-        && provider_repo
-            .find_by_id(provider_id)
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
-            .is_some();
+    ProviderId::try_from(provider_id).map_err(|_| {
+        AppError::BadRequest("provider_id must be a canonical ProviderId".to_owned())
+    })?;
+    if model.is_empty() || model.trim() != model {
+        return Err(AppError::BadRequest(
+            "model must be trimmed and non-empty".to_owned(),
+        ));
+    }
+    let stored_ok = provider_repo
+        .find_by_id(provider_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
+        .is_some();
 
     if stored_ok {
         return resolve_provider_fields(provider_repo, encryption_key, provider_id, model).await;
@@ -680,6 +687,9 @@ mod fallback_tests {
     use nomifun_db::models::Provider;
     use nomifun_db::{CreateProviderParams, DbError, UpdateProviderParams};
 
+    const PROVIDER_A: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_DEAD: &str = "prov_0190f5fe-7c00-7a00-8000-000000000099";
+
     // Copied (and lightly adapted) from knowledge_completer.rs tests: the same
     // `ListOnlyRepo` + `provider(...)` fixture. `api_key_encrypted` is a REAL
     // AES-GCM ciphertext under the all-zero test key so `resolve_provider_fields`
@@ -737,8 +747,8 @@ mod fallback_tests {
 
     #[tokio::test]
     async fn fallback_uses_stored_provider_when_present() {
-        let repo = list_only(vec![provider("prov_a", true, &["m1"], None)]);
-        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "prov_a", "m1")
+        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
+        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_A, "m1")
             .await
             .unwrap();
         assert_eq!(f.model, "m1");
@@ -746,30 +756,27 @@ mod fallback_tests {
 
     #[tokio::test]
     async fn fallback_to_first_enabled_when_provider_missing() {
-        let repo = list_only(vec![provider("prov_a", true, &["m1"], None)]);
-        // 会话里存的是已删除的 prov_dead
-        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "prov_dead", "mX")
+        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
+        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_DEAD, "mX")
             .await
             .unwrap();
         assert_eq!(f.model, "m1"); // 回退到首个可用
     }
 
     #[tokio::test]
-    async fn fallback_on_empty_provider_id() {
-        let repo = list_only(vec![provider("prov_a", true, &["m1"], None)]);
-        let f = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "", "")
-            .await
-            .unwrap();
-        assert_eq!(f.model, "m1");
+    async fn empty_provider_id_is_rejected() {
+        let repo = list_only(vec![provider(PROVIDER_A, true, &["m1"], None)]);
+        let result = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "", "m1").await;
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
     }
 
     #[tokio::test]
     async fn fallback_errors_provider_unavailable_when_none() {
-        let repo = list_only(vec![provider("prov_a", false, &["m1"], None)]); // disabled
+        let repo = list_only(vec![provider(PROVIDER_A, false, &["m1"], None)]); // disabled
         // NB: match on the `Result` directly rather than `.unwrap_err()` — the Ok
         // variant (`ResolvedProviderFields`) intentionally does not derive `Debug`
         // (it holds a decrypted api key we must not risk logging).
-        let result = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], "prov_dead", "m").await;
+        let result = resolve_provider_fields_with_fallback(&repo, &[0u8; 32], PROVIDER_DEAD, "m").await;
         assert!(matches!(result, Err(AppError::ProviderUnavailable(_))));
     }
 }

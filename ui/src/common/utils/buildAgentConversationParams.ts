@@ -6,17 +6,20 @@
 
 import type { ICreateConversationParams } from '@/common/adapter/ipcBridge';
 import type { TProviderWithModel } from '@/common/config/storage';
+import type { RemoteAgentId } from '@/common/types/ids';
+import type { PresetReference } from '@/common/types/agent/presetTypes';
 
 export type BuildAgentConversationInput = {
   backend: string;
   name: string;
   agent_id?: string;
   agent_name?: string;
-  preset_id?: string;
+  preset_id?: PresetReference;
   workspace: string;
   model: TProviderWithModel;
   cli_path?: string;
   custom_agent_id?: string;
+  remote_agent_id?: RemoteAgentId;
   custom_workspace?: boolean;
   is_preset?: boolean;
   session_mode?: string;
@@ -51,6 +54,7 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
     model,
     cli_path,
     custom_agent_id,
+    remote_agent_id,
     custom_workspace = true,
     is_preset = false,
     session_mode,
@@ -67,13 +71,10 @@ export function buildAgentConversationParams(input: BuildAgentConversationInput)
 
   if (!is_preset) {
     if (type === 'remote') {
-      // custom_agent_id carries the remote_agents row id stringified by the
-      // agent-selection layer; parse it back to the integer FK the backend wants.
-      const remoteAgentId = custom_agent_id != null ? Number(custom_agent_id) : Number.NaN;
-      if (!Number.isSafeInteger(remoteAgentId) || remoteAgentId <= 0) {
+      if (!remote_agent_id) {
         throw new Error('A valid remote_agent_id is required for remote conversations');
       }
-      extra.remote_agent_id = remoteAgentId;
+      extra.remote_agent_id = remote_agent_id;
     } else if (type === 'openclaw-gateway') {
       extra.agent_name = agent_name || name;
       extra.gateway = {

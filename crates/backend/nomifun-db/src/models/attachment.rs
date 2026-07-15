@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AttachmentRow {
     pub id: String,
-    pub requirement_id: i64,
+    pub requirement_id: String,
     /// Original display name, deduped per requirement (`name(2).ext`).
     pub file_name: String,
     /// Path relative to the data dir, e.g. `attachments/{requirement_id}/{id}.png`.

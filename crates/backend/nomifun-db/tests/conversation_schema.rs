@@ -1,11 +1,10 @@
-use nomifun_db::{init_database_memory, models::ConversationRow, models::MessageRow};
+use nomifun_db::{installation_owner_id, init_database_memory, models::ConversationRow, models::MessageRow};
+use nomifun_common::ConversationId;
 use sqlx::Row;
-
-const INSTALLATION_OWNER: &str = "system_default_user";
 
 // Helper: insert a secondary test user and return their id.
 async fn insert_test_user(pool: &sqlx::SqlitePool) -> String {
-    let id = "test_user_1";
+    let id = "user_0190f5fe-7c00-7a00-8abc-012345678910";
     sqlx::query(
         "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
          VALUES ($1, 'testuser', 'hash', 1000, 1000)",
@@ -33,17 +32,17 @@ async fn insert_test_provider(pool: &sqlx::SqlitePool, id: &str) {
 }
 
 // Helper: insert a legal model-only Conversation for a secondary user and
-// return its id. Tests that need host-capable columns use INSTALLATION_OWNER
-// explicitly instead.
-async fn insert_test_conversation(pool: &sqlx::SqlitePool, user_id: &str) -> i64 {
-    let id: i64 = 1;
+// return its id. Tests that need host-capable columns resolve the installation
+// owner explicitly instead.
+async fn insert_test_conversation(pool: &sqlx::SqlitePool, user_id: &str) -> String {
+    let id = ConversationId::new().into_string();
     sqlx::query(
         "INSERT INTO conversations \
          (id, user_id, name, type, extra, status, delegation_policy, created_at, updated_at) \
          VALUES ($1, $2, 'Test Chat', 'nomi', '{\"workspace\":\"/tmp\"}', \
                  'pending', 'disabled', 1000, 1000)",
     )
-    .bind(id)
+    .bind(&id)
     .bind(user_id)
     .execute(pool)
     .await
@@ -82,24 +81,26 @@ async fn migration_creates_messages_table() {
 #[tokio::test]
 async fn conversations_accepts_all_columns() {
     let db = init_database_memory().await.unwrap();
-    insert_test_provider(db.pool(), "p1").await;
-    let user_id = INSTALLATION_OWNER;
+    insert_test_provider(db.pool(), "prov_0190f5fe-7c00-7a00-8abc-012345678911").await;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
 
+    let conversation_id = ConversationId::new().into_string();
     sqlx::query(
         "INSERT INTO conversations \
          (id, user_id, name, type, extra, model, status, source, channel_chat_id, \
           pinned, pinned_at, created_at, updated_at) \
          VALUES ($1, $2, 'Full Chat', 'acp', '{\"backend\":\"claude\"}', \
-                 '{\"providerId\":\"p1\",\"model\":\"claude-sonnet\"}', \
+                 '{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8abc-012345678911\",\"model\":\"claude-sonnet\"}', \
                  'running', 'telegram', 'user:123', 1, 1700000000000, 1000, 2000)",
     )
-    .bind(10_i64)
+    .bind(&conversation_id)
     .bind(&user_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row = sqlx::query("SELECT * FROM conversations WHERE id = 10")
+    let row = sqlx::query("SELECT * FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -113,23 +114,56 @@ async fn conversations_accepts_all_columns() {
     assert_eq!(row.get::<i64, _>("pinned_at"), 1700000000000);
 }
 
+#[tokio::test]
+async fn conversations_reject_legacy_model_identity_shapes() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = "prov_0190f5fe-7c00-7a00-8abc-012345678912";
+    insert_test_provider(db.pool(), provider_id).await;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
+
+    for model in [
+        format!(r#"{{"providerId":"{provider_id}","model":"m1"}}"#),
+        format!(r#"{{"id":"{provider_id}","model":"m1"}}"#),
+        format!(r#"{{"provider_id":"{provider_id}","useModel":"m1","model":"m1"}}"#),
+    ] {
+        let error = sqlx::query(
+            "INSERT INTO conversations \
+             (id, user_id, name, type, extra, model, status, delegation_policy, created_at, updated_at) \
+             VALUES (?, ?, 'legacy model', 'nomi', '{}', ?, 'pending', 'disabled', 1000, 1000)",
+        )
+        .bind(ConversationId::new().into_string())
+        .bind(&user_id)
+        .bind(model)
+        .execute(db.pool())
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().to_ascii_lowercase().contains("conversation model"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
 // -- Conversations table: default values --
 
 #[tokio::test]
 async fn conversations_defaults() {
     let db = init_database_memory().await.unwrap();
-    let user_id = INSTALLATION_OWNER;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
 
+    let conversation_id = ConversationId::new().into_string();
     sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
-         VALUES (11, $1, 'Default Chat', 'gemini', 'pending', 1000, 1000)",
+         VALUES ($1, $2, 'Default Chat', 'gemini', 'pending', 1000, 1000)",
     )
+    .bind(&conversation_id)
     .bind(&user_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row = sqlx::query("SELECT extra, pinned, pinned_at, model, source FROM conversations WHERE id = 11")
+    let row = sqlx::query("SELECT extra, pinned, pinned_at, model, source FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -159,12 +193,14 @@ async fn conversations_defaults() {
 #[tokio::test]
 async fn conversations_status_check_constraint() {
     let db = init_database_memory().await.unwrap();
-    let user_id = INSTALLATION_OWNER;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
+    let conversation_id = ConversationId::new().into_string();
 
     let result = sqlx::query(
         "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
-         VALUES (12, $1, 'Bad', 'gemini', 'invalid_status', 1000, 1000)",
+         VALUES ($1, $2, 'Bad', 'gemini', 'invalid_status', 1000, 1000)",
     )
+    .bind(&conversation_id)
     .bind(&user_id)
     .execute(db.pool())
     .await;
@@ -175,15 +211,15 @@ async fn conversations_status_check_constraint() {
 #[tokio::test]
 async fn conversations_status_allows_valid_values() {
     let db = init_database_memory().await.unwrap();
-    let user_id = INSTALLATION_OWNER;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
 
-    for (i, status) in ["pending", "running", "finished"].iter().enumerate() {
-        let id = 20_i64 + i as i64;
+    for status in ["pending", "running", "finished"] {
+        let id = ConversationId::new().into_string();
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, status, created_at, updated_at) \
              VALUES ($1, $2, 'Test', 'gemini', $3, 1000, 1000)",
         )
-        .bind(id)
+        .bind(&id)
         .bind(&user_id)
         .bind(status)
         .execute(db.pool())
@@ -197,13 +233,15 @@ async fn conversations_status_allows_valid_values() {
 #[tokio::test]
 async fn conversations_fk_user_id() {
     let db = init_database_memory().await.unwrap();
+    let conversation_id = ConversationId::new().into_string();
 
     let result = sqlx::query(
         "INSERT INTO conversations \
             (id, user_id, name, type, status, delegation_policy, created_at, updated_at) \
          VALUES \
-            (30, 'nonexistent_user', 'Bad FK', 'nomi', 'pending', 'disabled', 1000, 1000)",
+            ($1, 'nonexistent_user', 'Bad FK', 'nomi', 'pending', 'disabled', 1000, 1000)",
     )
+    .bind(&conversation_id)
     .execute(db.pool())
     .await;
 
@@ -253,7 +291,7 @@ async fn messages_accepts_all_columns() {
     sqlx::query(
         "INSERT INTO messages \
          (id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-         VALUES ('msg_1', $1, 'client_msg_1', 'text', \
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678921', $1, 'msg_0190f5fe-7c00-7a00-8abc-012345678922', 'text', \
                  '{\"content\":\"Hello\"}', 'right', 'finish', 0, 1000)",
     )
     .bind(&conv_id)
@@ -261,13 +299,13 @@ async fn messages_accepts_all_columns() {
     .await
     .unwrap();
 
-    let row = sqlx::query("SELECT * FROM messages WHERE id = 'msg_1'")
+    let row = sqlx::query("SELECT * FROM messages WHERE id = 'msg_0190f5fe-7c00-7a00-8abc-012345678921'")
         .fetch_one(db.pool())
         .await
         .unwrap();
 
-    assert_eq!(row.get::<i64, _>("conversation_id"), conv_id);
-    assert_eq!(row.get::<String, _>("msg_id"), "client_msg_1");
+    assert_eq!(row.get::<String, _>("conversation_id"), conv_id);
+    assert_eq!(row.get::<String, _>("msg_id"), "msg_0190f5fe-7c00-7a00-8abc-012345678922");
     assert_eq!(row.get::<String, _>("type"), "text");
     assert_eq!(row.get::<String, _>("position"), "right");
     assert_eq!(row.get::<String, _>("status"), "finish");
@@ -284,14 +322,14 @@ async fn messages_defaults() {
 
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, created_at) \
-         VALUES ('msg_def', $1, 'text', 1000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678923', $1, 'text', 1000)",
     )
     .bind(&conv_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row = sqlx::query("SELECT content, hidden, msg_id, position, status FROM messages WHERE id = 'msg_def'")
+    let row = sqlx::query("SELECT content, hidden, msg_id, position, status FROM messages WHERE id = 'msg_0190f5fe-7c00-7a00-8abc-012345678923'")
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -317,7 +355,7 @@ async fn messages_position_check_constraint() {
 
     let result = sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, position, created_at) \
-         VALUES ('msg_bad_pos', $1, 'text', 'invalid_pos', 1000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678924', $1, 'text', 'invalid_pos', 1000)",
     )
     .bind(&conv_id)
     .execute(db.pool())
@@ -334,7 +372,7 @@ async fn messages_status_check_constraint() {
 
     let result = sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, status, created_at) \
-         VALUES ('msg_bad_st', $1, 'text', 'invalid_status', 1000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678925', $1, 'text', 'invalid_status', 1000)",
     )
     .bind(&conv_id)
     .execute(db.pool())
@@ -393,7 +431,7 @@ async fn messages_fk_conversation_id() {
 
     let result = sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, created_at) \
-         VALUES ('msg_fk', 999999, 'text', 1000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678926', 'conv_0190f5fe-7c00-7a00-8abc-012345678999', 'text', 1000)",
     )
     .execute(db.pool())
     .await;
@@ -459,7 +497,7 @@ async fn cascade_delete_user_removes_conversations_and_messages() {
 
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, created_at) \
-         VALUES ('msg_cascade', $1, 'text', 1000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678927', $1, 'text', 1000)",
     )
     .bind(&conv_id)
     .execute(db.pool())
@@ -491,33 +529,36 @@ async fn cascade_delete_user_removes_conversations_and_messages() {
 #[tokio::test]
 async fn conversation_row_from_row() {
     let db = init_database_memory().await.unwrap();
-    insert_test_provider(db.pool(), "p1").await;
-    let user_id = INSTALLATION_OWNER;
+    insert_test_provider(db.pool(), "prov_0190f5fe-7c00-7a00-8abc-012345678911").await;
+    let user_id = installation_owner_id(db.pool()).await.unwrap();
+    let conversation_id = ConversationId::new().into_string();
 
     sqlx::query(
         "INSERT INTO conversations \
          (id, user_id, name, type, extra, model, status, source, channel_chat_id, \
           pinned, pinned_at, created_at, updated_at) \
-         VALUES (40, $1, 'FromRow Test', 'gemini', '{\"workspace\":\"/home\"}', \
-                 '{\"providerId\":\"p1\",\"model\":\"m1\"}', \
+         VALUES ($1, $2, 'FromRow Test', 'gemini', '{\"workspace\":\"/home\"}', \
+                 '{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8abc-012345678911\",\"model\":\"m1\"}', \
                  'finished', 'nomifun', 'group:42', 1, 1700000000000, 1000, 2000)",
     )
+    .bind(&conversation_id)
     .bind(&user_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row: ConversationRow = sqlx::query_as("SELECT * FROM conversations WHERE id = 40")
+    let row: ConversationRow = sqlx::query_as("SELECT * FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
         .fetch_one(db.pool())
         .await
         .unwrap();
 
-    assert_eq!(row.id, 40);
+    assert_eq!(row.id, conversation_id);
     assert_eq!(row.user_id, user_id);
     assert_eq!(row.name, "FromRow Test");
     assert_eq!(row.r#type, "gemini");
     assert_eq!(row.extra, "{\"workspace\":\"/home\"}");
-    assert_eq!(row.model.as_deref(), Some("{\"providerId\":\"p1\",\"model\":\"m1\"}"));
+    assert_eq!(row.model.as_deref(), Some("{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8abc-012345678911\",\"model\":\"m1\"}"));
     assert_eq!(row.status.as_deref(), Some("finished"));
     assert_eq!(row.source.as_deref(), Some("nomifun"));
     assert_eq!(row.channel_chat_id.as_deref(), Some("group:42"));
@@ -531,19 +572,22 @@ async fn conversation_row_from_row() {
 async fn conversation_row_nullable_fields() {
     let db = init_database_memory().await.unwrap();
     let user_id = insert_test_user(db.pool()).await;
+    let conversation_id = ConversationId::new().into_string();
 
     sqlx::query(
         "INSERT INTO conversations \
          (id, user_id, name, type, extra, status, delegation_policy, created_at, updated_at) \
          VALUES \
-            (41, $1, 'Nullable Test', 'nomi', '{}', 'pending', 'disabled', 1000, 1000)",
+            ($1, $2, 'Nullable Test', 'nomi', '{}', 'pending', 'disabled', 1000, 1000)",
     )
+    .bind(&conversation_id)
     .bind(&user_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row: ConversationRow = sqlx::query_as("SELECT * FROM conversations WHERE id = 41")
+    let row: ConversationRow = sqlx::query_as("SELECT * FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
         .fetch_one(db.pool())
         .await
         .unwrap();
@@ -566,7 +610,7 @@ async fn message_row_from_row() {
     sqlx::query(
         "INSERT INTO messages \
          (id, conversation_id, msg_id, type, content, position, status, hidden, created_at) \
-         VALUES ('msg_fr', $1, 'client_42', 'text', '{\"content\":\"Hi\"}', \
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678928', $1, 'msg_0190f5fe-7c00-7a00-8abc-012345678929', 'text', '{\"content\":\"Hi\"}', \
                  'right', 'finish', 1, 1500)",
     )
     .bind(&conv_id)
@@ -574,14 +618,14 @@ async fn message_row_from_row() {
     .await
     .unwrap();
 
-    let row: MessageRow = sqlx::query_as("SELECT * FROM messages WHERE id = 'msg_fr'")
+    let row: MessageRow = sqlx::query_as("SELECT * FROM messages WHERE id = 'msg_0190f5fe-7c00-7a00-8abc-012345678928'")
         .fetch_one(db.pool())
         .await
         .unwrap();
 
-    assert_eq!(row.id, "msg_fr");
+    assert_eq!(row.id, "msg_0190f5fe-7c00-7a00-8abc-012345678928");
     assert_eq!(row.conversation_id, conv_id);
-    assert_eq!(row.msg_id.as_deref(), Some("client_42"));
+    assert_eq!(row.msg_id.as_deref(), Some("msg_0190f5fe-7c00-7a00-8abc-012345678929"));
     assert_eq!(row.r#type, "text");
     assert_eq!(row.content, "{\"content\":\"Hi\"}");
     assert_eq!(row.position.as_deref(), Some("right"));
@@ -598,14 +642,14 @@ async fn message_row_nullable_fields() {
 
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, type, created_at) \
-         VALUES ('msg_null', $1, 'tips', 2000)",
+         VALUES ('msg_0190f5fe-7c00-7a00-8abc-012345678930', $1, 'tips', 2000)",
     )
     .bind(&conv_id)
     .execute(db.pool())
     .await
     .unwrap();
 
-    let row: MessageRow = sqlx::query_as("SELECT * FROM messages WHERE id = 'msg_null'")
+    let row: MessageRow = sqlx::query_as("SELECT * FROM messages WHERE id = 'msg_0190f5fe-7c00-7a00-8abc-012345678930'")
         .fetch_one(db.pool())
         .await
         .unwrap();

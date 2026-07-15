@@ -18,7 +18,7 @@ impl SqliteChannelRepository {
 
 #[async_trait::async_trait]
 impl IChannelRepository for SqliteChannelRepository {
-    // ── Plugin CRUD ──────────────────────────────────────────────────
+    // -- Plugin CRUD --------------------------------------------------
 
     async fn get_all_plugins(&self) -> Result<Vec<ChannelPluginRow>, DbError> {
         let rows = sqlx::query_as::<_, ChannelPluginRow>("SELECT * FROM channel_plugins ORDER BY created_at ASC")
@@ -198,7 +198,7 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    // ── User CRUD ────────────────────────────────────────────────────
+    // -- User CRUD ----------------------------------------------------
 
     async fn get_all_users(&self) -> Result<Vec<ChannelUserRow>, DbError> {
         let rows = sqlx::query_as::<_, ChannelUserRow>("SELECT * FROM channel_users ORDER BY authorized_at DESC")
@@ -278,7 +278,7 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    // ── Session CRUD ─────────────────────────────────────────────────
+    // -- Session CRUD -----------------------------------------------------
 
     async fn get_all_sessions(&self) -> Result<Vec<ChannelSessionRow>, DbError> {
         let rows =
@@ -367,7 +367,7 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    async fn update_session_conversation(&self, id: &str, conversation_id: i64) -> Result<(), DbError> {
+    async fn update_session_conversation(&self, id: &str, conversation_id: &str) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
             "UPDATE channel_sessions \
@@ -437,7 +437,7 @@ impl IChannelRepository for SqliteChannelRepository {
         Ok(())
     }
 
-    // ── Pairing Codes ────────────────────────────────────────────────
+    // -- Pairing Codes ------------------------------------------------
 
     async fn create_pairing(&self, row: &ChannelPairingCodeRow) -> Result<(), DbError> {
         sqlx::query(
@@ -590,7 +590,7 @@ mod tests {
         }
     }
 
-    // ── Plugin tests ─────────────────────────────────────────────────
+    // -- Plugin tests -----------------------------------------------------
 
     #[tokio::test]
     async fn get_all_plugins_empty() {
@@ -850,7 +850,7 @@ mod tests {
         );
     }
 
-    // ── User tests ───────────────────────────────────────────────────
+    // -- User tests -------------------------------------------------------
 
     #[tokio::test]
     async fn get_all_users_empty() {
@@ -1005,7 +1005,7 @@ mod tests {
         assert!(repo.get_all_sessions().await.unwrap().is_empty());
     }
 
-    // ── Session tests ────────────────────────────────────────────────
+    // -- Session tests ------------------------------------------------
 
     #[tokio::test]
     async fn get_all_sessions_empty() {
@@ -1130,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn delete_sessions_by_user_no_sessions_is_ok() {
         let (repo, _db) = setup().await;
-        // No sessions exist for this user — should not error.
+        // No sessions exist for this user —should not error.
         repo.delete_sessions_by_user("usr-1").await.unwrap();
     }
 
@@ -1138,7 +1138,7 @@ mod tests {
     /// (FK → channel_plugins(id), added in the seq/primary-key refactor) can
     /// reference it. `channel_id` is used as a routing key bound verbatim in
     /// `get_or_create_session`, so it cannot be nulled out without breaking the
-    /// reuse-matching semantics the session tests exercise — the parent row
+    /// reuse-matching semantics the session tests exercise —the parent row
     /// must exist instead. Idempotent via the upsert path.
     async fn seed_channel(repo: &SqliteChannelRepository, id: &str) {
         let now = nomifun_common::now_ms();
@@ -1164,13 +1164,15 @@ mod tests {
     /// FK-constrained channel-session tests. Channel sessions may point at a
     /// host-capable Conversation, so the fixture must use the one principal
     /// that is allowed to own host execution.
-    async fn create_stub_conversation(pool: &SqlitePool, conv_id: i64) {
+    async fn create_stub_conversation(pool: &SqlitePool, conv_id: &str) {
         let now = nomifun_common::now_ms();
+        let installation_owner = crate::installation_owner_id(pool).await.unwrap();
         sqlx::query(
             "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (?1, 'system_default_user', 'Test Conv', 'chat', ?2, ?2)",
+             VALUES (?1, ?2, 'Test Conv', 'chat', ?3, ?3)",
         )
         .bind(conv_id)
+        .bind(installation_owner)
         .bind(now)
         .execute(pool)
         .await
@@ -1179,6 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_session_conversation_persists() {
+        let conversation_id = nomifun_common::ConversationId::new().into_string();
         let (repo, db) = setup().await;
         seed_channel(&repo, "tg-1").await;
         repo.create_user(&sample_user()).await.unwrap();
@@ -1186,18 +1189,24 @@ mod tests {
         let new = sample_session("usr-1");
         repo.get_or_create_session("usr-1", "chat-abc", "tg-1", &new).await.unwrap();
 
-        create_stub_conversation(db.pool(), 42).await;
+        create_stub_conversation(db.pool(), &conversation_id).await;
 
-        repo.update_session_conversation("sess-1", 42).await.unwrap();
+        repo.update_session_conversation("sess-1", &conversation_id)
+            .await
+            .unwrap();
 
         let found = repo.get_session("sess-1").await.unwrap().unwrap();
-        assert_eq!(found.conversation_id, Some(42));
+        assert_eq!(found.conversation_id, Some(conversation_id));
     }
 
     #[tokio::test]
     async fn update_session_conversation_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.update_session_conversation("nope", 1).await.unwrap_err();
+        let missing_id = nomifun_common::ConversationId::new();
+        let err = repo
+            .update_session_conversation("nope", missing_id.as_str())
+            .await
+            .unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -1251,7 +1260,7 @@ mod tests {
     #[tokio::test]
     async fn delete_session_by_user_chat_no_match_is_ok() {
         let (repo, _db) = setup().await;
-        // No sessions exist — should not error.
+        // No sessions exist —should not error.
         repo.delete_session_by_user_chat("usr-1", "chat-abc", "tg-1").await.unwrap();
     }
 
@@ -1311,7 +1320,7 @@ mod tests {
         assert_eq!(remaining[0].channel_id.as_deref(), Some("achn_2"));
     }
 
-    // ── Pairing tests ────────────────────────────────────────────────
+    // -- Pairing tests ------------------------------------------------
 
     #[tokio::test]
     async fn create_and_get_pairing() {

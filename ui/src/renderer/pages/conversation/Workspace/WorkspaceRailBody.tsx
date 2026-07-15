@@ -5,12 +5,14 @@
  */
 
 import type { IDirOrFile } from '@/common/adapter/ipcBridge';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import {
   WORKSPACE_PANEL_TAB_EVENT,
   dispatchWorkspacePanelMetaEvent,
+  isWorkspacePanelEventForTarget,
   type WorkspacePanelTabDetail,
 } from '@/renderer/pages/conversation/components/ChatLayout/WorkspaceToolRail';
 import { getWorkspaceDisplayName as getDisplayName } from '@/renderer/utils/workspace/workspace';
@@ -66,6 +68,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   const workspace = source.workspace;
   const uploadConfig = source.upload;
   const uploadEnabled = Boolean(uploadConfig);
+  const panelTabStorageKey = sessionStorageKey('workspace-panel-tab', source.tree.target);
 
   // Message API setup
   const [internalMessageApi, messageContext] = useArcoMessage();
@@ -82,7 +85,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(() => {
     if (typeof window === 'undefined') return 'files';
     try {
-      return localStorage.getItem(`workspace-panel-tab-${source.tree.key}`) || 'files';
+      return localStorage.getItem(panelTabStorageKey) || 'files';
     } catch {
       return 'files';
     }
@@ -94,32 +97,32 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
 
   useEffect(() => {
     dispatchWorkspacePanelMetaEvent({
-      sourceKey: source.tree.key,
+      target: source.tree.target,
       changeCount: fileChangesHook.changeCount,
     });
-  }, [fileChangesHook.changeCount, source.tree.key]);
+  }, [fileChangesHook.changeCount, source.tree.target.id, source.tree.target.kind]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const handlePanelTab = (event: Event) => {
       const nextTab = (event as CustomEvent<WorkspacePanelTabDetail>).detail?.tab;
-      const sourceKey = (event as CustomEvent<WorkspacePanelTabDetail>).detail?.sourceKey;
-      if (sourceKey && sourceKey !== source.tree.key) return;
+      const eventTarget = (event as CustomEvent<WorkspacePanelTabDetail>).detail?.target;
+      if (!isWorkspacePanelEventForTarget(eventTarget, source.tree.target)) return;
       if (!nextTab) return;
       if (nextTab === 'changes') setChangesTabEverOpened(true);
       setActiveTab(nextTab);
     };
     window.addEventListener(WORKSPACE_PANEL_TAB_EVENT, handlePanelTab);
     return () => window.removeEventListener(WORKSPACE_PANEL_TAB_EVENT, handlePanelTab);
-  }, [source.tree.key]);
+  }, [source.tree.target.id, source.tree.target.kind]);
 
   useEffect(() => {
     try {
-      localStorage.setItem(`workspace-panel-tab-${source.tree.key}`, activeTab);
+      localStorage.setItem(panelTabStorageKey, activeTab);
     } catch {
       /* ignore storage failures */
     }
-  }, [activeTab, source.tree.key]);
+  }, [activeTab, panelTabStorageKey]);
 
   // Initialize all hooks
   const { isWorkspaceCollapsed, setIsWorkspaceCollapsed } = useWorkspaceCollapse();
@@ -157,9 +160,9 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   // depend on the body's live tree selection (to resolve the paste-target
   // folder). The hook is always called (hook-order stability); whether the UI
   // surfaces it is gated on `uploadEnabled`. The tracking identity comes from
-  // the source's upload config (empty string when uploads are unsupported).
+  // the source's upload config (absent when uploads are unsupported).
   const pasteHook = useWorkspacePaste({
-    trackingKey: uploadConfig?.trackingKey ?? '',
+    trackingKey: uploadConfig?.trackingKey,
     workspace,
     messageApi,
     t,
@@ -179,7 +182,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
     messageApi,
     t,
     onFilesDropped: pasteHook.handleFilesToAdd,
-    sourceKey: source.tree.key,
+    sourceKey: uploadConfig?.trackingKey,
   });
 
   // Setup source-agnostic events (cache reset on source change, context-menu

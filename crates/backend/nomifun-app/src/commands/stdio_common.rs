@@ -420,8 +420,8 @@ mod tests {
         now: u64,
     ) -> ScopedMcpChildBootstrap<LoopbackCapabilityClaims<TestScope>> {
         let claims = LoopbackCapabilityClaims::issue_at(
-            "user-1",
-            LoopbackSessionBinding::conversation("conversation-1"),
+            "user_0190f5fe-7c00-7a00-8000-000000000001",
+            LoopbackSessionBinding::conversation("conv_0190f5fe-7c00-7a00-8000-000000000001"),
             ["tools/call", "tools/list"],
             TestScope {
                 resource: "alpha".into(),

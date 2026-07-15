@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use nomifun_api_types::ConfirmRequest;
+use nomifun_common::ConversationId;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,13 +21,13 @@ use crate::server::ok;
 #[derive(Deserialize, JsonSchema)]
 struct ListConfirmationsParams {
     /// The id of the conversation whose pending decisions to read.
-    conversation_id: i64,
+    conversation_id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct ResolveConfirmationParams {
     /// The id of the conversation containing the pending decision.
-    conversation_id: i64,
+    conversation_id: String,
     /// The call_id of the specific pending decision to resolve (from nomi_list_confirmations).
     call_id: String,
     /// The chosen option's value (a bare option-id string for ACP).
@@ -44,13 +45,16 @@ fn confirm_data(option: &str) -> Value {
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConfirmationsParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity"});
     }
-    let id = p.conversation_id.to_string();
+    let id = match ConversationId::try_from(p.conversation_id) {
+        Ok(id) => id.into_string(),
+        Err(error) => return json!({"error": format!("invalid conversation_id: {error}")}),
+    };
     let confs = match deps
         .conversation_service
-        .list_confirmations(&ctx.user_id, &id, &deps.runtime_registry)
+        .list_confirmations(ctx.user_id.as_str(), &id, &deps.runtime_registry)
         .await
     {
         Ok(c) => c,
@@ -74,14 +78,17 @@ async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ListConfirmationsParams
 }
 
 async fn resolve(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResolveConfirmationParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity"});
     }
-    let id = p.conversation_id.to_string();
+    let id = match ConversationId::try_from(p.conversation_id) {
+        Ok(id) => id.into_string(),
+        Err(error) => return json!({"error": format!("invalid conversation_id: {error}")}),
+    };
 
     // Self-confirmation guard: an agent may not resolve a decision in its own
     // conversation (that would bypass the human-in-the-loop contract).
-    if !ctx.conversation_id.is_empty() && id == ctx.conversation_id {
+    if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
         return json!({
             "error": "self_confirmation_forbidden: you cannot resolve a confirmation in your own conversation"
         });
@@ -94,7 +101,7 @@ async fn resolve(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: ResolveConfirmationP
     };
     match deps
         .conversation_service
-        .confirm(&ctx.user_id, &id, &p.call_id, req, &deps.runtime_registry)
+        .confirm(ctx.user_id.as_str(), &id, &p.call_id, req, &deps.runtime_registry)
         .await
     {
         Ok(()) => ok(json!({"resolved": p.call_id})),
@@ -127,6 +134,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_common::UserId;
 
     #[test]
     fn confirm_data_carries_option_under_both_keys_so_nomi_does_not_read_cancel() {
@@ -157,43 +165,57 @@ mod tests {
     #[test]
     fn self_confirmation_guard_forbids_own_conversation() {
         let ctx = CallerCtx {
-            conversation_id: "42".into(),
-            user_id: "u1".into(),
+            conversation_id: Some(
+                ConversationId::parse("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+                    .unwrap(),
+            ),
+            user_id: UserId::parse("user_0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap(),
             ..Default::default()
         };
-        let id = 42i64.to_string();
-        let forbidden = !ctx.conversation_id.is_empty() && id == ctx.conversation_id;
+        let id = ConversationId::try_from("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+            .unwrap()
+            .into_string();
+        let forbidden = ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str());
         assert!(forbidden, "resolving own conversation must be forbidden");
     }
 
     #[test]
     fn self_confirmation_guard_allows_different_conversation() {
         let ctx = CallerCtx {
-            conversation_id: "42".into(),
-            user_id: "u1".into(),
+            conversation_id: Some(
+                ConversationId::parse("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+                    .unwrap(),
+            ),
+            user_id: UserId::parse("user_0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap(),
             ..Default::default()
         };
-        let id = 99i64.to_string();
-        let allowed = ctx.conversation_id.is_empty() || id != ctx.conversation_id;
+        let id = ConversationId::try_from("conv_0190f5fe-7c00-7a00-8abc-012345678904")
+            .unwrap()
+            .into_string();
+        let allowed = ctx.conversation_id.as_ref().is_none_or(|caller| id != caller.as_str());
         assert!(allowed, "resolving a different conversation must be allowed");
     }
 
     #[test]
     fn self_confirmation_guard_allows_when_caller_has_no_conversation() {
         let ctx = CallerCtx {
-            conversation_id: String::new(),
-            user_id: "u1".into(),
+            conversation_id: None,
+            user_id: UserId::parse("user_0190f5fe-7c00-7a00-8000-000000000001")
+                .unwrap(),
             ..Default::default()
         };
-        let id = 42i64.to_string();
-        let allowed = ctx.conversation_id.is_empty() || id != ctx.conversation_id;
-        assert!(allowed, "empty caller conversation_id must bypass the guard");
+        let id = ConversationId::try_from("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+            .unwrap()
+            .into_string();
+        let allowed = ctx.conversation_id.as_ref().is_none_or(|caller| id != caller.as_str());
+        assert!(allowed, "a caller without a conversation must bypass the guard");
     }
 
     #[test]
-    fn missing_user_identity_produces_error() {
-        // The handlers check ctx.user_id.is_empty() before any deps access.
+    fn default_context_has_a_canonical_user_identity() {
         let ctx = CallerCtx::default();
-        assert!(ctx.user_id.is_empty());
+        assert!(UserId::parse(ctx.user_id.as_str()).is_ok());
     }
 }

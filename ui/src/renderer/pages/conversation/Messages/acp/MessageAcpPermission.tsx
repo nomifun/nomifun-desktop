@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IMessageAcpPermission } from '@/common/chat/chatLib';
+import { parseConfirmationCorrelationId, type IMessageAcpPermission } from '@/common/chat/chatLib';
 import { optionalDisplayText, toDisplayText } from '@/common/chat/displayText';
 import { conversation } from '@/common/adapter/ipcBridge';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
@@ -63,7 +63,7 @@ const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({ 
     try {
       const invokeData = {
         confirm_key: selected,
-        msg_id: message.id,
+        msg_id: message.msg_id ?? parseConfirmationCorrelationId(message.id),
         conversation_id: message.conversation_id,
         call_id: tool_call?.tool_call_id || message.id,
       };

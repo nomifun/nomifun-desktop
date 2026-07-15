@@ -1,6 +1,6 @@
 use nomifun_common::{
     AdaptationPolicy, AgentExecutionActor, AgentExecutionEventKind, AgentExecutionStatus,
-    DecisionPolicy, DelegationPolicy, PlanGate,
+    ConversationId, DecisionPolicy, DelegationPolicy, PlanGate,
 };
 use nomifun_db::models::ConversationRow;
 use nomifun_db::{
@@ -13,8 +13,6 @@ use nomifun_db::{
     SqliteProviderRepository,
     UpdateAgentExecutionParams, init_database_memory,
 };
-
-const USER_ID: &str = "system_default_user";
 
 async fn insert_provider(database: &nomifun_db::Database, id: &str) {
     nomifun_db::sqlx::query(
@@ -32,13 +30,14 @@ async fn insert_provider(database: &nomifun_db::Database, id: &str) {
 }
 
 fn conversation(
+    installation_owner: &str,
     name: &str,
     model: Option<serde_json::Value>,
     execution_model_pool: Option<serde_json::Value>,
 ) -> ConversationRow {
     ConversationRow {
-        id: 0,
-        user_id: USER_ID.to_owned(),
+        id: ConversationId::new().into_string(),
+        user_id: installation_owner.to_owned(),
         name: name.to_owned(),
         r#type: "nomi".to_owned(),
         extra: "{}".to_owned(),
@@ -113,8 +112,9 @@ fn event(kind: AgentExecutionEventKind) -> NewAgentExecutionEvent {
 #[tokio::test]
 async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan() {
     let database = init_database_memory().await.unwrap();
-    insert_provider(&database, "provider_drop").await;
-    insert_provider(&database, "provider_keep").await;
+    let owner = nomifun_db::installation_owner_id(database.pool()).await.unwrap();
+    insert_provider(&database, "prov_0190f5fe-7c00-7a00-8000-000000000002").await;
+    insert_provider(&database, "prov_0190f5fe-7c00-7a00-8000-000000000001").await;
     let conversations = SqliteConversationRepository::new(database.pool().clone());
     let templates = SqliteAgentExecutionTemplateRepository::new(database.pool().clone());
     let executions = SqliteAgentExecutionRepository::new(database.pool().clone());
@@ -123,7 +123,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert!(
         nomifun_db::sqlx::query(
             "INSERT INTO client_preferences (key, value, updated_at) \
-             VALUES ('idmm_backup_provider_id', 'provider_missing', 1)",
+             VALUES ('idmm_backup_provider_id', 'prov_0190f5fe-7c00-7a00-8000-000000000003', 1)",
         )
         .execute(database.pool())
         .await
@@ -134,9 +134,10 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert!(
         conversations
             .create(&conversation(
+                &owner,
                 "missing lead",
                 Some(serde_json::json!({
-                    "provider_id": "provider_missing",
+                    "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000003",
                     "model": "model"
                 })),
                 None,
@@ -148,16 +149,17 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert!(
         conversations
             .create(&conversation(
+                &owner,
                 "missing collaborator",
                 Some(serde_json::json!({
-                    "provider_id": "provider_keep",
+                    "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001",
                     "model": "model"
                 })),
                 Some(serde_json::json!({
                     "mode": "range",
                     "models": [
-                        {"provider_id": "provider_keep", "model": "model"},
-                        {"provider_id": "provider_missing", "model": "model"}
+                        {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model"},
+                        {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000003", "model": "model"}
                     ]
                 })),
             ))
@@ -168,14 +170,14 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert!(
         templates
             .create_template(
-                USER_ID,
+                &owner,
                 &CreateAgentExecutionTemplateParams {
                     name: "missing provider".to_owned(),
                     description: None,
                     max_parallel: Some(1),
                     work_dir: None,
                     context: None,
-                    participants: vec![template_participant("provider_missing")],
+                    participants: vec![template_participant("prov_0190f5fe-7c00-7a00-8000-000000000003")],
                 },
             )
             .await
@@ -185,16 +187,17 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
 
     let soft_ref_conversation = conversations
         .create(&conversation(
+            &owner,
             "soft references",
             Some(serde_json::json!({
-                "provider_id": "provider_keep",
+                "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001",
                 "model": "model"
             })),
             Some(serde_json::json!({
                 "mode": "range",
                 "models": [
-                    {"provider_id": "provider_keep", "model": "model"},
-                    {"provider_id": "provider_drop", "model": "model"}
+                    {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model"},
+                    {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000002", "model": "model"}
                 ]
             })),
         ))
@@ -203,7 +206,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     nomifun_db::sqlx::query(
         "INSERT INTO client_preferences (key, value, updated_at) VALUES (\
             'agent.model_failover', \
-            '{\"enabled\":true,\"queue\":[{\"provider_id\":\"provider_drop\",\"model\":\"model\"},{\"provider_id\":\"provider_keep\",\"model\":\"model\"}],\"max_switches\":4,\"stamp_unhealthy\":true}', \
+            '{\"enabled\":true,\"queue\":[{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8000-000000000002\",\"model\":\"model\"},{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8000-000000000001\",\"model\":\"model\"}],\"max_switches\":4,\"stamp_unhealthy\":true}', \
             1)",
     )
     .execute(database.pool())
@@ -215,10 +218,10 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     )
     .bind(
         serde_json::json!([
-            {"provider_id": "provider_keep", "model": "model_first"},
-            {"provider_id": "provider_drop", "model": "model"},
-            {"provider_id": "provider_missing", "model": "model"},
-            {"provider_id": "provider_keep", "model": "model_second"}
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model_first"},
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000002", "model": "model"},
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000003", "model": "model"},
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model_second"}
         ])
         .to_string(),
     )
@@ -228,13 +231,13 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
 
     // This is the race-equivalent path: an application usage scan can observe
     // no hard binding, then a soft reference exists before the raw DELETE.
-    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
         .execute(database.pool())
         .await
         .unwrap();
     let pool: serde_json::Value = serde_json::from_str(
         &conversations
-            .get(soft_ref_conversation)
+            .get(&soft_ref_conversation)
             .await
             .unwrap()
             .unwrap()
@@ -246,7 +249,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         pool,
         serde_json::json!({
             "mode": "range",
-            "models": [{"provider_id": "provider_keep", "model": "model"}]
+            "models": [{"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model"}]
         }),
         "provider deletion prunes persisted collaboration candidates in the same transaction"
     );
@@ -258,7 +261,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     .unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&failover).unwrap()["queue"],
-        serde_json::json!([{"provider_id": "provider_keep", "model": "model"}])
+        serde_json::json!([{"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model"}])
     );
     let collaboration_models: String = nomifun_db::sqlx::query_scalar(
         "SELECT value FROM client_preferences WHERE key = 'nomi.collaborationModels'",
@@ -269,22 +272,22 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&collaboration_models).unwrap(),
         serde_json::json!([
-            {"provider_id": "provider_keep", "model": "model_first"},
-            {"provider_id": "provider_keep", "model": "model_second"}
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model_first"},
+            {"provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "model_second"}
         ]),
         "provider deletion preserves candidate order while pruning the deleted and already-missing providers"
     );
 
-    insert_provider(&database, "provider_drop").await;
+    insert_provider(&database, "prov_0190f5fe-7c00-7a00-8000-000000000002").await;
     nomifun_db::sqlx::query(
         "INSERT INTO client_preferences (key, value, updated_at) \
-         VALUES ('idmm_backup_provider_id', 'provider_drop', 1)",
+         VALUES ('idmm_backup_provider_id', 'prov_0190f5fe-7c00-7a00-8000-000000000002', 1)",
     )
     .execute(database.pool())
     .await
     .unwrap();
     assert!(
-        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
             .execute(database.pool())
             .await
             .is_err(),
@@ -292,7 +295,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     );
     assert!(
         nomifun_db::sqlx::query(
-            "UPDATE client_preferences SET value = 'provider_missing' \
+            "UPDATE client_preferences SET value = 'prov_0190f5fe-7c00-7a00-8000-000000000003' \
              WHERE key = 'idmm_backup_provider_id'",
         )
         .execute(database.pool())
@@ -308,16 +311,17 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     .unwrap();
     let hard_conversation = conversations
         .create(&conversation(
+            &owner,
             "hard lead",
             Some(serde_json::json!({
-                "provider_id": "provider_drop",
+                "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000002",
                 "model": "model"
             })),
             None,
         ))
         .await
         .unwrap();
-    let conflict = providers.delete("provider_drop").await.unwrap_err();
+    let conflict = providers.delete("prov_0190f5fe-7c00-7a00-8000-000000000002").await.unwrap_err();
     assert!(
         matches!(
             conflict,
@@ -327,27 +331,27 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         "the repository must preserve the DB's race-authority conflict as a 409-class error; got {conflict:?}"
     );
     nomifun_db::sqlx::query("UPDATE conversations SET model = NULL WHERE id = ?")
-        .bind(hard_conversation)
+        .bind(&hard_conversation)
         .execute(database.pool())
         .await
         .unwrap();
 
     let template = templates
         .create_template(
-            USER_ID,
+            &owner,
             &CreateAgentExecutionTemplateParams {
                 name: "hard template".to_owned(),
                 description: None,
                 max_parallel: Some(1),
                 work_dir: None,
                 context: None,
-                participants: vec![template_participant("provider_drop")],
+                participants: vec![template_participant("prov_0190f5fe-7c00-7a00-8000-000000000002")],
             },
         )
         .await
         .unwrap();
     assert!(
-        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
             .execute(database.pool())
             .await
             .is_err(),
@@ -355,14 +359,14 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     );
     assert!(
         templates
-            .delete_template(USER_ID, &template.template.id, template.template.version)
+            .delete_template(&owner, &template.template.id, template.template.version)
             .await
             .unwrap()
     );
 
     let execution = executions
         .create_execution_with_participants(
-            USER_ID,
+            &owner,
             &CreateAgentExecutionParams {
                 goal: "hard execution".to_owned(),
                 status: AgentExecutionStatus::Planning,
@@ -372,16 +376,16 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
                 delegation_policy: DelegationPolicy::Automatic,
                 max_parallel: 1,
                 work_dir: None,
-                lead_conversation_id: Some(hard_conversation),
+                lead_conversation_id: Some(hard_conversation.clone()),
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
-            &[execution_participant("provider_drop")],
+            &[execution_participant("prov_0190f5fe-7c00-7a00-8000-000000000002")],
             &event(AgentExecutionEventKind::Created),
         )
         .await
         .unwrap();
     assert!(
-        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+        nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
             .execute(database.pool())
             .await
             .is_err(),
@@ -389,7 +393,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
     );
     executions
         .update_execution(
-            USER_ID,
+            &owner,
             &execution.id,
             execution.version,
             None,
@@ -401,14 +405,14 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
         )
         .await
         .unwrap();
-    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
         .execute(database.pool())
         .await
         .unwrap();
 
     let missing_execution = executions
         .create_execution_with_participants(
-            USER_ID,
+            &owner,
             &CreateAgentExecutionParams {
                 goal: "missing provider".to_owned(),
                 status: AgentExecutionStatus::Planning,
@@ -421,7 +425,7 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
                 lead_conversation_id: None,
                 initial_plan_input: r#"{"mode":"automatic"}"#.to_owned(),
             },
-            &[execution_participant("provider_missing")],
+            &[execution_participant("prov_0190f5fe-7c00-7a00-8000-000000000003")],
             &event(AgentExecutionEventKind::Created),
         )
         .await;
@@ -434,17 +438,17 @@ async fn provider_bindings_are_validated_and_delete_is_atomic_after_a_stale_scan
 #[tokio::test]
 async fn provider_delete_keeps_empty_collaboration_models_preference_as_an_array() {
     let database = init_database_memory().await.unwrap();
-    insert_provider(&database, "provider_drop").await;
+    insert_provider(&database, "prov_0190f5fe-7c00-7a00-8000-000000000002").await;
     nomifun_db::sqlx::query(
         "INSERT INTO client_preferences (key, value, updated_at) \
          VALUES ('nomi.collaborationModels', \
-                 '[{\"provider_id\":\"provider_drop\",\"model\":\"model\"}]', 1)",
+                 '[{\"provider_id\":\"prov_0190f5fe-7c00-7a00-8000-000000000002\",\"model\":\"model\"}]', 1)",
     )
     .execute(database.pool())
     .await
     .unwrap();
 
-    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'provider_drop'")
+    nomifun_db::sqlx::query("DELETE FROM providers WHERE id = 'prov_0190f5fe-7c00-7a00-8000-000000000002'")
         .execute(database.pool())
         .await
         .unwrap();

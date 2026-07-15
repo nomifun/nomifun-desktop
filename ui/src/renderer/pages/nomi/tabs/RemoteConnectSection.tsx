@@ -16,9 +16,15 @@ import {
   PLUGIN_ENABLED_KEY,
   PlatformConfigBody,
 } from '@/renderer/components/channels/PlatformConfigBody';
-import { retargetConfigAfterStatus, statusOwnedBy, statusIsUnbound } from '@/renderer/components/channels/channelStatusSelection';
+import {
+  retargetConfigAfterStatus,
+  statusOwnedBy,
+  statusIsUnbound,
+  type ChannelConfigTarget,
+} from '@/renderer/components/channels/channelStatusSelection';
 import { Button, Message, Modal, Switch, Tag } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { ChannelId, CompanionId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
 import { useCompanions } from '../useNomi';
 
@@ -34,17 +40,17 @@ import { useCompanions } from '../useNomi';
  * this companion owns a row, an unbound row exists, or only other companions' rows exist.
  * Pending pairing requests still surface as a platform-level badge.
  */
-const RemoteConnectSection: React.FC<{ companionId: string; companionName: string }> = ({ companionId, companionName }) => {
+const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: string }> = ({ companionId, companionName }) => {
   const { t } = useTranslation();
   const { companions } = useCompanions();
 
   // All channel rows, indexed by row id (NOT platform type — one platform may have many rows).
   const [statuses, setStatuses] = useState<Record<string, IChannelPluginStatus>>({});
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
-  const [busyRowId, setBusyRowId] = useState<string | null>(null);
+  const [busyRowId, setBusyRowId] = useState<ChannelId | null>(null);
   // Config modal target: with channelId = edit that row; without = create mode
   // (the form's first save creates a row bound to this companion).
-  const [configTarget, setConfigTarget] = useState<{ platform: ChannelPlatform; channelId?: string } | null>(null);
+  const [configTarget, setConfigTarget] = useState<ChannelConfigTarget>(null);
 
   // ── Channel plugin statuses (REST snapshot + WS live updates) ──
   const refreshStatuses = useCallback(async () => {
@@ -112,7 +118,10 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
     if (created) setConfigTarget((prev) => retargetConfigAfterStatus(prev, created));
   }, [statuses, configTarget, companionId]);
 
-  const companionNameOf = useCallback((id: string | null | undefined) => companions.find((p) => p.id === id)?.name, [companions]);
+  const companionNameOf = useCallback(
+    (id: CompanionId | null | undefined) => companions.find((p) => p.id === id)?.name,
+    [companions]
+  );
 
   // ── Row actions ──
   const handleToggleEnabled = useCallback(
@@ -150,7 +159,7 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
   );
 
   const applyRowBinding = useCallback(
-    async (rowId: string, bind: boolean) => {
+    async (rowId: ChannelId, bind: boolean) => {
       setBusyRowId(rowId);
       try {
         // Backend contract: empty companion_id clears the binding. The call atomically
@@ -407,7 +416,10 @@ const RemoteConnectSection: React.FC<{ companionId: string; companionName: strin
             key={configTarget.channelId ?? `${configTarget.platform}:new`}
             platform={configTarget.platform}
             status={configTarget.channelId ? (statuses[configTarget.channelId] ?? null) : null}
-            channelTarget={{ channelId: configTarget.channelId, companionId }}
+            channelTarget={{
+              channelId: configTarget.channelId,
+              companionId,
+            }}
             onStatusChange={(status) => {
               // Forms report the row they saved; merge by row id, then let the
               // snapshot reconcile (create mode discovers the new row there).

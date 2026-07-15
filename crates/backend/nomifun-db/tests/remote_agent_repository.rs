@@ -5,10 +5,15 @@
 
 use std::sync::Arc;
 
+use nomifun_common::RemoteAgentId;
 use nomifun_db::{
     CreateRemoteAgentParams, DbError, IRemoteAgentRepository, SqliteRemoteAgentRepository, UpdateRemoteAgentParams,
     init_database_memory,
 };
+
+fn missing_id() -> RemoteAgentId {
+    RemoteAgentId::parse("ragent_0190f5fe-7c00-7a00-8000-000000000999").unwrap()
+}
 
 async fn repo() -> (Arc<dyn IRemoteAgentRepository>, nomifun_db::Database) {
     let db = init_database_memory().await.unwrap();
@@ -57,7 +62,7 @@ async fn create_bearer_agent_returns_complete_object() {
     let (r, _db) = repo().await;
     let agent = r.create(bearer_params()).await.unwrap();
 
-    assert!(agent.id > 0);
+    assert!(agent.id.as_str().starts_with("ragent_"));
     assert_eq!(agent.name, "Remote Server");
     assert_eq!(agent.protocol, "acp");
     assert_eq!(agent.url, "wss://remote.example.com");
@@ -110,7 +115,7 @@ async fn find_by_id_returns_full_record() {
     let (r, _db) = repo().await;
     let created = r.create(bearer_params()).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.id, created.id);
     assert_eq!(found.name, "Remote Server");
     assert_eq!(found.auth_token.as_deref(), Some("encrypted_bearer_token"));
@@ -120,7 +125,7 @@ async fn find_by_id_returns_full_record() {
 #[tokio::test]
 async fn find_by_id_nonexistent_returns_none() {
     let (r, _db) = repo().await;
-    let result = r.find_by_id(999_999).await.unwrap();
+    let result = r.find_by_id(&missing_id()).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -133,7 +138,7 @@ async fn update_name_only_preserves_other_fields() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateRemoteAgentParams {
                 name: Some("New Name"),
                 ..Default::default()
@@ -157,7 +162,7 @@ async fn update_multiple_fields() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateRemoteAgentParams {
                 name: Some("Updated"),
                 url: Some("wss://new-url.example.com"),
@@ -177,7 +182,7 @@ async fn update_multiple_fields() {
 async fn update_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
     let err = r
-        .update(999_999, UpdateRemoteAgentParams::default())
+        .update(&missing_id(), UpdateRemoteAgentParams::default())
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
@@ -192,7 +197,7 @@ async fn update_can_clear_optional_fields() {
 
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateRemoteAgentParams {
                 description: Some(None),
                 auth_token: Some(None),
@@ -212,7 +217,7 @@ async fn update_persists_to_database() {
     let created = r.create(bearer_params()).await.unwrap();
 
     r.update(
-        created.id,
+        &created.id,
         UpdateRemoteAgentParams {
             name: Some("Persisted Name"),
             ..Default::default()
@@ -221,7 +226,7 @@ async fn update_persists_to_database() {
     .await
     .unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.name, "Persisted Name");
 }
 
@@ -232,16 +237,16 @@ async fn delete_existing_removes_record() {
     let (r, _db) = repo().await;
     let created = r.create(bearer_params()).await.unwrap();
 
-    r.delete(created.id).await.unwrap();
+    r.delete(&created.id).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap();
     assert!(found.is_none());
 }
 
 #[tokio::test]
 async fn delete_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
-    let err = r.delete(999_999).await.unwrap_err();
+    let err = r.delete(&missing_id()).await.unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
 }
 
@@ -251,7 +256,7 @@ async fn delete_one_does_not_affect_others() {
     let a1 = r.create(bearer_params()).await.unwrap();
     let a2 = r.create(openclaw_params()).await.unwrap();
 
-    r.delete(a1.id).await.unwrap();
+    r.delete(&a1.id).await.unwrap();
 
     let remaining = r.list().await.unwrap();
     assert_eq!(remaining.len(), 1);
@@ -266,9 +271,9 @@ async fn update_status_to_connected_with_timestamp() {
     let created = r.create(bearer_params()).await.unwrap();
 
     let ts = nomifun_common::now_ms();
-    r.update_status(created.id, "connected", Some(ts)).await.unwrap();
+    r.update_status(&created.id, "connected", Some(ts)).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.status, "connected");
     assert_eq!(found.last_connected_at, Some(ts));
 }
@@ -278,9 +283,9 @@ async fn update_status_to_error_without_timestamp() {
     let (r, _db) = repo().await;
     let created = r.create(bearer_params()).await.unwrap();
 
-    r.update_status(created.id, "error", None).await.unwrap();
+    r.update_status(&created.id, "error", None).await.unwrap();
 
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.status, "error");
     assert!(found.last_connected_at.is_none());
 }
@@ -289,7 +294,7 @@ async fn update_status_to_error_without_timestamp() {
 async fn update_status_nonexistent_returns_not_found() {
     let (r, _db) = repo().await;
     let err = r
-        .update_status(999_999, "connected", None)
+        .update_status(&missing_id(), "connected", None)
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::NotFound(_)));
@@ -306,13 +311,13 @@ async fn full_crud_lifecycle() {
     assert_eq!(created.name, "Remote Server");
 
     // Read
-    let found = r.find_by_id(created.id).await.unwrap().unwrap();
+    let found = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(found.id, created.id);
 
     // Update
     let updated = r
         .update(
-            created.id,
+            &created.id,
             UpdateRemoteAgentParams {
                 name: Some("Renamed Server"),
                 description: Some(Some("Updated desc")),
@@ -325,15 +330,15 @@ async fn full_crud_lifecycle() {
     assert_eq!(updated.description.as_deref(), Some("Updated desc"));
 
     // Update status
-    r.update_status(created.id, "connected", Some(nomifun_common::now_ms()))
+    r.update_status(&created.id, "connected", Some(nomifun_common::now_ms()))
         .await
         .unwrap();
-    let after_status = r.find_by_id(created.id).await.unwrap().unwrap();
+    let after_status = r.find_by_id(&created.id).await.unwrap().unwrap();
     assert_eq!(after_status.status, "connected");
 
     // Delete
-    r.delete(created.id).await.unwrap();
-    assert!(r.find_by_id(created.id).await.unwrap().is_none());
+    r.delete(&created.id).await.unwrap();
+    assert!(r.find_by_id(&created.id).await.unwrap().is_none());
 
     // List should be empty
     assert!(r.list().await.unwrap().is_empty());

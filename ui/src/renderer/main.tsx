@@ -38,6 +38,8 @@ import './styles/themes/index.css';
 // so their startup paths (which await configService.whenReady()) observe the
 // authoritative settings from the backend instead of the empty cache.
 import { configService } from '@/common/config/configService';
+import { application } from '@/common/adapter/ipcBridge';
+import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 configService.initialize().catch((err) => {
   console.error('Failed to initialize config:', err);
 });
@@ -90,6 +92,13 @@ const Main = () => {
     // read `handshake.available_models` on the very first render — without
     // waiting for a session to be created.
     Promise.all([
+      application.systemInfo
+        .invoke()
+        .then((info) => setBrowserStorageGeneration(info.storageGeneration))
+        .catch((err) => {
+          console.error('Failed to initialize browser storage generation:', err);
+          throw err;
+        }),
       configService.initialize().catch((err) => {
         console.error('Failed to initialize config:', err);
       }),

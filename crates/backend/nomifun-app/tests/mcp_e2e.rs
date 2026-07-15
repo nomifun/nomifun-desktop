@@ -76,7 +76,7 @@ async fn connection_test_unreachable_url() {
 }
 
 #[tokio::test]
-async fn connection_test_accepts_numeric_saved_server_id_and_persists_failure() {
+async fn connection_test_accepts_canonical_saved_server_id_and_persists_failure() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -96,7 +96,7 @@ async fn connection_test_accepts_numeric_saved_server_id_and_persists_failure() 
     let created = app.clone().oneshot(create).await.unwrap();
     assert_eq!(created.status(), StatusCode::CREATED);
     let created_json = body_json(created).await;
-    let server_id = created_json["data"]["id"].as_i64().unwrap();
+    let server_id = created_json["data"]["id"].as_str().unwrap().to_owned();
 
     let test = json_with_token(
         "POST",
@@ -128,7 +128,7 @@ async fn connection_test_accepts_numeric_saved_server_id_and_persists_failure() 
         .as_array()
         .unwrap()
         .iter()
-        .find(|server| server["id"].as_i64() == Some(server_id))
+        .find(|server| server["id"].as_str() == Some(server_id.as_str()))
         .unwrap();
     assert_eq!(persisted["last_test_status"], "error");
 }

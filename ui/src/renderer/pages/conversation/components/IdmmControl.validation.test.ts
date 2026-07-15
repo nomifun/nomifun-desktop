@@ -10,6 +10,7 @@ import {
   isWatchBackupReady,
   type IdmmWatchBackupConfig,
 } from './IdmmControl.validation';
+import { parseProviderId } from '@/common/types/ids';
 
 const modelWatch = (overrides: Partial<IdmmWatchBackupConfig> = {}): IdmmWatchBackupConfig => ({
   enabled: true,
@@ -27,7 +28,12 @@ describe('IDMM backup model validation', () => {
   });
 
   test('blocks enabling when a local backup provider is selected without a model', () => {
-    const watch = modelWatch({ bypass_model: { provider_id: 'openai', model: null } });
+    const watch = modelWatch({
+      bypass_model: {
+        provider_id: parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000001'),
+        model: null,
+      },
+    });
 
     expect(isWatchBackupReady(watch, true)).toBe(false);
     expect(getWatchBackupValidationErrorKey(watch, true)).toBe('idmm.backupModelIncomplete');

@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import React from 'react';
 import { useMessageList } from '@renderer/pages/conversation/Messages/hooks';
@@ -13,7 +14,7 @@ import styles from './ConversationQuestionLocator.module.css';
 import { buildTurnPreview, truncate } from './minimapUtils';
 
 type ConversationQuestionLocatorProps = {
-  conversation_id?: number;
+  conversation_id?: ConversationId;
 };
 
 export const pickActiveQuestionIndex = (questionTopOffsets: number[], anchorY: number): number => {

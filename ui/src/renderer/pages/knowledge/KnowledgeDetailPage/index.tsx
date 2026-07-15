@@ -18,6 +18,7 @@
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import {
@@ -488,7 +489,8 @@ const SettingsTab: React.FC<SettingsTabProps> = ({ base, allTags, createTag, onR
 const KnowledgeDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { id } = useParams<{ id: string }>();
+  const { id: rawId } = useParams<{ id: string }>();
+  const id = rawId == null ? undefined : parseKnowledgeBaseId(rawId);
   const [searchParams, setSearchParams] = useSearchParams();
   const layout = useLayoutContext();
   const isMobile = layout?.isMobile ?? false;

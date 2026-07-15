@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, generate_prefixed_id, now_ms};
+use nomifun_common::{
+    AppError, CompanionId, CompanionMemoryId, CompanionSessionWindowId,
+    CompanionSuggestionId, ConversationId, TimestampMs, now_ms,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqliteConnection, SqlitePool};
@@ -37,8 +40,8 @@ fn default_scope_kind() -> String {
 }
 
 /// Visibility of a companion memory. Mirrors the companion-skills scoping
-/// (`scope_kind` `'user'`=shared / `'companion'`=private + `scope_companion_id`
-/// `''`=shared). Shared memories inject/recall for every companion; private
+/// (`scope_kind` `'user'`=shared / `'companion'`=private + `scope_companion_id`).
+/// Shared memories inject/recall for every companion; private
 /// memories only for their owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryScope {
@@ -50,10 +53,13 @@ pub enum MemoryScope {
 
 impl MemoryScope {
     /// `(scope_kind, scope_companion_id)` column values.
-    pub fn columns(&self) -> (&'static str, String) {
+    pub fn columns(&self) -> Result<(&'static str, Option<String>), AppError> {
         match self {
-            MemoryScope::Shared => ("user", String::new()),
-            MemoryScope::Companion(id) => ("companion", id.clone()),
+            MemoryScope::Shared => Ok(("user", None)),
+            MemoryScope::Companion(id) => {
+                validate_companion_id(id, "memory scope companion_id")?;
+                Ok(("companion", Some(id.clone())))
+            }
         }
     }
 }
@@ -75,9 +81,9 @@ pub struct CompanionMemory {
     /// `'user'` = shared (all companions) / `'companion'` = private to one.
     #[serde(default = "default_scope_kind")]
     pub scope_kind: String,
-    /// Owning companion id when private; `''` when shared.
+    /// Owning canonical companion id when private; `None` when shared.
     #[serde(default)]
-    pub scope_companion_id: String,
+    pub scope_companion_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +112,7 @@ pub struct SuggestionPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompanionThread {
     pub conversation_id: String,
-    /// Owning companion (`companion_…`). Empty string = legacy row not yet backfilled.
+    /// Owning canonical companion (`companion_…`). Ownerless rows are invalid.
     pub companion_id: String,
     pub title: String,
     pub created_at: TimestampMs,
@@ -230,8 +236,12 @@ CREATE TABLE IF NOT EXISTS companion_memories (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   last_reinforced_at INTEGER NOT NULL,
-  scope_kind TEXT NOT NULL DEFAULT 'user',
-  scope_companion_id TEXT
+  scope_kind TEXT NOT NULL DEFAULT 'user' CHECK(scope_kind IN ('user', 'companion')),
+  scope_companion_id TEXT,
+  CHECK(
+    (scope_kind = 'user' AND scope_companion_id IS NULL) OR
+    (scope_kind = 'companion' AND scope_companion_id IS NOT NULL AND length(scope_companion_id) > 0)
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);
 
@@ -266,7 +276,7 @@ CREATE TABLE IF NOT EXISTS companion_state (
 
 CREATE TABLE IF NOT EXISTS companion_threads (
   conversation_id TEXT PRIMARY KEY,
-  companion_id TEXT NOT NULL DEFAULT '',
+  companion_id TEXT NOT NULL CHECK(length(companion_id) > 0),
   title TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -281,8 +291,8 @@ CREATE TABLE IF NOT EXISTS companion_runtime_state (
 
 CREATE TABLE IF NOT EXISTS companion_skills (
   skill_name TEXT NOT NULL,
-  scope_kind TEXT NOT NULL DEFAULT 'companion',
-  scope_companion_id TEXT NOT NULL DEFAULT '',
+  scope_kind TEXT NOT NULL DEFAULT 'companion' CHECK(scope_kind IN ('user', 'companion')),
+  scope_companion_id TEXT,
   status TEXT NOT NULL DEFAULT 'draft',
   source TEXT NOT NULL DEFAULT 'mined',
   confidence REAL NOT NULL DEFAULT 0.0,
@@ -295,9 +305,16 @@ CREATE TABLE IF NOT EXISTS companion_skills (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   signature TEXT NOT NULL DEFAULT '',
-  PRIMARY KEY(scope_kind, scope_companion_id, skill_name)
+  CHECK(
+    (scope_kind = 'user' AND scope_companion_id IS NULL) OR
+    (scope_kind = 'companion' AND scope_companion_id IS NOT NULL AND length(scope_companion_id) > 0)
+  )
 );
 CREATE INDEX IF NOT EXISTS idx_companion_skills_owner ON companion_skills(scope_companion_id, status, strength DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_shared_name
+  ON companion_skills(skill_name) WHERE scope_kind = 'user';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_skills_private_owner_name
+  ON companion_skills(scope_companion_id, skill_name) WHERE scope_kind = 'companion';
 
 CREATE TABLE IF NOT EXISTS skill_pattern_stats (
   signature TEXT PRIMARY KEY,
@@ -341,18 +358,36 @@ fn db_err(e: sqlx::Error) -> AppError {
     AppError::Internal(format!("companion store: {e}"))
 }
 
-/// 桌面伙伴单会话不变式：每个伙伴最多一条 companion 会话。空 companion_id（未回填的
-/// 遗留行）允许并存，故索引带 `WHERE companion_id != ''` 谓词放过它们。Created for
+fn validate_companion_id(value: &str, field: &str) -> Result<(), AppError> {
+    CompanionId::try_from(value)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid {field}: {error}")))
+}
+
+fn validate_conversation_id(value: &str, field: &str) -> Result<(), AppError> {
+    ConversationId::try_from(value)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid {field}: {error}")))
+}
+
+fn invalid_disk_id(field: &str, value: &str, error: impl std::fmt::Display) -> AppError {
+    AppError::Internal(format!(
+        "companion store contains non-canonical {field} {value:?}: {error}"
+    ))
+}
+
+/// 桌面伙伴单会话不变式：每个伙伴最多一条 companion 会话。Ownerless rows are
+/// rejected by the table CHECK and are never exempt from this index. Created for
 /// fresh dbs in [`init_schema`] (after the table is born with `companion_id`) and for
 /// pre-existing dbs by the v1→v2 migration. NOT part of the inline SCHEMA: that
 /// string also runs against pre-v1 tables that still lack the `companion_id` column,
 /// where referencing it would error.
 const COMPANION_UNIQUE_INDEX: &str = "CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_threads_companion \
-     ON companion_threads(companion_id) WHERE companion_id != ''";
+     ON companion_threads(companion_id)";
 
 /// Current schema version stamped into `PRAGMA user_version`. The base
 /// SCHEMA always reflects this latest shape (fresh dbs are born current).
-const STORE_VERSION: i64 = 5;
+const STORE_VERSION: i64 = 6;
 
 /// Schema bootstrap shared by `open`/`open_memory`. Runs entirely on one
 /// acquired connection so DDL is never spread across pool members. Probes
@@ -528,6 +563,18 @@ async fn apply_migrations_on(conn: &mut SqliteConnection) -> Result<(), AppError
             }
         }
     }
+    if version < 6 {
+        sqlx::raw_sql("BEGIN IMMEDIATE").execute(&mut *conn).await.map_err(db_err)?;
+        match migrate_v5_to_v6(conn).await {
+            Ok(()) => {
+                sqlx::raw_sql("COMMIT").execute(&mut *conn).await.map_err(db_err)?;
+            }
+            Err(e) => {
+                let _ = sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await;
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -542,7 +589,7 @@ async fn migrate_v0_to_v1(conn: &mut SqliteConnection) -> Result<(), AppError> {
         .iter()
         .any(|row| row.get::<String, _>("name") == "companion_id");
     if !has_companion_id {
-        sqlx::raw_sql("ALTER TABLE companion_threads ADD COLUMN companion_id TEXT NOT NULL DEFAULT ''")
+        sqlx::raw_sql("ALTER TABLE companion_threads ADD COLUMN companion_id TEXT")
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -567,7 +614,7 @@ async fn migrate_v1_to_v2(conn: &mut SqliteConnection) -> Result<(), AppError> {
     // the backing conversations + shared memories are untouched.
     sqlx::raw_sql(
         "DELETE FROM companion_threads
-         WHERE companion_id != ''
+         WHERE companion_id IS NOT NULL AND length(companion_id) > 0
            AND EXISTS (
              SELECT 1 FROM companion_threads b
              WHERE b.companion_id = companion_threads.companion_id
@@ -684,10 +731,295 @@ async fn migrate_v4_to_v5(conn: &mut SqliteConnection) -> Result<(), AppError> {
     Ok(())
 }
 
-fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> CompanionMemory {
+/// v5 → v6: hard-cut the independent companion store to the ID-v2 contract.
+///
+/// Shared memory/skill scope is represented only by SQL `NULL`; an empty string
+/// is never an owner sentinel. The three affected tables are rebuilt so CHECKs
+/// and uniqueness rules also apply to upgraded files. Rows whose entity IDs or
+/// owners are not canonical typed IDs are copied to a small quarantine ledger
+/// and excluded from the live tables; this prevents a legacy row from silently
+/// re-entering API responses after boot.
+async fn migrate_v5_to_v6(conn: &mut SqliteConnection) -> Result<(), AppError> {
+    // Production bootstrap has already run SCHEMA. Direct migration callers
+    // (notably shape-focused tests) may start from only one legacy table, so
+    // materialize any missing companion tables before the three-table rebuild.
+    sqlx::raw_sql(SCHEMA)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS companion_id_v6_quarantine (
+           table_name TEXT NOT NULL,
+           row_key TEXT NOT NULL,
+           reason TEXT NOT NULL,
+           payload_json TEXT NOT NULL,
+           quarantined_at INTEGER NOT NULL,
+           PRIMARY KEY(table_name, row_key)
+         )",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+
+    let memories = sqlx::query(
+        "SELECT id, scope_kind, scope_companion_id FROM companion_memories",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for row in memories {
+        let id: String = row.get("id");
+        let scope_kind: String = row.get("scope_kind");
+        let raw_owner: Option<String> = row.try_get("scope_companion_id").ok().flatten();
+        let owner = raw_owner.as_deref().filter(|value| !value.is_empty());
+        let reason = if let Err(error) = CompanionMemoryId::try_from(id.as_str()) {
+            Some(format!("invalid memory id: {error}"))
+        } else {
+            match (scope_kind.as_str(), owner) {
+                ("user", None) => None,
+                ("companion", Some(value)) => CompanionId::try_from(value)
+                    .err()
+                    .map(|error| format!("invalid scope companion id: {error}")),
+                ("user", Some(_)) => Some("shared memory unexpectedly has an owner".to_string()),
+                ("companion", None) => Some("private memory has no owner".to_string()),
+                _ => Some(format!("invalid scope kind {scope_kind:?}")),
+            }
+        };
+        if let Some(reason) = reason {
+            quarantine_v6_row(
+                conn,
+                "companion_memories",
+                &id,
+                &reason,
+                serde_json::json!({
+                    "id": id,
+                    "scope_kind": scope_kind,
+                    "scope_companion_id": raw_owner,
+                }),
+            )
+            .await?;
+            sqlx::query("DELETE FROM companion_memories WHERE id = ?")
+                .bind(&id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+    }
+    let threads = sqlx::query(
+        "SELECT conversation_id, companion_id FROM companion_threads",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for row in threads {
+        let conversation_id: String = row.get("conversation_id");
+        let companion_id: Option<String> = row.try_get("companion_id").ok().flatten();
+        let reason = ConversationId::try_from(conversation_id.as_str())
+            .err()
+            .map(|error| format!("invalid conversation id: {error}"))
+            .or_else(|| match companion_id.as_deref() {
+                Some(value) => CompanionId::try_from(value)
+                    .err()
+                    .map(|error| format!("invalid companion id: {error}")),
+                None => Some("thread has no companion owner".to_string()),
+            });
+        if let Some(reason) = reason {
+            quarantine_v6_row(
+                conn,
+                "companion_threads",
+                &conversation_id,
+                &reason,
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "companion_id": companion_id,
+                }),
+            )
+            .await?;
+            sqlx::query("DELETE FROM companion_threads WHERE conversation_id = ?")
+                .bind(&conversation_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+    }
+
+    let skills = sqlx::query(
+        "SELECT rowid AS legacy_rowid, skill_name, scope_kind, scope_companion_id FROM companion_skills",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for row in skills {
+        let rowid: i64 = row.get("legacy_rowid");
+        let skill_name: String = row.get("skill_name");
+        let scope_kind: String = row.get("scope_kind");
+        let raw_owner: Option<String> = row.try_get("scope_companion_id").ok().flatten();
+        let owner = raw_owner.as_deref().filter(|value| !value.is_empty());
+        let reason = match (scope_kind.as_str(), owner) {
+            ("user", None) => None,
+            ("companion", Some(value)) => CompanionId::try_from(value)
+                .err()
+                .map(|error| format!("invalid scope companion id: {error}")),
+            ("user", Some(_)) => Some("shared skill unexpectedly has an owner".to_string()),
+            ("companion", None) => Some("private skill has no owner".to_string()),
+            _ => Some(format!("invalid scope kind {scope_kind:?}")),
+        };
+        if let Some(reason) = reason {
+            let key = format!("{rowid}:{skill_name}");
+            quarantine_v6_row(
+                conn,
+                "companion_skills",
+                &key,
+                &reason,
+                serde_json::json!({
+                    "skill_name": skill_name,
+                    "scope_kind": scope_kind,
+                    "scope_companion_id": raw_owner,
+                }),
+            )
+            .await?;
+            sqlx::query("DELETE FROM companion_skills WHERE rowid = ?")
+                .bind(rowid)
+                .execute(&mut *conn)
+                .await
+                .map_err(db_err)?;
+        }
+    }
+    sqlx::raw_sql(
+        "DROP INDEX IF EXISTS idx_companion_memories_kind;
+         ALTER TABLE companion_memories RENAME TO companion_memories_v5;
+         CREATE TABLE companion_memories (
+           id TEXT PRIMARY KEY,
+           kind TEXT NOT NULL,
+           content TEXT NOT NULL,
+           tags TEXT NOT NULL DEFAULT '[]',
+           importance REAL NOT NULL DEFAULT 0.5,
+           strength REAL NOT NULL DEFAULT 0.5,
+           pinned INTEGER NOT NULL DEFAULT 0,
+           source TEXT NOT NULL DEFAULT 'learn',
+           status TEXT NOT NULL DEFAULT 'active',
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           last_reinforced_at INTEGER NOT NULL,
+           scope_kind TEXT NOT NULL DEFAULT 'user' CHECK(scope_kind IN ('user', 'companion')),
+           scope_companion_id TEXT,
+           CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
+                 (scope_kind = 'companion' AND scope_companion_id IS NOT NULL AND length(scope_companion_id) > 0))
+         );
+         INSERT INTO companion_memories(
+           id, kind, content, tags, importance, strength, pinned, source, status,
+           created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id
+         )
+         SELECT id, kind, content, tags, importance, strength, pinned, source, status,
+                created_at, updated_at, last_reinforced_at, scope_kind,
+                CASE WHEN scope_kind = 'user' THEN NULL ELSE scope_companion_id END
+         FROM companion_memories_v5;
+         DROP TABLE companion_memories_v5;
+         CREATE INDEX idx_companion_memories_kind ON companion_memories(kind, status, strength DESC);
+
+         DROP INDEX IF EXISTS idx_companion_threads_companion;
+         ALTER TABLE companion_threads RENAME TO companion_threads_v5;
+         CREATE TABLE companion_threads (
+           conversation_id TEXT PRIMARY KEY,
+           companion_id TEXT NOT NULL CHECK(length(companion_id) > 0),
+           title TEXT NOT NULL DEFAULT '',
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );
+         INSERT INTO companion_threads SELECT * FROM companion_threads_v5;
+         DROP TABLE companion_threads_v5;
+         CREATE UNIQUE INDEX idx_companion_threads_companion ON companion_threads(companion_id);
+
+         DROP INDEX IF EXISTS idx_companion_skills_owner;
+         DROP INDEX IF EXISTS idx_companion_skills_shared_name;
+         DROP INDEX IF EXISTS idx_companion_skills_private_owner_name;
+         ALTER TABLE companion_skills RENAME TO companion_skills_v5;
+         CREATE TABLE companion_skills (
+           skill_name TEXT NOT NULL,
+           scope_kind TEXT NOT NULL DEFAULT 'companion' CHECK(scope_kind IN ('user', 'companion')),
+           scope_companion_id TEXT,
+           status TEXT NOT NULL DEFAULT 'draft',
+           source TEXT NOT NULL DEFAULT 'mined',
+           confidence REAL NOT NULL DEFAULT 0.0,
+           provenance TEXT NOT NULL DEFAULT '[]',
+           strength REAL NOT NULL DEFAULT 1.0,
+           version INTEGER NOT NULL DEFAULT 1,
+           superseded_by TEXT,
+           usage_count INTEGER NOT NULL DEFAULT 0,
+           last_used_at INTEGER,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL,
+           signature TEXT NOT NULL DEFAULT '',
+           CHECK((scope_kind = 'user' AND scope_companion_id IS NULL) OR
+                 (scope_kind = 'companion' AND scope_companion_id IS NOT NULL AND length(scope_companion_id) > 0))
+         );
+         INSERT INTO companion_skills(
+           skill_name, scope_kind, scope_companion_id, status, source, confidence,
+           provenance, strength, version, superseded_by, usage_count, last_used_at,
+           created_at, updated_at, signature
+         )
+         SELECT skill_name, scope_kind,
+                CASE WHEN scope_kind = 'user' THEN NULL ELSE scope_companion_id END,
+                status, source, confidence, provenance, strength, version,
+                superseded_by, usage_count, last_used_at, created_at, updated_at, signature
+         FROM companion_skills_v5;
+         DROP TABLE companion_skills_v5;
+         CREATE INDEX idx_companion_skills_owner ON companion_skills(scope_companion_id, status, strength DESC);
+         CREATE UNIQUE INDEX idx_companion_skills_shared_name
+           ON companion_skills(skill_name) WHERE scope_kind = 'user';
+         CREATE UNIQUE INDEX idx_companion_skills_private_owner_name
+           ON companion_skills(scope_companion_id, skill_name) WHERE scope_kind = 'companion';
+         PRAGMA user_version = 6;",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+async fn quarantine_v6_row(
+    conn: &mut SqliteConnection,
+    table_name: &str,
+    row_key: &str,
+    reason: &str,
+    payload: serde_json::Value,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO companion_id_v6_quarantine \
+         (table_name, row_key, reason, payload_json, quarantined_at) VALUES(?,?,?,?,?)",
+    )
+    .bind(table_name)
+    .bind(row_key)
+    .bind(reason)
+    .bind(payload.to_string())
+    .bind(now_ms())
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionMemory, AppError> {
     let tags: String = row.get("tags");
-    CompanionMemory {
-        id: row.get("id"),
+    let id: String = row.get("id");
+    CompanionMemoryId::try_from(id.as_str())
+        .map_err(|error| invalid_disk_id("memory id", &id, error))?;
+    let scope_kind: String = row.try_get("scope_kind").unwrap_or_else(|_| "user".to_string());
+    let scope_companion_id: Option<String> = row.try_get("scope_companion_id").ok().flatten();
+    match (scope_kind.as_str(), scope_companion_id.as_deref()) {
+        ("user", None) => {}
+        ("companion", Some(owner)) => {
+            CompanionId::try_from(owner)
+                .map_err(|error| invalid_disk_id("memory scope companion id", owner, error))?;
+        }
+        _ => {
+            return Err(AppError::Internal(format!(
+                "companion store contains invalid memory scope: kind={scope_kind:?}, owner={scope_companion_id:?}"
+            )));
+        }
+    }
+    Ok(CompanionMemory {
+        id,
         kind: row.get("kind"),
         content: row.get("content"),
         tags: serde_json::from_str(&tags).unwrap_or_default(),
@@ -699,13 +1031,9 @@ fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> CompanionMemory {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         last_reinforced_at: row.get("last_reinforced_at"),
-        // scope_kind is NOT NULL DEFAULT 'user'; scope_companion_id is nullable
-        // on memories — normalize NULL/absent to '' so the shared/private query
-        // (`scope_kind='user' OR scope_companion_id=?`) and the wire shape are
-        // uniform with skills.
-        scope_kind: row.try_get::<String, _>("scope_kind").unwrap_or_else(|_| "user".to_string()),
-        scope_companion_id: row.try_get::<Option<String>, _>("scope_companion_id").ok().flatten().unwrap_or_default(),
-    }
+        scope_kind,
+        scope_companion_id,
+    })
 }
 
 /// Local-time day key (`YYYYMMDD`) for a ms-epoch timestamp — the partition key
@@ -738,14 +1066,20 @@ fn row_to_window(row: &sqlx::sqlite::SqliteRow) -> SessionWindow {
     }
 }
 
-fn row_to_companion_thread(row: &sqlx::sqlite::SqliteRow) -> CompanionThread {
-    CompanionThread {
-        conversation_id: row.get("conversation_id"),
-        companion_id: row.get("companion_id"),
+fn row_to_companion_thread(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionThread, AppError> {
+    let conversation_id: String = row.get("conversation_id");
+    ConversationId::try_from(conversation_id.as_str())
+        .map_err(|error| invalid_disk_id("thread conversation id", &conversation_id, error))?;
+    let companion_id: String = row.get("companion_id");
+    CompanionId::try_from(companion_id.as_str())
+        .map_err(|error| invalid_disk_id("thread companion id", &companion_id, error))?;
+    Ok(CompanionThread {
+        conversation_id,
+        companion_id,
         title: row.get("title"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }
 
 fn row_to_learn_run(row: &sqlx::sqlite::SqliteRow) -> CompanionLearnRun {
@@ -900,6 +1234,17 @@ impl CompanionStore {
         Ok(())
     }
 
+    pub async fn delete_companion_state(&self, companion_id: &str, key: &str) -> Result<(), AppError> {
+        validate_companion_id(companion_id, "companion state companion_id")?;
+        sqlx::query("DELETE FROM companion_runtime_state WHERE companion_id = ? AND key = ?")
+            .bind(companion_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub async fn get_companion_state_i64(&self, companion_id: &str, key: &str) -> Result<i64, AppError> {
         Ok(self
             .get_companion_state(companion_id, key)
@@ -982,9 +1327,9 @@ impl CompanionStore {
         // which both funnel through here.
         let content = nomi_redact::redact_secrets(content);
         let now = now_ms();
-        let (scope_kind, scope_companion_id) = scope.columns();
+        let (scope_kind, scope_companion_id) = scope.columns()?;
         let mem = CompanionMemory {
-            id: generate_prefixed_id("mem"),
+            id: CompanionMemoryId::new().into_string(),
             kind: kind.to_owned(),
             content: content.into_owned(),
             tags: tags.to_vec(),
@@ -1056,6 +1401,9 @@ impl CompanionStore {
     }
 
     pub async fn list_memories(&self, filter: &MemoryFilter) -> Result<Vec<CompanionMemory>, AppError> {
+        if let Some(companion_id) = filter.scope_companion_id.as_deref() {
+            validate_companion_id(companion_id, "memory filter companion_id")?;
+        }
         let mut sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
         sql.push_str(" ORDER BY pinned DESC, strength DESC, updated_at DESC LIMIT ? OFFSET ?");
         let mut query = sqlx::query(&sql);
@@ -1074,10 +1422,13 @@ impl CompanionStore {
         let limit = if filter.limit <= 0 { 100 } else { filter.limit.min(500) };
         query = query.bind(limit).bind(filter.offset.max(0));
         let rows = query.fetch_all(&self.pool).await.map_err(db_err)?;
-        Ok(rows.iter().map(row_to_memory).collect())
+        rows.iter().map(row_to_memory).collect()
     }
 
     pub async fn list_memory_page(&self, filter: &MemoryFilter) -> Result<MemoryPage, AppError> {
+        if let Some(companion_id) = filter.scope_companion_id.as_deref() {
+            validate_companion_id(companion_id, "memory filter companion_id")?;
+        }
         let mut items_sql = format!("SELECT * FROM companion_memories{}", memory_filter_clause(filter));
         items_sql.push_str(" ORDER BY pinned DESC, strength DESC, updated_at DESC LIMIT ? OFFSET ?");
         let mut items_query = sqlx::query(&items_sql);
@@ -1118,7 +1469,7 @@ impl CompanionStore {
         let total = count_query.fetch_one(&self.pool).await.map_err(db_err)?.get("n");
 
         Ok(MemoryPage {
-            items: rows.iter().map(row_to_memory).collect(),
+            items: rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?,
             total,
         })
     }
@@ -1140,6 +1491,8 @@ impl CompanionStore {
         status: Option<&str>,
         scope: Option<MemoryScope>,
     ) -> Result<(), AppError> {
+        CompanionMemoryId::try_from(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
         // Validate + redact edited content symmetrically with insert_memory_scoped:
         // a user/agent edit must not bypass the empty-content guard or secret
         // redaction that the insert path enforces.
@@ -1153,28 +1506,29 @@ impl CompanionStore {
             }
             None => None,
         };
-        let (scope_kind, scope_companion_id) = match &scope {
-            Some(s) => {
-                let (k, c) = s.columns();
-                (Some(k.to_owned()), Some(c))
-            }
-            None => (None, None),
-        };
+        let scope_changed = scope.is_some();
+        let scope_columns = scope.as_ref().map(MemoryScope::columns).transpose()?;
+        let scope_kind = scope_columns.as_ref().map(|(kind, _)| *kind);
+        let scope_companion_id = scope_columns
+            .as_ref()
+            .and_then(|(_, companion_id)| companion_id.as_deref());
         let now = now_ms();
         let result = sqlx::query(
             "UPDATE companion_memories SET
                content = COALESCE(?, content),
                pinned = COALESCE(?, pinned),
                status = COALESCE(?, status),
-               scope_kind = COALESCE(?, scope_kind),
-               scope_companion_id = COALESCE(?, scope_companion_id),
+               scope_kind = CASE WHEN ? THEN ? ELSE scope_kind END,
+               scope_companion_id = CASE WHEN ? THEN ? ELSE scope_companion_id END,
                updated_at = ?
              WHERE id = ?",
         )
         .bind(redacted.as_deref())
         .bind(pinned.map(|p| p as i64))
         .bind(status)
+        .bind(scope_changed)
         .bind(scope_kind)
+        .bind(scope_changed)
         .bind(scope_companion_id)
         .bind(now)
         .bind(id)
@@ -1188,6 +1542,8 @@ impl CompanionStore {
     }
 
     pub async fn delete_memory(&self, id: &str) -> Result<(), AppError> {
+        CompanionMemoryId::try_from(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
         sqlx::query("DELETE FROM companion_memories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -1272,6 +1628,7 @@ impl CompanionStore {
     /// memories plus that companion's own private ones (others' private are
     /// never injected into this companion's prompt).
     pub async fn memories_for_injection(&self, companion_id: &str, per_kind: i64, char_budget: usize) -> Result<Vec<CompanionMemory>, AppError> {
+        validate_companion_id(companion_id, "memory injection companion_id")?;
         let mut picked: Vec<CompanionMemory> = Vec::new();
         let pinned = sqlx::query(
             "SELECT * FROM companion_memories WHERE status = 'active' AND pinned = 1 AND (scope_kind = 'user' OR scope_companion_id = ?) ORDER BY strength DESC",
@@ -1280,7 +1637,7 @@ impl CompanionStore {
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
-        picked.extend(pinned.iter().map(row_to_memory));
+        picked.extend(pinned.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
         for kind in MEMORY_KINDS {
             let rows = sqlx::query(
                 "SELECT * FROM companion_memories WHERE status = 'active' AND pinned = 0 AND kind = ? AND (scope_kind = 'user' OR scope_companion_id = ?) ORDER BY strength DESC LIMIT ?",
@@ -1291,7 +1648,7 @@ impl CompanionStore {
             .fetch_all(&self.pool)
             .await
             .map_err(db_err)?;
-            picked.extend(rows.iter().map(row_to_memory));
+            picked.extend(rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
         }
         let mut used = 0usize;
         picked.retain(|m| {
@@ -1330,7 +1687,7 @@ impl CompanionStore {
         }
         let now = now_ms();
         let w = SessionWindow {
-            id: generate_prefixed_id("csw"),
+            id: CompanionSessionWindowId::new().into_string(),
             companion_id: companion_id.to_owned(),
             conversation_id: conversation_id.to_owned(),
             session_day: local_day(now),
@@ -1472,7 +1829,7 @@ impl CompanionStore {
     ) -> Result<CompanionSuggestion, AppError> {
         let now = now_ms();
         let s = CompanionSuggestion {
-            id: generate_prefixed_id("sug"),
+            id: CompanionSuggestionId::new().into_string(),
             kind: kind.to_owned(),
             title: title.to_owned(),
             body: body.to_owned(),
@@ -1720,7 +2077,7 @@ impl CompanionStore {
                 .map_err(db_err)?;
             let Some(last) = rows.last() else { break };
             cursor = last.get("id");
-            out.extend(rows.iter().map(row_to_memory));
+            out.extend(rows.iter().map(row_to_memory).collect::<Result<Vec<_>, _>>()?);
         }
         Ok(out)
     }
@@ -1745,12 +2102,14 @@ impl CompanionStore {
     }
 
     pub async fn get_memory(&self, id: &str) -> Result<Option<CompanionMemory>, AppError> {
+        CompanionMemoryId::try_from(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid memory id: {error}")))?;
         let row = sqlx::query("SELECT * FROM companion_memories WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
-        Ok(row.as_ref().map(row_to_memory))
+        row.as_ref().map(row_to_memory).transpose()
     }
 
     /// Fidelity insert for import: every field (id, timestamps, strength,
@@ -1758,6 +2117,17 @@ impl CompanionStore {
     /// [`insert_memory`], nothing is regenerated or clamped. The caller is
     /// responsible for id-collision handling (see `export::import_bundle`).
     pub async fn insert_memory_raw(&self, mem: &CompanionMemory) -> Result<(), AppError> {
+        CompanionMemoryId::try_from(mem.id.as_str())
+            .map_err(|error| AppError::BadRequest(format!("invalid imported memory id: {error}")))?;
+        match (mem.scope_kind.as_str(), mem.scope_companion_id.as_deref()) {
+            ("user", None) => {}
+            ("companion", Some(owner)) => validate_companion_id(owner, "imported memory scope companion_id")?,
+            _ => {
+                return Err(AppError::BadRequest(
+                    "imported memory scope must be shared (user/None) or private (companion/Some(canonical ID))".into(),
+                ));
+            }
+        }
         sqlx::query(
             "INSERT INTO companion_memories(id, kind, content, tags, importance, strength, pinned, source, status, created_at, updated_at, last_reinforced_at, scope_kind, scope_companion_id)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1794,24 +2164,19 @@ impl CompanionStore {
     // ----- companion threads -----
 
     /// Register a conversation as a companion thread (idempotent upsert).
-    /// The owning companion is fixed at registration: re-registering an existing
-    /// thread refreshes title/clock but never re-homes it to another companion.
-    /// That also means legacy rows with an empty companion_id cannot be claimed
-    /// through this upsert — the T1.4 backfill must use a dedicated UPDATE
-    /// targeting `companion_id = ''` instead.
+    /// Both IDs must be canonical. Re-registering an existing thread refreshes
+    /// title/clock and preserves the one-thread-per-companion invariant.
     pub async fn insert_companion_thread(
         &self,
         conversation_id: &str,
         companion_id: &str,
         title: &str,
     ) -> Result<CompanionThread, AppError> {
+        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
+        validate_companion_id(companion_id, "companion thread companion_id")?;
         let now = now_ms();
-        // `companion_id = excluded.companion_id`: rebind a reused conversation_id to the
-        // companion that just created it. conversation ids are now INTEGER (not
-        // globally-unique strings), so a colliding id means the prior binding
-        // is stale (its conversation no longer exists) — `companion.create`
-        // only ever inserts a freshly-minted conversation, so the latest caller
-        // is the rightful owner. See numeric-id spec §2.5 (reused-id staleness).
+        // The canonical conversation ID is the stable thread identity. An
+        // upsert refreshes mutable thread metadata for that same entity.
         let row = sqlx::query(
             "INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES(?,?,?,?,?)
              ON CONFLICT(conversation_id) DO UPDATE SET companion_id = excluded.companion_id, title = excluded.title, updated_at = excluded.updated_at
@@ -1825,11 +2190,14 @@ impl CompanionStore {
         .fetch_one(&self.pool)
         .await
         .map_err(db_err)?;
-        Ok(row_to_companion_thread(&row))
+        row_to_companion_thread(&row)
     }
 
     /// Threads, most recently touched first — all of them, or only one companion's.
     pub async fn list_companion_threads(&self, companion_id: Option<&str>) -> Result<Vec<CompanionThread>, AppError> {
+        if let Some(companion_id) = companion_id {
+            validate_companion_id(companion_id, "companion thread companion_id")?;
+        }
         let rows = if let Some(companion_id) = companion_id {
             sqlx::query("SELECT * FROM companion_threads WHERE companion_id = ? ORDER BY updated_at DESC")
                 .bind(companion_id)
@@ -1841,23 +2209,27 @@ impl CompanionStore {
                 .await
         }
         .map_err(db_err)?;
-        Ok(rows.iter().map(row_to_companion_thread).collect())
+        rows.iter().map(row_to_companion_thread).collect()
     }
 
-    /// The owning companion of a registered thread. Unregistered conversations and
-    /// legacy rows with an empty (not yet backfilled) companion_id are both `None`.
+    /// The owning companion of a registered thread. Only an unregistered
+    /// conversation returns `None`; ownerless disk rows are rejected at migration.
     pub async fn thread_companion_id(&self, conversation_id: &str) -> Result<Option<String>, AppError> {
+        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
         let row = sqlx::query("SELECT companion_id FROM companion_threads WHERE conversation_id = ?")
             .bind(conversation_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
-        Ok(row
-            .map(|r| r.get::<String, _>("companion_id"))
-            .filter(|id| !id.is_empty()))
+        let Some(row) = row else { return Ok(None) };
+        let companion_id: String = row.get("companion_id");
+        CompanionId::try_from(companion_id.as_str())
+            .map_err(|error| invalid_disk_id("thread companion id", &companion_id, error))?;
+        Ok(Some(companion_id))
     }
 
     pub async fn is_companion_thread(&self, conversation_id: &str) -> Result<bool, AppError> {
+        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
         let row = sqlx::query("SELECT 1 AS x FROM companion_threads WHERE conversation_id = ?")
             .bind(conversation_id)
             .fetch_optional(&self.pool)
@@ -1868,6 +2240,7 @@ impl CompanionStore {
 
     /// Rename and/or bump the activity clock of a thread.
     pub async fn touch_companion_thread(&self, conversation_id: &str, title: Option<&str>) -> Result<(), AppError> {
+        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
         let result = sqlx::query(
             "UPDATE companion_threads SET title = COALESCE(?, title), updated_at = ? WHERE conversation_id = ?",
         )
@@ -1886,6 +2259,7 @@ impl CompanionStore {
     }
 
     pub async fn delete_companion_thread(&self, conversation_id: &str) -> Result<(), AppError> {
+        validate_conversation_id(conversation_id, "companion thread conversation_id")?;
         sqlx::query("DELETE FROM companion_threads WHERE conversation_id = ?")
             .bind(conversation_id)
             .execute(&self.pool)
@@ -1894,72 +2268,17 @@ impl CompanionStore {
         Ok(())
     }
 
-    // ----- legacy backfill -----
+    // ----- legacy state backfill -----
 
-    /// Post-migration backfill (idempotent): stamp the single legacy companion
-    /// row and move legacy global xp / companion_active_thread into
-    /// companion_runtime_state.
-    ///
-    /// Single-session invariant (work-partner refactor): a companion owns at most one
-    /// companion thread, enforced by the v2 UNIQUE INDEX. So this claims at
-    /// most ONE empty-companion_id legacy row for `companion_id` — the most recently
-    /// updated — and drops every other empty-companion_id row (registry rows only;
-    /// conversations + companion_memories untouched). It also skips the claim
-    /// entirely when `companion_id` already owns a thread (re-run safety), since a
-    /// blanket re-home would collide with the unique index.
-    ///
-    /// The companion-thread upsert deliberately never re-homes existing rows,
-    /// so claiming the empty-companion_id legacy row needs this dedicated UPDATE.
-    /// The global kv keys are only moved when the per-companion slot is still empty
-    /// (a value earned post-migration must win), then deleted either way so a
-    /// second run finds nothing left to move.
+    /// Post-migration backfill (idempotent): move the legacy global XP counter
+    /// into the first canonical companion's runtime state. ID-v2 does not claim
+    /// ownerless thread rows: v6 quarantines them, and the obsolete global active
+    /// thread pointer is deleted rather than reintroduced as an unvalidated ID.
     pub async fn backfill_first_companion(&self, companion_id: &str) -> Result<(), AppError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
-        // The legacy row to keep: newest empty-companion_id thread (ties → larger
-        // conversation_id). NULL when there are no legacy rows.
-        let keep: Option<String> = sqlx::query_scalar(
-            "SELECT conversation_id FROM companion_threads
-             WHERE companion_id = ''
-             ORDER BY updated_at DESC, conversation_id DESC
-             LIMIT 1",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        // Drop the surplus legacy rows regardless (single-session invariant);
-        // the conversations they pointed at are not touched here.
-        sqlx::query("DELETE FROM companion_threads WHERE companion_id = '' AND conversation_id != COALESCE(?, '')")
-            .bind(&keep)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_err)?;
-        // Claim the kept row only when the companion has no thread yet — re-homing
-        // onto a companion that already owns one would hit the unique index.
-        let already_owns: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM companion_threads WHERE companion_id = ?")
-                .bind(companion_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        if already_owns == 0 {
-            sqlx::query("UPDATE companion_threads SET companion_id = ? WHERE companion_id = ''")
-                .bind(companion_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        } else {
-            // Companion already has a thread: discard the leftover legacy row too.
-            sqlx::query("DELETE FROM companion_threads WHERE companion_id = ''")
-                .execute(&mut *tx)
-                .await
-                .map_err(db_err)?;
-        }
-        tx.commit().await.map_err(db_err)?;
-        for key in ["xp", "companion_active_thread"] {
-            if let Some(value) = self.get_state(key).await? {
-                if self.get_companion_state(companion_id, key).await?.is_none() {
-                    self.set_companion_state(companion_id, key, &value).await?;
-                }
+        validate_companion_id(companion_id, "first companion_id")?;
+        if let Some(value) = self.get_state("xp").await? {
+            if self.get_companion_state(companion_id, "xp").await?.is_none() {
+                self.set_companion_state(companion_id, "xp", &value).await?;
             }
         }
         sqlx::query("DELETE FROM companion_state WHERE key IN ('xp','companion_active_thread')")
@@ -1973,7 +2292,7 @@ impl CompanionStore {
 // ---------------------------------------------------------------------------
 // 自进化：技能注册表 / 挖矿统计 / 反馈回流
 // 正文以磁盘 SKILL.md 为事实源（见 nomifun-extension::skill_service）；这里只存
-// 元数据 + 溯源 + 生命周期。scope_companion_id == "" 表示 shared（全员可用）。
+// 元数据 + 溯源 + 生命周期。scope_companion_id = NULL 表示 shared（全员可用）。
 // ---------------------------------------------------------------------------
 
 /// 一个伙伴自进化技能的注册表行。
@@ -1981,8 +2300,8 @@ impl CompanionStore {
 pub struct CompanionSkill {
     pub skill_name: String,
     pub scope_kind: String,
-    /// "" = shared（全员可用）；否则为拥有该专属技能的 companion_id。
-    pub scope_companion_id: String,
+    /// `None` = shared（全员可用）；`Some` is the canonical owning companion ID.
+    pub scope_companion_id: Option<String>,
     pub status: String,
     pub source: String,
     pub confidence: f64,
@@ -2007,12 +2326,26 @@ pub struct CompanionSkillPage {
     pub total: i64,
 }
 
-fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> CompanionSkill {
+fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> Result<CompanionSkill, AppError> {
     let prov: String = row.get("provenance");
-    CompanionSkill {
+    let scope_kind: String = row.get("scope_kind");
+    let scope_companion_id: Option<String> = row.get("scope_companion_id");
+    match (scope_kind.as_str(), scope_companion_id.as_deref()) {
+        ("user", None) => {}
+        ("companion", Some(owner)) => {
+            CompanionId::try_from(owner)
+                .map_err(|error| invalid_disk_id("skill scope companion id", owner, error))?;
+        }
+        _ => {
+            return Err(AppError::Internal(format!(
+                "companion store contains invalid skill scope: kind={scope_kind:?}, owner={scope_companion_id:?}"
+            )));
+        }
+    }
+    Ok(CompanionSkill {
         skill_name: row.get("skill_name"),
-        scope_kind: row.get("scope_kind"),
-        scope_companion_id: row.get("scope_companion_id"),
+        scope_kind,
+        scope_companion_id,
         status: row.get("status"),
         source: row.get("source"),
         confidence: row.get("confidence"),
@@ -2025,18 +2358,27 @@ fn row_to_skill(row: &sqlx::sqlite::SqliteRow) -> CompanionSkill {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         signature: row.get("signature"),
-    }
+    })
 }
 
 impl CompanionStore {
     /// UPSERT a skill registry row (keyed by scope + name).
     pub async fn insert_skill(&self, s: &CompanionSkill) -> Result<(), AppError> {
+        match (s.scope_kind.as_str(), s.scope_companion_id.as_deref()) {
+            ("user", None) => {}
+            ("companion", Some(owner)) => validate_companion_id(owner, "skill scope companion_id")?,
+            _ => {
+                return Err(AppError::BadRequest(
+                    "skill scope must be shared (user/None) or private (companion/Some(canonical ID))".into(),
+                ));
+            }
+        }
         let prov = serde_json::to_string(&s.provenance).unwrap_or_else(|_| "[]".into());
         sqlx::query(
             "INSERT INTO companion_skills(skill_name, scope_kind, scope_companion_id, status, source, confidence,
                 provenance, strength, version, superseded_by, usage_count, last_used_at, created_at, updated_at, signature)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-             ON CONFLICT(scope_kind, scope_companion_id, skill_name) DO UPDATE SET
+             ON CONFLICT DO UPDATE SET
                 status=excluded.status, source=excluded.source, confidence=excluded.confidence,
                 provenance=excluded.provenance, strength=excluded.strength, version=excluded.version,
                 superseded_by=excluded.superseded_by, updated_at=excluded.updated_at, signature=excluded.signature",
@@ -2064,6 +2406,7 @@ impl CompanionStore {
 
     /// List a companion's own skills; with `include_shared`, also the user-scoped (shared) ones.
     pub async fn list_skills(&self, companion_id: &str, include_shared: bool) -> Result<Vec<CompanionSkill>, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let sql = if include_shared {
             "SELECT * FROM companion_skills WHERE scope_companion_id = ? OR scope_kind = 'user' \
              ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
@@ -2072,7 +2415,7 @@ impl CompanionStore {
              ORDER BY strength DESC, updated_at DESC, scope_kind ASC, scope_companion_id ASC, skill_name ASC"
         };
         let rows = sqlx::query(sql).bind(companion_id).fetch_all(&self.pool).await.map_err(db_err)?;
-        Ok(rows.iter().map(row_to_skill).collect())
+        rows.iter().map(row_to_skill).collect()
     }
 
     /// List one page of skills visible to a companion, optionally limited to one lifecycle status.
@@ -2084,6 +2427,7 @@ impl CompanionStore {
         limit: i64,
         offset: i64,
     ) -> Result<CompanionSkillPage, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let scope_clause = if include_shared {
             " WHERE (scope_companion_id = ? OR scope_kind = 'user')"
         } else {
@@ -2116,22 +2460,24 @@ impl CompanionStore {
         let total = count_query.fetch_one(&self.pool).await.map_err(db_err)?.get("n");
 
         Ok(CompanionSkillPage {
-            items: rows.iter().map(row_to_skill).collect(),
+            items: rows.iter().map(row_to_skill).collect::<Result<Vec<_>, _>>()?,
             total,
         })
     }
 
     pub async fn get_skill(&self, companion_id: &str, name: &str) -> Result<Option<CompanionSkill>, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let row = sqlx::query("SELECT * FROM companion_skills WHERE scope_companion_id = ? AND skill_name = ?")
             .bind(companion_id)
             .bind(name)
             .fetch_optional(&self.pool)
             .await
             .map_err(db_err)?;
-        Ok(row.as_ref().map(row_to_skill))
+        row.as_ref().map(row_to_skill).transpose()
     }
 
     pub async fn set_skill_status(&self, companion_id: &str, name: &str, status: &str) -> Result<(), AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         sqlx::query("UPDATE companion_skills SET status = ? WHERE scope_companion_id = ? AND skill_name = ?")
             .bind(status)
             .bind(companion_id)
@@ -2142,16 +2488,26 @@ impl CompanionStore {
         Ok(())
     }
 
-    pub async fn record_skill_usage(&self, companion_id: &str, name: &str, now: i64) -> Result<(), AppError> {
+    pub async fn record_skill_usage(
+        &self,
+        scope_companion_id: Option<&str>,
+        name: &str,
+        now: i64,
+    ) -> Result<(), AppError> {
+        if let Some(companion_id) = scope_companion_id {
+            validate_companion_id(companion_id, "skill scope companion_id")?;
+        }
         // Bump usage AND reinforce strength toward 1.0 (mirrors reinforce_memories) so that
         // a frequently-used skill survives the decay pass — "used skills stay sharp".
         sqlx::query(
             "UPDATE companion_skills SET usage_count = usage_count + 1, last_used_at = ?, \
-             strength = MIN(1.0, strength + 0.1), updated_at = ? WHERE scope_companion_id = ? AND skill_name = ?",
+             strength = MIN(1.0, strength + 0.1), updated_at = ? \
+             WHERE ((? IS NULL AND scope_companion_id IS NULL) OR scope_companion_id = ?) AND skill_name = ?",
         )
         .bind(now)
         .bind(now)
-        .bind(companion_id)
+        .bind(scope_companion_id)
+        .bind(scope_companion_id)
         .bind(name)
         .execute(&self.pool)
         .await
@@ -2183,12 +2539,17 @@ impl CompanionStore {
             let clock: i64 = row.get("clock");
             let age_days = ((now - clock).max(0)) as f64 / 86_400_000.0;
             let decayed = strength * 0.5f64.powf(age_days / half);
-            let cid: String = row.get("scope_companion_id");
+            let cid: Option<String> = row.get("scope_companion_id");
+            if let Some(companion_id) = cid.as_deref() {
+                CompanionId::try_from(companion_id)
+                    .map_err(|error| invalid_disk_id("skill scope companion id", companion_id, error))?;
+            }
             let name: String = row.get("skill_name");
             if decayed < archive_threshold {
-                sqlx::query("UPDATE companion_skills SET strength = ?, status = 'archived', updated_at = ? WHERE scope_companion_id = ? AND skill_name = ?")
+                sqlx::query("UPDATE companion_skills SET strength = ?, status = 'archived', updated_at = ? WHERE ((? IS NULL AND scope_companion_id IS NULL) OR scope_companion_id = ?) AND skill_name = ?")
                     .bind(decayed)
                     .bind(now)
+                    .bind(&cid)
                     .bind(&cid)
                     .bind(&name)
                     .execute(&self.pool)
@@ -2196,8 +2557,9 @@ impl CompanionStore {
                     .map_err(db_err)?;
                 archived += 1;
             } else {
-                sqlx::query("UPDATE companion_skills SET strength = ? WHERE scope_companion_id = ? AND skill_name = ?")
+                sqlx::query("UPDATE companion_skills SET strength = ? WHERE ((? IS NULL AND scope_companion_id IS NULL) OR scope_companion_id = ?) AND skill_name = ?")
                     .bind(decayed)
+                    .bind(&cid)
                     .bind(&cid)
                     .bind(&name)
                     .execute(&self.pool)
@@ -2210,6 +2572,7 @@ impl CompanionStore {
 
     /// Count a companion's own active skills (for the expertise badge).
     pub async fn count_active_skills(&self, companion_id: &str) -> Result<i64, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND status = 'active'",
         )
@@ -2222,6 +2585,7 @@ impl CompanionStore {
 
     /// Count a companion's skills created since `since_ms` (optionally filtered by status) — weekly digest.
     pub async fn count_skills_since(&self, companion_id: &str, since_ms: i64, status: Option<&str>) -> Result<i64, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let n: i64 = match status {
             Some(s) => sqlx::query_scalar(
                 "SELECT COUNT(*) FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ? AND status = ?",
@@ -2246,6 +2610,7 @@ impl CompanionStore {
 
     /// Skill names created since `since_ms`, newest first (for the weekly digest list).
     pub async fn list_skill_names_since(&self, companion_id: &str, since_ms: i64, limit: i64) -> Result<Vec<String>, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let rows = sqlx::query(
             "SELECT skill_name FROM companion_skills WHERE scope_companion_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
         )
@@ -2274,6 +2639,7 @@ impl CompanionStore {
     /// `name` (exact lowercased, or ≥0.6 containment) — for evolve-in-place instead of duplicating.
     /// Returns the existing skill_name. Same-name is excluded (the insert UPSERT handles that).
     pub async fn find_similar_skill(&self, companion_id: &str, name: &str) -> Result<Option<String>, AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         let target = name.to_lowercase();
         let rows = sqlx::query(
             "SELECT skill_name FROM companion_skills WHERE scope_companion_id = ? AND status IN ('active','draft')",
@@ -2301,6 +2667,7 @@ impl CompanionStore {
 
     /// Bump a skill's version (on evolve-in-place).
     pub async fn bump_skill_version(&self, companion_id: &str, name: &str) -> Result<(), AppError> {
+        validate_companion_id(companion_id, "skill companion_id")?;
         sqlx::query("UPDATE companion_skills SET version = version + 1, updated_at = ? WHERE scope_companion_id = ? AND skill_name = ?")
             .bind(now_ms())
             .bind(companion_id)
@@ -2403,6 +2770,139 @@ impl CompanionStore {
 mod tests {
     use super::*;
 
+    fn companion_fixture(sequence: u64) -> String {
+        let raw = format!("companion_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        CompanionId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    fn memory_fixture(sequence: u64) -> String {
+        let raw = format!("mem_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        CompanionMemoryId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
+    const MALFORMED_CONVERSATION_ID: &str = "not-a-conversation-id";
+    const MALFORMED_COMPANION_ID: &str = "not-a-companion-id";
+    const MALFORMED_MEMORY_ID: &str = "not-a-memory-id";
+
+    #[tokio::test]
+    async fn id_v2_scope_null_contract_and_v5_quarantine() {
+        let opts = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE companion_memories (
+               id TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT NOT NULL,
+               tags TEXT NOT NULL DEFAULT '[]', importance REAL NOT NULL DEFAULT 0.5,
+               strength REAL NOT NULL DEFAULT 0.5, pinned INTEGER NOT NULL DEFAULT 0,
+               source TEXT NOT NULL DEFAULT 'learn', status TEXT NOT NULL DEFAULT 'active',
+               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+               last_reinforced_at INTEGER NOT NULL, scope_kind TEXT NOT NULL DEFAULT 'user',
+               scope_companion_id TEXT
+             );
+             CREATE TABLE companion_threads (
+               conversation_id TEXT PRIMARY KEY, companion_id TEXT NOT NULL DEFAULT '',
+               title TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE companion_skills (
+               skill_name TEXT NOT NULL, scope_kind TEXT NOT NULL DEFAULT 'companion',
+               scope_companion_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'draft',
+               source TEXT NOT NULL DEFAULT 'mined', confidence REAL NOT NULL DEFAULT 0.0,
+               provenance TEXT NOT NULL DEFAULT '[]', strength REAL NOT NULL DEFAULT 1.0,
+               version INTEGER NOT NULL DEFAULT 1, superseded_by TEXT, usage_count INTEGER NOT NULL DEFAULT 0,
+               last_used_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+               signature TEXT NOT NULL DEFAULT '', PRIMARY KEY(scope_kind, scope_companion_id, skill_name)
+             );
+             PRAGMA user_version = 5;",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let memory_id = CompanionMemoryId::new().into_string();
+        sqlx::query(
+            "INSERT INTO companion_memories VALUES(?, 'knowledge', 'shared', '[]', .5, .5, 0, 'manual', 'active', 1, 1, 1, 'user', '')",
+        )
+        .bind(&memory_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO companion_memories VALUES('mem_bad', 'knowledge', 'bad', '[]', .5, .5, 0, 'manual', 'active', 1, 1, 1, 'user', '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let conversation_id = ConversationId::new().into_string();
+        sqlx::query("INSERT INTO companion_threads VALUES(?, '', 'ownerless', 1, 1)")
+            .bind(&conversation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO companion_skills VALUES('shared-skill', 'user', '', 'active', 'manual', 1, '[]', 1, 1, NULL, 0, NULL, 1, 1, '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO companion_skills VALUES('ownerless-private', 'companion', '', 'active', 'manual', 1, '[]', 1, 1, NULL, 0, NULL, 1, 1, '')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migrations(&pool).await.unwrap();
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&pool).await.unwrap();
+        assert_eq!(version, STORE_VERSION);
+        let shared_owner: Option<String> = sqlx::query_scalar(
+            "SELECT scope_companion_id FROM companion_memories WHERE id = ?",
+        )
+        .bind(&memory_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(shared_owner, None);
+        let shared_skill_owner: Option<String> = sqlx::query_scalar(
+            "SELECT scope_companion_id FROM companion_skills WHERE skill_name = 'shared-skill'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(shared_skill_owner, None);
+        let quarantined: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM companion_id_v6_quarantine",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(quarantined, 3);
+        assert!(
+            sqlx::query("INSERT INTO companion_threads VALUES(?, '', '', 1, 1)")
+                .bind(ConversationId::new().into_string())
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query(
+                "INSERT INTO companion_memories VALUES(?, 'knowledge', 'bad scope', '[]', .5, .5, 0, 'manual', 'active', 1, 1, 1, 'user', '')",
+            )
+            .bind(CompanionMemoryId::new().into_string())
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn pattern_bump_and_reject_feedback() {
         let store = CompanionStore::open_memory().await.unwrap();
@@ -2419,10 +2919,11 @@ mod tests {
     #[tokio::test]
     async fn insert_list_get_skill_roundtrip() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
         let s = CompanionSkill {
             skill_name: "weekly-report".into(),
             scope_kind: "companion".into(),
-            scope_companion_id: "c1".into(),
+            scope_companion_id: Some(owner.clone()),
             status: "draft".into(),
             source: "mined".into(),
             confidence: 0.7,
@@ -2437,15 +2938,15 @@ mod tests {
             signature: String::new(),
         };
         store.insert_skill(&s).await.unwrap();
-        let got = store.get_skill("c1", "weekly-report").await.unwrap().unwrap();
+        let got = store.get_skill(&owner, "weekly-report").await.unwrap().unwrap();
         assert_eq!(got.confidence, 0.7);
         assert_eq!(got.provenance, vec!["e1".to_string(), "e2".to_string()]);
-        let listed = store.list_skills("c1", false).await.unwrap();
+        let listed = store.list_skills(&owner, false).await.unwrap();
         assert_eq!(listed.len(), 1);
-        store.set_skill_status("c1", "weekly-report", "active").await.unwrap();
-        assert_eq!(store.get_skill("c1", "weekly-report").await.unwrap().unwrap().status, "active");
-        store.record_skill_usage("c1", "weekly-report", 200).await.unwrap();
-        let after = store.get_skill("c1", "weekly-report").await.unwrap().unwrap();
+        store.set_skill_status(&owner, "weekly-report", "active").await.unwrap();
+        assert_eq!(store.get_skill(&owner, "weekly-report").await.unwrap().unwrap().status, "active");
+        store.record_skill_usage(Some(&owner), "weekly-report", 200).await.unwrap();
+        let after = store.get_skill(&owner, "weekly-report").await.unwrap().unwrap();
         assert_eq!(after.usage_count, 1);
         assert_eq!(after.last_used_at, Some(200));
     }
@@ -2453,10 +2954,12 @@ mod tests {
     #[tokio::test]
     async fn list_skill_page_filters_counts_and_pages() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let skill = |name: &str, owner: &str, scope_kind: &str, status: &str, strength: f64| CompanionSkill {
+        let owner = companion_fixture(1);
+        let other = companion_fixture(2);
+        let skill = |name: &str, owner: Option<&str>, scope_kind: &str, status: &str, strength: f64| CompanionSkill {
             skill_name: name.into(),
             scope_kind: scope_kind.into(),
-            scope_companion_id: owner.into(),
+            scope_companion_id: owner.map(str::to_owned),
             status: status.into(),
             source: "mined".into(),
             confidence: 0.7,
@@ -2472,16 +2975,16 @@ mod tests {
         };
 
         for s in [
-            skill("own-strong", "c1", "companion", "active", 0.9),
-            skill("own-next", "c1", "companion", "active", 0.8),
-            skill("shared", "", "user", "active", 0.7),
-            skill("other", "c2", "companion", "active", 1.0),
-            skill("own-draft", "c1", "companion", "draft", 1.0),
+            skill("own-strong", Some(&owner), "companion", "active", 0.9),
+            skill("own-next", Some(&owner), "companion", "active", 0.8),
+            skill("shared", None, "user", "active", 0.7),
+            skill("other", Some(&other), "companion", "active", 1.0),
+            skill("own-draft", Some(&owner), "companion", "draft", 1.0),
         ] {
             store.insert_skill(&s).await.unwrap();
         }
 
-        let page = store.list_skill_page("c1", true, Some("active"), 2, 1).await.unwrap();
+        let page = store.list_skill_page(&owner, true, Some("active"), 2, 1).await.unwrap();
 
         assert_eq!(page.total, 3);
         assert_eq!(
@@ -2493,12 +2996,13 @@ mod tests {
     #[tokio::test]
     async fn list_skill_page_stably_orders_equal_strength() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
         for name in ["zeta", "alpha"] {
             store
                 .insert_skill(&CompanionSkill {
                     skill_name: name.into(),
                     scope_kind: "companion".into(),
-                    scope_companion_id: "c1".into(),
+                    scope_companion_id: Some(owner.clone()),
                     status: "active".into(),
                     source: "mined".into(),
                     confidence: 0.7,
@@ -2516,7 +3020,7 @@ mod tests {
                 .unwrap();
         }
 
-        let page = store.list_skill_page("c1", false, Some("active"), 10, 0).await.unwrap();
+        let page = store.list_skill_page(&owner, false, Some("active"), 10, 0).await.unwrap();
 
         assert_eq!(
             page.items.iter().map(|s| s.skill_name.as_str()).collect::<Vec<_>>(),
@@ -2553,11 +3057,12 @@ mod tests {
     #[tokio::test]
     async fn decay_archives_unused_mined_skill_but_spares_manual() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
         let old = now_ms() - 365 * 86_400_000; // ~1 year ago, never used
         let mk = |name: &str, source: &str| CompanionSkill {
             skill_name: name.into(),
             scope_kind: "companion".into(),
-            scope_companion_id: "c1".into(),
+            scope_companion_id: Some(owner.clone()),
             status: "active".into(),
             source: source.into(),
             confidence: 0.7,
@@ -2575,9 +3080,9 @@ mod tests {
         store.insert_skill(&mk("manual-skill", "manual")).await.unwrap();
         let archived = store.decay_skills(45.0, 0.05).await.unwrap();
         assert_eq!(archived, 1, "only the stale mined skill should archive");
-        assert_eq!(store.get_skill("c1", "stale-mined").await.unwrap().unwrap().status, "archived");
-        assert_eq!(store.get_skill("c1", "manual-skill").await.unwrap().unwrap().status, "active", "manual skills never decay");
-        assert_eq!(store.count_active_skills("c1").await.unwrap(), 1);
+        assert_eq!(store.get_skill(&owner, "stale-mined").await.unwrap().unwrap().status, "archived");
+        assert_eq!(store.get_skill(&owner, "manual-skill").await.unwrap().unwrap().status, "active", "manual skills never decay");
+        assert_eq!(store.count_active_skills(&owner).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2694,41 +3199,45 @@ mod tests {
     #[tokio::test]
     async fn private_memory_injects_only_for_owner() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
+        let other = companion_fixture(2);
         store.insert_memory("knowledge", "shared fact", &[], 0.9, "learn").await.unwrap();
         store
-            .insert_memory_scoped("preference", "c1 likes tea", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .insert_memory_scoped("preference", "owner likes tea", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
             .await
             .unwrap();
         store
-            .insert_memory_scoped("preference", "c2 likes coffee", &[], 0.9, "chat", MemoryScope::Companion("c2".into()))
+            .insert_memory_scoped("preference", "other likes coffee", &[], 0.9, "chat", MemoryScope::Companion(other))
             .await
             .unwrap();
 
-        let c1 = store.memories_for_injection("c1", 10, 100_000).await.unwrap();
-        let texts: Vec<&str> = c1.iter().map(|m| m.content.as_str()).collect();
+        let visible = store.memories_for_injection(&owner, 10, 100_000).await.unwrap();
+        let texts: Vec<&str> = visible.iter().map(|m| m.content.as_str()).collect();
         assert!(texts.contains(&"shared fact"), "owner sees shared: {texts:?}");
-        assert!(texts.contains(&"c1 likes tea"), "owner sees own private: {texts:?}");
-        assert!(!texts.contains(&"c2 likes coffee"), "owner must NOT see another companion's private: {texts:?}");
+        assert!(texts.contains(&"owner likes tea"), "owner sees own private: {texts:?}");
+        assert!(!texts.contains(&"other likes coffee"), "owner must NOT see another companion's private: {texts:?}");
     }
 
     #[tokio::test]
     async fn list_memories_scope_filter_excludes_other_private() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
+        let other = companion_fixture(2);
         store.insert_memory("knowledge", "shared fact", &[], 0.9, "learn").await.unwrap();
         store
-            .insert_memory_scoped("knowledge", "c1 private", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .insert_memory_scoped("knowledge", "owner private", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
             .await
             .unwrap();
         store
-            .insert_memory_scoped("knowledge", "c2 private", &[], 0.9, "chat", MemoryScope::Companion("c2".into()))
+            .insert_memory_scoped("knowledge", "other private", &[], 0.9, "chat", MemoryScope::Companion(other))
             .await
             .unwrap();
-        let filter = MemoryFilter { scope_companion_id: Some("c1".into()), ..Default::default() };
+        let filter = MemoryFilter { scope_companion_id: Some(owner), ..Default::default() };
         let listed = store.list_memories(&filter).await.unwrap();
         let texts: Vec<&str> = listed.iter().map(|m| m.content.as_str()).collect();
         assert!(texts.contains(&"shared fact"));
-        assert!(texts.contains(&"c1 private"));
-        assert!(!texts.contains(&"c2 private"));
+        assert!(texts.contains(&"owner private"));
+        assert!(!texts.contains(&"other private"));
         // No scope filter → cross-companion "all" view sees everything.
         let all = store.list_memories(&MemoryFilter::default()).await.unwrap();
         assert_eq!(all.len(), 3);
@@ -2737,23 +3246,25 @@ mod tests {
     #[tokio::test]
     async fn list_memory_page_counts_the_same_filtered_scope() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
+        let other = companion_fixture(2);
         store.insert_memory("knowledge", "shared fact", &[], 0.9, "learn").await.unwrap();
         store
-            .insert_memory_scoped("knowledge", "c1 private one", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .insert_memory_scoped("knowledge", "owner private one", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
             .await
             .unwrap();
         store
-            .insert_memory_scoped("knowledge", "c1 private two", &[], 0.9, "chat", MemoryScope::Companion("c1".into()))
+            .insert_memory_scoped("knowledge", "owner private two", &[], 0.9, "chat", MemoryScope::Companion(owner.clone()))
             .await
             .unwrap();
         store
-            .insert_memory_scoped("knowledge", "c2 private", &[], 0.9, "chat", MemoryScope::Companion("c2".into()))
+            .insert_memory_scoped("knowledge", "other private", &[], 0.9, "chat", MemoryScope::Companion(other.clone()))
             .await
             .unwrap();
 
         let page = store
             .list_memory_page(&MemoryFilter {
-                scope_companion_id: Some("c1".into()),
+                scope_companion_id: Some(owner),
                 limit: 2,
                 offset: 1,
                 ..Default::default()
@@ -2763,7 +3274,7 @@ mod tests {
 
         assert_eq!(page.total, 3);
         assert_eq!(page.items.len(), 2);
-        assert!(page.items.iter().all(|m| m.scope_companion_id != "c2"));
+        assert!(page.items.iter().all(|m| m.scope_companion_id.as_deref() != Some(other.as_str())));
     }
 
     #[tokio::test]
@@ -2784,21 +3295,22 @@ mod tests {
     #[tokio::test]
     async fn update_memory_can_change_scope_shared_to_private() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let owner = companion_fixture(1);
         let m = store.insert_memory("preference", "fact", &[], 0.8, "manual").await.unwrap();
         assert_eq!(m.scope_kind, "user");
-        assert_eq!(m.scope_companion_id, "");
+        assert_eq!(m.scope_companion_id, None);
         store
-            .update_memory(&m.id, None, None, None, Some(MemoryScope::Companion("c1".into())))
+            .update_memory(&m.id, None, None, None, Some(MemoryScope::Companion(owner.clone())))
             .await
             .unwrap();
         let got = store.get_memory(&m.id).await.unwrap().unwrap();
         assert_eq!(got.scope_kind, "companion");
-        assert_eq!(got.scope_companion_id, "c1");
+        assert_eq!(got.scope_companion_id.as_deref(), Some(owner.as_str()));
         // And back to shared.
         store.update_memory(&m.id, None, None, None, Some(MemoryScope::Shared)).await.unwrap();
         let back = store.get_memory(&m.id).await.unwrap().unwrap();
         assert_eq!(back.scope_kind, "user");
-        assert_eq!(back.scope_companion_id, "");
+        assert_eq!(back.scope_companion_id, None);
     }
 
     #[tokio::test]
@@ -2862,7 +3374,7 @@ mod tests {
         assert!(!newly_again, "no second transition");
         // A genuinely missing row is still NotFound.
         assert!(matches!(
-            store.decide_suggestion("sug_doesnotexist000", true).await,
+            store.decide_suggestion("malformed-suggestion-id", true).await,
             Err(AppError::NotFound(_))
         ));
 
@@ -2964,36 +3476,41 @@ mod tests {
     #[tokio::test]
     async fn companion_thread_crud_roundtrip() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let conversation_a = conversation_fixture(1);
+        let conversation_b = conversation_fixture(2);
+        let companion_a = companion_fixture(1);
+        let companion_b = companion_fixture(2);
+        let companion_rebound = companion_fixture(9);
         assert!(store.list_companion_threads(None).await.unwrap().is_empty());
-        assert!(!store.is_companion_thread("conv_a").await.unwrap());
+        assert!(!store.is_companion_thread(&conversation_a).await.unwrap());
 
-        store.insert_companion_thread("conv_a", "companion_1", "第一段对话").await.unwrap();
-        store.insert_companion_thread("conv_b", "companion_2", "第二段").await.unwrap();
-        assert!(store.is_companion_thread("conv_a").await.unwrap());
+        store.insert_companion_thread(&conversation_a, &companion_a, "第一段对话").await.unwrap();
+        store.insert_companion_thread(&conversation_b, &companion_b, "第二段").await.unwrap();
+        assert!(store.is_companion_thread(&conversation_a).await.unwrap());
 
         // touch bumps the activity clock so conv_a sorts first.
-        store.touch_companion_thread("conv_a", Some("改名了")).await.unwrap();
+        store.touch_companion_thread(&conversation_a, Some("改名了")).await.unwrap();
         let threads = store.list_companion_threads(None).await.unwrap();
         assert_eq!(threads.len(), 2);
-        assert_eq!(threads[0].conversation_id, "conv_a");
+        assert_eq!(threads[0].conversation_id, conversation_a);
         assert_eq!(threads[0].title, "改名了");
-        assert_eq!(threads[0].companion_id, "companion_1");
+        assert_eq!(threads[0].companion_id, companion_a);
 
         // Per-companion filter only sees that companion's threads.
-        let companion2_threads = store.list_companion_threads(Some("companion_2")).await.unwrap();
+        let companion2_threads = store.list_companion_threads(Some(&companion_b)).await.unwrap();
         assert_eq!(companion2_threads.len(), 1);
-        assert_eq!(companion2_threads[0].conversation_id, "conv_b");
+        assert_eq!(companion2_threads[0].conversation_id, conversation_b);
 
-        // Re-inserting a conversation_id rebinds it to the new companion (reused
-        // INTEGER ids ⇒ the prior binding was stale). Title/clock update too.
-        let again = store.insert_companion_thread("conv_a", "companion_9", "再次注册").await.unwrap();
+        // Re-inserting the same canonical conversation rebinds its registry row;
+        // title and activity clock update too.
+        let again = store.insert_companion_thread(&conversation_a, &companion_rebound, "再次注册").await.unwrap();
         assert_eq!(store.list_companion_threads(None).await.unwrap().len(), 2);
-        assert_eq!(again.companion_id, "companion_9");
+        assert_eq!(again.companion_id, companion_rebound);
         assert_eq!(again.title, "再次注册");
 
-        assert!(store.touch_companion_thread("missing", None).await.is_err());
-        store.delete_companion_thread("conv_a").await.unwrap();
-        assert!(!store.is_companion_thread("conv_a").await.unwrap());
+        assert!(store.touch_companion_thread(MALFORMED_CONVERSATION_ID, None).await.is_err());
+        store.delete_companion_thread(&conversation_a).await.unwrap();
+        assert!(!store.is_companion_thread(&conversation_a).await.unwrap());
         assert_eq!(store.list_companion_threads(None).await.unwrap().len(), 1);
     }
 
@@ -3007,6 +3524,7 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
+        let legacy_conversation = conversation_fixture(1);
         sqlx::raw_sql(
             r#"
             CREATE TABLE companion_threads (
@@ -3015,13 +3533,16 @@ mod tests {
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
-            INSERT INTO companion_threads(conversation_id, title, created_at, updated_at)
-              VALUES('conv_old', '旧线程', 1, 1);
             "#,
         )
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query("INSERT INTO companion_threads(conversation_id, title, created_at, updated_at) VALUES(?, '旧线程', 1, 1)")
+            .bind(&legacy_conversation)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         apply_migrations(&pool).await.unwrap();
 
@@ -3038,13 +3559,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(version, STORE_VERSION);
-        // Legacy row got the empty-string default.
-        let companion_id: String = sqlx::query("SELECT companion_id FROM companion_threads WHERE conversation_id = 'conv_old'")
+        // The v0 row has no canonical owner, so v6 quarantines it.
+        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM companion_threads")
             .fetch_one(&pool)
             .await
-            .unwrap()
-            .get("companion_id");
-        assert_eq!(companion_id, "");
+            .unwrap();
+        assert_eq!(live, 0);
+        let quarantined: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM companion_id_v6_quarantine WHERE table_name = 'companion_threads' AND row_key = ?",
+        )
+        .bind(&legacy_conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(quarantined, 1);
 
         // Idempotent: a second run is a no-op.
         apply_migrations(&pool).await.unwrap();
@@ -3061,6 +3589,7 @@ mod tests {
         // user_version 0, one legacy row) opened via CompanionStore::open must come
         // out migrated with the legacy row intact.
         let dir = tempfile::tempdir().unwrap();
+        let legacy_conversation = conversation_fixture(1);
         {
             let opts = SqliteConnectOptions::new()
                 .filename(dir.path().join("memory.db"))
@@ -3078,14 +3607,17 @@ mod tests {
                   created_at INTEGER NOT NULL,
                   updated_at INTEGER NOT NULL
                 );
-                INSERT INTO companion_threads(conversation_id, title, created_at, updated_at)
-                  VALUES('conv_old', '旧线程', 1, 1);
                 PRAGMA user_version = 0;
                 "#,
             )
             .execute(&pool)
             .await
             .unwrap();
+            sqlx::query("INSERT INTO companion_threads(conversation_id, title, created_at, updated_at) VALUES(?, '旧线程', 1, 1)")
+                .bind(&legacy_conversation)
+                .execute(&pool)
+                .await
+                .unwrap();
             pool.close().await;
         }
 
@@ -3104,12 +3636,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(version, STORE_VERSION);
-        // Legacy row survives and reads back with the empty-string companion_id.
-        let threads = store.list_companion_threads(None).await.unwrap();
-        assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].conversation_id, "conv_old");
-        assert_eq!(threads[0].title, "旧线程");
-        assert_eq!(threads[0].companion_id, "");
+        assert!(store.list_companion_threads(None).await.unwrap().is_empty());
+        let quarantined: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM companion_id_v6_quarantine WHERE table_name = 'companion_threads' AND row_key = ?",
+        )
+        .bind(&legacy_conversation)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(quarantined, 1);
     }
 
     #[tokio::test]
@@ -3124,9 +3659,14 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
-        // Build a v1-shaped table (already has companion_id, no unique index) with
-        // three threads for companion_1 (keep the newest = conv_a3), one for companion_2,
-        // and two legacy empty-companion_id rows (exempt — must both survive).
+        // Build a v1-shaped table (already has companion_id, no unique index)
+        // with three canonical threads for one companion and one for another.
+        let companion_a = companion_fixture(1);
+        let companion_b = companion_fixture(2);
+        let conversation_a1 = conversation_fixture(1);
+        let conversation_a2 = conversation_fixture(2);
+        let conversation_a3 = conversation_fixture(3);
+        let conversation_b1 = conversation_fixture(4);
         sqlx::raw_sql(
             r#"
             CREATE TABLE companion_threads (
@@ -3136,19 +3676,30 @@ mod tests {
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
-            INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES
-              ('conv_a1', 'companion_1', '甲一', 1, 10),
-              ('conv_a2', 'companion_1', '甲二', 1, 20),
-              ('conv_a3', 'companion_1', '甲三', 1, 30),
-              ('conv_b1', 'companion_2', '乙一', 1, 5),
-              ('conv_l1', '', '旧一', 1, 1),
-              ('conv_l2', '', '旧二', 1, 2);
             PRAGMA user_version = 1;
             "#,
         )
         .execute(&pool)
         .await
         .unwrap();
+        for (conversation_id, companion_id, title, updated_at) in [
+            (&conversation_a1, &companion_a, "甲一", 10_i64),
+            (&conversation_a2, &companion_a, "甲二", 20_i64),
+            (&conversation_a3, &companion_a, "甲三", 30_i64),
+            (&conversation_b1, &companion_b, "乙一", 5_i64),
+        ] {
+            sqlx::query(
+                "INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES(?,?,?,?,?)",
+            )
+            .bind(conversation_id)
+            .bind(companion_id)
+            .bind(title)
+            .bind(1_i64)
+            .bind(updated_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
 
         apply_migrations(&pool).await.unwrap();
 
@@ -3159,37 +3710,31 @@ mod tests {
         assert_eq!(version, STORE_VERSION);
 
         let store = CompanionStore { pool: pool.clone() };
-        // companion_1 keeps only the newest thread (conv_a3); companion_2 keeps its one.
-        let companion1 = store.list_companion_threads(Some("companion_1")).await.unwrap();
+        // The first companion keeps only its newest thread; the second keeps its one.
+        let companion1 = store.list_companion_threads(Some(&companion_a)).await.unwrap();
         assert_eq!(companion1.len(), 1, "companion_1 must be deduped to a single thread");
-        assert_eq!(companion1[0].conversation_id, "conv_a3");
-        let companion2 = store.list_companion_threads(Some("companion_2")).await.unwrap();
+        assert_eq!(companion1[0].conversation_id, conversation_a3);
+        let companion2 = store.list_companion_threads(Some(&companion_b)).await.unwrap();
         assert_eq!(companion2.len(), 1);
-        assert_eq!(companion2[0].conversation_id, "conv_b1");
-        // Empty-companion_id legacy rows are exempt and both survive.
-        let all = store.list_companion_threads(None).await.unwrap();
-        let legacy: Vec<_> = all.iter().filter(|t| t.companion_id.is_empty()).collect();
-        assert_eq!(legacy.len(), 2, "empty-companion_id rows must not be deduped");
+        assert_eq!(companion2[0].conversation_id, conversation_b1);
 
         // The UNIQUE INDEX now blocks a second non-empty thread for a companion.
         let dup = sqlx::query(
-            "INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES('conv_a4','companion_1','重复',1,40)",
+            "INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES(?,?,?,?,?)",
         )
+        .bind(conversation_fixture(5))
+        .bind(&companion_a)
+        .bind("重复")
+        .bind(1_i64)
+        .bind(40_i64)
         .execute(&pool)
         .await;
-        assert!(dup.is_err(), "unique index must reject a second thread for companion_1");
-        // …but multiple empty-companion_id rows remain allowed (partial index).
-        sqlx::query(
-            "INSERT INTO companion_threads(conversation_id, companion_id, title, created_at, updated_at) VALUES('conv_l3','','旧三',1,3)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        assert!(dup.is_err(), "unique index must reject a second thread for one companion");
 
         // Idempotent: a second migration run is a no-op.
         apply_migrations(&pool).await.unwrap();
         assert_eq!(
-            store.list_companion_threads(Some("companion_1")).await.unwrap().len(),
+            store.list_companion_threads(Some(&companion_a)).await.unwrap().len(),
             1
         );
     }
@@ -3219,116 +3764,93 @@ mod tests {
     #[tokio::test]
     async fn per_companion_xp_and_state_kv() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let companion_a = companion_fixture(1);
+        let companion_b = companion_fixture(2);
         // Missing keys default to 0.
-        assert_eq!(store.get_companion_state_i64("companion_1", "xp").await.unwrap(), 0);
+        assert_eq!(store.get_companion_state_i64(&companion_a, "xp").await.unwrap(), 0);
 
-        assert_eq!(store.add_companion_xp("companion_1", 5).await.unwrap(), 5);
-        assert_eq!(store.add_companion_xp("companion_1", 7).await.unwrap(), 12);
-        assert_eq!(store.get_companion_state_i64("companion_1", "xp").await.unwrap(), 12);
+        assert_eq!(store.add_companion_xp(&companion_a, 5).await.unwrap(), 5);
+        assert_eq!(store.add_companion_xp(&companion_a, 7).await.unwrap(), 12);
+        assert_eq!(store.get_companion_state_i64(&companion_a, "xp").await.unwrap(), 12);
         // Other companions are untouched.
-        assert_eq!(store.get_companion_state_i64("companion_2", "xp").await.unwrap(), 0);
+        assert_eq!(store.get_companion_state_i64(&companion_b, "xp").await.unwrap(), 0);
 
-        store.add_xp_all(&["companion_1".into(), "companion_2".into()], 3).await.unwrap();
-        assert_eq!(store.get_companion_state_i64("companion_1", "xp").await.unwrap(), 15);
-        assert_eq!(store.get_companion_state_i64("companion_2", "xp").await.unwrap(), 3);
+        store.add_xp_all(&[companion_a.clone(), companion_b.clone()], 3).await.unwrap();
+        assert_eq!(store.get_companion_state_i64(&companion_a, "xp").await.unwrap(), 15);
+        assert_eq!(store.get_companion_state_i64(&companion_b, "xp").await.unwrap(), 3);
 
-        store.set_companion_state("companion_1", "mood", "happy").await.unwrap();
-        assert_eq!(store.get_companion_state("companion_1", "mood").await.unwrap().as_deref(), Some("happy"));
-        assert_eq!(store.get_companion_state("companion_2", "mood").await.unwrap(), None);
+        store.set_companion_state(&companion_a, "mood", "happy").await.unwrap();
+        assert_eq!(store.get_companion_state(&companion_a, "mood").await.unwrap().as_deref(), Some("happy"));
+        assert_eq!(store.get_companion_state(&companion_b, "mood").await.unwrap(), None);
     }
 
     #[tokio::test]
-    async fn thread_companion_id_hit_miss_and_empty() {
+    async fn thread_companion_id_hit_miss_and_rejects_ownerless_input() {
         let store = CompanionStore::open_memory().await.unwrap();
-        store.insert_companion_thread("conv_a", "companion_1", "甲").await.unwrap();
-        store.insert_companion_thread("conv_legacy", "", "旧").await.unwrap();
+        let conversation = conversation_fixture(1);
+        let missing = conversation_fixture(2);
+        let companion = companion_fixture(1);
+        store.insert_companion_thread(&conversation, &companion, "甲").await.unwrap();
 
-        assert_eq!(store.thread_companion_id("conv_a").await.unwrap().as_deref(), Some("companion_1"));
-        assert_eq!(store.thread_companion_id("conv_missing").await.unwrap(), None);
-        // Legacy empty-string companion_id reads back as None.
-        assert_eq!(store.thread_companion_id("conv_legacy").await.unwrap(), None);
+        assert_eq!(store.thread_companion_id(&conversation).await.unwrap().as_deref(), Some(companion.as_str()));
+        assert_eq!(store.thread_companion_id(&missing).await.unwrap(), None);
+        assert!(store.insert_companion_thread(&conversation_fixture(3), MALFORMED_COMPANION_ID, "旧").await.is_err());
     }
 
     #[tokio::test]
     async fn delete_companion_rows_only_targets_one_companion() {
         let store = CompanionStore::open_memory().await.unwrap();
-        store.add_companion_xp("companion_1", 10).await.unwrap();
-        store.add_companion_xp("companion_2", 20).await.unwrap();
-        store.set_companion_state("companion_1", "mood", "happy").await.unwrap();
-        store.insert_companion_thread("conv_a", "companion_1", "甲").await.unwrap();
-        store.insert_companion_thread("conv_b", "companion_2", "乙").await.unwrap();
+        let companion_a = companion_fixture(1);
+        let companion_b = companion_fixture(2);
+        let conversation_a = conversation_fixture(1);
+        let conversation_b = conversation_fixture(2);
+        store.add_companion_xp(&companion_a, 10).await.unwrap();
+        store.add_companion_xp(&companion_b, 20).await.unwrap();
+        store.set_companion_state(&companion_a, "mood", "happy").await.unwrap();
+        store.insert_companion_thread(&conversation_a, &companion_a, "甲").await.unwrap();
+        store.insert_companion_thread(&conversation_b, &companion_b, "乙").await.unwrap();
 
-        store.delete_companion_rows("companion_1").await.unwrap();
+        store.delete_companion_rows(&companion_a).await.unwrap();
 
-        assert_eq!(store.get_companion_state_i64("companion_1", "xp").await.unwrap(), 0);
-        assert_eq!(store.get_companion_state("companion_1", "mood").await.unwrap(), None);
-        assert!(!store.is_companion_thread("conv_a").await.unwrap());
+        assert_eq!(store.get_companion_state_i64(&companion_a, "xp").await.unwrap(), 0);
+        assert_eq!(store.get_companion_state(&companion_a, "mood").await.unwrap(), None);
+        assert!(!store.is_companion_thread(&conversation_a).await.unwrap());
         // companion_2 keeps everything.
-        assert_eq!(store.get_companion_state_i64("companion_2", "xp").await.unwrap(), 20);
-        assert!(store.is_companion_thread("conv_b").await.unwrap());
+        assert_eq!(store.get_companion_state_i64(&companion_b, "xp").await.unwrap(), 20);
+        assert!(store.is_companion_thread(&conversation_b).await.unwrap());
     }
 
     #[tokio::test]
-    async fn backfill_first_companion_claims_single_legacy_row_and_kv() {
+    async fn backfill_first_companion_moves_only_legacy_xp() {
         let store = CompanionStore::open_memory().await.unwrap();
-        // Two legacy threads with empty companion_id + one already owned by another
-        // companion. Hand-set updated_at so the keeper is deterministic: conv_b is
-        // the newest empty-companion_id row.
-        store.insert_companion_thread("conv_a", "", "旧甲").await.unwrap();
-        store.insert_companion_thread("conv_b", "", "旧乙").await.unwrap();
-        store.insert_companion_thread("conv_c", "companion_other", "新").await.unwrap();
-        sqlx::query("UPDATE companion_threads SET updated_at = 10 WHERE conversation_id = 'conv_a'")
-            .execute(&store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE companion_threads SET updated_at = 20 WHERE conversation_id = 'conv_b'")
-            .execute(&store.pool)
-            .await
-            .unwrap();
-        // Legacy global kv.
+        let first_companion = companion_fixture(1);
         store.set_state("xp", "120").await.unwrap();
-        store.set_state("companion_active_thread", "conv_b").await.unwrap();
+        store.set_state("companion_active_thread", MALFORMED_CONVERSATION_ID).await.unwrap();
 
-        store.backfill_first_companion("companion_first").await.unwrap();
+        store.backfill_first_companion(&first_companion).await.unwrap();
 
-        // Single-session invariant: only the newest legacy row (conv_b) is
-        // claimed; the surplus (conv_a) is dropped from the registry. The
-        // companion owns exactly one thread. Owned rows of other companions untouched.
-        assert_eq!(store.thread_companion_id("conv_b").await.unwrap().as_deref(), Some("companion_first"));
-        assert!(!store.is_companion_thread("conv_a").await.unwrap(), "surplus legacy row must be pruned");
-        assert_eq!(store.list_companion_threads(Some("companion_first")).await.unwrap().len(), 1);
-        assert_eq!(store.thread_companion_id("conv_c").await.unwrap().as_deref(), Some("companion_other"));
-        // Global kv moved into companion_runtime_state…
-        assert_eq!(store.get_companion_state_i64("companion_first", "xp").await.unwrap(), 120);
-        assert_eq!(
-            store.get_companion_state("companion_first", "companion_active_thread").await.unwrap().as_deref(),
-            Some("conv_b")
-        );
-        // …and the residual global keys are gone.
+        assert_eq!(store.get_companion_state_i64(&first_companion, "xp").await.unwrap(), 120);
+        assert_eq!(store.get_companion_state(&first_companion, "companion_active_thread").await.unwrap(), None);
         assert_eq!(store.get_state("xp").await.unwrap(), None);
         assert_eq!(store.get_state("companion_active_thread").await.unwrap(), None);
 
-        // Idempotent: a second run never clobbers values earned since, and the
-        // companion still owns exactly one thread (the claim is skipped now that it
-        // already owns one).
-        store.add_companion_xp("companion_first", 5).await.unwrap();
-        store.backfill_first_companion("companion_first").await.unwrap();
-        assert_eq!(store.get_companion_state_i64("companion_first", "xp").await.unwrap(), 125);
-        assert_eq!(store.list_companion_threads(Some("companion_first")).await.unwrap().len(), 1);
-        assert_eq!(store.thread_companion_id("conv_c").await.unwrap().as_deref(), Some("companion_other"));
+        store.add_companion_xp(&first_companion, 5).await.unwrap();
+        store.backfill_first_companion(&first_companion).await.unwrap();
+        assert_eq!(store.get_companion_state_i64(&first_companion, "xp").await.unwrap(), 125);
     }
 
     #[tokio::test]
     async fn backfill_never_overwrites_existing_per_companion_values() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let first_companion = companion_fixture(1);
         // The companion already has per-companion xp; the stale global key must lose and
         // still be cleaned up.
-        store.add_companion_xp("companion_first", 999).await.unwrap();
+        store.add_companion_xp(&first_companion, 999).await.unwrap();
         store.set_state("xp", "120").await.unwrap();
 
-        store.backfill_first_companion("companion_first").await.unwrap();
+        store.backfill_first_companion(&first_companion).await.unwrap();
 
-        assert_eq!(store.get_companion_state_i64("companion_first", "xp").await.unwrap(), 999);
+        assert_eq!(store.get_companion_state_i64(&first_companion, "xp").await.unwrap(), 999);
         assert_eq!(store.get_state("xp").await.unwrap(), None);
     }
 
@@ -3347,22 +3869,26 @@ mod tests {
             updated_at: 2_222,
             last_reinforced_at: 3_333,
             scope_kind: "companion".into(),
-            scope_companion_id: "c-raw".into(),
+            scope_companion_id: Some(companion_fixture(1)),
         }
     }
 
     #[tokio::test]
     async fn insert_raw_get_and_dump_preserve_all_fields() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let active = raw_memory("mem_aaa", "preference", "主人喜欢深色主题", "active");
-        let archived = raw_memory("mem_bbb", "episode", "上周修了导出 bug", "archived");
+        let active_id = memory_fixture(1);
+        let archived_id = memory_fixture(2);
+        let missing_id = memory_fixture(3);
+        let active = raw_memory(&active_id, "preference", "主人喜欢深色主题", "active");
+        let archived = raw_memory(&archived_id, "episode", "上周修了导出 bug", "archived");
         store.insert_memory_raw(&active).await.unwrap();
         store.insert_memory_raw(&archived).await.unwrap();
 
         // get_memory reads back exactly what went in (timestamps incl.).
-        let got = store.get_memory("mem_aaa").await.unwrap().unwrap();
+        let got = store.get_memory(&active_id).await.unwrap().unwrap();
         assert_eq!(serde_json::to_value(&got).unwrap(), serde_json::to_value(&active).unwrap());
-        assert!(store.get_memory("mem_missing").await.unwrap().is_none());
+        assert!(store.get_memory(&missing_id).await.unwrap().is_none());
+        assert!(matches!(store.get_memory(MALFORMED_MEMORY_ID).await, Err(AppError::BadRequest(_))));
 
         // Duplicate id is a hard error (caller decides how to regenerate).
         assert!(store.insert_memory_raw(&active).await.is_err());
@@ -3371,7 +3897,7 @@ mod tests {
         let dump = store.dump_memories_all().await.unwrap();
         assert_eq!(
             dump.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec!["mem_aaa", "mem_bbb"]
+            vec![active_id.as_str(), archived_id.as_str()]
         );
         assert_eq!(dump[1].status, "archived");
     }
@@ -3382,23 +3908,24 @@ mod tests {
         let count = (CompanionStore::DUMP_PAGE + 3) as usize;
         for i in 0..count {
             store
-                .insert_memory_raw(&raw_memory(&format!("mem_{i:05}"), "knowledge", &format!("内容 {i}"), "active"))
+                .insert_memory_raw(&raw_memory(&memory_fixture(i as u64 + 1), "knowledge", &format!("内容 {i}"), "active"))
                 .await
                 .unwrap();
         }
         let dump = store.dump_memories_all().await.unwrap();
         assert_eq!(dump.len(), count);
-        assert_eq!(dump.first().unwrap().id, "mem_00000");
-        assert_eq!(dump.last().unwrap().id, format!("mem_{:05}", count - 1));
+        assert_eq!(dump.first().unwrap().id, memory_fixture(1));
+        assert_eq!(dump.last().unwrap().id, memory_fixture(count as u64));
     }
 
     #[tokio::test]
     async fn learn_run_dump_and_exists() {
         let store = CompanionStore::open_memory().await.unwrap();
-        assert!(!store.learn_run_exists("run_x").await.unwrap());
+        let run_id = nomifun_common::CompanionLearnRunId::new().into_string();
+        assert!(!store.learn_run_exists(&run_id).await.unwrap());
         store
             .insert_learn_run(&CompanionLearnRun {
-                id: "run_x".into(),
+                id: run_id.clone(),
                 started_at: 10,
                 finished_at: Some(20),
                 status: "ok".into(),
@@ -3410,11 +3937,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(store.learn_run_exists("run_x").await.unwrap());
+        assert!(store.learn_run_exists(&run_id).await.unwrap());
 
         let dump = store.dump_learn_runs_all().await.unwrap();
         assert_eq!(dump.len(), 1);
-        assert_eq!(dump[0].id, "run_x");
+        assert_eq!(dump[0].id, run_id);
         assert_eq!(dump[0].finished_at, Some(20));
         assert_eq!(dump[0].summary.as_deref(), Some("学到了"));
     }
@@ -3430,7 +3957,7 @@ mod tests {
     // ----- session windows (伙伴会话窗口归档) -----
 
     #[tokio::test]
-    async fn fresh_db_born_at_v5_with_session_windows() {
+    async fn fresh_db_born_at_current_version_with_session_windows() {
         let store = CompanionStore::open_memory().await.unwrap();
         let n: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='companion_session_windows'",
@@ -3441,7 +3968,7 @@ mod tests {
         assert_eq!(n, 1, "fresh db must be born with companion_session_windows");
         let version: i64 = sqlx::query_scalar("PRAGMA user_version").fetch_one(&store.pool).await.unwrap();
         assert_eq!(version, STORE_VERSION);
-        assert_eq!(STORE_VERSION, 5);
+        assert_eq!(STORE_VERSION, 6);
     }
 
     #[tokio::test]
@@ -3475,17 +4002,19 @@ mod tests {
     #[tokio::test]
     async fn window_lifecycle_open_touch_close_and_list() {
         let store = CompanionStore::open_memory().await.unwrap();
+        let companion = companion_fixture(1);
+        let conversation = conversation_fixture(1);
         // ensure_open_window is idempotent: second call returns the same row.
-        let w1 = store.ensure_open_window("c1", "conv1", 100).await.unwrap();
-        let w2 = store.ensure_open_window("c1", "conv1", 999).await.unwrap();
+        let w1 = store.ensure_open_window(&companion, &conversation, 100).await.unwrap();
+        let w2 = store.ensure_open_window(&companion, &conversation, 999).await.unwrap();
         assert_eq!(w1.id, w2.id, "must reuse the open window");
         assert_eq!(w2.boundary_ts, 100, "boundary must not change on reuse");
-        assert_eq!(store.open_window("c1").await.unwrap().unwrap().id, w1.id);
+        assert_eq!(store.open_window(&companion).await.unwrap().unwrap().id, w1.id);
 
         store.touch_window(&w1.id, 500, 7).await.unwrap();
         // count never regresses.
         store.touch_window(&w1.id, 600, 3).await.unwrap();
-        let open = store.open_window("c1").await.unwrap().unwrap();
+        let open = store.open_window(&companion).await.unwrap().unwrap();
         assert_eq!(open.last_activity_at, 600);
         assert_eq!(open.message_count, 7);
 
@@ -3493,8 +4022,8 @@ mod tests {
             .close_window(&w1.id, "archived", Some("今天陪主人修了 bug"), Some(r#"{"topics":["bug"]}"#), 42)
             .await
             .unwrap();
-        assert!(store.open_window("c1").await.unwrap().is_none(), "archived window is no longer open");
-        let digests = store.list_digests("c1", 10).await.unwrap();
+        assert!(store.open_window(&companion).await.unwrap().is_none(), "archived window is no longer open");
+        let digests = store.list_digests(&companion, 10).await.unwrap();
         assert_eq!(digests.len(), 1);
         assert_eq!(digests[0].digest.as_deref(), Some("今天陪主人修了 bug"));
         assert_eq!(digests[0].token_estimate, 42);
@@ -3504,9 +4033,10 @@ mod tests {
     #[tokio::test]
     async fn skipped_window_is_not_a_digest() {
         let store = CompanionStore::open_memory().await.unwrap();
-        let w = store.ensure_open_window("c1", "conv1", 0).await.unwrap();
+        let companion = companion_fixture(1);
+        let w = store.ensure_open_window(&companion, &conversation_fixture(1), 0).await.unwrap();
         store.close_window(&w.id, "skipped", None, None, 0).await.unwrap();
-        assert!(store.list_digests("c1", 10).await.unwrap().is_empty(), "skipped windows never surface as digests");
+        assert!(store.list_digests(&companion, 10).await.unwrap().is_empty(), "skipped windows never surface as digests");
     }
 
     /// Insert an already-closed archived window with a specific session_day (bypassing
@@ -3518,9 +4048,9 @@ mod tests {
              (id, companion_id, conversation_id, session_day, started_at, last_activity_at, closed_at, status, message_count, boundary_ts, digest, highlights, token_estimate) \
              VALUES(?,?,?,?,?,?,?, 'archived', 5, 0, ?, NULL, 10)",
         )
-        .bind(generate_prefixed_id("csw"))
+        .bind(CompanionSessionWindowId::new().into_string())
         .bind(companion)
-        .bind("conv1")
+        .bind(conversation_fixture(1))
         .bind(day)
         .bind(now)
         .bind(now)
@@ -3534,23 +4064,25 @@ mod tests {
     #[tokio::test]
     async fn digests_in_range_and_day_of_year() {
         let store = CompanionStore::open_memory().await.unwrap();
-        seed_digest(&store, "c1", "20250702").await; // 去年今日
-        seed_digest(&store, "c1", "20260101").await;
-        seed_digest(&store, "c1", "20260702").await; // 今日
-        seed_digest(&store, "c2", "20250702").await; // 其他伙伴，须隔离
+        let companion = companion_fixture(1);
+        let other = companion_fixture(2);
+        seed_digest(&store, &companion, "20250702").await; // 去年今日
+        seed_digest(&store, &companion, "20260101").await;
+        seed_digest(&store, &companion, "20260702").await; // 今日
+        seed_digest(&store, &other, "20250702").await; // 其他伙伴，须隔离
 
         // Range query, ascending, scoped to c1.
-        let range = store.digests_in_range("c1", "20260101", "20261231").await.unwrap();
+        let range = store.digests_in_range(&companion, "20260101", "20261231").await.unwrap();
         assert_eq!(range.len(), 2);
         assert_eq!(range[0].session_day, "20260101");
         assert_eq!(range[1].session_day, "20260702");
 
         // Open-ended lower bound.
-        let all = store.digests_in_range("c1", "", "").await.unwrap();
+        let all = store.digests_in_range(&companion, "", "").await.unwrap();
         assert_eq!(all.len(), 3);
 
         // "去年今日" — MMDD = 0702, excluding today's 20260702.
-        let on_day = store.digests_on_day_of_year("c1", "0702", "20260702", 10).await.unwrap();
+        let on_day = store.digests_on_day_of_year(&companion, "0702", "20260702", 10).await.unwrap();
         assert_eq!(on_day.len(), 1);
         assert_eq!(on_day[0].session_day, "20250702");
     }

@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import ConversationTitleMinimap from '@/renderer/pages/conversation/components/ConversationTitleMinimap';
 import { Input } from '@arco-design/web-react';
 import classNames from 'classnames';
@@ -14,7 +15,7 @@ type ChatTitleEditorProps = {
   submitTitleRename: () => Promise<void>;
   titleAreaMaxWidth: number;
   title: React.ReactNode;
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   /** Optional leading icon (e.g. agent logo) rendered inside the hover region, just before the title */
   leading?: React.ReactNode;
 };

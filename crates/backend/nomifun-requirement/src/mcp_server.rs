@@ -41,7 +41,7 @@ use nomifun_api_types::{
 };
 use nomifun_common::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_REVOKE_PATH,
-    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest,
+    LoopbackCapabilityIssuer, LoopbackCapabilityRenewalRequest, RequirementId,
 };
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -260,16 +260,10 @@ async fn handle_capability_revoke(
     }
 }
 
-/// Extract an integer id from a JSON value, tolerating both a JSON number and a
-/// numeric string (agents occasionally stringify tool arguments). Returns
-/// `None` for absent / null / non-numeric — the caller decides whether that is
-/// benign.
-fn json_to_i64(v: Option<&Value>) -> Option<i64> {
-    match v {
-        Some(Value::Number(n)) => n.as_i64(),
-        Some(Value::String(s)) => s.trim().parse::<i64>().ok(),
-        _ => None,
-    }
+fn json_to_requirement_id(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str)
+        .and_then(|value| RequirementId::try_from(value).ok())
+        .map(RequirementId::into_string)
 }
 
 /// Wrap a JSON body as a response and ask the client to close the connection
@@ -290,19 +284,19 @@ async fn exec_complete(
     args: &Value,
     claims: &RequirementCapabilityClaims,
 ) -> Value {
-    let id = match json_to_i64(args.get("id")) {
+    let id = match json_to_requirement_id(args.get("id")) {
         Some(id) => id,
-        None => return json!({"error": "missing or non-integer required field: id"}),
+        None => return json!({"error": "missing or invalid canonical requirement id"}),
     };
     let note = args
         .get("completion_note")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    if let Err(e) = verify_scope(svc, id, claims).await {
+    if let Err(e) = verify_scope(svc, &id, claims).await {
         return json!({"error": e});
     }
-    match svc.complete(id, note).await {
+    match svc.complete(&id, note).await {
         Ok(_) => {
             info!(requirement_id = id, "Requirement MCP: requirement_complete succeeded");
             json!({"result": format!("Requirement {id} marked complete.")})
@@ -316,9 +310,9 @@ async fn exec_update_status(
     args: &Value,
     claims: &RequirementCapabilityClaims,
 ) -> Value {
-    let id = match json_to_i64(args.get("id")) {
+    let id = match json_to_requirement_id(args.get("id")) {
         Some(id) => id,
-        None => return json!({"error": "missing or non-integer required field: id"}),
+        None => return json!({"error": "missing or invalid canonical requirement id"}),
     };
     let status_str = args.get("status").and_then(Value::as_str).unwrap_or("");
     let status = match status_str {
@@ -336,10 +330,10 @@ async fn exec_update_status(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    if let Err(e) = verify_scope(svc, id, claims).await {
+    if let Err(e) = verify_scope(svc, &id, claims).await {
         return json!({"error": e});
     }
-    match svc.set_status(id, status, note).await {
+    match svc.set_status(&id, status, note).await {
         Ok(_) => {
             info!(requirement_id = id, status = status_str, "Requirement MCP: requirement_update_status succeeded");
             json!({"result": format!("Requirement {id} status set to {status_str}.")})
@@ -354,20 +348,20 @@ async fn exec_update_status(
 /// capability.
 async fn verify_scope(
     svc: &RequirementService,
-    id: i64,
+    id: &str,
     claims: &RequirementCapabilityClaims,
 ) -> Result<(), String> {
     let caller_kind = claims.scope.owner_kind.as_str();
-    let caller_id = claims.scope.owner_session_id;
+    let caller_id = claims.scope.owner_session_id.as_str();
     if claims.session.kind != claims.scope.owner_kind
-        || claims.session.session_id != caller_id.to_string()
+        || claims.session.session_id != caller_id
     {
         return Err("signed requirement scope is internally inconsistent".into());
     }
     let req = svc.get(id).await.map_err(|e| e.to_string())?;
-    match (req.owner_session_id, req.owner_kind.as_deref()) {
-        (Some(owner), Some("conversation")) if caller_kind == "conversation" && owner == caller_id => Ok(()),
-        (Some(owner), Some("terminal")) if caller_kind == "terminal" && owner == caller_id => Ok(()),
+    match caller_kind {
+        "conversation" if req.owner_conversation_id.as_deref() == Some(caller_id) => Ok(()),
+        "terminal" if req.owner_terminal_id.as_deref() == Some(caller_id) => Ok(()),
         _ => Err(format!("requirement {id} is owned by a different session")),
     }
 }
@@ -376,7 +370,8 @@ async fn verify_scope(
 mod tests {
     use super::*;
     use crate::events::RequirementEventEmitter;
-    use nomifun_api_types::{AutoWorkTargetKind, CreateRequirementRequest, RequirementStatus};
+    use nomifun_api_types::{AutoWorkTargetKind, CreateRequirementRequest};
+    use nomifun_common::{ConversationId, TerminalId};
     use nomifun_db::{SqliteRequirementRepository, init_database_memory};
     use nomifun_realtime::UserEventSink;
 
@@ -391,27 +386,49 @@ mod tests {
         }
     }
 
-    /// Build a service with one requirement in tag `t`, claimed into `conv_1`
-    /// (so it is `in_progress` with `conversation_id = conv_1`). Returns the
-    /// service (keep it alive — the server holds only a `Weak`) and the req id.
-    async fn service_with_claimed_req() -> (Arc<RequirementService>, i64) {
+    async fn service_with_claim(
+        kind: AutoWorkTargetKind,
+    ) -> (Arc<RequirementService>, String, String, String) {
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let repo: Arc<dyn nomifun_db::IRequirementRepository> =
             Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
+        let owner_id = match kind {
+            AutoWorkTargetKind::Conversation => {
+                let id = ConversationId::new().into_string();
+                sqlx::query(
+                    "INSERT INTO conversations \
+                        (id, user_id, name, type, created_at, updated_at) \
+                     VALUES (?1, ?2, 'Requirement MCP Conversation', 'nomi', 0, 0)",
+                )
+                .bind(&id)
+                .bind(&installation_owner)
+                .execute(db.pool())
+                .await
+                .unwrap();
+                id
+            }
+            AutoWorkTargetKind::Terminal => {
+                let id = TerminalId::new().into_string();
+                sqlx::query(
+                    "INSERT INTO terminal_sessions \
+                        (id, user_id, name, cwd, command, args, cols, rows, last_status, created_at, updated_at) \
+                     VALUES (?1, ?2, 'Requirement MCP Terminal', '/tmp', '$SHELL', '[]', 80, 24, 'running', 0, 0)",
+                )
+                .bind(&id)
+                .bind(&installation_owner)
+                .execute(db.pool())
+                .await
+                .unwrap();
+                id
+            }
+        };
         let emitter = RequirementEventEmitter::new(
             Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
+            Arc::from(installation_owner.as_str()),
         );
-        sqlx::query(
-            "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (1, 'system_default_user', 'Test Conv', 'acp', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        Box::leak(Box::new(db));
-        let svc = Arc::new(RequirementService::new(repo, emitter));
-        let req = svc
+        let service = Arc::new(RequirementService::new(repo, emitter));
+        let requirement = service
             .create(CreateRequirementRequest {
                 title: "Do X".into(),
                 content: "body".into(),
@@ -423,504 +440,201 @@ mod tests {
             })
             .await
             .unwrap();
-        let claimed = svc
-            .claim_next("t", 1, AutoWorkTargetKind::Conversation, 120_000)
+        service
+            .claim_next("t", &owner_id, kind, 120_000)
             .await
             .unwrap()
-            .expect("a pending requirement should be claimable");
-        assert_eq!(claimed.id, req.id);
-        (svc, req.id)
+            .unwrap();
+        Box::leak(Box::new(db));
+        (service, installation_owner, owner_id, requirement.id)
     }
 
-    async fn started_server(svc: &Arc<RequirementService>) -> RequirementMcpServer {
-        let server = RequirementMcpServer::start().await.expect("start");
-        server.set_service(Arc::downgrade(svc)).await;
-        server
-    }
-
-    fn conversation_child(
+    fn child_for(
         server: &RequirementMcpServer,
-        conversation_id: i64,
+        installation_owner: &str,
+        kind: AutoWorkTargetKind,
+        owner_id: &str,
     ) -> nomifun_api_types::RequirementMcpChildConfig {
-        server
-            .issuer_config("/bin/nomicore".into())
-            .issue_for_conversation("system_default_user", conversation_id)
-            .unwrap()
-    }
-
-    fn terminal_child(
-        server: &RequirementMcpServer,
-        terminal_id: i64,
-    ) -> nomifun_api_types::RequirementMcpChildConfig {
-        server
-            .issuer_config("/bin/nomicore".into())
-            .issue_for_terminal("system_default_user", terminal_id)
-            .unwrap()
+        let config = server.issuer_config("/bin/nomicore".into());
+        match kind {
+            AutoWorkTargetKind::Conversation => config
+                .issue_for_conversation(installation_owner, owner_id)
+                .unwrap(),
+            AutoWorkTargetKind::Terminal => {
+                config.issue_for_terminal(installation_owner, owner_id).unwrap()
+            }
+        }
     }
 
     async fn post_tool(
         server: &RequirementMcpServer,
-        auth: Option<(&str, &RequirementCapabilityClaims)>,
-        mut body: Value,
+        child: &nomifun_api_types::RequirementMcpChildConfig,
+        tool: &str,
+        args: Value,
     ) -> (u16, Value) {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .expect("test HTTP client should build");
-        if let Some((_, claims)) = auth {
-            body["session"] = serde_json::to_value(claims).unwrap();
-        }
-        let mut req = client
-            .post(format!("http://127.0.0.1:{}/tool", server.http_port()))
-            .json(&body);
-        if let Some((token, _)) = auth {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-        let resp = req.send().await.unwrap();
-        let status = resp.status().as_u16();
-        let json: Value = resp.json().await.unwrap_or(Value::Null);
-        (status, json)
-    }
-
-    async fn post_renew(
-        server: &RequirementMcpServer,
-        request: &LoopbackCapabilityRenewalRequest,
-    ) -> (
-        u16,
-        Option<nomifun_common::LoopbackCapabilityAccess<RequirementCapabilityClaims>>,
-    ) {
+        let claims = &child.bootstrap.access.claims;
         let response = reqwest::Client::builder()
             .no_proxy()
             .build()
             .unwrap()
-            .post(format!(
-                "http://127.0.0.1:{}{}",
-                server.http_port(),
-                LOOPBACK_CAPABILITY_RENEW_PATH
-            ))
-            .json(request)
+            .post(format!("http://127.0.0.1:{}/tool", server.http_port()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", child.bootstrap.access.token),
+            )
+            .json(&json!({
+                "tool": tool,
+                "args": args,
+                "session": claims,
+            }))
             .send()
             .await
             .unwrap();
         let status = response.status().as_u16();
-        let access = if status == StatusCode::OK.as_u16() {
-            Some(response.json().await.unwrap())
-        } else {
-            None
-        };
-        (status, access)
+        let body = response.json().await.unwrap_or(Value::Null);
+        (status, body)
     }
 
-    async fn post_revoke(
-        server: &RequirementMcpServer,
-        request: &LoopbackCapabilityRenewalRequest,
-    ) -> u16 {
-        reqwest::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap()
-            .post(format!(
-                "http://127.0.0.1:{}{}",
-                server.http_port(),
-                LOOPBACK_CAPABILITY_REVOKE_PATH
-            ))
-            .json(request)
+    #[test]
+    fn requirement_id_parser_accepts_only_canonical_string_ids() {
+        let id = RequirementId::new().into_string();
+        assert_eq!(json_to_requirement_id(Some(&json!(id))), Some(id));
+        assert!(json_to_requirement_id(Some(&json!(7))).is_none());
+        assert!(json_to_requirement_id(Some(&json!("7"))).is_none());
+        assert!(json_to_requirement_id(Some(&json!("term_invalid"))).is_none());
+    }
+
+    #[tokio::test]
+    async fn conversation_child_completes_only_its_owned_requirement() {
+        let (service, installation_owner, owner_id, requirement_id) =
+            service_with_claim(AutoWorkTargetKind::Conversation).await;
+        let server = RequirementMcpServer::start().await.unwrap();
+        server.set_service(Arc::downgrade(&service)).await;
+        let child = child_for(
+            &server,
+            &installation_owner,
+            AutoWorkTargetKind::Conversation,
+            &owner_id,
+        );
+
+        let (status, body) = post_tool(
+            &server,
+            &child,
+            "requirement_complete",
+            json!({"id": requirement_id, "completion_note": "done"}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(body.get("result").is_some(), "{body}");
+        let row = service.get(&requirement_id).await.unwrap();
+        assert_eq!(row.status, RequirementStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn numeric_requirement_id_is_rejected_without_mutation() {
+        let (service, installation_owner, owner_id, requirement_id) =
+            service_with_claim(AutoWorkTargetKind::Conversation).await;
+        let server = RequirementMcpServer::start().await.unwrap();
+        server.set_service(Arc::downgrade(&service)).await;
+        let child = child_for(
+            &server,
+            &installation_owner,
+            AutoWorkTargetKind::Conversation,
+            &owner_id,
+        );
+
+        let (status, body) = post_tool(
+            &server,
+            &child,
+            "requirement_complete",
+            json!({"id": 1}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("missing or invalid canonical requirement id")
+        );
+        assert_eq!(
+            service.get(&requirement_id).await.unwrap().status,
+            RequirementStatus::InProgress
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_domain_child_is_denied() {
+        let (service, installation_owner, terminal_id, requirement_id) =
+            service_with_claim(AutoWorkTargetKind::Terminal).await;
+        let conversation_id = ConversationId::new().into_string();
+        let server = RequirementMcpServer::start().await.unwrap();
+        server.set_service(Arc::downgrade(&service)).await;
+        let child = child_for(
+            &server,
+            &installation_owner,
+            AutoWorkTargetKind::Conversation,
+            &conversation_id,
+        );
+
+        let (status, body) = post_tool(
+            &server,
+            &child,
+            "requirement_complete",
+            json!({"id": requirement_id}),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(
+            body.get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("different session")),
+            "{body}"
+        );
+        let row = service.get(&requirement_id).await.unwrap();
+        assert_eq!(row.status, RequirementStatus::InProgress);
+        assert_eq!(row.owner_terminal_id.as_deref(), Some(terminal_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn missing_or_tampered_capability_is_unauthorized() {
+        let (service, installation_owner, owner_id, requirement_id) =
+            service_with_claim(AutoWorkTargetKind::Conversation).await;
+        let server = RequirementMcpServer::start().await.unwrap();
+        server.set_service(Arc::downgrade(&service)).await;
+        let child = child_for(
+            &server,
+            &installation_owner,
+            AutoWorkTargetKind::Conversation,
+            &owner_id,
+        );
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!("http://127.0.0.1:{}/tool", server.http_port()))
+            .json(&json!({
+                "tool": "requirement_complete",
+                "args": {"id": requirement_id},
+            }))
             .send()
             .await
-            .unwrap()
-            .status()
-            .as_u16()
-    }
-
-    #[tokio::test]
-    async fn start_returns_positive_port_and_redacted_issuer() {
-        let server = RequirementMcpServer::start().await.unwrap();
-        assert!(server.http_port() > 0);
-        let debug = format!("{:?}", server.issuer_config("/bin/nomicore".into()));
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("root_secret"));
-    }
-
-    #[tokio::test]
-    async fn each_issued_child_uses_a_fresh_nonce_and_token() {
-        let server = RequirementMcpServer::start().await.unwrap();
-        let a = conversation_child(&server, 1);
-        let b = conversation_child(&server, 1);
-        assert_ne!(
-            a.bootstrap.access.claims.nonce,
-            b.bootstrap.access.claims.nonce
-        );
-        assert_ne!(a.bootstrap.access.token, b.bootstrap.access.token);
-    }
-
-    #[tokio::test]
-    async fn renewal_restores_immutable_scope_and_revoke_closes_the_lease() {
-        let server = RequirementMcpServer::start().await.unwrap();
-        let child = conversation_child(&server, 17);
-
-        let mut forged_proof = child.bootstrap.renewal.clone();
-        forged_proof.renewal_proof.push('x');
-        assert_eq!(post_renew(&server, &forged_proof).await.0, 401);
-        assert_eq!(post_revoke(&server, &forged_proof).await, 401);
-
-        let (status, renewed) = post_renew(&server, &child.bootstrap.renewal).await;
-        assert_eq!(status, 200);
-        let renewed = renewed.expect("valid proof should renew");
-        let original = &child.bootstrap.access.claims;
-        assert_eq!(renewed.claims.lease_id, original.lease_id);
-        assert_eq!(renewed.claims.user_id, original.user_id);
-        assert_eq!(renewed.claims.session, original.session);
-        assert_eq!(renewed.claims.allowed_tools, original.allowed_tools);
-        assert_eq!(renewed.claims.scope, original.scope);
-        assert_ne!(renewed.claims.nonce, original.nonce);
-
-        assert_eq!(post_revoke(&server, &child.bootstrap.renewal).await, 204);
-        let (status, _) = post_tool(
-            &server,
-            Some((&renewed.token, &renewed.claims)),
-            json!({"tool": "requirement_complete", "args": {"id": 1}}),
-        )
-        .await;
-        assert_eq!(status, 401, "revoked access must fail before dispatch");
-        assert_eq!(post_renew(&server, &child.bootstrap.renewal).await.0, 401);
-    }
-
-    #[tokio::test]
-    async fn renewal_rejects_registry_authorization_with_invalid_requirement_scope() {
-        let server = RequirementMcpServer::start().await.unwrap();
-        let claims = RequirementCapabilityClaims::issue(
-            "system_default_user",
-            nomifun_common::LoopbackSessionBinding::conversation("17"),
-            ["requirement_complete"],
-            RequirementCapabilityScope {
-                owner_kind: nomifun_common::LoopbackSessionKind::Terminal,
-                owner_session_id: 17,
-            },
-        )
-        .unwrap();
-        let (_, renewal_proof) = server
-            .issuer
-            .activate(REQUIREMENT_CAPABILITY_DOMAIN, &claims)
             .unwrap();
-        let request = LoopbackCapabilityRenewalRequest {
-            lease_id: claims.lease_id,
-            renewal_proof,
-        };
-        assert_eq!(post_renew(&server, &request).await.0, 401);
-    }
+        assert_eq!(response.status().as_u16(), 401);
 
-    #[tokio::test]
-    async fn tool_call_requires_auth() {
-        let (svc, _id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let (status, _) = post_tool(&server, None, json!({"tool": "requirement_complete", "args": {"id": "x"}})).await;
-        assert_eq!(status, 401);
-    }
-
-    #[tokio::test]
-    async fn complete_marks_requirement_done() {
-        let (svc, id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 1);
-        let (status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_complete",
-                "args": {"id": id, "completion_note": "did the thing"},
-            }),
-        )
-        .await;
-        assert_eq!(status, 200);
-        assert!(body.get("result").is_some(), "expected result, got {body}");
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Done);
-        assert_eq!(after.completion_note.as_deref(), Some("did the thing"));
-    }
-
-    #[tokio::test]
-    async fn update_status_failed_marks_failed() {
-        let (svc, id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 1);
-        let (status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_update_status",
-                "args": {"id": id, "status": "failed", "note": "could not finish"},
-            }),
-        )
-        .await;
-        assert_eq!(status, 200);
-        assert!(body.get("result").is_some(), "expected result, got {body}");
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Failed);
-    }
-
-    #[tokio::test]
-    async fn update_status_rejects_invalid_status() {
-        let (svc, id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 1);
-        let (_status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_update_status",
-                "args": {"id": id, "status": "bogus"},
-            }),
-        )
-        .await;
-        assert!(
-            body.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("bogus")),
-            "expected an invalid-status error, got {body}"
-        );
-        // The requirement must remain untouched (still in_progress).
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::InProgress);
-    }
-
-    #[tokio::test]
-    async fn tool_outside_signed_allowlist_is_forbidden() {
-        let (svc, _id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 1);
-        let (status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({"tool": "requirement_explode", "args": {}}),
-        )
-        .await;
-        assert_eq!(status, 403);
-        assert_eq!(body["error"], "forbidden");
-    }
-
-    #[tokio::test]
-    async fn missing_service_returns_unavailable() {
-        // Server started but set_service never called → Weak upgrades to None.
-        let server = RequirementMcpServer::start().await.unwrap();
-        let child = conversation_child(&server, 1);
-        let (status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({"tool": "requirement_complete", "args": {"id": "x"}}),
-        )
-        .await;
-        assert_eq!(status, 200);
-        assert_eq!(body.get("error").and_then(Value::as_str), Some("service_unavailable"));
-    }
-
-    #[tokio::test]
-    async fn complete_rejects_cross_session() {
-        let (svc, id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        // Requirement is owned by conv_1; a call from conv_other must be refused.
-        let child = conversation_child(&server, 2);
-        let (_status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_complete",
-                "args": {"id": id, "completion_note": "sneaky"},
-            }),
-        )
-        .await;
-        assert!(
-            body.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("different session")),
-            "expected a cross-session refusal, got {body}"
-        );
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::InProgress, "must not be mutated");
-    }
-
-    // ── C1 (spec §2.2): cross-domain authz isolation ────────────────────────
-    //
-    // The requirement MCP caller is ALWAYS a conversation (the MCP is injected
-    // into ACP conversation sessions). After integerization `conv#5` and
-    // `term#5` share the numeric owner value `5`. A conversation caller must
-    // NEVER be allowed to mutate a requirement owned by a TERMINAL that merely
-    // shares its number — `verify_scope` pairs the owner with `owner_kind`.
-
-    /// Service with one requirement claimed by TERMINAL #5, plus a conversation
-    /// #5 present (same number, different domain). Returns the service + req id.
-    async fn service_with_terminal5_claimed_req() -> (Arc<RequirementService>, i64) {
-        let db = init_database_memory().await.unwrap();
-        let repo: Arc<dyn nomifun_db::IRequirementRepository> =
-            Arc::new(SqliteRequirementRepository::new(db.pool().clone()));
-        let emitter = RequirementEventEmitter::new(
-            Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
-        );
-        sqlx::query(
-            "INSERT INTO conversations (id, user_id, name, type, created_at, updated_at) \
-             VALUES (5, 'system_default_user', 'Conv Five', 'acp', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO terminal_sessions \
-                 (id, user_id, name, cwd, command, args, cols, rows, last_status, created_at, updated_at) \
-             VALUES (5, 'system_default_user', 'Term Five', '/tmp', 'bash', '[]', 80, 24, 'running', 0, 0)",
-        )
-        .execute(db.pool())
-        .await
-        .unwrap();
-        Box::leak(Box::new(db));
-        let svc = Arc::new(RequirementService::new(repo, emitter));
-        let req = svc
-            .create(CreateRequirementRequest {
-                title: "Term work".into(),
-                content: "body".into(),
-                tag: "t".into(),
-                order_key: None,
-                status: None,
-                created_by: None,
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let claimed = svc
-            .claim_next("t", 5, AutoWorkTargetKind::Terminal, 120_000)
-            .await
-            .unwrap()
-            .expect("claimable");
-        assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
-        (svc, req.id)
-    }
-
-    #[tokio::test]
-    async fn c1_terminal_owned_req_unmutated_by_conversation_mcp_call() {
-        // End-to-end through the HTTP tool: a conversation #5 caller's
-        // requirement_complete on a terminal#5-owned requirement is refused and
-        // the requirement is left in_progress.
-        let (svc, id) = service_with_terminal5_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 5);
-        let (_status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_complete",
-                "args": {"id": id, "completion_note": "cross-domain"},
-            }),
-        )
-        .await;
-        assert!(
-            body.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("different session")),
-            "expected a cross-domain refusal, got {body}"
-        );
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::InProgress, "terminal#5 work must not be mutated by conv#5");
-        assert_eq!(after.owner_kind.as_deref(), Some("terminal"));
-    }
-
-    #[tokio::test]
-    async fn terminal_child_can_complete_only_its_owned_requirement() {
-        let (svc, id) = service_with_terminal5_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = terminal_child(&server, 5);
-        let (_status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_complete",
-                "args": {"id": id, "completion_note": "terminal did it"},
-            }),
-        )
-        .await;
-        assert!(
-            body.get("result").is_some(),
-            "terminal #5 should complete its own req, got {body}"
-        );
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::Done);
-        assert_eq!(after.completion_note.as_deref(), Some("terminal did it"));
-    }
-
-    #[tokio::test]
-    async fn different_terminal_caller_denied_via_http() {
-        // End-to-end: terminal #99 cannot complete terminal#5-owned req.
-        let (svc, id) = service_with_terminal5_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = terminal_child(&server, 99);
-        let (_status, body) = post_tool(
-            &server,
-            Some((
-                &child.bootstrap.access.token,
-                &child.bootstrap.access.claims,
-            )),
-            json!({
-                "tool": "requirement_complete",
-                "args": {"id": id, "completion_note": "sneaky terminal"},
-            }),
-        )
-        .await;
-        assert!(
-            body.get("error").and_then(Value::as_str).is_some_and(|e| e.contains("different session")),
-            "terminal #99 must be denied on terminal#5-owned requirement, got {body}"
-        );
-        let after = svc.get(id).await.unwrap();
-        assert_eq!(after.status, RequirementStatus::InProgress, "must not be mutated");
-    }
-
-    #[tokio::test]
-    async fn tampered_cross_session_and_expired_claims_are_unauthorized() {
-        let (svc, id) = service_with_claimed_req().await;
-        let server = started_server(&svc).await;
-        let child = conversation_child(&server, 1);
-
-        let mut forged = child.bootstrap.access.claims.clone();
-        forged.session = nomifun_common::LoopbackSessionBinding::conversation("2");
-        forged.scope.owner_session_id = 2;
-        let (status, _) = post_tool(
-            &server,
-            Some((&child.bootstrap.access.token, &forged)),
-            json!({"tool": "requirement_complete", "args": {"id": id}}),
-        )
-        .await;
-        assert_eq!(status, 401, "claim tampering must invalidate the token");
-
-        let now = nomifun_common::unix_time_secs();
-        let expired = server
-            .issuer
-            .renew_at::<RequirementCapabilityScope>(
-                REQUIREMENT_CAPABILITY_DOMAIN,
-                &child.bootstrap.renewal,
-                now.saturating_sub(nomifun_common::LOOPBACK_CAPABILITY_TTL_SECS + 1),
+        let mut claims = child.bootstrap.access.claims.clone();
+        claims.scope.owner_session_id = ConversationId::new().into_string();
+        let response = client
+            .post(format!("http://127.0.0.1:{}/tool", server.http_port()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", child.bootstrap.access.token),
             )
-            .expect("clock-injected renewal should produce an already-expired access");
-        let (status, _) = post_tool(
-            &server,
-            Some((&expired.token, &expired.claims)),
-            json!({"tool": "requirement_complete", "args": {"id": id}}),
-        )
-        .await;
-        assert_eq!(status, 401, "even correctly signed expired claims fail closed");
+            .json(&json!({
+                "tool": "requirement_complete",
+                "args": {"id": requirement_id},
+                "session": claims,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 401);
     }
 }

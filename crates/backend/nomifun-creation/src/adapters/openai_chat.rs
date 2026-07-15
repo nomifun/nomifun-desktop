@@ -171,7 +171,12 @@ mod tests {
     use super::*;
 
     fn text_input(mime: &str, body: &str) -> InputAsset {
-        InputAsset { asset_id: "wsa_x".into(), role: "reference".into(), bytes: body.as_bytes().to_vec(), mime: mime.into() }
+        InputAsset {
+            asset_id: nomifun_common::WorkshopAssetId::new().into_string(),
+            role: "reference".into(),
+            bytes: body.as_bytes().to_vec(),
+            mime: mime.into(),
+        }
     }
 
     #[test]
@@ -230,7 +235,12 @@ mod tests {
     #[test]
     fn body_multimodal_with_image_and_text_inputs() {
         let inputs = vec![
-            InputAsset { asset_id: "a".into(), role: "reference".into(), bytes: b"hi".to_vec(), mime: "image/png".into() },
+            InputAsset {
+                asset_id: nomifun_common::WorkshopAssetId::new().into_string(),
+                role: "reference".into(),
+                bytes: b"hi".to_vec(),
+                mime: "image/png".into(),
+            },
             text_input("text/plain", "extra context"),
         ];
         let body = build_chat_body("gpt-4o", &json!({"prompt": "describe"}), &inputs);

@@ -1,6 +1,6 @@
 use sqlx::SqlitePool;
 
-use nomifun_common::PaginatedResult;
+use nomifun_common::{MessageId, PaginatedResult, ProviderWithModel};
 
 use crate::error::DbError;
 use crate::models::{
@@ -62,33 +62,17 @@ async fn validate_execution_template_selection(
 }
 
 fn effective_conversation_model_binding(encoded: &str) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_str(encoded).ok()?;
-    let provider_id = value
-        .get("provider_id")
-        .or_else(|| value.get("providerId"))
-        .or_else(|| value.get("id"))
-        .and_then(serde_json::Value::as_str)?;
-    let explicit = value
-        .get("use_model")
-        .or_else(|| value.get("useModel"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty());
-    let model = explicit.or_else(|| value.get("model").and_then(serde_json::Value::as_str))?;
-    if provider_id.trim().is_empty()
-        || provider_id.trim() != provider_id
-        || model.trim().is_empty()
-        || model.trim() != model
-    {
-        return None;
-    }
-    Some((provider_id.to_owned(), model.to_owned()))
+    let binding: ProviderWithModel = serde_json::from_str(encoded).ok()?;
+    binding.validate().ok()?;
+    let model = binding.use_model.unwrap_or_else(|| binding.model.clone());
+    Some((binding.provider_id, model))
 }
 
 #[async_trait::async_trait]
 impl IConversationRepository for SqliteConversationRepository {
     // ── Conversation CRUD ───────────────────────────────────────────
 
-    async fn get(&self, id: i64) -> Result<Option<ConversationRow>, DbError> {
+    async fn get(&self, id: &str) -> Result<Option<ConversationRow>, DbError> {
         let row = sqlx::query_as::<_, ConversationRow>("SELECT * FROM conversations WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
@@ -97,7 +81,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(row)
     }
 
-    async fn create(&self, row: &ConversationRow) -> Result<i64, DbError> {
+    async fn create(&self, row: &ConversationRow) -> Result<String, DbError> {
         if let Some(template_id) = row.execution_template_id.as_deref() {
             validate_execution_template_selection(
                 &self.pool,
@@ -107,16 +91,15 @@ impl IConversationRepository for SqliteConversationRepository {
             )
             .await?;
         }
-        // `id` is allocated by SQLite (INTEGER PK AUTOINCREMENT) and never bound;
-        // the caller receives the assigned id via last_insert_rowid().
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO conversations \
-                (user_id, name, type, extra, delegation_policy, execution_model_pool, \
+                (id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
                  decision_policy, execution_template_id, model, status, source, \
                  channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
                  preset_snapshot, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(&row.id)
         .bind(&row.user_id)
         .bind(&row.name)
         .bind(&row.r#type)
@@ -140,14 +123,14 @@ impl IConversationRepository for SqliteConversationRepository {
         .execute(&self.pool)
         .await?;
 
-        Ok(result.last_insert_rowid())
+        Ok(row.id.clone())
     }
 
     async fn create_idempotent(
         &self,
         row: &ConversationRow,
         creation_key: &str,
-    ) -> Result<(i64, bool), DbError> {
+    ) -> Result<(String, bool), DbError> {
         let creation_key = creation_key.trim();
         if creation_key.is_empty() {
             return Err(DbError::Conflict(
@@ -163,7 +146,7 @@ impl IConversationRepository for SqliteConversationRepository {
             )
             .await?;
         }
-        if let Some((conversation_id, existing_user_id)) = sqlx::query_as::<_, (i64, String)>(
+        if let Some((conversation_id, existing_user_id)) = sqlx::query_as::<_, (String, String)>(
             "SELECT conversation_id, user_id FROM conversation_creation_keys \
              WHERE creation_key = ?",
         )
@@ -180,14 +163,15 @@ impl IConversationRepository for SqliteConversationRepository {
         }
 
         let mut tx = self.pool.begin().await?;
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO conversations \
-                (user_id, name, type, extra, delegation_policy, execution_model_pool, \
+                (id, user_id, name, type, extra, delegation_policy, execution_model_pool, \
                  decision_policy, execution_template_id, model, status, source, \
                  channel_chat_id, pinned, pinned_at, cron_job_id, preset_id, preset_revision, \
                  preset_snapshot, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(&row.id)
         .bind(&row.user_id)
         .bind(&row.name)
         .bind(&row.r#type)
@@ -210,7 +194,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .bind(row.updated_at)
         .execute(&mut *tx)
         .await?;
-        let candidate_id = result.last_insert_rowid();
+        let candidate_id = row.id.clone();
         let key_result = sqlx::query(
             "INSERT INTO conversation_creation_keys \
                 (creation_key, user_id, conversation_id, created_at) \
@@ -218,7 +202,7 @@ impl IConversationRepository for SqliteConversationRepository {
         )
         .bind(creation_key)
         .bind(&row.user_id)
-        .bind(candidate_id)
+        .bind(&candidate_id)
         .bind(row.created_at)
         .execute(&mut *tx)
         .await?;
@@ -231,10 +215,10 @@ impl IConversationRepository for SqliteConversationRepository {
         // was waiting for SQLite's write lock.  Remove the unobservable
         // candidate inside this transaction and return the committed identity.
         sqlx::query("DELETE FROM conversations WHERE id = ?")
-            .bind(candidate_id)
+            .bind(&candidate_id)
             .execute(&mut *tx)
             .await?;
-        let (conversation_id, existing_user_id): (i64, String) = sqlx::query_as(
+        let (conversation_id, existing_user_id): (String, String) = sqlx::query_as(
             "SELECT conversation_id, user_id FROM conversation_creation_keys \
              WHERE creation_key = ?",
         )
@@ -272,23 +256,25 @@ impl IConversationRepository for SqliteConversationRepository {
     async fn claim_delivery_receipt(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         kind: &str,
         request_payload: &str,
         now: i64,
     ) -> Result<ConversationDeliveryReceiptRow, DbError> {
         let mut tx = self.pool.begin().await?;
+        let message_id = MessageId::new().into_string();
         sqlx::query(
             "INSERT INTO conversation_delivery_receipts (\
-                operation_id, conversation_id, user_id, kind, request_payload, status, \
+                operation_id, message_id, conversation_id, user_id, kind, request_payload, status, \
                 created_at, updated_at\
-             ) SELECT ?, conversation.id, ?, ?, ?, 'accepted', ?, ? \
+             ) SELECT ?, ?, conversation.id, ?, ?, ?, 'accepted', ?, ? \
                FROM conversations conversation \
               WHERE conversation.id = ? AND conversation.user_id = ? \
              ON CONFLICT(operation_id) DO NOTHING",
         )
         .bind(operation_id)
+        .bind(message_id)
         .bind(user_id)
         .bind(kind)
         .bind(request_payload)
@@ -321,7 +307,7 @@ impl IConversationRepository for SqliteConversationRepository {
     async fn get_delivery_receipt(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
     ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
         Ok(sqlx::query_as::<_, ConversationDeliveryReceiptRow>(
@@ -338,7 +324,7 @@ impl IConversationRepository for SqliteConversationRepository {
     async fn complete_delivery_receipt(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         result_ok: bool,
         result_text: Option<&str>,
@@ -380,7 +366,7 @@ impl IConversationRepository for SqliteConversationRepository {
     async fn project_assistant_message_with_receipt(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         kind: &str,
         request_payload: &str,
@@ -392,7 +378,7 @@ impl IConversationRepository for SqliteConversationRepository {
         if operation_id.trim().is_empty()
             || kind != "projection"
             || request_payload.trim().is_empty()
-            || message.id.trim().is_empty()
+            || MessageId::parse(&message.id).is_err()
             || message.content.trim().is_empty()
             || !valid_content
             || message.r#type != "text"
@@ -429,12 +415,13 @@ impl IConversationRepository for SqliteConversationRepository {
         // or neither one is externally visible.
         let claim = sqlx::query(
             "INSERT INTO conversation_delivery_receipts (\
-                operation_id, conversation_id, user_id, kind, request_payload, status, \
+                operation_id, message_id, conversation_id, user_id, kind, request_payload, status, \
                 result_ok, result_text, result_error, created_at, updated_at, completed_at\
-             ) VALUES (?, ?, ?, ?, ?, 'completed', 1, ?, NULL, ?, ?, ?) \
+             ) VALUES (?, ?, ?, ?, ?, ?, 'completed', 1, ?, NULL, ?, ?, ?) \
              ON CONFLICT(operation_id) DO NOTHING",
         )
         .bind(operation_id)
+        .bind(&message.id)
         .bind(conversation_id)
         .bind(user_id)
         .bind(kind)
@@ -454,7 +441,7 @@ impl IConversationRepository for SqliteConversationRepository {
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&message.id)
-            .bind(message.conversation_id)
+            .bind(&message.conversation_id)
             .bind(&message.msg_id)
             .bind(&message.r#type)
             .bind(&message.content)
@@ -493,7 +480,7 @@ impl IConversationRepository for SqliteConversationRepository {
                 "conversation projection operation identity was reused".to_owned(),
             ));
         }
-        let message_id = receipt.result_text.as_deref().filter(|_| {
+        let message_id = Some(receipt.message_id.as_str()).filter(|_| {
             receipt.status == "completed"
                 && receipt.result_ok == Some(true)
                 && receipt.result_error.is_none()
@@ -523,7 +510,7 @@ impl IConversationRepository for SqliteConversationRepository {
         })
     }
 
-    async fn update(&self, id: i64, updates: &ConversationRowUpdate) -> Result<(), DbError> {
+    async fn update(&self, id: &str, updates: &ConversationRowUpdate) -> Result<(), DbError> {
         if updates.execution_template_id.is_some() || updates.model.is_some() {
             let current: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
                 "SELECT user_id, execution_template_id, model FROM conversations WHERE id = ?",
@@ -635,7 +622,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
-    async fn delete(&self, id: i64) -> Result<(), DbError> {
+    async fn delete(&self, id: &str) -> Result<(), DbError> {
         let result = sqlx::query("DELETE FROM conversations WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -661,16 +648,16 @@ impl IConversationRepository for SqliteConversationRepository {
         let mut binds: Vec<BindValue> = vec![BindValue::Str(user_id.to_string())];
 
         // Cursor-based pagination: use updated_at of the cursor row
-        if let Some(cursor_id) = filters.cursor {
+        if let Some(cursor_id) = &filters.cursor {
             where_parts.push(
                 "(c.updated_at < (SELECT updated_at FROM conversations WHERE id = ?) \
                  OR (c.updated_at = (SELECT updated_at FROM conversations WHERE id = ?) \
                      AND c.id < ?))"
                     .to_string(),
             );
-            binds.push(BindValue::I64(cursor_id));
-            binds.push(BindValue::I64(cursor_id));
-            binds.push(BindValue::I64(cursor_id));
+            binds.push(BindValue::Str(cursor_id.clone()));
+            binds.push(BindValue::Str(cursor_id.clone()));
+            binds.push(BindValue::Str(cursor_id.clone()));
         }
 
         append_filter_conditions(filters, &mut where_parts, &mut binds);
@@ -749,7 +736,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
-    async fn list_associated(&self, user_id: &str, conversation_id: i64) -> Result<Vec<ConversationRow>, DbError> {
+    async fn list_associated(&self, user_id: &str, conversation_id: &str) -> Result<Vec<ConversationRow>, DbError> {
         // First get the target conversation's workspace
         let target = sqlx::query_as::<_, ConversationRow>("SELECT * FROM conversations WHERE id = ? AND user_id = ?")
             .bind(conversation_id)
@@ -791,15 +778,11 @@ impl IConversationRepository for SqliteConversationRepository {
     async fn list_conversations_using_model_provider(
         &self,
         provider_id: &str,
-    ) -> Result<Vec<(i64, String)>, DbError> {
+    ) -> Result<Vec<(String, String)>, DbError> {
         Ok(sqlx::query_as(
             "SELECT id, name FROM conversations \
              WHERE model IS NOT NULL AND json_valid(model) \
-               AND COALESCE( \
-                   json_extract(model, '$.provider_id'), \
-                   json_extract(model, '$.providerId'), \
-                   json_extract(model, '$.id') \
-               ) = ? \
+               AND json_extract(model, '$.provider_id') = ? \
              ORDER BY updated_at DESC, id",
         )
         .bind(provider_id)
@@ -811,7 +794,7 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn get_messages(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         page: u32,
         page_size: u32,
         order: SortOrder,
@@ -862,7 +845,7 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn get_messages_keyset(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         before: Option<(i64, String)>,
         limit: u32,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
@@ -914,7 +897,7 @@ impl IConversationRepository for SqliteConversationRepository {
         })
     }
 
-    async fn get_message(&self, conv_id: i64, message_id: &str) -> Result<Option<MessageRow>, DbError> {
+    async fn get_message(&self, conv_id: &str, message_id: &str) -> Result<Option<MessageRow>, DbError> {
         let row = sqlx::query_as::<_, MessageRow>(
             "SELECT * FROM messages \
              WHERE conversation_id = ? \
@@ -949,6 +932,53 @@ impl IConversationRepository for SqliteConversationRepository {
         .await?;
 
         Ok(())
+    }
+
+    async fn claim_message_correlation(
+        &self,
+        conversation_id: &str,
+        turn_message_id: &str,
+        message_type: &str,
+        correlation_key: &str,
+    ) -> Result<String, DbError> {
+        nomifun_common::ConversationId::parse(conversation_id)
+            .map_err(|error| DbError::Conflict(error.to_string()))?;
+        MessageId::parse(turn_message_id).map_err(|error| DbError::Conflict(error.to_string()))?;
+        let message_type = message_type.trim();
+        let correlation_key = correlation_key.trim();
+        if message_type.is_empty() || correlation_key.is_empty() {
+            return Err(DbError::Conflict(
+                "message correlation type and key must be non-empty canonical strings".to_owned(),
+            ));
+        }
+
+        let candidate = MessageId::new().into_string();
+        sqlx::query(
+            "INSERT INTO message_correlations \
+             (conversation_id, turn_message_id, message_type, correlation_key, message_id) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(conversation_id, turn_message_id, message_type, correlation_key) DO NOTHING",
+        )
+        .bind(conversation_id)
+        .bind(turn_message_id)
+        .bind(message_type)
+        .bind(correlation_key)
+        .bind(&candidate)
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query_scalar(
+            "SELECT message_id FROM message_correlations \
+             WHERE conversation_id = ? AND turn_message_id = ? \
+               AND message_type = ? AND correlation_key = ?",
+        )
+        .bind(conversation_id)
+        .bind(turn_message_id)
+        .bind(message_type)
+        .bind(correlation_key)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     async fn update_message(&self, id: &str, updates: &MessageRowUpdate) -> Result<(), DbError> {
@@ -989,7 +1019,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
-    async fn delete_messages_by_conversation(&self, conv_id: i64) -> Result<(), DbError> {
+    async fn delete_messages_by_conversation(&self, conv_id: &str) -> Result<(), DbError> {
         sqlx::query("DELETE FROM messages WHERE conversation_id = ?")
             .bind(conv_id)
             .execute(&self.pool)
@@ -1000,7 +1030,7 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn delete_messages_from(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         from_created_at: i64,
         from_id: &str,
     ) -> Result<u64, DbError> {
@@ -1023,7 +1053,7 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn get_message_by_msg_id(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         msg_id: &str,
         msg_type: &str,
     ) -> Result<Option<MessageRow>, DbError> {
@@ -1110,7 +1140,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(PaginatedResult { items, total, has_more })
     }
 
-    async fn list_artifacts(&self, conversation_id: i64) -> Result<Vec<ConversationArtifactRow>, DbError> {
+    async fn list_artifacts(&self, conversation_id: &str) -> Result<Vec<ConversationArtifactRow>, DbError> {
         let rows = sqlx::query_as::<_, ConversationArtifactRow>(
             "SELECT * FROM conversation_artifacts \
              WHERE conversation_id = ? \
@@ -1125,8 +1155,8 @@ impl IConversationRepository for SqliteConversationRepository {
 
     async fn get_artifact(
         &self,
-        conversation_id: i64,
-        artifact_id: i64,
+        conversation_id: &str,
+        artifact_id: &str,
     ) -> Result<Option<ConversationArtifactRow>, DbError> {
         let row = sqlx::query_as::<_, ConversationArtifactRow>(
             "SELECT * FROM conversation_artifacts WHERE conversation_id = ? AND id = ?",
@@ -1140,7 +1170,6 @@ impl IConversationRepository for SqliteConversationRepository {
     }
 
     async fn upsert_artifact(&self, artifact: &ConversationArtifactRow) -> Result<ConversationArtifactRow, DbError> {
-        // `id` is allocated by SQLite (INTEGER PK AUTOINCREMENT) and never bound.
         // Idempotency depends on `kind`:
         //   - skill_suggest: upsert against the partial UNIQUE index
         //     uq_conversation_artifacts_skill_suggest
@@ -1149,16 +1178,17 @@ impl IConversationRepository for SqliteConversationRepository {
         //   - cron_trigger: plain INSERT, one row per trigger (no unique
         //     constraint, no ON CONFLICT clause).
         let id = if artifact.kind == "skill_suggest" {
-            sqlx::query_scalar::<_, i64>(
+            sqlx::query_scalar::<_, String>(
                 "INSERT INTO conversation_artifacts \
-                    (conversation_id, cron_job_id, kind, status, payload, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                    (id, conversation_id, cron_job_id, kind, status, payload, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(conversation_id, cron_job_id) WHERE kind = 'skill_suggest' DO UPDATE SET \
                     status = excluded.status, \
                     payload = excluded.payload, \
                     updated_at = excluded.updated_at \
                  RETURNING id",
             )
+            .bind(&artifact.id)
             .bind(&artifact.conversation_id)
             .bind(&artifact.cron_job_id)
             .bind(&artifact.kind)
@@ -1169,11 +1199,12 @@ impl IConversationRepository for SqliteConversationRepository {
             .fetch_one(&self.pool)
             .await?
         } else {
-            let result = sqlx::query(
+            sqlx::query(
                 "INSERT INTO conversation_artifacts \
-                    (conversation_id, cron_job_id, kind, status, payload, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (id, conversation_id, cron_job_id, kind, status, payload, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
+            .bind(&artifact.id)
             .bind(&artifact.conversation_id)
             .bind(&artifact.cron_job_id)
             .bind(&artifact.kind)
@@ -1183,18 +1214,18 @@ impl IConversationRepository for SqliteConversationRepository {
             .bind(artifact.updated_at)
             .execute(&self.pool)
             .await?;
-            result.last_insert_rowid()
+            artifact.id.clone()
         };
 
-        self.get_artifact(artifact.conversation_id, id)
+        self.get_artifact(&artifact.conversation_id, &id)
             .await?
             .ok_or_else(|| DbError::Init(format!("upsert artifact did not produce row for id '{id}'")))
     }
 
     async fn update_artifact_status(
         &self,
-        conversation_id: i64,
-        artifact_id: i64,
+        conversation_id: &str,
+        artifact_id: &str,
         status: &str,
         updated_at: i64,
     ) -> Result<Option<ConversationArtifactRow>, DbError> {
@@ -1265,7 +1296,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(rows)
     }
 
-    async fn delete_artifacts_by_conversation(&self, conversation_id: i64) -> Result<(), DbError> {
+    async fn delete_artifacts_by_conversation(&self, conversation_id: &str) -> Result<(), DbError> {
         sqlx::query("DELETE FROM conversation_artifacts WHERE conversation_id = ?")
             .bind(conversation_id)
             .execute(&self.pool)
@@ -1274,7 +1305,7 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(())
     }
 
-    async fn list_legacy_cron_trigger_messages(&self, conversation_id: i64) -> Result<Vec<MessageRow>, DbError> {
+    async fn list_legacy_cron_trigger_messages(&self, conversation_id: &str) -> Result<Vec<MessageRow>, DbError> {
         let rows = sqlx::query_as::<_, MessageRow>(
             "SELECT * FROM messages \
              WHERE conversation_id = ? AND type = 'cron_trigger' \
@@ -1289,8 +1320,8 @@ impl IConversationRepository for SqliteConversationRepository {
 
     // ── conversation_mcp_servers junction ───────────────────────────
 
-    async fn list_mcp_server_ids(&self, conversation_id: i64) -> Result<Vec<i64>, DbError> {
-        let ids = sqlx::query_scalar::<_, i64>(
+    async fn list_mcp_server_ids(&self, conversation_id: &str) -> Result<Vec<nomifun_common::McpServerId>, DbError> {
+        let ids = sqlx::query_scalar::<_, String>(
             "SELECT mcp_server_id FROM conversation_mcp_servers \
              WHERE conversation_id = ? \
              ORDER BY sort_order ASC, mcp_server_id ASC",
@@ -1299,10 +1330,12 @@ impl IConversationRepository for SqliteConversationRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(ids)
+        ids.into_iter()
+            .map(|id| nomifun_common::McpServerId::parse(id).map_err(|e| DbError::Init(e.to_string())))
+            .collect()
     }
 
-    async fn set_mcp_server_ids(&self, conversation_id: i64, ids: &[i64]) -> Result<(), DbError> {
+    async fn set_mcp_server_ids(&self, conversation_id: &str, ids: &[nomifun_common::McpServerId]) -> Result<(), DbError> {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("DELETE FROM conversation_mcp_servers WHERE conversation_id = ?")
@@ -1316,7 +1349,7 @@ impl IConversationRepository for SqliteConversationRepository {
                  VALUES (?, ?, ?)",
             )
             .bind(conversation_id)
-            .bind(mcp_server_id)
+            .bind(mcp_server_id.as_str())
             .bind(sort_order as i64)
             .execute(&mut *tx)
             .await?;
@@ -1346,10 +1379,10 @@ fn append_filter_conditions(filters: &ConversationFilters, where_parts: &mut Vec
         binds.push(BindValue::Bool(pinned));
     }
     // Companion companion (work-partner) 单会话不计入普通会话列表/计数。
-    // `extra.companionSession` 为 1 的行被排除;`IS NOT 1` 同时覆盖缺失/为 0
+    // `extra.companion_session` 为 1 的行被排除;`IS NOT 1` 同时覆盖缺失/为 0
     // 的普通会话(json_extract 返回 NULL 时 `NULL IS NOT 1` 为真)。
     if filters.exclude_companion_companion {
-        where_parts.push("json_extract(c.extra, '$.companionSession') IS NOT 1".to_string());
+        where_parts.push("json_extract(c.extra, '$.companion_session') IS NOT 1".to_string());
     }
     // Attempt conversations are aggregate-internal execution surfaces.  The
     // explicit execution link is the only source of truth; legacy JSON-extra
@@ -1390,7 +1423,17 @@ async fn execute_count(pool: &SqlitePool, sql: &str, binds: &[BindValue]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_database_memory;
+
+    const TEST_INSTALLATION_OWNER: &str =
+        "user_0190f5fe-7c00-7a00-8000-000000000001";
+
+    async fn init_database_memory() -> Result<crate::Database, crate::DbError> {
+        crate::init_database_memory_with_owner(
+            nomifun_common::UserId::parse(TEST_INSTALLATION_OWNER.to_owned())
+                .expect("canonical fixture owner"),
+        )
+        .await
+    }
 
     async fn insert_fixture_provider(pool: &SqlitePool, id: &str) {
         sqlx::query(
@@ -1409,7 +1452,11 @@ mod tests {
 
     async fn setup() -> (SqliteConversationRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
-        insert_fixture_provider(db.pool(), "prov_1").await;
+        insert_fixture_provider(
+            db.pool(),
+            "prov_0190f5fe-7c00-7a00-8abc-012345678901",
+        )
+        .await;
         let repo = SqliteConversationRepository::new(db.pool().clone());
         (repo, db)
     }
@@ -1417,8 +1464,7 @@ mod tests {
     fn sample_conversation(user_id: &str) -> ConversationRow {
         let now = nomifun_common::now_ms();
         ConversationRow {
-            // id is allocated by SQLite on create(); the value here is ignored.
-            id: 0,
+            id: nomifun_common::ConversationId::new().into_string(),
             user_id: user_id.to_string(),
             name: "Test Conversation".to_string(),
             r#type: "gemini".to_string(),
@@ -1427,7 +1473,7 @@ mod tests {
             execution_model_pool: None,
             decision_policy: "automatic".to_string(),
             execution_template_id: None,
-            model: Some(r#"{"providerId":"prov_1","model":"claude-sonnet-4-20250514"}"#.to_string()),
+            model: Some(r#"{"provider_id":"prov_0190f5fe-7c00-7a00-8abc-012345678901","model":"claude-sonnet-4-20250514"}"#.to_string()),
             status: Some("pending".to_string()),
             source: Some("nomifun".to_string()),
             channel_chat_id: None,
@@ -1442,11 +1488,11 @@ mod tests {
         }
     }
 
-    fn sample_message(conv_id: i64) -> MessageRow {
+    fn sample_message(conv_id: impl Into<String>) -> MessageRow {
         let now = nomifun_common::now_ms();
         MessageRow {
             id: nomifun_common::generate_prefixed_id("msg"),
-            conversation_id: conv_id,
+            conversation_id: conv_id.into(),
             msg_id: Some("client_msg_1".to_string()),
             r#type: "text".to_string(),
             content: r#"{"content":"Hello world"}"#.to_string(),
@@ -1456,8 +1502,6 @@ mod tests {
             created_at: now,
         }
     }
-
-    const SYSTEM_USER_ID: &str = "system_default_user";
 
     /// Inserts a minimal valid `cron_jobs` row so conversations can reference it
     /// via the `cron_job_id` FK (foreign_keys is ON in the test pool).
@@ -1469,7 +1513,7 @@ mod tests {
              VALUES (?, ?, ?, 'every', '60', '', 'gemini', 'user', ?, ?)",
         )
         .bind(id)
-        .bind(SYSTEM_USER_ID)
+        .bind(TEST_INSTALLATION_OWNER)
         .bind(format!("job {id}"))
         .bind(now)
         .bind(now)
@@ -1478,30 +1522,31 @@ mod tests {
         .unwrap();
     }
 
-    /// Inserts a minimal valid `mcp_servers` row and returns its auto id so the
+    /// Inserts a minimal valid `mcp_servers` row and returns its entity id so the
     /// junction can reference it via the `mcp_server_id` FK.
-    async fn insert_mcp_server(pool: &SqlitePool, name: &str) -> i64 {
+    async fn insert_mcp_server(pool: &SqlitePool, name: &str) -> nomifun_common::McpServerId {
+        let id = nomifun_common::McpServerId::new();
         let now = nomifun_common::now_ms();
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO mcp_servers \
-                (name, transport_type, transport_config, created_at, updated_at) \
-             VALUES (?, 'stdio', '{}', ?, ?)",
+                (id, name, transport_type, transport_config, created_at, updated_at) \
+             VALUES (?, ?, 'stdio', '{}', ?, ?)",
         )
+        .bind(id.as_str())
         .bind(name)
         .bind(now)
         .bind(now)
         .execute(pool)
         .await
         .unwrap();
-        result.last_insert_rowid()
+        id
     }
 
-    fn sample_artifact(conversation_id: i64, kind: &str, cron_job_id: Option<&str>) -> ConversationArtifactRow {
+    fn sample_artifact(conversation_id: impl Into<String>, kind: &str, cron_job_id: Option<&str>) -> ConversationArtifactRow {
         let now = nomifun_common::now_ms();
         ConversationArtifactRow {
-            // id is allocated by SQLite; the value here is ignored by upsert.
-            id: 0,
-            conversation_id,
+            id: nomifun_common::ConversationArtifactId::new().into_string(),
+            conversation_id: conversation_id.into(),
             cron_job_id: cron_job_id.map(str::to_string),
             kind: kind.to_string(),
             status: "active".to_string(),
@@ -1513,14 +1558,14 @@ mod tests {
 
     async fn link_lead_and_attempt_conversations(
         pool: &SqlitePool,
-        lead_conversation_id: i64,
-        attempt_conversation_id: i64,
+        lead_conversation_id: &str,
+        attempt_conversation_id: &str,
     ) {
         let now = nomifun_common::now_ms();
-        let execution_id = nomifun_common::generate_prefixed_id("exec");
-        let participant_id = nomifun_common::generate_prefixed_id("participant");
-        let step_id = nomifun_common::generate_prefixed_id("step");
-        let attempt_id = nomifun_common::generate_prefixed_id("attempt");
+        let execution_id = nomifun_common::AgentExecutionId::new().into_string();
+        let participant_id = nomifun_common::AgentExecutionParticipantId::new().into_string();
+        let step_id = nomifun_common::AgentExecutionStepId::new().into_string();
+        let attempt_id = nomifun_common::AgentExecutionAttemptId::new().into_string();
 
         sqlx::query(
              "INSERT INTO agent_executions \
@@ -1530,7 +1575,7 @@ mod tests {
                      'automatic', 'automatic', 4, '{\"mode\":\"automatic\"}', ?, ?)",
         )
         .bind(&execution_id)
-        .bind(SYSTEM_USER_ID)
+        .bind(TEST_INSTALLATION_OWNER)
         .bind(now)
         .bind(now)
         .execute(pool)
@@ -1541,7 +1586,7 @@ mod tests {
             "INSERT INTO agent_execution_participants \
              (id, execution_id, source_agent_id, provider_id, model, \
               introduced_in_revision, created_at) \
-             VALUES (?, ?, 'test-agent', 'prov_1', 'fixture-model', 0, ?)",
+             VALUES (?, ?, 'test-agent', 'prov_0190f5fe-7c00-7a00-8abc-012345678901', 'fixture-model', 0, ?)",
         )
         .bind(&participant_id)
         .bind(&execution_id)
@@ -1589,7 +1634,7 @@ mod tests {
              (id, conversation_id, execution_id, relation, active, created_at, updated_at) \
              VALUES (?, ?, ?, 'lead', 1, ?, ?)",
         )
-        .bind(nomifun_common::generate_prefixed_id("link"))
+        .bind(nomifun_common::ConversationExecutionLinkId::new().into_string())
         .bind(lead_conversation_id)
         .bind(&execution_id)
         .bind(now)
@@ -1604,7 +1649,7 @@ mod tests {
               active, created_at, updated_at) \
              VALUES (?, ?, ?, 'attempt', ?, ?, 1, ?, ?)",
         )
-        .bind(nomifun_common::generate_prefixed_id("link"))
+        .bind(nomifun_common::ConversationExecutionLinkId::new().into_string())
         .bind(attempt_conversation_id)
         .bind(&execution_id)
         .bind(&step_id)
@@ -1621,11 +1666,11 @@ mod tests {
     #[tokio::test]
     async fn create_and_get_conversation() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
 
         conv.id = repo.create(&conv).await.unwrap();
-        assert!(conv.id > 0);
-        let found = repo.get(conv.id).await.unwrap().unwrap();
+        assert!(nomifun_common::ConversationId::parse(conv.id.clone()).is_ok());
+        let found = repo.get(&conv.id).await.unwrap().unwrap();
 
         assert_eq!(found.id, conv.id);
         assert_eq!(found.name, "Test Conversation");
@@ -1637,18 +1682,18 @@ mod tests {
     #[tokio::test]
     async fn get_nonexistent_returns_none() {
         let (repo, _db) = setup().await;
-        assert!(repo.get(999_999).await.unwrap().is_none());
+        assert!(repo.get("conv_019abcdef012-7abc-8abc-0123-456789abcdee").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn update_conversation_name() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         let now = nomifun_common::now_ms();
         repo.update(
-            conv.id,
+            &conv.id,
             &ConversationRowUpdate {
                 name: Some("Updated Name".to_string()),
                 updated_at: Some(now),
@@ -1658,7 +1703,7 @@ mod tests {
         .await
         .unwrap();
 
-        let found = repo.get(conv.id).await.unwrap().unwrap();
+        let found = repo.get(&conv.id).await.unwrap().unwrap();
         assert_eq!(found.name, "Updated Name");
         assert!(found.updated_at >= conv.updated_at);
     }
@@ -1666,12 +1711,12 @@ mod tests {
     #[tokio::test]
     async fn update_conversation_pinned() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         let pin_time = nomifun_common::now_ms();
         repo.update(
-            conv.id,
+            &conv.id,
             &ConversationRowUpdate {
                 pinned: Some(true),
                 pinned_at: Some(Some(pin_time)),
@@ -1682,7 +1727,7 @@ mod tests {
         .await
         .unwrap();
 
-        let found = repo.get(conv.id).await.unwrap().unwrap();
+        let found = repo.get(&conv.id).await.unwrap().unwrap();
         assert!(found.pinned);
         assert_eq!(found.pinned_at, Some(pin_time));
     }
@@ -1692,7 +1737,7 @@ mod tests {
         let (repo, _db) = setup().await;
         let err = repo
             .update(
-                999_999,
+                "conv_019abcdef012-7abc-8abc-0123-456789abcdee",
                 &ConversationRowUpdate {
                     name: Some("x".to_string()),
                     ..Default::default()
@@ -1706,43 +1751,43 @@ mod tests {
     #[tokio::test]
     async fn update_empty_is_noop() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         // Empty update should succeed without error
-        repo.update(conv.id, &ConversationRowUpdate::default()).await.unwrap();
+        repo.update(&conv.id, &ConversationRowUpdate::default()).await.unwrap();
     }
 
     #[tokio::test]
     async fn delete_conversation() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        repo.delete(conv.id).await.unwrap();
-        assert!(repo.get(conv.id).await.unwrap().is_none());
+        repo.delete(&conv.id).await.unwrap();
+        assert!(repo.get(&conv.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn delete_cascades_messages() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let msg = sample_message(conv.id);
+        let msg = sample_message(conv.id.clone());
         repo.insert_message(&msg).await.unwrap();
 
-        repo.delete(conv.id).await.unwrap();
+        repo.delete(&conv.id).await.unwrap();
 
         // Messages should be gone due to CASCADE
-        let result = repo.get_messages(conv.id, 1, 50, SortOrder::Desc).await.unwrap();
+        let result = repo.get_messages(&conv.id, 1, 50, SortOrder::Desc).await.unwrap();
         assert!(result.items.is_empty());
     }
 
     #[tokio::test]
     async fn delete_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.delete(999_999).await.unwrap_err();
+        let err = repo.delete("conv_019abcdef012-7abc-8abc-0123-456789abcdee").await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -1753,7 +1798,7 @@ mod tests {
         let (repo, _db) = setup().await;
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     limit: 20,
                     ..Default::default()
@@ -1771,24 +1816,24 @@ mod tests {
     async fn list_ordered_by_updated_at_desc() {
         let (repo, _db) = setup().await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.name = "First".to_string();
         c1.updated_at = 1000;
         repo.create(&c1).await.unwrap();
 
-        let mut c2 = sample_conversation(SYSTEM_USER_ID);
+        let mut c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         c2.name = "Second".to_string();
         c2.updated_at = 2000;
         repo.create(&c2).await.unwrap();
 
-        let mut c3 = sample_conversation(SYSTEM_USER_ID);
+        let mut c3 = sample_conversation(TEST_INSTALLATION_OWNER);
         c3.name = "Third".to_string();
         c3.updated_at = 3000;
         repo.create(&c3).await.unwrap();
 
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     limit: 20,
                     ..Default::default()
@@ -1810,7 +1855,7 @@ mod tests {
 
         let mut convs = Vec::new();
         for i in 0..5 {
-            let mut c = sample_conversation(SYSTEM_USER_ID);
+            let mut c = sample_conversation(TEST_INSTALLATION_OWNER);
             c.name = format!("Conv {i}");
             c.updated_at = (i + 1) as i64 * 1000;
             repo.create(&c).await.unwrap();
@@ -1820,7 +1865,7 @@ mod tests {
         // Page 1: limit 2 → items[4,3], hasMore=true
         let page1 = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     limit: 2,
                     ..Default::default()
@@ -1835,10 +1880,10 @@ mod tests {
         assert_eq!(page1.items[1].name, "Conv 3");
 
         // Page 2: cursor = last item of page 1
-        let cursor = page1.items.last().unwrap().id;
+        let cursor = page1.items.last().unwrap().id.clone();
         let page2 = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     cursor: Some(cursor),
                     limit: 2,
@@ -1854,10 +1899,10 @@ mod tests {
         assert_eq!(page2.items[1].name, "Conv 1");
 
         // Page 3: cursor = last item of page 2
-        let cursor = page2.items.last().unwrap().id;
+        let cursor = page2.items.last().unwrap().id.clone();
         let page3 = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     cursor: Some(cursor),
                     limit: 2,
@@ -1876,17 +1921,17 @@ mod tests {
     async fn list_filter_by_source() {
         let (repo, _db) = setup().await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.source = Some("nomifun".to_string());
         repo.create(&c1).await.unwrap();
 
-        let mut c2 = sample_conversation(SYSTEM_USER_ID);
+        let mut c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         c2.source = Some("telegram".to_string());
         repo.create(&c2).await.unwrap();
 
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     source: Some("telegram".to_string()),
                     limit: 20,
@@ -1907,16 +1952,16 @@ mod tests {
 
         insert_cron_job(&repo.pool, "cron_abc").await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.cron_job_id = Some("cron_abc".to_string());
         c1.id = repo.create(&c1).await.unwrap();
 
-        let c2 = sample_conversation(SYSTEM_USER_ID);
+        let c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         repo.create(&c2).await.unwrap();
 
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     cron_job_id: Some("cron_abc".to_string()),
                     limit: 20,
@@ -1935,18 +1980,18 @@ mod tests {
     async fn list_filter_by_pinned() {
         let (repo, _db) = setup().await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.pinned = true;
         c1.pinned_at = Some(nomifun_common::now_ms());
         repo.create(&c1).await.unwrap();
 
-        let mut c2 = sample_conversation(SYSTEM_USER_ID);
+        let mut c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         c2.pinned = false;
         repo.create(&c2).await.unwrap();
 
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     pinned: Some(true),
                     limit: 20,
@@ -1965,22 +2010,22 @@ mod tests {
     async fn list_keeps_lead_and_excludes_attempt_conversation() {
         let (repo, db) = setup().await;
 
-        let mut plain = sample_conversation(SYSTEM_USER_ID);
+        let mut plain = sample_conversation(TEST_INSTALLATION_OWNER);
         plain.extra = r#"{"workspace":"/project"}"#.to_string();
         let plain_id = repo.create(&plain).await.unwrap();
 
-        let lead = sample_conversation(SYSTEM_USER_ID);
+        let lead = sample_conversation(TEST_INSTALLATION_OWNER);
         let lead_id = repo.create(&lead).await.unwrap();
 
         let attempt_id = repo
-            .create(&sample_conversation(SYSTEM_USER_ID))
+            .create(&sample_conversation(TEST_INSTALLATION_OWNER))
             .await
             .unwrap();
-        link_lead_and_attempt_conversations(db.pool(), lead_id, attempt_id).await;
+        link_lead_and_attempt_conversations(db.pool(), &lead_id, &attempt_id).await;
 
         let result = repo
             .list_paginated(
-                SYSTEM_USER_ID,
+                TEST_INSTALLATION_OWNER,
                 &ConversationFilters {
                     limit: 20,
                     ..Default::default()
@@ -2010,14 +2055,14 @@ mod tests {
     async fn find_by_source_and_chat() {
         let (repo, _db) = setup().await;
 
-        let mut c = sample_conversation(SYSTEM_USER_ID);
+        let mut c = sample_conversation(TEST_INSTALLATION_OWNER);
         c.source = Some("telegram".to_string());
         c.channel_chat_id = Some("user:123".to_string());
         c.r#type = "gemini".to_string();
         c.id = repo.create(&c).await.unwrap();
 
         let found = repo
-            .find_by_source_and_chat(SYSTEM_USER_ID, "telegram", "user:123", "gemini")
+            .find_by_source_and_chat(TEST_INSTALLATION_OWNER, "telegram", "user:123", "gemini")
             .await
             .unwrap();
         assert!(found.is_some());
@@ -2025,7 +2070,7 @@ mod tests {
 
         // Different chat ID → not found
         let not_found = repo
-            .find_by_source_and_chat(SYSTEM_USER_ID, "telegram", "user:999", "gemini")
+            .find_by_source_and_chat(TEST_INSTALLATION_OWNER, "telegram", "user:999", "gemini")
             .await
             .unwrap();
         assert!(not_found.is_none());
@@ -2038,19 +2083,19 @@ mod tests {
         insert_cron_job(&repo.pool, "cron_1").await;
         insert_cron_job(&repo.pool, "cron_2").await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.cron_job_id = Some("cron_1".to_string());
         repo.create(&c1).await.unwrap();
 
-        let mut c2 = sample_conversation(SYSTEM_USER_ID);
+        let mut c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         c2.cron_job_id = Some("cron_1".to_string());
         repo.create(&c2).await.unwrap();
 
-        let mut c3 = sample_conversation(SYSTEM_USER_ID);
+        let mut c3 = sample_conversation(TEST_INSTALLATION_OWNER);
         c3.cron_job_id = Some("cron_2".to_string());
         repo.create(&c3).await.unwrap();
 
-        let result = repo.list_by_cron_job(SYSTEM_USER_ID, "cron_1").await.unwrap();
+        let result = repo.list_by_cron_job(TEST_INSTALLATION_OWNER, "cron_1").await.unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -2058,19 +2103,19 @@ mod tests {
     async fn list_associated_by_workspace() {
         let (repo, _db) = setup().await;
 
-        let mut c1 = sample_conversation(SYSTEM_USER_ID);
+        let mut c1 = sample_conversation(TEST_INSTALLATION_OWNER);
         c1.extra = r#"{"workspace":"/shared/project"}"#.to_string();
         c1.id = repo.create(&c1).await.unwrap();
 
-        let mut c2 = sample_conversation(SYSTEM_USER_ID);
+        let mut c2 = sample_conversation(TEST_INSTALLATION_OWNER);
         c2.extra = r#"{"workspace":"/shared/project"}"#.to_string();
         c2.id = repo.create(&c2).await.unwrap();
 
-        let mut c3 = sample_conversation(SYSTEM_USER_ID);
+        let mut c3 = sample_conversation(TEST_INSTALLATION_OWNER);
         c3.extra = r#"{"workspace":"/other/project"}"#.to_string();
         repo.create(&c3).await.unwrap();
 
-        let associated = repo.list_associated(SYSTEM_USER_ID, c1.id).await.unwrap();
+        let associated = repo.list_associated(TEST_INSTALLATION_OWNER, &c1.id).await.unwrap();
         assert_eq!(associated.len(), 1);
         assert_eq!(associated[0].id, c2.id);
     }
@@ -2079,18 +2124,18 @@ mod tests {
     async fn list_associated_no_workspace() {
         let (repo, _db) = setup().await;
 
-        let mut c = sample_conversation(SYSTEM_USER_ID);
+        let mut c = sample_conversation(TEST_INSTALLATION_OWNER);
         c.extra = r#"{}"#.to_string();
         c.id = repo.create(&c).await.unwrap();
 
-        let associated = repo.list_associated(SYSTEM_USER_ID, c.id).await.unwrap();
+        let associated = repo.list_associated(TEST_INSTALLATION_OWNER, &c.id).await.unwrap();
         assert!(associated.is_empty());
     }
 
     #[tokio::test]
     async fn list_associated_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.list_associated(SYSTEM_USER_ID, 999_999).await.unwrap_err();
+        let err = repo.list_associated(TEST_INSTALLATION_OWNER, "conv_019abcdef012-7abc-8abc-0123-456789abcdee").await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -2100,16 +2145,16 @@ mod tests {
 
         insert_cron_job(&repo.pool, "cron_x").await;
 
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.cron_job_id = Some("cron_x".to_string());
         conv.id = repo.create(&conv).await.unwrap();
 
-        let found = repo.get(conv.id).await.unwrap().unwrap();
+        let found = repo.get(&conv.id).await.unwrap().unwrap();
         assert_eq!(found.cron_job_id.as_deref(), Some("cron_x"));
 
         // Clearing via update sets the column to NULL.
         repo.update(
-            conv.id,
+            &conv.id,
             &ConversationRowUpdate {
                 cron_job_id: Some(None),
                 updated_at: Some(nomifun_common::now_ms()),
@@ -2118,7 +2163,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let cleared = repo.get(conv.id).await.unwrap().unwrap();
+        let cleared = repo.get(&conv.id).await.unwrap().unwrap();
         assert_eq!(cleared.cron_job_id, None);
     }
 
@@ -2127,71 +2172,75 @@ mod tests {
     #[tokio::test]
     async fn cron_trigger_artifacts_insert_distinct_rows() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
         insert_cron_job(&repo.pool, "cron_t").await;
 
         // cron_trigger has no unique constraint: each upsert is a fresh row with
         // a distinct auto-assigned i64 id.
         let a1 = repo
-            .upsert_artifact(&sample_artifact(conv.id, "cron_trigger", Some("cron_t")))
+            .upsert_artifact(&sample_artifact(conv.id.clone(), "cron_trigger", Some("cron_t")))
             .await
             .unwrap();
         let a2 = repo
-            .upsert_artifact(&sample_artifact(conv.id, "cron_trigger", Some("cron_t")))
+            .upsert_artifact(&sample_artifact(conv.id.clone(), "cron_trigger", Some("cron_t")))
             .await
             .unwrap();
 
-        assert!(a1.id > 0);
-        assert!(a2.id > 0);
+        assert!(nomifun_common::ConversationArtifactId::parse(a1.id.clone()).is_ok());
+        assert!(nomifun_common::ConversationArtifactId::parse(a2.id.clone()).is_ok());
         assert_ne!(a1.id, a2.id);
 
-        let listed = repo.list_artifacts(conv.id).await.unwrap();
+        let listed = repo.list_artifacts(&conv.id).await.unwrap();
         assert_eq!(listed.len(), 2);
     }
 
     #[tokio::test]
     async fn skill_suggest_artifacts_upsert_is_idempotent() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
         insert_cron_job(&repo.pool, "cron_s").await;
 
         let first = repo
-            .upsert_artifact(&sample_artifact(conv.id, "skill_suggest", Some("cron_s")))
+            .upsert_artifact(&sample_artifact(conv.id.clone(), "skill_suggest", Some("cron_s")))
             .await
             .unwrap();
 
         // Second upsert for the same (conversation_id, cron_job_id) collides on the
         // partial UNIQUE index → updates in place, keeping the same id.
-        let mut updated_input = sample_artifact(conv.id, "skill_suggest", Some("cron_s"));
+        let mut updated_input = sample_artifact(conv.id.clone(), "skill_suggest", Some("cron_s"));
         updated_input.payload = r#"{"v":2}"#.to_string();
         let second = repo.upsert_artifact(&updated_input).await.unwrap();
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.payload, r#"{"v":2}"#);
 
-        let listed = repo.list_artifacts(conv.id).await.unwrap();
+        let listed = repo.list_artifacts(&conv.id).await.unwrap();
         assert_eq!(listed.len(), 1);
     }
 
     #[tokio::test]
     async fn get_and_update_artifact_status_by_i64_id() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
         insert_cron_job(&repo.pool, "cron_u").await;
 
         let inserted = repo
-            .upsert_artifact(&sample_artifact(conv.id, "cron_trigger", Some("cron_u")))
+            .upsert_artifact(&sample_artifact(conv.id.clone(), "cron_trigger", Some("cron_u")))
             .await
             .unwrap();
 
-        let fetched = repo.get_artifact(conv.id, inserted.id).await.unwrap().unwrap();
+        let fetched = repo
+            .get_artifact(&conv.id, &inserted.id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(fetched.id, inserted.id);
 
         let updated = repo
-            .update_artifact_status(conv.id, inserted.id, "dismissed", nomifun_common::now_ms())
+            .update_artifact_status(&conv.id, &inserted.id, "dismissed", nomifun_common::now_ms())
             .await
             .unwrap()
             .unwrap();
@@ -2199,7 +2248,7 @@ mod tests {
 
         // Missing id → None.
         let missing = repo
-            .update_artifact_status(conv.id, 999_999, "dismissed", nomifun_common::now_ms())
+            .update_artifact_status(&conv.id, "artifact_019abcdef012-7abc-8abc-0123-456789abcdee", "dismissed", nomifun_common::now_ms())
             .await
             .unwrap();
         assert!(missing.is_none());
@@ -2210,7 +2259,7 @@ mod tests {
     #[tokio::test]
     async fn set_and_list_mcp_server_ids_preserves_order() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         let a = insert_mcp_server(&repo.pool, "srv_a").await;
@@ -2218,33 +2267,42 @@ mod tests {
         let c = insert_mcp_server(&repo.pool, "srv_c").await;
 
         // Empty by default.
-        assert!(repo.list_mcp_server_ids(conv.id).await.unwrap().is_empty());
+        assert!(repo.list_mcp_server_ids(&conv.id).await.unwrap().is_empty());
 
         // Order is preserved via sort_order, not numeric id order.
-        repo.set_mcp_server_ids(conv.id, &[c, a, b]).await.unwrap();
-        assert_eq!(repo.list_mcp_server_ids(conv.id).await.unwrap(), vec![c, a, b]);
+        repo.set_mcp_server_ids(&conv.id, &[c.clone(), a.clone(), b.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.list_mcp_server_ids(&conv.id).await.unwrap(),
+            vec![c.clone(), a.clone(), b.clone()]
+        );
 
         // set replaces the whole set (DELETE + ordered INSERT).
-        repo.set_mcp_server_ids(conv.id, &[b]).await.unwrap();
-        assert_eq!(repo.list_mcp_server_ids(conv.id).await.unwrap(), vec![b]);
+        repo.set_mcp_server_ids(&conv.id, std::slice::from_ref(&b))
+            .await
+            .unwrap();
+        assert_eq!(repo.list_mcp_server_ids(&conv.id).await.unwrap(), vec![b]);
 
         // Empty slice clears the selection.
-        repo.set_mcp_server_ids(conv.id, &[]).await.unwrap();
-        assert!(repo.list_mcp_server_ids(conv.id).await.unwrap().is_empty());
+        repo.set_mcp_server_ids(&conv.id, &[]).await.unwrap();
+        assert!(repo.list_mcp_server_ids(&conv.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn deleting_conversation_cascades_mcp_junction() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
         let a = insert_mcp_server(&repo.pool, "srv_cascade").await;
 
-        repo.set_mcp_server_ids(conv.id, &[a]).await.unwrap();
-        repo.delete(conv.id).await.unwrap();
+        repo.set_mcp_server_ids(&conv.id, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+        repo.delete(&conv.id).await.unwrap();
 
         // Junction rows are removed via ON DELETE CASCADE.
-        let remaining = repo.list_mcp_server_ids(conv.id).await.unwrap();
+        let remaining = repo.list_mcp_server_ids(&conv.id).await.unwrap();
         assert!(remaining.is_empty());
     }
 
@@ -2253,13 +2311,13 @@ mod tests {
     #[tokio::test]
     async fn insert_and_get_messages() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let msg = sample_message(conv.id);
+        let msg = sample_message(conv.id.clone());
         repo.insert_message(&msg).await.unwrap();
 
-        let result = repo.get_messages(conv.id, 1, 50, SortOrder::Desc).await.unwrap();
+        let result = repo.get_messages(&conv.id, 1, 50, SortOrder::Desc).await.unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].id, msg.id);
@@ -2268,17 +2326,17 @@ mod tests {
     #[tokio::test]
     async fn get_messages_pagination() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         for i in 0..10 {
-            let mut msg = sample_message(conv.id);
+            let mut msg = sample_message(conv.id.clone());
             msg.id = nomifun_common::generate_prefixed_id("msg");
             msg.created_at = (i + 1) * 1000;
             repo.insert_message(&msg).await.unwrap();
         }
 
-        let page1 = repo.get_messages(conv.id, 1, 3, SortOrder::Desc).await.unwrap();
+        let page1 = repo.get_messages(&conv.id, 1, 3, SortOrder::Desc).await.unwrap();
         assert_eq!(page1.items.len(), 3);
         assert_eq!(page1.total, 10);
         assert!(page1.has_more);
@@ -2289,27 +2347,27 @@ mod tests {
     #[tokio::test]
     async fn get_messages_asc_order() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         for i in 0..3 {
-            let mut msg = sample_message(conv.id);
+            let mut msg = sample_message(conv.id.clone());
             msg.id = nomifun_common::generate_prefixed_id("msg");
             msg.created_at = (i + 1) * 1000;
             repo.insert_message(&msg).await.unwrap();
         }
 
-        let result = repo.get_messages(conv.id, 1, 50, SortOrder::Asc).await.unwrap();
+        let result = repo.get_messages(&conv.id, 1, 50, SortOrder::Asc).await.unwrap();
         assert!(result.items[0].created_at < result.items[1].created_at);
     }
 
     #[tokio::test]
     async fn update_message_content() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let msg = sample_message(conv.id);
+        let msg = sample_message(conv.id.clone());
         repo.insert_message(&msg).await.unwrap();
 
         repo.update_message(
@@ -2322,7 +2380,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = repo.get_messages(conv.id, 1, 50, SortOrder::Desc).await.unwrap();
+        let result = repo.get_messages(&conv.id, 1, 50, SortOrder::Desc).await.unwrap();
         assert_eq!(result.items[0].content, r#"{"content":"Updated"}"#);
     }
 
@@ -2345,18 +2403,18 @@ mod tests {
     #[tokio::test]
     async fn delete_messages_by_conversation() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         for _ in 0..3 {
-            let mut msg = sample_message(conv.id);
+            let mut msg = sample_message(conv.id.clone());
             msg.id = nomifun_common::generate_prefixed_id("msg");
             repo.insert_message(&msg).await.unwrap();
         }
 
-        repo.delete_messages_by_conversation(conv.id).await.unwrap();
+        repo.delete_messages_by_conversation(&conv.id).await.unwrap();
 
-        let result = repo.get_messages(conv.id, 1, 50, SortOrder::Desc).await.unwrap();
+        let result = repo.get_messages(&conv.id, 1, 50, SortOrder::Desc).await.unwrap();
         assert!(result.items.is_empty());
         assert_eq!(result.total, 0);
     }
@@ -2364,14 +2422,14 @@ mod tests {
     #[tokio::test]
     async fn get_message_by_msg_id() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let msg = sample_message(conv.id);
+        let msg = sample_message(conv.id.clone());
         repo.insert_message(&msg).await.unwrap();
 
         let found = repo
-            .get_message_by_msg_id(conv.id, "client_msg_1", "text")
+            .get_message_by_msg_id(&conv.id, "client_msg_1", "text")
             .await
             .unwrap();
         assert!(found.is_some());
@@ -2379,7 +2437,7 @@ mod tests {
 
         // Wrong type → not found
         let not_found = repo
-            .get_message_by_msg_id(conv.id, "client_msg_1", "tips")
+            .get_message_by_msg_id(&conv.id, "client_msg_1", "tips")
             .await
             .unwrap();
         assert!(not_found.is_none());
@@ -2388,19 +2446,19 @@ mod tests {
     #[tokio::test]
     async fn search_messages_by_keyword() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let mut msg1 = sample_message(conv.id);
+        let mut msg1 = sample_message(conv.id.clone());
         msg1.content = r#"{"content":"Rust 审查报告"}"#.to_string();
         repo.insert_message(&msg1).await.unwrap();
 
-        let mut msg2 = sample_message(conv.id);
+        let mut msg2 = sample_message(conv.id.clone());
         msg2.id = nomifun_common::generate_prefixed_id("msg");
         msg2.content = r#"{"content":"Python 测试"}"#.to_string();
         repo.insert_message(&msg2).await.unwrap();
 
-        let result = repo.search_messages(SYSTEM_USER_ID, "审查", 1, 20).await.unwrap();
+        let result = repo.search_messages(TEST_INSTALLATION_OWNER, "审查", 1, 20).await.unwrap();
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.total, 1);
         assert_eq!(result.items[0].conversation_name, "Test Conversation");
@@ -2409,14 +2467,14 @@ mod tests {
     #[tokio::test]
     async fn search_messages_no_match() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
-        let msg = sample_message(conv.id);
+        let msg = sample_message(conv.id.clone());
         repo.insert_message(&msg).await.unwrap();
 
         let result = repo
-            .search_messages(SYSTEM_USER_ID, "xxxxnotexist", 1, 20)
+            .search_messages(TEST_INSTALLATION_OWNER, "xxxxnotexist", 1, 20)
             .await
             .unwrap();
         assert!(result.items.is_empty());
@@ -2426,18 +2484,18 @@ mod tests {
     #[tokio::test]
     async fn search_messages_pagination() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         for i in 0..5 {
-            let mut msg = sample_message(conv.id);
+            let mut msg = sample_message(conv.id.clone());
             msg.id = nomifun_common::generate_prefixed_id("msg");
             msg.content = format!(r#"{{"content":"match keyword item {i}"}}"#);
             msg.created_at = (i + 1) * 1000;
             repo.insert_message(&msg).await.unwrap();
         }
 
-        let result = repo.search_messages(SYSTEM_USER_ID, "keyword", 1, 2).await.unwrap();
+        let result = repo.search_messages(TEST_INSTALLATION_OWNER, "keyword", 1, 2).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.total, 5);
         assert!(result.has_more);
@@ -2476,12 +2534,12 @@ mod tests {
     #[tokio::test]
     async fn delete_messages_from_removes_cursor_and_newer() {
         let (repo, _db) = setup().await;
-        let mut conv = sample_conversation(SYSTEM_USER_ID);
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
         conv.id = repo.create(&conv).await.unwrap();
 
         let mk = |id: &str, created_at: i64| MessageRow {
             id: id.to_string(),
-            conversation_id: conv.id,
+            conversation_id: conv.id.clone(),
             msg_id: Some(id.to_string()),
             r#type: "text".to_string(),
             content: r#"{"content":"x"}"#.to_string(),
@@ -2496,11 +2554,11 @@ mod tests {
         repo.insert_message(&mk("m3", 300)).await.unwrap();
 
         // 从 m2 (t=200) 起（含）删除 → 删 m2、m3，留 m1
-        let deleted = repo.delete_messages_from(conv.id, 200, "m2").await.unwrap();
+        let deleted = repo.delete_messages_from(&conv.id, 200, "m2").await.unwrap();
         assert_eq!(deleted, 2);
 
-        assert!(repo.get_message(conv.id, "m1").await.unwrap().is_some());
-        assert!(repo.get_message(conv.id, "m2").await.unwrap().is_none());
-        assert!(repo.get_message(conv.id, "m3").await.unwrap().is_none());
+        assert!(repo.get_message(&conv.id, "m1").await.unwrap().is_some());
+        assert!(repo.get_message(&conv.id, "m2").await.unwrap().is_none());
+        assert!(repo.get_message(&conv.id, "m3").await.unwrap().is_none());
     }
 }

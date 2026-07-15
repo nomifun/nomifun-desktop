@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::fs;
+use nomifun_common::CronJobId;
 
 use crate::error::CronError;
 
@@ -192,10 +193,9 @@ pub async fn delete_skill_file(data_dir: &Path, job_id: &str) -> Result<(), Cron
 }
 
 fn validate_job_id(job_id: &str) -> Result<(), CronError> {
-    if job_id.is_empty() || job_id.contains('/') || job_id.contains('\\') || job_id.contains("..") {
-        return Err(CronError::InvalidSkillContent(format!("invalid cron job id: {job_id}")));
-    }
-    Ok(())
+    CronJobId::try_from(job_id)
+        .map(|_| ())
+        .map_err(|error| CronError::InvalidSkillContent(format!("invalid cron job id: {error}")))
 }
 
 fn parse_frontmatter(content: &str) -> Result<(String, String, String), CronError> {

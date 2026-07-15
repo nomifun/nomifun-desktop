@@ -12,6 +12,7 @@ import { ipcBridge } from '@/common';
 import type { IKnowledgeBase, IPublicAgent, IPublicAgentPatch } from '@/common/adapter/ipcBridge';
 import type { ArcoMessageInstance } from '@renderer/utils/ui/useArcoMessage';
 import { SectionCard } from '../components';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 
 interface Props {
   agent: IPublicAgent;
@@ -27,7 +28,7 @@ const KnowledgeSection: React.FC<Props> = ({ agent, patch, message }) => {
   const { t } = useTranslation();
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
   const [loadingBases, setLoadingBases] = useState(true);
-  const [selected, setSelected] = useState<string[]>(agent.knowledge_base_ids);
+  const [selected, setSelected] = useState<KnowledgeBaseId[]>(agent.knowledge_base_ids);
   const [saving, setSaving] = useState(false);
   const [groundedSaving, setGroundedSaving] = useState(false);
 
@@ -110,7 +111,7 @@ const KnowledgeSection: React.FC<Props> = ({ agent, patch, message }) => {
             mode='multiple'
             allowClear
             value={selected}
-            onChange={(v: string[]) => setSelected(v)}
+            onChange={(v: KnowledgeBaseId[]) => setSelected(v)}
             placeholder={t('publicCompanion.knowledge.selectPlaceholder', { defaultValue: '选择公开知识库（可多选）' })}
             style={{ width: '100%' }}
             notFoundContent={

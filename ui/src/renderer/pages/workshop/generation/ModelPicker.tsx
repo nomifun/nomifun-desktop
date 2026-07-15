@@ -19,10 +19,11 @@ import type { GenMode, ModelOption } from './genTypes';
 import { useGeneratorModels } from './useGeneratorModels';
 import Floating from './Floating';
 import { modelHubPathForMode } from './localZImage';
+import type { ProviderId } from '@/common/types/ids';
 
 export interface ModelPickerProps {
   mode: GenMode;
-  providerId?: string;
+  providerId?: ProviderId;
   model?: string;
   onChange: (opt: ModelOption) => void;
 }

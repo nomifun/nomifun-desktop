@@ -6,13 +6,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use nomifun_common::AppError;
+use nomifun_common::{AppError, PublicAgentId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::config::PublicAgentConfig;
-use crate::fsio::{load_json_or_default, save_json_atomic};
+use crate::fsio::{load_json, load_json_or_default, save_json_atomic};
 
 const CONFIG_FILE: &str = "config.json";
 /// Registry-private seq watermark file (hidden, alongside the agent dirs).
@@ -44,11 +44,11 @@ fn json_merge_patch(target: &mut Value, patch: &Value) {
 /// The in-memory roster + persisted seq watermark.
 pub struct PublicAgentRegistry {
     dir: PathBuf,
-    agents: RwLock<BTreeMap<String, PublicAgentConfig>>,
+    agents: RwLock<BTreeMap<PublicAgentId, PublicAgentConfig>>,
     watermark: RwLock<u64>,
 }
 
-fn max_live_seq(agents: &BTreeMap<String, PublicAgentConfig>) -> u64 {
+fn max_live_seq(agents: &BTreeMap<PublicAgentId, PublicAgentConfig>) -> u64 {
     agents.values().filter_map(|a| a.seq).max().unwrap_or(0)
 }
 
@@ -63,10 +63,18 @@ impl PublicAgentRegistry {
                     continue;
                 }
                 let cfg_path = entry.path().join(CONFIG_FILE);
-                let cfg: PublicAgentConfig = load_json_or_default(&cfg_path);
-                if !cfg.id.trim().is_empty() {
-                    agents.insert(cfg.id.clone(), cfg);
+                let Some(cfg) = load_json::<PublicAgentConfig>(&cfg_path) else {
+                    continue;
+                };
+                if cfg.validate().is_err() || entry.file_name().to_string_lossy() != cfg.id.as_str() {
+                    tracing::warn!(
+                        path = %cfg_path.display(),
+                        config_id = %cfg.id,
+                        "skipping public-agent config whose identity or directory is invalid"
+                    );
+                    continue;
                 }
+                agents.insert(cfg.id.clone(), cfg);
             }
         }
         let seq_state: SeqState = load_json_or_default(&dir.join(SEQ_STATE_FILE));
@@ -78,8 +86,8 @@ impl PublicAgentRegistry {
         }
     }
 
-    fn agent_dir(&self, id: &str) -> PathBuf {
-        self.dir.join(id)
+    fn agent_dir(&self, id: &PublicAgentId) -> PathBuf {
+        self.dir.join(id.as_str())
     }
 
     pub async fn list(&self) -> Vec<PublicAgentConfig> {
@@ -89,11 +97,11 @@ impl PublicAgentRegistry {
         v
     }
 
-    pub async fn get(&self, id: &str) -> Option<PublicAgentConfig> {
+    pub async fn get(&self, id: &PublicAgentId) -> Option<PublicAgentConfig> {
         self.agents.read().await.get(id).cloned()
     }
 
-    pub async fn exists(&self, id: &str) -> bool {
+    pub async fn exists(&self, id: &PublicAgentId) -> bool {
         self.agents.read().await.contains_key(id)
     }
 
@@ -109,6 +117,7 @@ impl PublicAgentRegistry {
         let seq = (*watermark).max(max_live_seq(&agents)) + 1;
         let mut cfg = PublicAgentConfig::new(name);
         cfg.seq = Some(seq);
+        cfg.validate()?;
         self.persist(&cfg)?;
         self.advance_watermark(&mut watermark, seq);
         agents.insert(cfg.id.clone(), cfg.clone());
@@ -117,7 +126,7 @@ impl PublicAgentRegistry {
 
     /// RFC 7396 merge-patch over one agent's config. `id` / `seq` / `created_at`
     /// are immutable (stripped from the patch).
-    pub async fn patch(&self, id: &str, mut patch: Value) -> Result<PublicAgentConfig, AppError> {
+    pub async fn patch(&self, id: &PublicAgentId, mut patch: Value) -> Result<PublicAgentConfig, AppError> {
         if let Some(obj) = patch.as_object_mut() {
             obj.remove("id");
             obj.remove("seq");
@@ -135,24 +144,26 @@ impl PublicAgentRegistry {
         next.id = cur.id.clone();
         next.seq = cur.seq;
         next.created_at = cur.created_at;
+        next.validate()?;
         self.persist(&next)?;
-        agents.insert(id.to_owned(), next.clone());
+        agents.insert(id.clone(), next.clone());
         Ok(next)
     }
 
     /// Remove an agent's config dir and drop it from the roster.
-    pub async fn remove(&self, id: &str) -> Result<PublicAgentConfig, AppError> {
+    pub async fn remove(&self, id: &PublicAgentId) -> Result<PublicAgentConfig, AppError> {
         let mut agents = self.agents.write().await;
         let removed = agents
             .remove(id)
             .ok_or_else(|| AppError::NotFound(format!("public agent {id} not found")))?;
         if let Err(e) = std::fs::remove_dir_all(self.agent_dir(id)) {
-            tracing::warn!(error = %e, id, "remove public-agent dir failed (roster entry dropped)");
+            tracing::warn!(error = %e, id = %id, "remove public-agent dir failed (roster entry dropped)");
         }
         Ok(removed)
     }
 
     fn persist(&self, cfg: &PublicAgentConfig) -> Result<(), AppError> {
+        cfg.validate()?;
         save_json_atomic(&self.agent_dir(&cfg.id), CONFIG_FILE, cfg)
             .map_err(|e| AppError::Internal(format!("persist public agent: {e}")))
     }
@@ -226,5 +237,48 @@ mod tests {
         assert_eq!(patched.id, a.id);
         assert_eq!(patched.seq, Some(1));
         assert_eq!(patched.name, "A2");
+    }
+
+    #[tokio::test]
+    async fn scan_skips_malformed_and_directory_mismatched_identities() {
+        let d = tempfile::tempdir().unwrap();
+        let malformed_dir = d.path().join("pubagent_x");
+        std::fs::create_dir_all(&malformed_dir).unwrap();
+        std::fs::write(
+            malformed_dir.join(CONFIG_FILE),
+            r#"{"id":"pubagent_x","name":"bad"}"#,
+        )
+        .unwrap();
+
+        let canonical = PublicAgentConfig::new("mismatch");
+        let wrong_dir = d.path().join(PublicAgentId::new().as_str());
+        save_json_atomic(&wrong_dir, CONFIG_FILE, &canonical).unwrap();
+
+        let r = reg(d.path());
+        assert!(r.list().await.is_empty());
+        assert!(!r.exists(&canonical.id).await);
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_noncanonical_provider_and_knowledge_ids_atomically() {
+        let d = tempfile::tempdir().unwrap();
+        let r = reg(d.path());
+        let a = r.create("A").await.unwrap();
+
+        assert!(
+            r.patch(
+                &a.id,
+                serde_json::json!({"model":{"provider_id":"prov_x","model":"m"}}),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            r.patch(&a.id, serde_json::json!({"knowledge_base_ids":["kb_x"]}))
+                .await
+                .is_err()
+        );
+        assert_eq!(r.get(&a.id).await.unwrap(), a);
+        assert_eq!(reg(d.path()).get(&a.id).await.unwrap(), a);
     }
 }

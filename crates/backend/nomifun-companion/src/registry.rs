@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nomifun_common::AppError;
+use nomifun_common::{AppError, CompanionId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -114,7 +114,7 @@ pub struct CompanionRegistry {
 
 impl CompanionRegistry {
     /// Synchronous boot-time scan: every subdirectory of `companions_dir` is loaded
-    /// as a profile. Corrupt/missing configs (empty id sentinel) and dirs
+    /// as a profile. Corrupt/missing configs and dirs
     /// whose name does not match the embedded id are warned about and
     /// skipped — a broken profile must never brick boot or shadow a good one.
     ///
@@ -131,8 +131,11 @@ impl CompanionRegistry {
                     continue;
                 }
                 let dir_name = entry.file_name().to_string_lossy().into_owned();
-                let profile = CompanionProfileConfig::load(&path);
-                if profile.id.is_empty() || profile.id != dir_name {
+                let Some(profile) = CompanionProfileConfig::load(&path) else {
+                    tracing::warn!(dir = %path.display(), "companion profile missing or corrupt; skipping");
+                    continue;
+                };
+                if profile.id != dir_name {
                     tracing::warn!(
                         dir = %path.display(),
                         id = %profile.id,
@@ -177,7 +180,8 @@ impl CompanionRegistry {
     }
 
     pub async fn get(&self, id: &str) -> Option<CompanionProfileConfig> {
-        self.inner.read().await.get(id).cloned()
+        let id = CompanionId::try_from(id).ok()?;
+        self.inner.read().await.get(id.as_str()).cloned()
     }
 
     /// Companion ids in the same order as [`list`](Self::list).
@@ -186,14 +190,16 @@ impl CompanionRegistry {
     }
 
     /// 解析"代表全家发声"的伙伴 id（单一事实源，learner 与 evolution 引擎共用）。
-    /// 存活的显式默认体优先；否则首个注册伙伴；空 roster 返回空串。
+    /// 存活的显式默认体优先；否则首个注册伙伴；空 roster 返回 `None`。
     /// liveness 检查同时修掉"默认体已删除却仍被当 owner"的潜伏问题。
-    pub async fn resolve_default(&self, default_companion_id: &str) -> String {
+    pub async fn resolve_default(&self, default_companion_id: Option<&str>) -> Option<String> {
         let ids = self.ids().await;
-        if !default_companion_id.is_empty() && ids.iter().any(|id| id == default_companion_id) {
-            return default_companion_id.to_owned();
+        if let Some(default_companion_id) = default_companion_id
+            && ids.iter().any(|id| id == default_companion_id)
+        {
+            return Some(default_companion_id.to_owned());
         }
-        ids.into_iter().next().unwrap_or_default()
+        ids.into_iter().next()
     }
 
     /// Create a companion: validate the name, allocate its short number from the
@@ -284,13 +290,19 @@ impl CompanionRegistry {
         if !patch.is_object() {
             return Err(AppError::BadRequest("companion patch must be a JSON object".into()));
         }
+        let id = CompanionId::try_from(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
         let mut companions = self.inner.write().await;
         let current = companions
-            .get(id)
+            .get(id.as_str())
             .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))?;
         let mut value = serde_json::to_value(current)
             .map_err(|e| AppError::Internal(format!("serialize companion profile: {e}")))?;
         json_merge_patch(&mut value, &patch);
+        value["id"] = serde_json::Value::String(current.id.clone());
+        value["seq"] = serde_json::to_value(current.seq)
+            .map_err(|e| AppError::Internal(format!("serialize companion seq: {e}")))?;
+        value["created_at"] = serde_json::Value::Number(current.created_at.into());
         let mut merged: CompanionProfileConfig = serde_json::from_value(value)
             .map_err(|e| AppError::BadRequest(format!("invalid companion patch: {e}")))?;
         merged.id = current.id.clone();
@@ -307,11 +319,13 @@ impl CompanionRegistry {
     /// Remove a companion from the map and delete its directory (an already-missing
     /// directory is tolerated). Returns the removed profile.
     pub async fn remove(&self, id: &str) -> Result<CompanionProfileConfig, AppError> {
+        let id = CompanionId::try_from(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
         let mut companions = self.inner.write().await;
         let profile = companions
-            .remove(id)
+            .remove(id.as_str())
             .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))?;
-        match std::fs::remove_dir_all(self.companions_dir.join(id)) {
+        match std::fs::remove_dir_all(self.companions_dir.join(id.as_str())) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(AppError::Internal(format!("remove companion dir: {e}"))),
@@ -359,17 +373,17 @@ mod tests {
     async fn resolve_default_prefers_alive_explicit_then_first() {
         let dir = tempfile::tempdir().unwrap();
         let reg = CompanionRegistry::scan(dir.path().join("companions"), dir.path().join("shared"));
-        // 空 roster → 空串
-        assert_eq!(reg.resolve_default("").await, "");
+        // 空 roster → 无默认伙伴
+        assert_eq!(reg.resolve_default(None).await, None);
         let _a = reg.create("甲", "ink").await.unwrap();
         let b = reg.create("乙", "ink").await.unwrap();
         let first = reg.ids().await.into_iter().next().unwrap();
         // 显式默认体且存活 → 用之
-        assert_eq!(reg.resolve_default(&b.id).await, b.id);
+        assert_eq!(reg.resolve_default(Some(&b.id)).await.as_deref(), Some(b.id.as_str()));
         // 显式默认体已删（不在 roster）→ 回退首个注册
-        assert_eq!(reg.resolve_default("companion_ghost").await, first);
-        // 空默认体 → 首个注册
-        assert_eq!(reg.resolve_default("").await, first);
+        assert_eq!(reg.resolve_default(Some("malformed-companion-id")).await.as_deref(), Some(first.as_str()));
+        // 未配置默认体 → 首个注册
+        assert_eq!(reg.resolve_default(None).await.as_deref(), Some(first.as_str()));
     }
 
     #[tokio::test]
@@ -385,7 +399,7 @@ mod tests {
         assert_eq!(companion.seq, Some(1));
 
         // Persisted on disk under {companions_dir}/{id}/config.json.
-        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&companion.id));
+        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&companion.id)).unwrap();
         assert_eq!(on_disk, companion);
 
         assert_eq!(reg.get(&companion.id).await.unwrap(), companion);
@@ -446,7 +460,9 @@ mod tests {
                 &companion.id,
                 serde_json::json!({
                     "name": "新名",
-                    "id": "companion_evil",
+                    // Explicit malformed-ID negative: immutable fields are discarded
+                    // before the merged profile is deserialized.
+                    "id": "not-a-companion-id",
                     "seq": 99,
                     "created_at": 1,
                     "appearance": {"companion_enabled": true, "companion_x": 7}
@@ -464,12 +480,13 @@ mod tests {
         assert_eq!(patched.character, "ink");
 
         // Persisted and visible through the map.
-        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&companion.id));
+        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&companion.id)).unwrap();
         assert_eq!(on_disk, patched);
         assert_eq!(reg.get(&companion.id).await.unwrap(), patched);
 
+        let missing_id = CompanionId::new().into_string();
         assert!(matches!(
-            reg.patch("companion_missing", serde_json::json!({"name": "x"})).await,
+            reg.patch(&missing_id, serde_json::json!({"name": "x"})).await,
             Err(AppError::NotFound(_))
         ));
         assert!(matches!(
@@ -551,7 +568,7 @@ mod tests {
         assert_eq!(CompanionSeqState::load(&dir.path().join("shared")).last_companion_seq, 3);
         assert!(!crate::profile::SharedCompanionConfig::config_path(&dir.path().join("shared")).exists());
         // …and the number on the profile itself.
-        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&third.id));
+        let on_disk = CompanionProfileConfig::load(&dir.path().join("companions").join(&third.id)).unwrap();
         assert_eq!(on_disk.seq, Some(3));
 
         // A rescan (fresh process) keeps counting past the watermark even
@@ -589,8 +606,8 @@ mod tests {
         assert_eq!(reg.get(&newer.id).await.unwrap().seq, Some(7));
         assert_eq!(reg.get(&numbered.id).await.unwrap().seq, Some(5));
         // Persisted to each profile's config.json and to the watermark.
-        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&older.id)).seq, Some(6));
-        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&newer.id)).seq, Some(7));
+        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&older.id)).unwrap().seq, Some(6));
+        assert_eq!(CompanionProfileConfig::load(&companions_dir.join(&newer.id)).unwrap().seq, Some(7));
         assert_eq!(CompanionSeqState::load(&dir.path().join("shared")).last_companion_seq, 7);
 
         // Idempotent: a second run changes no number.

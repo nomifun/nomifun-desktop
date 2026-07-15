@@ -92,7 +92,11 @@ When prebuilt installers ship, they will be linked from the project README and t
 
 On `nomifun-web`, the in-band recovery flow is the local-only WebUI route (`POST /api/webui/reset-password`) — you can hit it from the same machine the server runs on, and it generates a fresh random password and prints it. From a remote machine you cannot recover the password through the API.
 
-The fallback is to stop the server, edit the database directly (the `system_default_user.password_hash` column), and restart. The simplest reset is to set the hash to an empty string — the next boot then treats the install as needing first-run setup again, and the next visitor can claim the admin.
+The fallback is to stop the server, resolve the installation owner through
+`installation_identity.owner_user_id`, edit that user's `password_hash`, and
+restart. The simplest reset is to set the hash to an empty string — the next
+boot then treats the install as needing first-run setup again, and the next
+visitor can claim the admin.
 
 For desktop installs there is no password for the local WebView. WebUI remote
 access has its own admin password because it is reachable from another browser.

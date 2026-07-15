@@ -1,6 +1,13 @@
 # 桌面伙伴直接操作终端会话 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **ID-contract v2 note:** This is a historical feature plan, not executable
+> current guidance. Terminal entity-ID examples are superseded by
+> [`../../architecture/id-system.md`](../../architecture/id-system.md): wire
+> boundaries use canonical `TerminalId` strings and never numeric IDs or
+> compatibility coercion.
+
+> **Archived plan:** The steps below record the original implementation history
+> and must not be executed against the ID-v2 codebase.
 
 **Goal:** 让桌面伙伴能把消息/命令直接发进终端会话并执行、读回执行结果、可选等待回合结束——完成会话操作能力的闭环。
 
@@ -200,7 +207,7 @@ git commit --author="NomiFun Contributor <nomifun@users.noreply.github.com>" -m 
 
 **Interfaces:**
 - Consumes: `encode_submit_chunks` / `SubmitChunks` / `TERMINAL_SUBMIT_DELAY`（Task 1）；`crate::types::resolve_command`、`crate::enhance::resolve_agent_family`（已存在）；`self.write_input`（trait 已实现于 service.rs:1291）。
-- Produces: `pub async fn TerminalService::submit_text(&self, id: i64, text: &str) -> Result<(), TerminalError>`
+- Produces: `pub async fn TerminalService::submit_text(&self, id: &str, text: &str) -> Result<(), TerminalError>` after strict `TerminalId` boundary validation.
 
 - [ ] **Step 1: 写失败测试**
 
@@ -258,7 +265,7 @@ Expected: 编译失败（`submit_text` 未定义）。
     /// agent TUIs, raw + CR for single lines / shells). Uses the raw PTY write
     /// path — this is deliberate driving, so it does NOT arm IDMM supervision or
     /// auto-title the way `input` (user typing) does. `Err(NotFound)` if not live.
-    pub async fn submit_text(&self, id: i64, text: &str) -> Result<(), TerminalError> {
+    pub async fn submit_text(&self, id: &str, text: &str) -> Result<(), TerminalError> {
         if !self.live.contains_key(&id) {
             return Err(TerminalError::NotFound(id.to_string()));
         }
@@ -307,7 +314,7 @@ git commit --author="NomiFun Contributor <nomifun@users.noreply.github.com>" -m 
 - Consumes: `IDLE_SETTLE_WINDOW`（Task 1）；`crate::enhance::terminal_autowork_capable`、`self.subscribe_lifecycle`、`self.subscribe_output`、`crate::lifecycle::LifecycleKind`（均已存在）。
 - Produces:
   - `pub enum SettleReason { TurnEnd, Idle, Timeout, Exited }`（`#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]`, `#[serde(rename_all = "snake_case")]`）
-  - `pub async fn TerminalService::await_turn_settle(&self, id: i64, timeout: std::time::Duration) -> SettleReason`
+  - `pub async fn TerminalService::await_turn_settle(&self, id: &str, timeout: std::time::Duration) -> SettleReason`
 
 - [ ] **Step 1: 写 SettleReason 与失败测试**
 
@@ -423,7 +430,7 @@ Expected: 编译失败（`await_turn_settle` 未定义）。
     /// (`IDLE_SETTLE_WINDOW`). Never dresses `Idle` up as definitive completion.
     pub async fn await_turn_settle(
         &self,
-        id: i64,
+        id: &str,
         timeout: std::time::Duration,
     ) -> crate::submit::SettleReason {
         use crate::submit::SettleReason;
@@ -510,7 +517,7 @@ git commit --author="NomiFun Contributor <nomifun@users.noreply.github.com>" -m 
 - Consumes: `self.get`（service.rs:763，返回带 `scrollback_b64`）；`crate::ansi::strip_ansi`（已存在）；`BASE64`（service.rs 已导入）。
 - Produces:
   - `pub struct TerminalOutputTail { pub text: String, pub truncated: bool, pub status: String }`
-  - `pub async fn TerminalService::read_output_tail(&self, id: i64, max_bytes: usize) -> Result<TerminalOutputTail, TerminalError>`
+  - `pub async fn TerminalService::read_output_tail(&self, id: &str, max_bytes: usize) -> Result<TerminalOutputTail, TerminalError>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -577,7 +584,7 @@ pub struct TerminalOutputTail {
     /// transcript read-back — what an agent uses to SEE a command's result.
     pub async fn read_output_tail(
         &self,
-        id: i64,
+        id: &str,
         max_bytes: usize,
     ) -> Result<TerminalOutputTail, TerminalError> {
         let resp = self.get(id).await?;
@@ -679,7 +686,7 @@ Expected: 编译失败（`SubmitTerminalParams` 未定义）。
 #[derive(Deserialize, JsonSchema)]
 struct SubmitTerminalParams {
     /// The terminal session id (from nomi_list_terminals).
-    id: i64,
+    id: TerminalId,
     /// Plain UTF-8 text/command to type into the terminal and RUN. Do NOT
     /// base64-encode and do NOT append a newline — submission (Enter) is handled
     /// for you, including the bracketed-paste sequence agent CLIs (claude/codex/
@@ -821,7 +828,7 @@ Expected: 编译失败（`ReadTerminalOutputParams` 未定义）。
 #[derive(Deserialize, JsonSchema)]
 struct ReadTerminalOutputParams {
     /// The terminal session id.
-    id: i64,
+    id: TerminalId,
     /// Max bytes of the scrollback TAIL to return after ANSI stripping
     /// (default 16384, capped 65536).
     #[serde(default)]
@@ -989,7 +996,7 @@ Expected: 依赖 `nomifun-terminal` 的 re-export 存在则 PASS（本测试即�
 ```rust
 async fn submit_terminal_prompt(
     driver: &Arc<dyn TerminalDriver>,
-    terminal_id: i64,
+    terminal_id: &str,
     prompt: &str,
 ) -> Result<(), AppError> {
     // AutoWork 只驱动 lifecycle-capable 的 agent CLI（claude/codex），故 is_agent_tui=true。

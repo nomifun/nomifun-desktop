@@ -11,6 +11,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { ipcBridge } from '@/common';
+import type { TerminalId } from '@/common/types/ids';
 import { createStreamingDecoder, encodeStringToBase64 } from './terminalEncoding';
 import { bumpCtrlC, createCtrlCState, isCtrlC, type CtrlCState } from './ctrlCEscalation';
 import { TERMINAL_THEME, TERMINAL_TYPOGRAPHY } from './terminalTheme';
@@ -59,7 +60,7 @@ export interface XtermViewHandle {
 }
 
 interface XtermViewProps {
-  sessionId: number;
+  sessionId: TerminalId;
   className?: string;
   apiRef?: React.MutableRefObject<XtermViewHandle | null>;
   /**

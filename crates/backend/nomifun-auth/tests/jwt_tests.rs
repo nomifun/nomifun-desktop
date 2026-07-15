@@ -4,17 +4,22 @@
 
 use nomifun_auth::{AuthError, JwtService, resolve_jwt_secret};
 
+const USER_1: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+const USER_2: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+const USER_3: &str = "user_0190f5fe-7c00-7a00-8000-000000000003";
+const USER_42: &str = "user_0190f5fe-7c00-7a00-8000-000000000042";
+
 #[test]
 fn full_lifecycle_sign_verify_blacklist() {
     let service = JwtService::new("integration_test_secret".into());
 
     // Sign a token
-    let token = service.sign("user_42", "testuser").unwrap();
+    let token = service.sign(USER_42, "testuser").unwrap();
     assert!(!token.is_empty());
 
     // Verify the token
     let payload = service.verify(&token).unwrap();
-    assert_eq!(payload.user_id, "user_42");
+    assert_eq!(payload.user_id.as_str(), USER_42);
     assert_eq!(payload.username, "testuser");
 
     // Blacklist the token
@@ -29,8 +34,8 @@ fn full_lifecycle_sign_verify_blacklist() {
 fn secret_rotation_invalidates_all_tokens() {
     let service = JwtService::new("original_secret".into());
 
-    let token1 = service.sign("user_1", "alice").unwrap();
-    let token2 = service.sign("user_2", "bob").unwrap();
+    let token1 = service.sign(USER_1, "alice").unwrap();
+    let token2 = service.sign(USER_2, "bob").unwrap();
 
     // Both tokens are valid
     assert!(service.verify(&token1).is_ok());
@@ -44,9 +49,9 @@ fn secret_rotation_invalidates_all_tokens() {
     assert!(service.verify(&token2).is_err());
 
     // New tokens with the new secret work
-    let new_token = service.sign("user_3", "charlie").unwrap();
+    let new_token = service.sign(USER_3, "charlie").unwrap();
     let payload = service.verify(&new_token).unwrap();
-    assert_eq!(payload.user_id, "user_3");
+    assert_eq!(payload.user_id.as_str(), USER_3);
 }
 
 #[test]

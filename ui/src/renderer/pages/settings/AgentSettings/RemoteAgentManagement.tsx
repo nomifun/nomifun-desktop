@@ -1,3 +1,4 @@
+import type { RemoteAgentId } from '@/common/types/ids';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -92,7 +93,7 @@ const RemoteAgentFormModal: React.FC<{
   }, [stopPolling]);
 
   const startPairingPoll = useCallback(
-    (agentId: number) => {
+    (agentId: RemoteAgentId) => {
       setPairingState('pending');
       setPairingTimeLeft(PAIRING_TIMEOUT);
       const startedAt = Date.now();
@@ -163,7 +164,7 @@ const RemoteAgentFormModal: React.FC<{
   }, [editAgent, form, t]);
 
   const handleSave = useCallback(async () => {
-    let createdAgentId: number | undefined;
+    let createdAgentId: RemoteAgentId | undefined;
     try {
       const values = await form.validate();
       setSaving(true);
@@ -173,7 +174,7 @@ const RemoteAgentFormModal: React.FC<{
         avatar,
       };
 
-      let agentId: number;
+      let agentId: RemoteAgentId;
       if (editAgent) {
         const updates: Partial<RemoteAgentInput> = { ...payload };
         if (

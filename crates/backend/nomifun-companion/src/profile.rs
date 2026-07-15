@@ -6,10 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use nomifun_common::{generate_prefixed_id, now_ms};
+use nomifun_common::{CompanionId, FigureId, ProviderWithModel, now_ms};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{CollectConfig, DEFAULT_CHARACTER, ModelConfig, PersonaConfig};
+use crate::config::{CollectConfig, DEFAULT_CHARACTER, PersonaConfig, deserialize_optional_model};
 
 /// Desktop-companion window settings for one companion — the legacy `AppearanceConfig`
 /// minus `character`, which now lives directly on [`CompanionProfileConfig`].
@@ -70,7 +70,11 @@ pub struct CustomFigureMeta {
     /// so one figure can back many companions. Absent for legacy per-companion figures
     /// installed before the library (those still serve from
     /// `/api/companion/companions/{id}/figure`), keeping old configs byte-identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_figure_id"
+    )]
     pub figure_id: Option<String>,
 }
 
@@ -78,8 +82,9 @@ pub struct CustomFigureMeta {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct CompanionProfileConfig {
-    /// Stable id (`companion_…`). An empty id after `load` means the file was
-    /// missing/corrupt — callers must discard such profiles.
+    /// Stable canonical id (`companion_…`). [`Self::load`] returns `None`
+    /// for a missing, corrupt, or non-canonical profile.
+    #[serde(default, deserialize_with = "deserialize_companion_profile_id")]
     pub id: String,
     /// Display-only short number (`#1`, `#2`, …) for companion lists. Monotonic
     /// within this machine — allocated by the registry from its private
@@ -94,7 +99,8 @@ pub struct CompanionProfileConfig {
     pub character: String,
     pub persona: PersonaConfig,
     /// Per-companion companion-chat model (the shared learn loop has its own).
-    pub model: ModelConfig,
+    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    pub model: Option<ProviderWithModel>,
     pub appearance: CompanionWindowConfig,
     /// Frozen reusable configuration applied to this companion. Identity,
     /// memories, evolved skills, window state and channel credentials remain
@@ -110,14 +116,14 @@ impl CompanionProfileConfig {
     pub fn new(name: &str, character: &str) -> Self {
         let character = if character.is_empty() { DEFAULT_CHARACTER } else { character };
         Self {
-            id: generate_prefixed_id("companion"),
+            id: CompanionId::new().into_string(),
             // Allocated by the registry under its lock (never here, where no
             // watermark is in scope).
             seq: None,
             name: name.to_owned(),
             character: character.to_owned(),
             persona: PersonaConfig::default(),
-            model: ModelConfig::default(),
+            model: None,
             appearance: CompanionWindowConfig::default(),
             applied_preset: None,
             created_at: now_ms(),
@@ -128,11 +134,13 @@ impl CompanionProfileConfig {
         dir.join("config.json")
     }
 
-    /// Load from `{dir}/config.json`, falling back to defaults when the file
-    /// is missing or unreadable (a corrupt profile must never brick boot).
-    /// The default has an empty `id` — callers detect and discard it.
-    pub fn load(dir: &Path) -> Self {
-        crate::fsio::load_json_or_default(&Self::config_path(dir))
+    /// Load and validate `{dir}/config.json`. Missing, malformed, or non-canonical
+    /// profiles are absent rather than represented by an empty-string ID sentinel.
+    pub fn load(dir: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(Self::config_path(dir)).ok()?;
+        let profile: Self = serde_json::from_str(&raw).ok()?;
+        CompanionId::try_from(profile.id.as_str()).ok()?;
+        Some(profile)
     }
 
     /// Atomically persist to `{dir}/config.json` (unique temp file + rename,
@@ -151,7 +159,8 @@ pub struct SharedLearnConfig {
     pub enabled: bool,
     /// Minutes between learning runs.
     pub interval_minutes: u32,
-    pub model: ModelConfig,
+    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    pub model: Option<ProviderWithModel>,
 }
 
 impl Default for SharedLearnConfig {
@@ -159,7 +168,7 @@ impl Default for SharedLearnConfig {
         Self {
             enabled: false,
             interval_minutes: 60,
-            model: ModelConfig::default(),
+            model: None,
         }
     }
 }
@@ -173,7 +182,8 @@ pub struct SharedEvolveConfig {
     pub enabled: bool,
     /// Minutes between evolution runs.
     pub interval_minutes: u32,
-    pub model: ModelConfig,
+    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    pub model: Option<ProviderWithModel>,
     /// A pattern must occur at least this many times total to be drafted.
     pub min_pattern_count: i64,
     /// A pattern must appear across at least this many distinct sessions.
@@ -196,7 +206,7 @@ impl Default for SharedEvolveConfig {
         Self {
             enabled: false,
             interval_minutes: 30,
-            model: ModelConfig::default(),
+            model: None,
             min_pattern_count: 3,
             min_distinct_sessions: 2,
             reflect_enabled: true,
@@ -259,7 +269,8 @@ pub struct SharedCompanionConfig {
     #[serde(default)]
     pub smart_collaboration: bool,
     /// Which companion new/unattributed activity defaults to.
-    pub default_companion_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_companion_id")]
+    pub default_companion_id: Option<String>,
     /// Opt-in (default None = off): when set to a directory path, companion
     /// `save` memories are ALSO mirrored into the nomi agent's file-memory there
     /// (the §3.4 "消两库割裂" bridge), so the agent recalls companion-learned
@@ -267,6 +278,44 @@ pub struct SharedCompanionConfig {
     /// sessions — that is the feature; default-off keeps the libraries separate.
     #[serde(default)]
     pub bridge_to_memory_dir: Option<String>,
+}
+
+fn deserialize_optional_companion_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|raw| {
+            CompanionId::try_from(raw.as_str())
+                .map(CompanionId::into_string)
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+
+fn deserialize_optional_figure_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|raw| {
+            FigureId::try_from(raw.as_str())
+                .map(FigureId::into_string)
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+}
+
+fn deserialize_companion_profile_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    CompanionId::try_from(raw.as_str())
+        .map(CompanionId::into_string)
+        .map_err(serde::de::Error::custom)
 }
 
 impl SharedCompanionConfig {
@@ -294,16 +343,18 @@ mod tests {
     fn profile_roundtrip_and_default_on_missing() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = CompanionProfileConfig::load(dir.path());
-        assert_eq!(loaded, CompanionProfileConfig::default());
-        assert!(loaded.id.is_empty()); // caller-discard sentinel
+        assert_eq!(loaded, None);
 
         let mut profile = CompanionProfileConfig::new("毛球", "ink");
-        profile.model.provider_id = "prov_x".into();
-        profile.model.model = "claude-fable-5".into();
+        profile.model = Some(ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "claude-fable-5".into(),
+            use_model: None,
+        });
         profile.appearance.companion_enabled = true;
         profile.save(dir.path()).unwrap();
 
-        let again = CompanionProfileConfig::load(dir.path());
+        let again = CompanionProfileConfig::load(dir.path()).unwrap();
         assert_eq!(again, profile);
         assert!(again.id.starts_with("companion_"));
         assert!(again.created_at > 0);
@@ -322,8 +373,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(CompanionProfileConfig::config_path(dir.path()), "{not json").unwrap();
         let loaded = CompanionProfileConfig::load(dir.path());
-        assert_eq!(loaded, CompanionProfileConfig::default());
-        assert!(loaded.id.is_empty());
+        assert_eq!(loaded, None);
     }
 
     #[test]
@@ -338,6 +388,7 @@ mod tests {
         let raw = std::fs::read_to_string(CompanionProfileConfig::config_path(dir.path())).unwrap();
         assert!(!raw.contains("custom_figure"));
 
+        let figure_id = FigureId::new().into_string();
         profile.appearance.custom_figure = Some(CustomFigureMeta {
             aspect: 0.9444,
             head_box: HeadBox { x: 0.321, y: 0.0, w: 0.281, h: 0.3 },
@@ -350,7 +401,7 @@ mod tests {
         let raw_none = std::fs::read_to_string(CompanionProfileConfig::config_path(dir.path())).unwrap();
         assert!(!raw_none.contains("figure_id"));
         assert!(!raw_none.contains("size_px"));
-        let again = CompanionProfileConfig::load(dir.path());
+        let again = CompanionProfileConfig::load(dir.path()).unwrap();
         assert_eq!(again, profile);
         let meta = again.appearance.custom_figure.unwrap();
         assert_eq!(meta.size_tier, "m");
@@ -363,12 +414,12 @@ mod tests {
             head_box: HeadBox { x: 0.321, y: 0.0, w: 0.281, h: 0.3 },
             size_tier: "m".into(),
             size_px: Some(333.0),
-            figure_id: Some("figure_abc".into()),
+            figure_id: Some(figure_id.clone()),
         });
         profile.save(dir.path()).unwrap();
-        let linked = CompanionProfileConfig::load(dir.path());
+        let linked = CompanionProfileConfig::load(dir.path()).unwrap();
         let linked_cf = linked.appearance.custom_figure.unwrap();
-        assert_eq!(linked_cf.figure_id.as_deref(), Some("figure_abc"));
+        assert_eq!(linked_cf.figure_id.as_deref(), Some(figure_id.as_str()));
         assert_eq!(linked_cf.size_px, Some(333.0));
     }
 
@@ -383,14 +434,17 @@ mod tests {
         let mut cfg = SharedCompanionConfig::default();
         cfg.collect.chat_user_messages = true;
         cfg.learn.enabled = true;
-        cfg.learn.model.provider_id = "prov_y".into();
-        cfg.learn.model.model = "claude-fable-5".into();
-        cfg.default_companion_id = "companion_abc".into();
+        cfg.learn.model = Some(ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "claude-fable-5".into(),
+            use_model: None,
+        });
+        cfg.default_companion_id = Some(nomifun_common::CompanionId::new().into_string());
         cfg.save(dir.path()).unwrap();
 
         let again = SharedCompanionConfig::load(dir.path());
         assert_eq!(again, cfg);
-        assert!(again.learn.model.is_configured());
+        assert!(again.learn.model.is_some());
     }
 
     #[test]
@@ -399,6 +453,39 @@ mod tests {
             "smart_orchestration": true
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn shared_config_rejects_empty_or_malformed_default_companion_id() {
+        for default_companion_id in ["", "not-a-companion-id"] {
+            let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+                "default_companion_id": default_companion_id
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn profile_and_shared_models_are_nullable_and_strict() {
+        let profile = CompanionProfileConfig::new("严格模型", "ink");
+        let profile_json = serde_json::to_value(&profile).unwrap();
+        assert!(profile_json["model"].is_null());
+
+        let shared_json = serde_json::to_value(SharedCompanionConfig::default()).unwrap();
+        assert!(shared_json["learn"]["model"].is_null());
+        assert!(shared_json["evolve"]["model"].is_null());
+
+        let canonical_provider = nomifun_common::ProviderId::new().into_string();
+        for model in [
+            serde_json::json!({"provider_id": "", "model": "chat"}),
+            serde_json::json!({"provider_id": "prov_x", "model": "chat"}),
+            serde_json::json!({"provider_id": canonical_provider, "model": " "}),
+        ] {
+            let result = serde_json::from_value::<SharedCompanionConfig>(serde_json::json!({
+                "learn": {"model": model}
+            }));
+            assert!(result.is_err(), "partial or malformed model ref must be rejected");
+        }
     }
 
     #[test]

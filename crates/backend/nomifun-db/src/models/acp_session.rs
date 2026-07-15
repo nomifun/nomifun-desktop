@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Primary key is `conversation_id` (one session per conversation).
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AcpSessionRow {
-    pub conversation_id: i64,
+    pub conversation_id: String,
     pub agent_backend: String,
     pub agent_source: String,
     pub agent_id: String,

@@ -11,10 +11,11 @@
  */
 
 import type { WorkshopAssetKind, WorkshopGeneratorMode } from '../types';
+import type { AssetId, ProviderId } from '@/common/types/ids';
 
 /** A single generation-capable model resolved against a configured provider. */
 export interface ModelOption {
-  providerId: string;
+  providerId: ProviderId;
   providerName: string;
   platform: string;
   model: string;
@@ -22,7 +23,7 @@ export interface ModelOption {
 
 /** Models grouped under one provider, for the picker's grouped list. */
 export interface ModelGroup {
-  providerId: string;
+  providerId: ProviderId;
   providerName: string;
   platform: string;
   models: ModelOption[];
@@ -49,7 +50,7 @@ export interface ResolvedMention {
   label: string;
   kind: WorkshopAssetKind;
   /** Asset id for image / video references; null for text (folded into prompt). */
-  assetId: string | null;
+  assetId: AssetId | null;
   /** Text body for text nodes / assets; null otherwise. */
   text: string | null;
 }

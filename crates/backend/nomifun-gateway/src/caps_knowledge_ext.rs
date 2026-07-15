@@ -8,6 +8,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use nomifun_common::KnowledgeBaseId;
 
 use crate::deps::GatewayDeps;
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
@@ -102,7 +103,8 @@ struct DiscardInboxParams {
 #[derive(Deserialize, JsonSchema)]
 struct SearchParams {
     /// Knowledge base ids to search (at least one required).
-    kb_ids: Vec<String>,
+    #[schemars(with = "Vec<String>")]
+    kb_ids: Vec<KnowledgeBaseId>,
     /// Free-text query (matched against file paths, headings, and content).
     query: String,
     /// Maximum results to return (default 20, clamped to 1..=100).

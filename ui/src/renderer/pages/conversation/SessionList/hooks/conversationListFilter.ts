@@ -5,6 +5,7 @@
  */
 
 import type { TChatConversation } from '@/common/config/storage';
+import type { CompanionId } from '@/common/types/ids';
 
 type ConversationListItem = Pick<TChatConversation, 'execution_step_id' | 'extra'>;
 
@@ -14,13 +15,13 @@ export const isOrdinaryWorkConversation = (conversation: ConversationListItem): 
   const extra = conversation.extra as
     | {
         is_health_check?: boolean;
-        companionSession?: boolean;
-        companionId?: string;
-        channelPlatform?: string;
+        companion_session?: boolean;
+        companion_id?: CompanionId;
+        channel_platform?: string;
       }
     | undefined;
   const isCompanionConversation =
-    !!extra?.companionSession || !!extra?.companionId || !!extra?.channelPlatform;
+    !!extra?.companion_session || !!extra?.companion_id || !!extra?.channel_platform;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);
   return extra?.is_health_check !== true && !isCompanionConversation && !isExecutionAttemptTranscript;
 };

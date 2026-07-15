@@ -4,6 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseCompanionId,
+  parseConversationId,
+  parseExecutionId,
+  parsePublicAgentId,
+  type CompanionId,
+  type ConversationId,
+  type ExecutionId,
+  type PublicAgentId,
+} from '@/common/types/ids';
+
 export type ProviderUsageFeature =
   | 'desktopCompanion'
   | 'publicCompanion'
@@ -11,14 +22,16 @@ export type ProviderUsageFeature =
   | 'conversation'
   | 'agentExecution';
 
+export type ProviderUsageTargetId = CompanionId | PublicAgentId | ConversationId | ExecutionId;
+
 export interface ProviderUsage {
   feature: ProviderUsageFeature;
   label: string;
-  targetId?: string;
+  targetId?: ProviderUsageTargetId;
 }
 
 /** Deep-link route for a feature's unbind location. Verify against Router.tsx. */
-export function featureRoute(feature: ProviderUsageFeature, targetId?: string): string {
+export function featureRoute(feature: ProviderUsageFeature, targetId?: ProviderUsageTargetId): string {
   switch (feature) {
     case 'desktopCompanion':
       // Desktop-companion model control (CompanionModelControl → profile.model)
@@ -40,7 +53,7 @@ export function featureRoute(feature: ProviderUsageFeature, targetId?: string): 
 export interface ProviderUsageGroup {
   feature: ProviderUsageFeature;
   labels: string[];
-  targetId?: string;
+  targetId?: ProviderUsageTargetId;
 }
 
 export function groupUsagesByFeature(usages: ProviderUsage[]): ProviderUsageGroup[] {
@@ -56,7 +69,26 @@ export function groupUsagesByFeature(usages: ProviderUsage[]): ProviderUsageGrou
 /** Extract usages from a BackendHttpError.details payload. */
 export function parseProviderInUseDetails(details: unknown): ProviderUsage[] {
   if (details && typeof details === 'object' && Array.isArray((details as { usages?: unknown }).usages)) {
-    return (details as { usages: ProviderUsage[] }).usages;
+    return (details as { usages: unknown[] }).usages.flatMap((item): ProviderUsage[] => {
+      if (!item || typeof item !== 'object') return [];
+      const raw = item as { feature?: unknown; label?: unknown; targetId?: unknown };
+      if (typeof raw.feature !== 'string' || typeof raw.label !== 'string') return [];
+      const feature = raw.feature as ProviderUsageFeature;
+      if (!['desktopCompanion', 'publicCompanion', 'smartDecision', 'conversation', 'agentExecution'].includes(feature)) {
+        return [];
+      }
+      if (raw.targetId == null) return [{ feature, label: raw.label }];
+      const targetId = (() => {
+        switch (feature) {
+          case 'desktopCompanion': return parseCompanionId(raw.targetId);
+          case 'publicCompanion': return parsePublicAgentId(raw.targetId);
+          case 'conversation': return parseConversationId(raw.targetId);
+          case 'agentExecution': return parseExecutionId(raw.targetId);
+          case 'smartDecision': return undefined;
+        }
+      })();
+      return [{ feature, label: raw.label, ...(targetId ? { targetId } : {}) }];
+    });
   }
   return [];
 }

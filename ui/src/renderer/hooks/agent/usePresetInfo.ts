@@ -9,21 +9,20 @@ import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
-import type { Preset, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import CoworkLogo from '@/renderer/assets/icons/cowork.svg';
 import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
 
 export interface PresetInfo {
-  id: string;
+  id: PresetReference;
   name: string;
   logo: string;
   isEmoji: boolean;
   revision?: number;
 }
 
-export function resolvePresetConfigId(conversation: TChatConversation): string | null {
-  const value = conversation.preset_id;
-  return typeof value === 'string' && value.trim() ? value.trim() : null;
+export function resolvePresetConfigId(conversation: TChatConversation): PresetReference | null {
+  return conversation.preset_id ?? null;
 }
 
 export function resolvePresetSnapshot(conversation: TChatConversation): ResolvedPresetSnapshot | null {

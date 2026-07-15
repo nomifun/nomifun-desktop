@@ -12,6 +12,7 @@ import { Alert, Button, Popconfirm, Select, Spin, Tooltip } from '@arco-design/w
 import { Caution, CheckOne, Copy, Delete, Key, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { CompanionId } from '@/common/types/ids';
 
 /**
  * CompanionAccessTokenPanel — mint / inspect / revoke a per-companion Remote
@@ -33,7 +34,7 @@ const CompanionAccessTokenPanel: React.FC = () => {
   // Companion roster + the picked companion.
   const [companions, setCompanions] = useState<ICompanionWithStatus[]>([]);
   const [companionsLoading, setCompanionsLoading] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<CompanionId | null>(null);
 
   // Per-companion token status (configured?), the minted one-time plaintext, the
   // mint-time no-model warning, and in-flight flags for each action.

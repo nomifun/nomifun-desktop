@@ -47,7 +47,7 @@
 //! per-instance profile dir) is kept — collapsing to one engine would turn
 //! per-companion serialization into a global one, a behavior change we avoid. But
 //! every slot points at the **same shared credential vault**
-//! (`nomifun_secret::pet_vault_path` now ignores its key and routes to
+//! (`nomifun_secret::shared_vault_path` routes to
 //! `{data_dir}/browser-secrets/shared`), so `secret:NAME` / login / domain policy are
 //! SHARED across companions and sessions (consistent with the unified-memory model).
 //! Per-companion slots isolate the live Chrome process + its ephemeral profile, not
@@ -79,6 +79,7 @@ use nomi_browser::{BrowserSecretSource, BrowserTool, OUT_OF_BAND_CONFIRMED_KEY};
 use nomi_config::config::BrowserConfig;
 use nomi_tools::Tool;
 use nomi_types::tool::ToolResult;
+use nomifun_common::{CompanionId, ConversationId};
 use serde_json::{Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -218,14 +219,18 @@ impl BrowserRegistry {
     /// Resolve the registry key for a caller. A companion binding scopes the
     /// browser to that companion (multi-companion isolation); a session without
     /// one (e.g. an IM Channel Agent) gets a `conversation:<id>` key so it still
-    /// has its own isolated tool. An empty/unknown caller falls back to a shared
-    /// `"_default"` key.
-    pub fn key_for(companion_id: Option<&str>, conversation_id: &str) -> String {
-        match companion_id {
-            Some(c) if !c.trim().is_empty() => c.trim().to_string(),
-            _ if !conversation_id.trim().is_empty() => format!("conversation:{}", conversation_id.trim()),
-            _ => "_default".to_string(),
+    /// has its own isolated tool. A caller without either identity cannot own a
+    /// browser session and is rejected.
+    pub fn key_for(
+        companion_id: Option<&CompanionId>,
+        conversation_id: Option<&ConversationId>,
+    ) -> Result<String, &'static str> {
+        if let Some(companion_id) = companion_id {
+            return Ok(companion_id.as_str().to_owned());
         }
+        conversation_id
+            .map(|conversation_id| format!("conversation:{}", conversation_id.as_str()))
+            .ok_or("browser caller requires a companion_id or conversation_id")
     }
 
     /// The per-companion workspace dir (`{data_dir}/browser-profiles/{key}`).
@@ -260,13 +265,12 @@ impl BrowserRegistry {
             .with_approval_gate(Arc::new(GatewayAutoApprovalGate));
         // P3-X2: give the slot tool the SHARED secret vault source so gateway-driven
         // `secret:NAME` resolves and the firewall allowlist is derived from the
-        // registered allowed_origins (裁决⑤). User decision (去 per-pet 键化):
-        // `pet_vault_path` now ignores `key` and routes every slot to the one shared
-        // vault `{data_dir}/browser-secrets/shared`, so credentials/login/domain policy
+        // registered allowed_origins (裁决⑤). Every slot uses the one shared vault
+        // `{data_dir}/browser-secrets/shared`, so credentials/login/domain policy
         // are shared across all companions — the same shared vault the registration
         // endpoint and the session factory write to/read from.
         if let Some(secret_key) = self.secret_key {
-            let vault_path = nomifun_secret::pet_vault_path(&self.data_dir, key);
+            let vault_path = nomifun_secret::shared_vault_path(&self.data_dir);
             tool = tool.secret_source(BrowserSecretSource { vault_path, key: secret_key });
         }
         let slot = Arc::new(CompanionBrowser {
@@ -335,7 +339,7 @@ impl BrowserRegistry {
     /// fails closed and denies) when the pending store is at capacity — a
     /// misbehaving agent cannot grow it without bound.
     pub fn stash_pending(&self, key: &str, input: Value) -> Option<String> {
-        let call_id = nomifun_common::generate_prefixed_id("browser_oob");
+        let call_id = nomifun_common::generate_prefixed_id("browseroob");
         let mut map = self.pending.lock().expect("browser registry pending poisoned");
         if map.len() >= MAX_PENDING {
             return None;
@@ -485,12 +489,24 @@ mod tests {
     }
 
     #[test]
-    fn key_prefers_companion_then_conversation_then_default() {
-        assert_eq!(BrowserRegistry::key_for(Some("companion_x"), "5"), "companion_x");
-        // Whitespace-only companion id is treated as absent.
-        assert_eq!(BrowserRegistry::key_for(Some("  "), "5"), "conversation:5");
-        assert_eq!(BrowserRegistry::key_for(None, "5"), "conversation:5");
-        assert_eq!(BrowserRegistry::key_for(None, ""), "_default");
+    fn key_prefers_companion_then_conversation_and_rejects_missing_identity() {
+        let companion = CompanionId::parse(
+            "companion_0190f5fe-7c00-7a00-8abc-012345678901",
+        )
+        .unwrap();
+        let conversation = ConversationId::parse(
+            "conv_0190f5fe-7c00-7a00-8abc-012345678902",
+        )
+        .unwrap();
+        assert_eq!(
+            BrowserRegistry::key_for(Some(&companion), Some(&conversation)).unwrap(),
+            companion.as_str()
+        );
+        assert_eq!(
+            BrowserRegistry::key_for(None, Some(&conversation)).unwrap(),
+            format!("conversation:{}", conversation.as_str())
+        );
+        assert!(BrowserRegistry::key_for(None, None).is_err());
     }
 
     #[test]
@@ -540,16 +556,8 @@ mod tests {
         // companion's gateway-driven browser (shared browser identity).
         let r = registry();
         let shared_tail = std::path::Path::new("browser-secrets").join("shared").join("secrets.json");
-        for key in ["companion_a", "companion_b", "conversation:5", "_default"] {
-            let p = nomifun_secret::pet_vault_path(&r.data_dir, key);
-            assert!(p.ends_with(&shared_tail), "key {key:?} must resolve the shared secret vault, got {p:?}");
-        }
-        // Distinct companion keys → identical shared vault path (the硬 evidence of sharing).
-        assert_eq!(
-            nomifun_secret::pet_vault_path(&r.data_dir, "companion_a"),
-            nomifun_secret::pet_vault_path(&r.data_dir, "companion_b"),
-            "去 per-pet 键化: two companions share one secret vault file"
-        );
+        let path = nomifun_secret::shared_vault_path(&r.data_dir);
+        assert!(path.ends_with(&shared_tail), "shared secret vault must use the singleton path: {path:?}");
     }
 
     #[test]
@@ -580,7 +588,7 @@ mod tests {
         let r = registry();
         let input = json!({"action": "click", "ref": "f0e3"});
         let call_id = r.stash_pending("companion_a", input.clone()).expect("under cap");
-        assert!(call_id.starts_with("browser_oob"), "synthetic call_id prefix: {call_id}");
+        assert!(call_id.starts_with("browseroob_"), "synthetic call_id prefix: {call_id}");
         assert_eq!(r.pending_count(), 1);
 
         let pending = r.take_pending(&call_id).expect("the just-stashed action");
@@ -594,7 +602,7 @@ mod tests {
     #[test]
     fn take_unknown_call_id_is_none() {
         let r = registry();
-        assert!(r.take_pending("browser_oob_nope").is_none());
+        assert!(r.take_pending("browseroob_019f6672-ed10-7193-8a86-7981f6c6feae").is_none());
     }
 
     #[test]
@@ -701,7 +709,11 @@ mod tests {
     #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all -E 'test(gateway_browser)'"]
     async fn gateway_browser_navigate_then_observe_round_trip() {
         let r = registry();
-        let key = BrowserRegistry::key_for(Some("companion_e2e"), "1");
+        let companion = CompanionId::parse(
+            "companion_0190f5fe-7c00-7a00-8abc-012345678911",
+        )
+        .unwrap();
+        let key = BrowserRegistry::key_for(Some(&companion), None).unwrap();
 
         let nav = tool_result_to_value(
             r.execute(&key, json!({"action": "navigate", "url": "https://example.com"}))
@@ -723,7 +735,11 @@ mod tests {
 
         // Isolation: a second companion gets a distinct slot (separate engine /
         // user-data-dir) — gateway-driven browsing is per-companion.
-        let other = BrowserRegistry::key_for(Some("companion_other"), "2");
+        let other_companion = CompanionId::parse(
+            "companion_0190f5fe-7c00-7a00-8abc-012345678912",
+        )
+        .unwrap();
+        let other = BrowserRegistry::key_for(Some(&other_companion), None).unwrap();
         assert!(
             !Arc::ptr_eq(&r.slot(&key), &r.slot(&other)),
             "different companions must get isolated browser slots"
@@ -742,7 +758,11 @@ mod tests {
     #[ignore = "需本机/打包 chrome：set NOMIFUN_CHROME_BINARY 后 --run-ignored all -E 'test(gw2_confirmed)'"]
     async fn gw2_confirmed_action_runs_held_then_approved() {
         let r = registry();
-        let key = BrowserRegistry::key_for(Some("companion_gw2"), "1");
+        let companion = CompanionId::parse(
+            "companion_0190f5fe-7c00-7a00-8abc-012345678913",
+        )
+        .unwrap();
+        let key = BrowserRegistry::key_for(Some(&companion), None).unwrap();
 
         // A data: URL with a real <form> whose submit button navigates on click.
         let page = "data:text/html,<form action='https://example.com/' method='get'>\

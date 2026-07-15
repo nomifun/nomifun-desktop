@@ -9,6 +9,7 @@ import type {
   TAgentExecutionLeadThinkingEvent,
   TAgentExecutionLeadThinkingPhase,
 } from '@/common/types/agentExecution/agentExecutionEvents';
+import type { ExecutionId } from '@/common/types/ids';
 import { useEffect, useRef, useState } from 'react';
 
 /** Public re-exports so consumers don't reach into the wire-type module. */
@@ -53,7 +54,7 @@ const EMPTY_STATE: LeadThinkingState = {
  * `requestAnimationFrame` tick, so a burst of tokens collapses into a single
  * re-render per frame rather than one per token.
  */
-export function useLeadThinking(executionId: string | null): LeadThinkingState {
+export function useLeadThinking(executionId: ExecutionId | null): LeadThinkingState {
   const [state, setState] = useState<LeadThinkingState>(EMPTY_STATE);
 
   // Pending reasoning deltas awaiting the next rAF flush, plus the scheduled

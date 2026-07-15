@@ -1,9 +1,12 @@
+import type { MessageId, RemoteAgentId } from '@/common/types/ids';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { conversationTarget, type ConversationId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
@@ -51,7 +54,7 @@ const useRemoteSendBoxDraft = getSendBoxDraftHook('remote', {
 const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
-const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id }) => {
+const RemoteSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
@@ -66,7 +69,7 @@ const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id 
   const aiProcessingRef = useRef(aiProcessing);
   const hasContentInTurnRef = useRef(false);
 
-  const { data: draftData, mutate: mutateDraft } = useRemoteSendBoxDraft(String(conversation_id));
+  const { data: draftData, mutate: mutateDraft } = useRemoteSendBoxDraft(conversation_id);
   const atPath = draftData?.atPath ?? EMPTY_AT_PATH;
   const uploadFile = draftData?.uploadFile ?? EMPTY_UPLOAD_FILES;
   const content = draftData?.content ?? '';
@@ -167,7 +170,7 @@ const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id 
   useEffect(() => {
     void getConversationOrNull(conversation_id).then(async (res) => {
       if (res?.extra?.workspace) setWorkspacePath(res.extra.workspace);
-      const extra = res?.extra as { remote_agent_id?: number; remoteAgentId?: number } | undefined;
+      const extra = res?.extra as { remote_agent_id?: RemoteAgentId; remoteAgentId?: RemoteAgentId } | undefined;
       const remoteAgentId = extra?.remote_agent_id ?? extra?.remoteAgentId;
       if (remoteAgentId != null) {
         const agent = await ipcBridge.remoteAgent.get.invoke({ id: remoteAgentId });
@@ -178,8 +181,9 @@ const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id 
 
   // Handle initial message from Guid page
   useEffect(() => {
-    const storageKey = `remote_initial_message_${conversation_id}`;
-    const processedKey = `remote_initial_processed_${conversation_id}`;
+    const target = conversationTarget(conversation_id);
+    const storageKey = sessionStorageKey('initial-message-remote', target);
+    const processedKey = sessionStorageKey('initial-message-processed-remote', target);
 
     const processInitialMessage = async () => {
       const stored = sessionStorage.getItem(storageKey);
@@ -262,7 +266,7 @@ const RemoteSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id 
       setAiProcessing(true);
       aiProcessingRef.current = true;
 
-      let msg_id: string | null = null;
+      let msg_id: MessageId | null = null;
       try {
         void checkAndUpdateTitle(conversation_id, input);
         // Wait for the server-assigned msg_id before rendering the optimistic

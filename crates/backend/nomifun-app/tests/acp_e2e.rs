@@ -11,6 +11,9 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, get_with_token, json_with_token, setup_and_login};
 
+const MISSING_CONVERSATION_ID: &str =
+    "conv_0190f5fe-7c00-7a00-8000-000000000099";
+
 // ── Global ACP routes ────────────────────────────────────────────
 
 #[tokio::test]
@@ -123,7 +126,10 @@ async fn get_mode_no_active_task() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    let req = get_with_token("/api/conversations/nonexistent/mode", &token);
+    let req = get_with_token(
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/mode"),
+        &token,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -135,7 +141,7 @@ async fn set_mode_no_active_task() {
 
     let req = json_with_token(
         "PUT",
-        "/api/conversations/nonexistent/mode",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/mode"),
         json!({ "mode": "code" }),
         &token,
         &csrf,
@@ -149,7 +155,10 @@ async fn get_model_no_active_task() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "user1", "pass123").await;
 
-    let req = get_with_token("/api/conversations/nonexistent/model", &token);
+    let req = get_with_token(
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/model"),
+        &token,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -161,7 +170,7 @@ async fn set_model_no_active_task() {
 
     let req = json_with_token(
         "PUT",
-        "/api/conversations/nonexistent/model",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/model"),
         json!({ "model_id": "claude-sonnet-4" }),
         &token,
         &csrf,

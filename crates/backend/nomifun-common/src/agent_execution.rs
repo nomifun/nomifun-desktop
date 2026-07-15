@@ -134,7 +134,7 @@ pub enum AgentExecutionActor {
     Agent {
         agent_id: String,
         #[serde(default)]
-        conversation_id: Option<i64>,
+        conversation_id: Option<String>,
         #[serde(default)]
         attempt_id: Option<String>,
     },
@@ -151,9 +151,10 @@ impl AgentExecutionActor {
         }
     }
 
-    pub fn agent(conversation_id: i64, attempt_id: Option<String>) -> Self {
+    pub fn agent(conversation_id: impl Into<String>, attempt_id: Option<String>) -> Self {
+        let conversation_id = conversation_id.into();
         Self::Agent {
-            agent_id: conversation_id.to_string(),
+            agent_id: conversation_id.clone(),
             conversation_id: Some(conversation_id),
             attempt_id,
         }
@@ -188,11 +189,11 @@ impl AgentExecutionActor {
         }
     }
 
-    pub const fn conversation_id(&self) -> Option<i64> {
+    pub fn conversation_id(&self) -> Option<&str> {
         match self {
             Self::Agent {
                 conversation_id, ..
-            } => *conversation_id,
+            } => conversation_id.as_deref(),
             _ => None,
         }
     }
@@ -488,9 +489,18 @@ mod tests {
 
     #[test]
     fn agent_actor_keeps_stable_identity_separate_from_local_context() {
-        let local = AgentExecutionActor::agent(42, Some("attempt_1".to_owned()));
-        assert_eq!(local.actor_id().as_deref(), Some("42"));
-        assert_eq!(local.conversation_id(), Some(42));
+        let local = AgentExecutionActor::agent(
+            "conv_019bffffffff-7abc-8def-0123-456789abcdef",
+            Some("attempt_1".to_owned()),
+        );
+        assert_eq!(
+            local.actor_id().as_deref(),
+            Some("conv_019bffffffff-7abc-8def-0123-456789abcdef")
+        );
+        assert_eq!(
+            local.conversation_id(),
+            Some("conv_019bffffffff-7abc-8def-0123-456789abcdef")
+        );
         assert_eq!(local.attempt_id(), Some("attempt_1"));
 
         let external = AgentExecutionActor::external_agent("companion_1");

@@ -1,4 +1,4 @@
-use nomifun_common::{RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, TimestampMs};
+use nomifun_common::{RemoteAgentAuthType, RemoteAgentId, RemoteAgentProtocol, RemoteAgentStatus, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// Request body for creating a remote agent.
@@ -44,7 +44,7 @@ pub struct UpdateRemoteAgentRequest {
 /// Remote agent response for list endpoint (auth_token omitted).
 #[derive(Debug, Serialize)]
 pub struct RemoteAgentListItem {
-    pub id: i64,
+    pub id: RemoteAgentId,
     pub name: String,
     pub protocol: RemoteAgentProtocol,
     pub url: String,
@@ -64,7 +64,7 @@ pub struct RemoteAgentListItem {
 /// Remote agent response for detail endpoint (auth_token masked, device keys visible).
 #[derive(Debug, Serialize)]
 pub struct RemoteAgentResponse {
-    pub id: i64,
+    pub id: RemoteAgentId,
     pub name: String,
     pub protocol: RemoteAgentProtocol,
     pub url: String,
@@ -125,7 +125,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::HandshakeResponse;
+    use super::{HandshakeResponse, RemoteAgentListItem};
+    use nomifun_common::{RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus};
 
     #[test]
     fn handshake_response_omits_empty_error() {
@@ -153,5 +154,27 @@ mod tests {
                 "error": "PAIRING_REQUIRED"
             })
         );
+    }
+
+    #[test]
+    fn remote_agent_response_serializes_canonical_string_id() {
+        let id = nomifun_common::RemoteAgentId::new();
+        let value = serde_json::to_value(RemoteAgentListItem {
+            id: id.clone(),
+            name: "remote".into(),
+            protocol: RemoteAgentProtocol::OpenClaw,
+            url: "wss://example.invalid".into(),
+            auth_type: RemoteAgentAuthType::None,
+            allow_insecure: false,
+            avatar: None,
+            description: None,
+            status: RemoteAgentStatus::Unknown,
+            last_connected_at: None,
+            created_at: 1,
+            updated_at: 2,
+        })
+        .unwrap();
+        assert_eq!(value["id"], id.as_str());
+        assert!(!value["id"].is_number());
     }
 }

@@ -210,16 +210,14 @@ pub(crate) async fn resolve_explicit_model(
 /// default companion (mirrors `CompanionChannelAgentProfile`).
 async fn companion_profile_model(deps: &GatewayDeps, ctx: &CallerCtx) -> Option<(String, String)> {
     if let Some(id) = &ctx.companion_id
-        && let Ok(p) = deps.companion_service.get_companion(id).await
-        && p.model.is_configured()
+        && let Ok(p) = deps.companion_service.get_companion(id.as_str()).await
+        && let Some(model) = p.model
     {
-        return Some((p.model.provider_id, p.model.model));
+        return Some((model.provider_id, model.model));
     }
     let default_id = deps.companion_service.default_companion_id().await?;
     let p = deps.companion_service.get_companion(&default_id).await.ok()?;
-    p.model
-        .is_configured()
-        .then(|| (p.model.provider_id, p.model.model))
+    p.model.map(|model| (model.provider_id, model.model))
 }
 
 #[cfg(test)]

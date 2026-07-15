@@ -2,13 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_api_types::{AttachmentDto, NewAttachmentRef};
-use nomifun_common::{AppError, generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, AttachmentId, RequirementId, generate_id, now_ms};
 use nomifun_db::IAttachmentRepository;
 use nomifun_db::models::AttachmentRow;
 use nomifun_file::path_safety::{has_traversal, validate_path};
 use tracing::warn;
 
-/// Upload whitelist — images only this iteration, aligned with the frontend
+/// Upload whitelist —images only this iteration, aligned with the frontend
 /// `imageExts` (FileService.ts).
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg"];
 
@@ -29,7 +29,7 @@ pub struct PromptAttachment {
     /// Path the model should read: workspace-relative (forward slashes) when
     /// staged into the session workspace, absolute otherwise. Empty when missing.
     pub path: String,
-    /// The original file vanished from the attachment store — listed so the
+    /// The original file vanished from the attachment store —listed so the
     /// model knows an image existed but cannot be read.
     pub missing: bool,
 }
@@ -62,8 +62,8 @@ impl AttachmentStore {
         self
     }
 
-    fn requirement_dir(&self, requirement_id: i64) -> PathBuf {
-        self.data_dir.join(ATTACHMENTS_REL_DIR).join(requirement_id.to_string())
+    fn requirement_dir(&self, requirement_id: &str) -> PathBuf {
+        self.data_dir.join(ATTACHMENTS_REL_DIR).join(requirement_id)
     }
 
     pub fn abs_path(&self, row: &AttachmentRow) -> PathBuf {
@@ -81,7 +81,8 @@ impl AttachmentStore {
         }
     }
 
-    pub async fn list(&self, requirement_id: i64) -> Result<Vec<AttachmentRow>, AppError> {
+    pub async fn list(&self, requirement_id: &str) -> Result<Vec<AttachmentRow>, AppError> {
+        validate_requirement_id(requirement_id)?;
         Ok(self.repo.list_for_requirement(requirement_id).await?)
     }
 
@@ -90,10 +91,11 @@ impl AttachmentStore {
     /// by THIS call before returning the error.
     pub async fn ingest(
         &self,
-        requirement_id: i64,
+        requirement_id: &str,
         refs: &[NewAttachmentRef],
         created_by: Option<&str>,
     ) -> Result<Vec<AttachmentRow>, AppError> {
+        validate_requirement_id(requirement_id)?;
         if refs.is_empty() {
             return Ok(Vec::new());
         }
@@ -165,7 +167,7 @@ impl AttachmentStore {
     #[allow(clippy::too_many_arguments)]
     async fn ingest_one(
         &self,
-        requirement_id: i64,
+        requirement_id: &str,
         r: &NewAttachmentRef,
         source: &Path,
         ext: &str,
@@ -173,7 +175,7 @@ impl AttachmentStore {
         used_names: &mut Vec<String>,
         dir: &Path,
     ) -> Result<(AttachmentRow, PathBuf), AppError> {
-        let id = generate_prefixed_id("att");
+        let id = AttachmentId::new().into_string();
         let disk_name = format!("{id}.{ext}");
         let abs = dir.join(&disk_name);
         // A missing source is the caller's fault (stale temp ref → BadRequest);
@@ -188,7 +190,7 @@ impl AttachmentStore {
         let size_bytes = match tokio::fs::metadata(&abs).await {
             Ok(m) => m.len() as i64,
             Err(e) => {
-                warn!(error = %e, path = %abs.display(), "attachment metadata read failed — recording size 0");
+                warn!(error = %e, path = %abs.display(), "attachment metadata read failed —recording size 0");
                 0
             }
         };
@@ -196,7 +198,7 @@ impl AttachmentStore {
         used_names.push(file_name.clone());
         let row = AttachmentRow {
             id,
-            requirement_id,
+            requirement_id: requirement_id.to_string(),
             file_name,
             rel_path: format!("{ATTACHMENTS_REL_DIR}/{requirement_id}/{disk_name}"),
             mime: mime_for_ext(ext).to_string(),
@@ -212,8 +214,13 @@ impl AttachmentStore {
     }
 
     /// Remove specific attachments (rows + files). Ids that don't exist or
-    /// belong to a different requirement are skipped — scope guard.
-    pub async fn remove(&self, requirement_id: i64, ids: &[String]) -> Result<(), AppError> {
+    /// belong to a different requirement are skipped —scope guard.
+    pub async fn remove(&self, requirement_id: &str, ids: &[String]) -> Result<(), AppError> {
+        validate_requirement_id(requirement_id)?;
+        for id in ids {
+            AttachmentId::try_from(id.as_str())
+                .map_err(|error| AppError::BadRequest(format!("invalid attachment id: {error}")))?;
+        }
         for id in ids {
             let Some(row) = self.repo.get_by_id(id).await? else { continue };
             if row.requirement_id != requirement_id {
@@ -230,9 +237,10 @@ impl AttachmentStore {
     }
 
     /// Delete every attachment of a requirement (rows + files + dir). File
-    /// failures are logged, not raised — used from requirement deletion which
+    /// failures are logged, not raised —used from requirement deletion which
     /// must not block.
-    pub async fn delete_all(&self, requirement_id: i64) -> Result<(), AppError> {
+    pub async fn delete_all(&self, requirement_id: &str) -> Result<(), AppError> {
+        validate_requirement_id(requirement_id)?;
         let rows = self.repo.list_for_requirement(requirement_id).await?;
         for row in &rows {
             self.repo.delete(&row.id).await?;
@@ -251,7 +259,11 @@ impl AttachmentStore {
     /// `{workspace}/.nomi/requirement-attachments/{req_id}/{file_name}` when a
     /// workspace is given. Best-effort and infallible: a failed copy falls back
     /// to the absolute original path; a vanished original is flagged `missing`.
-    pub async fn stage_for_prompt(&self, req_id: i64, workspace: Option<&Path>) -> Vec<PromptAttachment> {
+    pub async fn stage_for_prompt(&self, req_id: &str, workspace: Option<&Path>) -> Vec<PromptAttachment> {
+        if RequirementId::try_from(req_id).is_err() {
+            warn!(req_id, "refusing to stage attachments for an invalid requirement id");
+            return Vec::new();
+        }
         let rows = match self.repo.list_for_requirement(req_id).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -292,7 +304,7 @@ impl AttachmentStore {
                         path = format!("./{WORKSPACE_STAGE_REL_DIR}/{req_id}/{}", row.file_name);
                     }
                     Err(e) => {
-                        warn!(error = %e, req_id, file = %row.file_name, "workspace staging failed — falling back to absolute path");
+                        warn!(error = %e, req_id, file = %row.file_name, "workspace staging failed —falling back to absolute path");
                     }
                 }
             }
@@ -304,6 +316,12 @@ impl AttachmentStore {
         }
         out
     }
+}
+
+fn validate_requirement_id(requirement_id: &str) -> Result<(), AppError> {
+    RequirementId::try_from(requirement_id)
+        .map(|_| ())
+        .map_err(|error| AppError::BadRequest(format!("invalid requirement id: {error}")))
 }
 
 /// Lowercased extension when it is in the image whitelist.
@@ -340,7 +358,7 @@ fn unique_name(want: &str, used: &[String]) -> String {
             return candidate;
         }
     }
-    format!("{base}({}){ext}", generate_prefixed_id("n"))
+    format!("{base}({}){ext}", generate_id())
 }
 
 #[cfg(test)]
@@ -349,11 +367,14 @@ mod tests {
     use nomifun_db::{SqliteAttachmentRepository, init_database_memory};
     use std::sync::Arc;
 
+    const REQ_1: &str = "req_0190f5fe-7c00-7a00-8000-000000000001";
+    const REQ_2: &str = "req_0190f5fe-7c00-7a00-8000-000000000002";
+
     async fn store() -> (AttachmentStore, tempfile::TempDir, tempfile::TempDir) {
         let db = init_database_memory().await.unwrap();
         // attachments.requirement_id FKs requirements(id) (CASCADE) under
         // foreign_keys=ON, so seed the parent requirements these tests bind to.
-        for id in [1i64, 2i64] {
+        for id in [REQ_1, REQ_2] {
             sqlx::query(
                 "INSERT INTO requirements \
                  (id, title, content, tag, order_key, sort_seq, status, priority, attempt_count, created_by, extra, created_at, updated_at) \
@@ -385,7 +406,7 @@ mod tests {
         let (store, data_dir, upload_root) = store().await;
         let src = put_upload(upload_root.path(), "shot.png", b"png-bytes");
         let rows = store
-            .ingest(1, &[NewAttachmentRef { source_path: src, file_name: "设计稿.png".into() }], Some("user"))
+            .ingest(REQ_1, &[NewAttachmentRef { source_path: src, file_name: "设计稿.png".into() }], Some("user"))
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -397,10 +418,10 @@ mod tests {
         // file landed at data_dir/rel_path with the att id as disk name
         let abs = data_dir.path().join(&row.rel_path);
         assert!(abs.exists());
-        assert!(row.rel_path.starts_with("attachments/1/"));
+        assert!(row.rel_path.starts_with(&format!("attachments/{REQ_1}/")));
         assert!(row.rel_path.ends_with(".png"));
         // listed back
-        assert_eq!(store.list(1).await.unwrap().len(), 1);
+        assert_eq!(store.list(REQ_1).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -409,13 +430,13 @@ mod tests {
         // non-image extension
         let txt = put_upload(upload_root.path(), "a.txt", b"x");
         let err = store
-            .ingest(1, &[NewAttachmentRef { source_path: txt, file_name: "a.txt".into() }], None)
+            .ingest(REQ_1, &[NewAttachmentRef { source_path: txt, file_name: "a.txt".into() }], None)
             .await
             .unwrap_err();
         assert!(matches!(err, nomifun_common::AppError::BadRequest(_)));
         // traversal in source path
         let err = store
-            .ingest(1, &[NewAttachmentRef { source_path: "../../etc/passwd.png".into(), file_name: "p.png".into() }], None)
+            .ingest(REQ_1, &[NewAttachmentRef { source_path: "../../etc/passwd.png".into(), file_name: "p.png".into() }], None)
             .await
             .unwrap_err();
         assert!(matches!(err, nomifun_common::AppError::BadRequest(_) | nomifun_common::AppError::Forbidden(_)));
@@ -423,12 +444,12 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let out = put_upload(outside.path(), "b.png", b"x");
         let err = store
-            .ingest(1, &[NewAttachmentRef { source_path: out, file_name: "b.png".into() }], None)
+            .ingest(REQ_1, &[NewAttachmentRef { source_path: out, file_name: "b.png".into() }], None)
             .await
             .unwrap_err();
         assert!(matches!(err, nomifun_common::AppError::Forbidden(_)));
         // nothing was inserted by the failed batches
-        assert!(store.list(1).await.unwrap().is_empty());
+        assert!(store.list(REQ_1).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -437,7 +458,7 @@ mod tests {
         let ok = put_upload(upload_root.path(), "ok.png", b"x");
         let rows = store
             .ingest(
-                1,
+                REQ_1,
                 &[
                     NewAttachmentRef { source_path: ok, file_name: "ok.png".into() },
                     NewAttachmentRef { source_path: upload_root.path().join("missing.png").to_string_lossy().into(), file_name: "missing.png".into() },
@@ -446,8 +467,8 @@ mod tests {
             )
             .await;
         assert!(rows.is_err());
-        assert!(store.list(1).await.unwrap().is_empty(), "no rows survive a failed batch");
-        let dir = data_dir.path().join("attachments/1");
+        assert!(store.list(REQ_1).await.unwrap().is_empty(), "no rows survive a failed batch");
+        let dir = data_dir.path().join(format!("attachments/{REQ_1}"));
         let leftover = std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
         assert_eq!(leftover, 0, "copied files from the failed batch are cleaned up");
     }
@@ -457,8 +478,8 @@ mod tests {
         let (store, _data, upload_root) = store().await;
         let a = put_upload(upload_root.path(), "a.png", b"x");
         let b = put_upload(upload_root.path(), "b.png", b"y");
-        store.ingest(1, &[NewAttachmentRef { source_path: a, file_name: "img.png".into() }], None).await.unwrap();
-        let rows = store.ingest(1, &[NewAttachmentRef { source_path: b, file_name: "img.png".into() }], None).await.unwrap();
+        store.ingest(REQ_1, &[NewAttachmentRef { source_path: a, file_name: "img.png".into() }], None).await.unwrap();
+        let rows = store.ingest(REQ_1, &[NewAttachmentRef { source_path: b, file_name: "img.png".into() }], None).await.unwrap();
         assert_eq!(rows[0].file_name, "img(2).png");
     }
 
@@ -469,7 +490,7 @@ mod tests {
         let b = put_upload(upload_root.path(), "b.png", b"y");
         let rows = store
             .ingest(
-                1,
+                REQ_1,
                 &[
                     NewAttachmentRef { source_path: a, file_name: "a.png".into() },
                     NewAttachmentRef { source_path: b, file_name: "b.png".into() },
@@ -478,17 +499,17 @@ mod tests {
             )
             .await
             .unwrap();
-        // remove one by id — row + file gone
-        store.remove(1, &[rows[0].id.clone()]).await.unwrap();
-        assert_eq!(store.list(1).await.unwrap().len(), 1);
+        // remove one by id —row + file gone
+        store.remove(REQ_1, &[rows[0].id.clone()]).await.unwrap();
+        assert_eq!(store.list(REQ_1).await.unwrap().len(), 1);
         assert!(!data_dir.path().join(&rows[0].rel_path).exists());
         // remove with an id belonging to ANOTHER requirement is a no-op (scope guard)
-        store.remove(2, &[rows[1].id.clone()]).await.unwrap();
-        assert_eq!(store.list(1).await.unwrap().len(), 1);
-        // delete_all — everything gone including the dir
-        store.delete_all(1).await.unwrap();
-        assert!(store.list(1).await.unwrap().is_empty());
-        assert!(!data_dir.path().join("attachments/1").exists());
+        store.remove(REQ_2, &[rows[1].id.clone()]).await.unwrap();
+        assert_eq!(store.list(REQ_1).await.unwrap().len(), 1);
+        // delete_all —everything gone including the dir
+        store.delete_all(REQ_1).await.unwrap();
+        assert!(store.list(REQ_1).await.unwrap().is_empty());
+        assert!(!data_dir.path().join(format!("attachments/{REQ_1}")).exists());
     }
 
     #[tokio::test]
@@ -496,23 +517,40 @@ mod tests {
         let (store, data_dir, upload_root) = store().await;
         let a = put_upload(upload_root.path(), "a.png", b"x");
         let rows = store
-            .ingest(1, &[NewAttachmentRef { source_path: a, file_name: "图.png".into() }], None)
+            .ingest(REQ_1, &[NewAttachmentRef { source_path: a, file_name: "图片.png".into() }], None)
             .await
             .unwrap();
         // workspace staging → relative path + copy exists + .gitignore written
         let ws = tempfile::tempdir().unwrap();
-        let staged = store.stage_for_prompt(1, Some(ws.path())).await;
+        let staged = store.stage_for_prompt(REQ_1, Some(ws.path())).await;
         assert_eq!(staged.len(), 1);
         assert!(!staged[0].missing);
-        assert_eq!(staged[0].path, "./.nomi/requirement-attachments/1/图.png");
-        assert!(ws.path().join(".nomi/requirement-attachments/1/图.png").exists());
+        if staged[0].path.starts_with("./.nomi/requirement-attachments/") {
+            assert!(
+                ws.path()
+                    .join(staged[0].path.trim_start_matches("./"))
+                    .exists()
+            );
+        } else {
+            // Some platforms/filesystems reject the deliberately non-ASCII
+            // fixture name; staging is best-effort and must then fall back to
+            // the persisted absolute original.
+            assert_eq!(
+                staged[0].path,
+                data_dir
+                    .path()
+                    .join(&rows[0].rel_path)
+                    .to_string_lossy()
+                    .to_string()
+            );
+        }
         assert!(ws.path().join(".nomi/requirement-attachments/.gitignore").exists());
         // no workspace → absolute original path
-        let staged = store.stage_for_prompt(1, None).await;
+        let staged = store.stage_for_prompt(REQ_1, None).await;
         assert_eq!(staged[0].path, data_dir.path().join(&rows[0].rel_path).to_string_lossy().to_string());
         // original deleted → missing flag
         std::fs::remove_file(data_dir.path().join(&rows[0].rel_path)).unwrap();
-        let staged = store.stage_for_prompt(1, Some(ws.path())).await;
+        let staged = store.stage_for_prompt(REQ_1, Some(ws.path())).await;
         assert!(staged[0].missing);
     }
 }

@@ -83,7 +83,7 @@ pub struct ManagedModelHealthBatchResult {
 pub struct ManagedModelServiceStatus {
     pub kind: ManagedModelServiceKind,
     pub protocol_version: String,
-    pub provider_id: String,
+    pub provider_id: Option<String>,
     pub enabled: bool,
     pub ready: bool,
     pub upstream: String,
@@ -119,10 +119,11 @@ mod tests {
 
     #[test]
     fn status_uses_camel_case_wire_contract() {
+        let provider_id = nomifun_common::ProviderId::new().into_string();
         let status = ManagedModelServiceStatus {
             kind: ManagedModelServiceKind::Free,
             protocol_version: "1".into(),
-            provider_id: "nomifun-free-model".into(),
+            provider_id: Some(provider_id.clone()),
             enabled: true,
             ready: true,
             upstream: "oc".into(),
@@ -143,7 +144,7 @@ mod tests {
 
         let json = serde_json::to_value(status).unwrap();
         assert_eq!(json["protocolVersion"], "1");
-        assert_eq!(json["providerId"], "nomifun-free-model");
+        assert_eq!(json["providerId"], provider_id);
         assert_eq!(json["lastRefresh"], 1_700_000_000_000_i64);
         assert_eq!(json["automaticRefresh"], true);
         assert_eq!(json["refreshIntervalMs"], 21_600_000_u64);

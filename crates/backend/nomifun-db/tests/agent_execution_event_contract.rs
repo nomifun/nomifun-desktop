@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use nomifun_common::AgentExecutionEventKind;
 use ts_rs::{Config, TS};
 
-const MIGRATION: &str = include_str!("../migrations/037_unified_agent_execution.sql");
+const BASELINE: &str = include_str!("../migrations/001_id_contract_v2.sql");
 const TYPESCRIPT_BINDING: &str = include_str!(
     "../../../../ui/src/common/protocolBindings/AgentExecutionEventKind.ts"
 );
@@ -31,10 +31,10 @@ fn rust_sql_and_typescript_share_one_exact_event_vocabulary() {
         "committed TypeScript binding is stale; regenerate the ts-rs export"
     );
 
-    let sql_start = MIGRATION
+    let sql_start = BASELINE
         .find("event_type       TEXT NOT NULL CHECK (event_type IN (")
         .expect("event_type CHECK must exist");
-    let sql_check = &MIGRATION[sql_start..];
+    let sql_check = &BASELINE[sql_start..];
     let sql_end = sql_check
         .find("    )),")
         .expect("event_type CHECK must remain bounded");
@@ -58,5 +58,35 @@ fn rust_sql_and_typescript_share_one_exact_event_vocabulary() {
             .unwrap_or_else(|error| panic!("SQL event `{wire}` is not a Rust event kind: {error}"));
         assert_eq!(kind.as_str(), wire);
         assert_eq!(serde_json::to_value(kind).unwrap(), wire);
+    }
+}
+
+#[test]
+fn local_agent_actor_contract_is_string_native() {
+    let start = BASELINE
+        .find("-- table: agent_execution_events")
+        .expect("agent execution event table must exist");
+    let end = BASELINE[start..]
+        .find("-- table: agent_execution_participants")
+        .map(|offset| start + offset)
+        .expect("agent execution event table must remain bounded");
+    let event_table = &BASELINE[start..end];
+
+    assert!(
+        event_table.contains("actor_conversation_id TEXT"),
+        "conversation-backed actor IDs must be stored as TEXT"
+    );
+    assert!(
+        event_table.contains("actor_id = actor_conversation_id"),
+        "a local Agent actor must use its canonical conversation ID unchanged"
+    );
+    for retired_numeric_contract in [
+        "actor_conversation_id > 0",
+        "CAST(actor_conversation_id AS TEXT)",
+    ] {
+        assert!(
+            !event_table.contains(retired_numeric_contract),
+            "numeric actor-ID contract survived: {retired_numeric_contract}"
+        );
     }
 }

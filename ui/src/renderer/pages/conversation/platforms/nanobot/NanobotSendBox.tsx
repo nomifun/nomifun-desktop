@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { conversationTarget, type ConversationId, type MessageId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
@@ -52,7 +54,7 @@ const useNanobotSendBoxDraft = getSendBoxDraftHook('nanobot', {
 const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
 const EMPTY_UPLOAD_FILES: string[] = [];
 
-const NanobotSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id }) => {
+const NanobotSendBox: React.FC<{ conversation_id: ConversationId }> = ({ conversation_id }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
@@ -64,7 +66,7 @@ const NanobotSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id
   const [aiProcessing, setAiProcessing] = useState(false);
   const [hasHydratedRunningState, setHasHydratedRunningState] = useState(false);
 
-  const { data: draftData, mutate: mutateDraft } = useNanobotSendBoxDraft(String(conversation_id));
+  const { data: draftData, mutate: mutateDraft } = useNanobotSendBoxDraft(conversation_id);
   const atPath = draftData?.atPath ?? EMPTY_AT_PATH;
   const uploadFile = draftData?.uploadFile ?? EMPTY_UPLOAD_FILES;
   const content = draftData?.content ?? '';
@@ -184,7 +186,7 @@ const NanobotSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
 
       setAiProcessing(true);
-      let msg_id: string | null = null;
+      let msg_id: MessageId | null = null;
       try {
         void checkAndUpdateTitle(conversation_id, input);
         // Wait for the server-assigned msg_id before rendering the optimistic
@@ -288,8 +290,9 @@ const NanobotSendBox: React.FC<{ conversation_id: number }> = ({ conversation_id
   useEffect(() => {
     if (!conversation_id) return;
 
-    const storageKey = `nanobot_initial_message_${conversation_id}`;
-    const processedKey = `nanobot_initial_processed_${conversation_id}`;
+    const target = conversationTarget(conversation_id);
+    const storageKey = sessionStorageKey('initial-message-nanobot', target);
+    const processedKey = sessionStorageKey('initial-message-processed-nanobot', target);
 
     const processInitialMessage = async () => {
       const stored = sessionStorage.getItem(storageKey);

@@ -14,6 +14,7 @@ use crate::provider::ProviderResponse;
 /// A concrete provider/model selection returned by catalog resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatalogModelRef {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
 }
@@ -89,6 +90,8 @@ mod tests {
     use crate::provider::ProviderResponse;
     use std::collections::HashMap;
 
+    const PROVIDER_ID: &str = "prov_018f1234-5678-7abc-8def-012345678990";
+
     fn provider(id: &str, platform: &str, models: &[&str]) -> ProviderResponse {
         ProviderResponse {
             id: id.into(),
@@ -127,13 +130,13 @@ mod tests {
 
     #[test]
     fn resolves_by_task_from_profiles() {
-        let providers = vec![provider("p1", "stepfun-plan", &["step-image-edit-2", "gpt-4o"])];
+        let providers = vec![provider(PROVIDER_ID, "stepfun-plan", &["step-image-edit-2", "gpt-4o"])];
         let profiles = vec![
-            profile("p1", "step-image-edit-2", vec![ModelTask::ImageGeneration, ModelTask::ImageEdit], vec![]),
-            profile("p1", "gpt-4o", vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
+            profile(PROVIDER_ID, "step-image-edit-2", vec![ModelTask::ImageGeneration, ModelTask::ImageEdit], vec![]),
+            profile(PROVIDER_ID, "gpt-4o", vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
         ];
         let img = resolve_models(&providers, &profiles, ModelTask::ImageGeneration, &[]);
-        assert_eq!(img, vec![CatalogModelRef { provider_id: "p1".into(), model: "step-image-edit-2".into() }]);
+        assert_eq!(img, vec![CatalogModelRef { provider_id: PROVIDER_ID.into(), model: "step-image-edit-2".into() }]);
         let chat = resolve_models(&providers, &profiles, ModelTask::Chat, &[]);
         assert_eq!(chat.len(), 1);
         assert_eq!(chat[0].model, "gpt-4o");
@@ -141,10 +144,10 @@ mod tests {
 
     #[test]
     fn required_trait_filters() {
-        let providers = vec![provider("p1", "openai", &["gpt-4o", "o1-mini"])];
+        let providers = vec![provider(PROVIDER_ID, "openai", &["gpt-4o", "o1-mini"])];
         let profiles = vec![
-            profile("p1", "gpt-4o", vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
-            profile("p1", "o1-mini", vec![ModelTask::Chat], vec![]),
+            profile(PROVIDER_ID, "gpt-4o", vec![ModelTask::Chat], vec![ModelTrait::VisionInput]),
+            profile(PROVIDER_ID, "o1-mini", vec![ModelTask::Chat], vec![]),
         ];
         let vision = resolve_models(&providers, &profiles, ModelTask::Chat, &[ModelTrait::VisionInput]);
         assert_eq!(vision.len(), 1);
@@ -153,7 +156,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_heuristic_when_no_profile() {
-        let providers = vec![provider("p1", "openai", &["dall-e-3"])];
+        let providers = vec![provider(PROVIDER_ID, "openai", &["dall-e-3"])];
         // No profiles at all — heuristic should still surface the image model.
         let img = resolve_models(&providers, &[], ModelTask::ImageGeneration, &[]);
         assert_eq!(img.len(), 1);
@@ -162,13 +165,13 @@ mod tests {
 
     #[test]
     fn disabled_model_and_provider_excluded() {
-        let mut providers = vec![provider("p1", "openai", &["gpt-4o", "gpt-4o-mini"])];
+        let mut providers = vec![provider(PROVIDER_ID, "openai", &["gpt-4o", "gpt-4o-mini"])];
         let mut me = HashMap::new();
         me.insert("gpt-4o-mini".to_string(), false);
         providers[0].model_enabled = Some(me);
         let profiles = vec![
-            profile("p1", "gpt-4o", vec![ModelTask::Chat], vec![]),
-            profile("p1", "gpt-4o-mini", vec![ModelTask::Chat], vec![]),
+            profile(PROVIDER_ID, "gpt-4o", vec![ModelTask::Chat], vec![]),
+            profile(PROVIDER_ID, "gpt-4o-mini", vec![ModelTask::Chat], vec![]),
         ];
         let chat = resolve_models(&providers, &profiles, ModelTask::Chat, &[]);
         assert_eq!(chat.len(), 1);
@@ -176,5 +179,14 @@ mod tests {
 
         providers[0].enabled = false;
         assert!(resolve_models(&providers, &profiles, ModelTask::Chat, &[]).is_empty());
+    }
+
+    #[test]
+    fn catalog_model_ref_rejects_noncanonical_provider_id() {
+        let raw = serde_json::json!({
+            "provider_id": "openai",
+            "model": "gpt-5"
+        });
+        assert!(serde_json::from_value::<CatalogModelRef>(raw).is_err());
     }
 }

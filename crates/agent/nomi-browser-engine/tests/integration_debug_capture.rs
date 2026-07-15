@@ -32,7 +32,13 @@ fetch("https://this-domain-does-not-exist-12345.invalid/api").catch(function(){}
 #[tokio::test]
 #[ignore = "需 NOMIFUN_CHROME_BINARY（真 Chrome）：调试事件捕获冒烟"]
 async fn captures_console_error_and_network() {
-    let engine = create_engine(EngineConfig::default())
+    let temp = tempfile::tempdir().expect("unique browser test workspace");
+    let engine = create_engine(EngineConfig {
+        data_dir: temp.path().join("data"),
+        user_data_dir: Some(temp.path().join("profile")),
+        ephemeral_profile: true,
+        ..EngineConfig::default()
+    })
         .await
         .expect("engine builds with NOMIFUN_CHROME_BINARY set");
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
 import { useCallback } from 'react';
 
 type UsePresetResolverOptions = {
@@ -18,7 +18,7 @@ type UsePresetResolverOptions = {
 
 type UsePresetResolverResult = {
   resolvePresetAgentType: (
-    agentInfo: { agent_type: string; backend?: string; preset_id?: string } | undefined
+    agentInfo: { agent_type: string; backend?: string; preset_id?: PresetReference } | undefined
   ) => string;
 };
 
@@ -30,7 +30,7 @@ export const usePresetResolver = ({
   presets: _presets,
 }: UsePresetResolverOptions): UsePresetResolverResult => {
   const resolvePresetAgentType = useCallback(
-    (agentInfo: { agent_type: string; backend?: string; preset_id?: string } | undefined): string => {
+    (agentInfo: { agent_type: string; backend?: string; preset_id?: PresetReference } | undefined): string => {
       if (!agentInfo) return 'gemini';
       return agentInfo.backend || agentInfo.agent_type;
     },

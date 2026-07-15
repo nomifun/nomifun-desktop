@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use nomifun_api_types::{KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode};
+use nomifun_common::KnowledgeBaseId;
 use nomifun_knowledge::source_url::truncate_to_bytes;
 use nomifun_knowledge::{
     KnowledgeBinding, UrlFetcher, WriteRequest, WriteSurface, WriteTargetSpec, resolve_write_policy,
@@ -51,7 +52,8 @@ struct CreateBaseParams {
 #[derive(Deserialize, JsonSchema)]
 struct WriteFileParams {
     /// Target knowledge base id (from nomi_knowledge_list_bases).
-    kb_id: String,
+    #[schemars(with = "String")]
+    kb_id: KnowledgeBaseId,
     /// Relative .md path inside the base (no traversal; .md only).
     rel_path: String,
     /// Markdown document content (written verbatim, not trimmed).
@@ -91,7 +93,8 @@ struct SetBindingParams {
     enabled: bool,
     /// Replacement list of bound base ids (omit to keep the current list).
     #[serde(default)]
-    kb_ids: Option<Vec<String>>,
+    #[schemars(with = "Option<Vec<String>>")]
+    kb_ids: Option<Vec<KnowledgeBaseId>>,
     /// Write-back ("回血") switch (omit to keep).
     #[serde(default)]
     writeback: Option<bool>,
@@ -119,8 +122,14 @@ pub(crate) fn gateway_surface(channel_platform: Option<&str>, companion_id: Opti
     }
 }
 
-fn first_unknown_id<'a>(requested: &'a [String], known: &HashSet<&str>) -> Option<&'a str> {
-    requested.iter().find(|id| !known.contains(id.as_str())).map(String::as_str)
+fn first_unknown_id<'a>(
+    requested: &'a [KnowledgeBaseId],
+    known: &HashSet<&str>,
+) -> Option<&'a str> {
+    requested
+        .iter()
+        .find(|id| !known.contains(id.as_str()))
+        .map(KnowledgeBaseId::as_str)
 }
 
 fn unknown_kb_error(id: &str) -> Value {
@@ -128,7 +137,10 @@ fn unknown_kb_error(id: &str) -> Value {
 }
 
 /// Reject unknown base ids up front. Shared with `caps_terminal`'s bind-on-create.
-pub(crate) async fn ensure_known_kb_ids(deps: &GatewayDeps, ids: &[String]) -> Result<(), Value> {
+pub(crate) async fn ensure_known_kb_ids(
+    deps: &GatewayDeps,
+    ids: &[KnowledgeBaseId],
+) -> Result<(), Value> {
     if ids.is_empty() {
         return Ok(());
     }
@@ -273,16 +285,22 @@ async fn create_base(deps: Arc<GatewayDeps>, p: CreateBaseParams) -> Value {
 }
 
 async fn write_file(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: WriteFileParams) -> Value {
-    let surface = gateway_surface(ctx.channel_platform.as_deref(), ctx.companion_id.as_deref());
-    let (scope, binding) = match (surface, ctx.companion_id.as_deref()) {
+    let companion_id = ctx.companion_id.as_ref().map(|id| id.as_str());
+    let surface = gateway_surface(ctx.channel_platform.as_deref(), companion_id);
+    let (scope, binding) = match (surface, companion_id) {
         (WriteSurface::Companion, Some(cid)) => (
             cid.to_owned(),
             deps.knowledge_service.get_binding("companion", cid).await.unwrap_or_default(),
         ),
-        _ => (
-            ctx.conversation_id.clone(),
-            KnowledgeBinding { enabled: true, writeback: true, ..Default::default() },
-        ),
+        _ => {
+            let Some(conversation_id) = &ctx.conversation_id else {
+                return json!({ "error": "knowledge writes require a companion or conversation identity" });
+            };
+            (
+                conversation_id.to_string(),
+                KnowledgeBinding { enabled: true, writeback: true, ..Default::default() },
+            )
+        }
     };
     let policy = resolve_write_policy(surface, &binding, &scope);
     let bound_kb_ids = deps.knowledge_service.resolve_kb_ids_for_cwd("").await;
@@ -432,9 +450,15 @@ mod tests {
 
     #[test]
     fn first_unknown_id_finds_in_request_order() {
-        let known: HashSet<&str> = ["kb_a", "kb_b"].into();
-        assert_eq!(first_unknown_id(&["kb_a".into(), "kb_b".into()], &known), None);
-        assert_eq!(first_unknown_id(&["kb_a".into(), "kb_x".into()], &known), Some("kb_x"));
+        let first = KnowledgeBaseId::new();
+        let second = KnowledgeBaseId::new();
+        let unknown = KnowledgeBaseId::new();
+        let known: HashSet<&str> = [first.as_str(), second.as_str()].into();
+        assert_eq!(first_unknown_id(&[first.clone(), second.clone()], &known), None);
+        assert_eq!(
+            first_unknown_id(&[first.clone(), unknown.clone()], &known),
+            Some(unknown.as_str())
+        );
     }
 
     #[test]

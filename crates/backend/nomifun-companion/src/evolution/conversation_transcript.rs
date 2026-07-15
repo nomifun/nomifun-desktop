@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConversationId};
 use nomifun_db::{IConversationRepository, SortOrder};
 
 use crate::evolution::transcript::{TranscriptAnchor, TranscriptSource, TranscriptTurn};
@@ -77,12 +77,12 @@ fn extract_tool(ty: &str, content: &serde_json::Value) -> Option<(String, Option
 impl TranscriptSource for ConversationTranscriptSource {
     async fn window(&self, anchor: &TranscriptAnchor) -> Result<Option<Vec<TranscriptTurn>>, AppError> {
         // wire id = conversations.id 的十进制串(无独立公开 id 列);非数字 → 无法定位。
-        let Ok(conv_id) = anchor.conversation_id.parse::<i64>() else {
+        let Ok(conv_id) = ConversationId::try_from(anchor.conversation_id.as_str()) else {
             return Ok(None);
         };
         let page = self
             .repo
-            .get_messages(conv_id, 1, MAX_FETCH, SortOrder::Asc)
+            .get_messages(conv_id.as_str(), 1, MAX_FETCH, SortOrder::Asc)
             .await
             .map_err(|e| AppError::Internal(format!("rehydrate get_messages: {e}")))?;
         if page.items.is_empty() {
@@ -163,14 +163,14 @@ impl TranscriptSource for ConversationTranscriptSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::now_ms;
+    use nomifun_common::{ConversationId, now_ms};
     use nomifun_db::models::{ConversationRow, MessageRow};
     use nomifun_db::{init_database_memory, SqliteConversationRepository};
 
-    fn conv_row() -> ConversationRow {
+    fn conv_row(user_id: &str) -> ConversationRow {
         ConversationRow {
-            id: 0, // ignored on insert (autoincrement)
-            user_id: "system_default_user".into(), // seeded by init_database_memory (FK)
+            id: ConversationId::new().into_string(),
+            user_id: user_id.to_owned(),
             name: "t".into(),
             r#type: "gemini".into(),
             extra: "{}".into(),
@@ -193,10 +193,10 @@ mod tests {
         }
     }
 
-    fn text_msg(conv: i64, content: &str, position: &str, ts: i64) -> MessageRow {
+    fn text_msg(conv: &str, content: &str, position: &str, ts: i64) -> MessageRow {
         MessageRow {
             id: format!("msg-{position}-{ts}"),
-            conversation_id: conv,
+            conversation_id: conv.to_owned(),
             msg_id: None,
             r#type: "text".into(),
             content: serde_json::json!({ "content": content }).to_string(),
@@ -207,10 +207,10 @@ mod tests {
         }
     }
 
-    fn tool_msg(conv: i64, call_id: &str, args: serde_json::Value, output: &str, ts: i64) -> MessageRow {
+    fn tool_msg(conv: &str, call_id: &str, args: serde_json::Value, output: &str, ts: i64) -> MessageRow {
         MessageRow {
             id: format!("msg-{call_id}"),
-            conversation_id: conv,
+            conversation_id: conv.to_owned(),
             msg_id: None,
             r#type: "tool_call".into(),
             content: serde_json::json!({
@@ -224,10 +224,11 @@ mod tests {
         }
     }
 
-    async fn repo_with_conv() -> (Arc<SqliteConversationRepository>, i64) {
+    async fn repo_with_conv() -> (Arc<SqliteConversationRepository>, String) {
         let db = init_database_memory().await.unwrap();
+        let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
         let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
-        let id = repo.create(&conv_row()).await.unwrap();
+        let id = repo.create(&conv_row(&installation_owner)).await.unwrap();
         (repo, id)
     }
 
@@ -235,9 +236,9 @@ mod tests {
     #[tokio::test]
     async fn rehydrates_window_and_redacts_secrets() {
         let (repo, conv) = repo_with_conv().await;
-        repo.insert_message(&text_msg(conv, "把日志里的错误改掉", "right", 1)).await.unwrap();
+        repo.insert_message(&text_msg(&conv, "把日志里的错误改掉", "right", 1)).await.unwrap();
         repo.insert_message(&tool_msg(
-            conv,
+            &conv,
             "tc-1",
             serde_json::json!({ "pattern": "ERROR", "key": "sk-ABCDEFGHIJ0123456789xyz" }),
             "命中 3 处",
@@ -245,11 +246,11 @@ mod tests {
         ))
         .await
         .unwrap();
-        repo.insert_message(&text_msg(conv, "改好了", "left", 3)).await.unwrap();
-        let mut hidden = text_msg(conv, "隐藏内容", "left", 4);
+        repo.insert_message(&text_msg(&conv, "改好了", "left", 3)).await.unwrap();
+        let mut hidden = text_msg(&conv, "隐藏内容", "left", 4);
         hidden.hidden = true;
         repo.insert_message(&hidden).await.unwrap();
-        let mut thinking = text_msg(conv, "内心独白", "left", 5);
+        let mut thinking = text_msg(&conv, "内心独白", "left", 5);
         thinking.r#type = "thinking".into();
         repo.insert_message(&thinking).await.unwrap();
 
@@ -275,14 +276,17 @@ mod tests {
         assert!(!rendered.contains("隐藏内容"), "hidden leaked: {rendered}");
     }
 
-    /// 守门:非数字 id / 不存在的会话 → None(drafter 降级,不报错)。
+    /// 守门:非法 ID / 不存在的会话 → None(drafter 降级,不报错)。
     #[tokio::test]
-    async fn missing_or_nonnumeric_conversation_returns_none() {
+    async fn missing_or_invalid_conversation_returns_none() {
         let (repo, _conv) = repo_with_conv().await;
         let src = ConversationTranscriptSource::new(repo);
-        let nonnumeric = TranscriptAnchor { conversation_id: "conv_abc".into(), ..Default::default() };
-        assert!(src.window(&nonnumeric).await.unwrap().is_none(), "non-numeric id → None");
-        let gone = TranscriptAnchor { conversation_id: "999999".into(), ..Default::default() };
+        let malformed = TranscriptAnchor { conversation_id: "not-a-conversation-id".into(), ..Default::default() };
+        assert!(src.window(&malformed).await.unwrap().is_none(), "invalid id → None");
+        let gone = TranscriptAnchor {
+            conversation_id: ConversationId::new().into_string(),
+            ..Default::default()
+        };
         assert!(src.window(&gone).await.unwrap().is_none(), "missing conversation → None");
     }
 }

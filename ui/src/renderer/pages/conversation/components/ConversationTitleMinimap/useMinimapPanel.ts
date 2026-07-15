@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import { dispatchChatMessageJump } from '@/renderer/utils/chat/chatMinimapEvents';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -52,7 +53,7 @@ type UseMinimapPanelReturn = {
 /**
  * Extracts all state management and side effects for the ConversationTitleMinimap component.
  */
-export const useMinimapPanel = (conversation_id?: number): UseMinimapPanelReturn => {
+export const useMinimapPanel = (conversation_id?: ConversationId): UseMinimapPanelReturn => {
   const [visible, setVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<TurnPreviewItem[]>([]);

@@ -12,9 +12,10 @@
  */
 
 import type { WorkshopAssetKind, WorkshopGeneratorMode } from '../../types';
+import { tryParseEntityId, type AssetId } from '@/common/types/ids';
 
 export interface UpstreamPrimary {
-  assetId: string | null;
+  assetId: AssetId | null;
   kind: WorkshopAssetKind;
   /** Inline text for text nodes; null otherwise. */
   text: string | null;
@@ -24,11 +25,11 @@ export function upstreamPrimary(node: { type?: string; data?: unknown } | null |
   if (!node || !node.type) return null;
   const data = (node.data ?? {}) as Record<string, unknown>;
   if (node.type === 'image') {
-    const assetId = typeof data.assetId === 'string' ? data.assetId : null;
+    const assetId = tryParseEntityId('asset', data.assetId);
     return assetId ? { assetId, kind: 'image', text: null } : null;
   }
   if (node.type === 'video') {
-    const assetId = typeof data.assetId === 'string' ? data.assetId : null;
+    const assetId = tryParseEntityId('asset', data.assetId);
     return assetId ? { assetId, kind: 'video', text: null } : null;
   }
   if (node.type === 'text') {
@@ -36,10 +37,16 @@ export function upstreamPrimary(node: { type?: string; data?: unknown } | null |
     return content.trim() ? { assetId: null, kind: 'text', text: content } : null;
   }
   if (node.type === 'generator') {
-    const results = Array.isArray(data.resultAssetIds) ? (data.resultAssetIds as string[]) : [];
+    const results = Array.isArray(data.resultAssetIds)
+      ? data.resultAssetIds.flatMap((value) => {
+          const id = tryParseEntityId('asset', value);
+          return id ? [id] : [];
+        })
+      : [];
     if (!results.length) return null;
-    const batch = data.batch as { primary?: string } | undefined;
-    const primary = batch?.primary && results.includes(batch.primary) ? batch.primary : results[0];
+    const batch = data.batch as { primary?: unknown } | undefined;
+    const batchPrimary = tryParseEntityId('asset', batch?.primary);
+    const primary = batchPrimary && results.includes(batchPrimary) ? batchPrimary : results[0];
     const mode = typeof data.mode === 'string' ? (data.mode as WorkshopGeneratorMode) : 'image';
     const kind: WorkshopAssetKind = mode === 'video' ? 'video' : mode === 'text' ? 'text' : 'image';
     return { assetId: primary, kind, text: null };

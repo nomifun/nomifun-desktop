@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// restarts the whole process and the child can inherit the `NOMIFUN_WORK_DIR`
 /// the previous boot exported (see `environment.rs`), so a UI change must win
 /// over that stale inherited value.
-pub(super) fn resolve_work_dir(cli_work_dir: Option<PathBuf>, data_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_work_dir(cli_work_dir: Option<PathBuf>, data_dir: &Path) -> PathBuf {
     if let Some(cli) = cli_work_dir {
         return cli;
     }

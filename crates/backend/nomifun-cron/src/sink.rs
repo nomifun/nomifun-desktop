@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use async_trait::async_trait;
 use nomifun_ai_agent::{CronJobSummary, CronSink};
 use nomifun_api_types::{CreateCronJobRequest, CronScheduleDto, ListCronJobsQuery};
+use nomifun_common::{ConversationId, UserId};
 
 use crate::service::CronService;
 
@@ -30,9 +31,17 @@ pub fn set_process_cron_service(service: Arc<CronService>) {
 /// [`UnavailableCronSink`] if it has not been registered yet (only possible
 /// before startup finishes — never during a live conversation).
 pub fn cron_sink_for(user_id: String, conversation_id: String) -> Arc<dyn CronSink> {
-    match CRON_SERVICE.get() {
-        Some(service) => CronServiceSink::into_arc(service.clone(), user_id, conversation_id),
-        None => Arc::new(UnavailableCronSink),
+    match (
+        CRON_SERVICE.get(),
+        UserId::parse(user_id),
+        ConversationId::parse(conversation_id),
+    ) {
+        (Some(service), Ok(user_id), Ok(conversation_id)) => CronServiceSink::into_arc(
+            service.clone(),
+            user_id.into_string(),
+            conversation_id.into_string(),
+        ),
+        _ => Arc::new(UnavailableCronSink),
     }
 }
 
@@ -57,13 +66,13 @@ impl CronSink for UnavailableCronSink {
 pub struct CronServiceSink {
     service: Arc<CronService>,
     user_id: String,
-    /// The agent's conversation id (numeric string).
+    /// The agent's canonical conversation entity ID.
     conversation_id: String,
 }
 
 impl CronServiceSink {
     /// Build the sink as a trait object ready to inject into the agent factory.
-    pub fn into_arc(
+    fn into_arc(
         service: Arc<CronService>,
         user_id: String,
         conversation_id: String,
@@ -75,11 +84,6 @@ impl CronServiceSink {
         })
     }
 
-    fn conv_i64(&self) -> Result<i64, String> {
-        self.conversation_id
-            .parse::<i64>()
-            .map_err(|_| format!("conversation id '{}' is not numeric", self.conversation_id))
-    }
 }
 
 #[async_trait]
@@ -99,7 +103,7 @@ impl CronSink for CronServiceSink {
             },
             prompt: Some(prompt.to_string()),
             message: None,
-            conversation_id: self.conv_i64()?,
+            conversation_id: Some(self.conversation_id.clone()),
             conversation_title: None,
             agent_type: "nomi".to_string(),
             created_by: "agent".to_string(),
@@ -115,11 +119,10 @@ impl CronSink for CronServiceSink {
     }
 
     async fn list(&self) -> Result<Vec<CronJobSummary>, String> {
-        let conv = self.conv_i64()?;
         let jobs = self
             .service
             .list_jobs(&self.user_id, &ListCronJobsQuery {
-                conversation_id: Some(conv),
+                conversation_id: Some(self.conversation_id.clone()),
             })
             .await
             .map_err(|e| e.to_string())?;

@@ -14,15 +14,16 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CloseSmall, DownloadOne, Left, Right, ZoomIn, ZoomOut } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useWorkshopMedia } from '../media';
+import type { AssetId } from '@/common/types/ids';
 
 const MIN = 0.2;
 const MAX = 8;
 
 export interface ImagePreviewProps {
-  assetIds: string[];
+  assetIds: AssetId[];
   startIndex: number;
   onClose: () => void;
-  onDownload: (assetId: string) => void;
+  onDownload: (assetId: AssetId) => void;
 }
 
 const ImagePreview: React.FC<ImagePreviewProps> = ({ assetIds, startIndex, onClose, onDownload }) => {

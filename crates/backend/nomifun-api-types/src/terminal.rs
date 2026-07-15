@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use nomifun_common::TimestampMs;
+use nomifun_common::{KnowledgeBaseId, TerminalId, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 fn default_cols() -> u16 {
@@ -21,10 +21,10 @@ fn default_rows() -> u16 {
 /// A terminal session as returned by the API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TerminalSessionResponse {
-    pub id: i64,
+    pub id: TerminalId,
     pub name: String,
     pub cwd: String,
-    /// Derived on every read — never persisted: whether `cwd` equals or sits
+    /// Derived on every read —never persisted: whether `cwd` equals or sits
     /// under the backend-managed default work dir. Mirrors conversations'
     /// `is_temporary_workspace` so the frontend session list can group these
     /// terminals under the default-workpath node.
@@ -77,16 +77,16 @@ pub struct CreateTerminalRequest {
     /// Defer spawning the PTY until the first `resize` (which carries the real
     /// fitted terminal size). Set by the interactive frontend so a full-screen
     /// TUI (claude) draws at the correct size from its first frame instead of at
-    /// the 80×24 default and then jumping — the cause of "garbled until you
+    /// the 80×24 default and then jumping —the cause of "garbled until you
     /// resize". Headless callers (cron/AutoWork/gateway) leave this false and
     /// spawn immediately.
     #[serde(default)]
     pub defer_spawn: bool,
     /// Knowledge bases to bind to this terminal at creation (`kind="terminal"`
     /// binding). They are mounted into `{cwd}/.nomi/knowledge/` before the PTY
-    /// spawns; best-effort — mount failures never block the launch.
+    /// spawns; best-effort —mount failures never block the launch.
     #[serde(default)]
-    pub knowledge_base_ids: Option<Vec<String>>,
+    pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
 }
 
 /// Write bytes (base64) to a terminal's PTY.
@@ -114,14 +114,14 @@ pub struct TerminalResizeRequest {
 /// `terminal.output` WebSocket event payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TerminalOutputEvent {
-    pub id: i64,
+    pub id: TerminalId,
     pub data_b64: String,
 }
 
 /// `terminal.exit` WebSocket event payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TerminalExitEvent {
-    pub id: i64,
+    pub id: TerminalId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
 }
@@ -129,7 +129,7 @@ pub struct TerminalExitEvent {
 /// `terminal.removed` WebSocket event payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TerminalRemovedPayload {
-    pub id: i64,
+    pub id: TerminalId,
 }
 
 #[cfg(test)]
@@ -176,12 +176,51 @@ mod tests {
         assert!(req.knowledge_base_ids.is_none());
 
         // Present → bound at creation by the terminal service.
-        let raw = json!({"cwd": "/tmp", "command": "bash", "knowledge_base_ids": ["kb_1", "kb_2"]});
+        let kb_1 = nomifun_common::KnowledgeBaseId::new();
+        let kb_2 = nomifun_common::KnowledgeBaseId::new();
+        let raw = json!({"cwd": "/tmp", "command": "bash", "knowledge_base_ids": [kb_1, kb_2]});
         let req: CreateTerminalRequest = serde_json::from_value(raw).unwrap();
+        let parsed = req.knowledge_base_ids.unwrap();
         assert_eq!(
-            req.knowledge_base_ids,
-            Some(vec!["kb_1".to_owned(), "kb_2".to_owned()])
+            parsed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec![kb_1.to_string(), kb_2.to_string()]
         );
+    }
+
+    #[test]
+    fn create_request_rejects_noncanonical_knowledge_base_ids() {
+        for invalid in [json!(42), json!("kb_1"), json!(""), json!("term_0190f5fe-7c00-7a00-8000-000000000001")] {
+            let raw = json!({
+                "cwd": "/tmp",
+                "command": "bash",
+                "knowledge_base_ids": [invalid]
+            });
+            assert!(serde_json::from_value::<CreateTerminalRequest>(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_wire_entities_reject_noncanonical_ids() {
+        let response = json!({
+            "id": "term_1",
+            "name": "shell",
+            "cwd": "/tmp",
+            "command": "$SHELL",
+            "args": [],
+            "cols": 80,
+            "rows": 24,
+            "created_at": 1,
+            "updated_at": 1,
+            "last_status": "running"
+        });
+        assert!(serde_json::from_value::<TerminalSessionResponse>(response).is_err());
+        assert!(serde_json::from_value::<TerminalOutputEvent>(json!({
+            "id": 42,
+            "data_b64": ""
+        })).is_err());
+        assert!(serde_json::from_value::<TerminalRemovedPayload>(json!({
+            "id": "conv_0190f5fe-7c00-7a00-8000-000000000001"
+        })).is_err());
     }
 
     #[test]
@@ -199,7 +238,7 @@ mod tests {
     #[test]
     fn session_response_roundtrip_and_omits_none() {
         let resp = TerminalSessionResponse {
-            id: 1,
+            id: nomifun_common::TerminalId::new(),
             name: "shell".into(),
             cwd: "/tmp".into(),
             is_default_workpath: false,
@@ -242,7 +281,7 @@ mod tests {
     #[test]
     fn output_event_roundtrip() {
         let e = TerminalOutputEvent {
-            id: 1,
+            id: nomifun_common::TerminalId::new(),
             data_b64: "ZGF0YQ==".into(),
         };
         let s = serde_json::to_string(&e).unwrap();
@@ -252,7 +291,7 @@ mod tests {
     #[test]
     fn exit_event_omits_none_code() {
         let e = TerminalExitEvent {
-            id: 1,
+            id: nomifun_common::TerminalId::new(),
             exit_code: None,
         };
         let v = serde_json::to_value(&e).unwrap();

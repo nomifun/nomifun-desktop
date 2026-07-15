@@ -46,14 +46,6 @@ fn parse_kind(raw: &str) -> Result<AutoWorkTargetKind, Value> {
         .ok_or_else(|| json!({ "error": format!("unknown kind '{raw}' (expected conversation | terminal)") }))
 }
 
-/// Parse the string `target_id` into the integer conversation id the requirement
-/// service's owner check uses (the AutoWork target handle stays a string).
-fn parse_conv_id(target_id: &str) -> Result<i64, nomifun_common::AppError> {
-    target_id
-        .parse::<i64>()
-        .map_err(|_| nomifun_common::AppError::NotFound(format!("conversation {target_id}")))
-}
-
 /// Assemble the persisted config + the AutoWork runner's live view into one
 /// `AutoWorkState` (the same shape the REST routes return and broadcast).
 async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &str) -> Result<AutoWorkState, Value> {
@@ -82,7 +74,7 @@ async fn build_state(deps: &GatewayDeps, kind: AutoWorkTargetKind, target_id: &s
 }
 
 async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({ "error": "missing caller user identity" });
     }
     let kind = match parse_kind(&p.kind) {
@@ -96,11 +88,11 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
 
     // Ownership + (terminal) eligibility — same gates as the REST route.
     let owner_check = match kind {
-        AutoWorkTargetKind::Conversation => match parse_conv_id(&target_id) {
-            Ok(conv_id) => deps.requirement_service.verify_conversation_owner(conv_id, &ctx.user_id).await,
-            Err(e) => Err(e),
-        },
-        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, &ctx.user_id).await,
+        AutoWorkTargetKind::Conversation => deps
+            .requirement_service
+            .verify_conversation_owner(&target_id, ctx.user_id.as_str())
+            .await,
+        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, ctx.user_id.as_str()).await,
     };
     if let Err(e) = owner_check {
         return json!({ "error": e.to_string() });
@@ -139,7 +131,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetAutoworkParams) -> Va
 }
 
 async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetAutoworkParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({ "error": "missing caller user identity" });
     }
     let kind = match parse_kind(&p.kind) {
@@ -148,11 +140,11 @@ async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetAutoworkParams) -> Va
     };
     let target_id = p.target_id;
     let owner_check = match kind {
-        AutoWorkTargetKind::Conversation => match parse_conv_id(&target_id) {
-            Ok(conv_id) => deps.requirement_service.verify_conversation_owner(conv_id, &ctx.user_id).await,
-            Err(e) => Err(e),
-        },
-        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, &ctx.user_id).await,
+        AutoWorkTargetKind::Conversation => deps
+            .requirement_service
+            .verify_conversation_owner(&target_id, ctx.user_id.as_str())
+            .await,
+        AutoWorkTargetKind::Terminal => deps.requirement_service.verify_terminal_owner(&target_id, ctx.user_id.as_str()).await,
     };
     if let Err(e) = owner_check {
         return json!({ "error": e.to_string() });

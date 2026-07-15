@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { IMcpServer } from '@/common/config/storage';
+import { parseMcpServerId } from '@/common/types/ids';
 import { buildMcpConnectionTestRequest } from './mcpRequest';
 
 const transport: IMcpServer['transport'] = {
@@ -15,9 +16,10 @@ const transport: IMcpServer['transport'] = {
 };
 
 describe('buildMcpConnectionTestRequest', () => {
-  test('keeps a persisted numeric id and sends only endpoint-owned fields', () => {
+  test('keeps a canonical persisted id and sends only endpoint-owned fields', () => {
+    const id = parseMcpServerId('mcp_0190f5fe-7c00-7a00-8000-000000000001');
     const server: IMcpServer = {
-      id: 1,
+      id,
       name: 'search',
       description: 'not part of test request',
       enabled: true,
@@ -32,16 +34,10 @@ describe('buildMcpConnectionTestRequest', () => {
     };
 
     expect(buildMcpConnectionTestRequest(server)).toEqual({
-      id: 1,
+      id,
       name: 'search',
       transport,
     });
   });
 
-  test('omits the detected-server sentinel id', () => {
-    expect(buildMcpConnectionTestRequest({ id: 0, name: 'detected', transport })).toEqual({
-      name: 'detected',
-      transport,
-    });
-  });
 });

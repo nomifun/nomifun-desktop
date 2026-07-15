@@ -3,13 +3,14 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { TChatConversation } from '@/common/config/storage';
 import { mutate } from 'swr';
 
-export async function getConversationOrNull(conversation_id: number): Promise<TChatConversation | null> {
+export async function getConversationOrNull(conversation_id: ConversationId): Promise<TChatConversation | null> {
   try {
     return await ipcBridge.conversation.get.invoke({ id: conversation_id });
   } catch (error) {
@@ -20,7 +21,7 @@ export async function getConversationOrNull(conversation_id: number): Promise<TC
   }
 }
 
-export async function refreshConversationCache(conversation_id: number): Promise<void> {
+export async function refreshConversationCache(conversation_id: ConversationId): Promise<void> {
   const conversation = await getConversationOrNull(conversation_id);
   if (!conversation) return;
 

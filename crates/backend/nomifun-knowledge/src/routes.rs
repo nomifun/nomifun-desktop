@@ -7,7 +7,7 @@ use axum::routing::{get, post};
 
 use nomifun_api_types::{ApiResponse, ConnectorCredentialSummary, CreateKnowledgeTagRequest, KnowledgeSource, KnowledgeTag, UpdateKnowledgeTagRequest};
 use nomifun_auth::CurrentUser;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConnectorCredentialId, KnowledgeBaseId};
 use serde::{Deserialize, Serialize};
 
 use crate::connector::ConnectorIdentity;
@@ -132,7 +132,7 @@ async fn create_base(
     // 4-param `create_base` signature used by 50+ callers.
     if let Some(ref tag_keys) = req.tags {
         if !tag_keys.is_empty() {
-            info = state.service.update_base(&info.id, None, None, Some(tag_keys.clone())).await?;
+            info = state.service.update_base(info.id.as_str(), None, None, Some(tag_keys.clone())).await?;
         }
     }
     // Connector-backed sources (feishu, etc.): trigger background sync so the
@@ -141,8 +141,8 @@ async fn create_base(
         let service = state.service.clone();
         let kb_id = info.id.clone();
         tokio::spawn(async move {
-            if let Err(e) = service.sync_connector_source(&kb_id).await {
-                tracing::warn!(kb_id, error = %e, "background connector sync after create failed");
+            if let Err(e) = service.sync_connector_source(kb_id.as_str()).await {
+                tracing::warn!(kb_id = %kb_id, error = %e, "background connector sync after create failed");
             }
         });
     }
@@ -152,9 +152,9 @@ async fn create_base(
 async fn get_base(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<KnowledgeBaseInfo>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get_base_info(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.get_base_info(id.as_str()).await?)))
 }
 
 #[derive(Deserialize)]
@@ -168,14 +168,14 @@ struct UpdateBaseRequest {
 async fn update_base(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<UpdateBaseRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KnowledgeBaseInfo>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .update_base(&id, req.name.as_deref(), req.description.as_deref(), req.tags)
+            .update_base(id.as_str(), req.name.as_deref(), req.description.as_deref(), req.tags)
             .await?,
     )))
 }
@@ -189,19 +189,19 @@ struct DeleteBaseQuery {
 async fn delete_base(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(query): Query<DeleteBaseQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete_base(&id, query.purge).await?;
+    state.service.delete_base(id.as_str(), query.purge).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 async fn list_files(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<Vec<KbFileEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.list_files(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.list_files(id.as_str()).await?)))
 }
 
 #[derive(Deserialize, Default)]
@@ -213,11 +213,11 @@ struct TreeQuery {
 async fn list_tree(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<ApiResponse<Vec<KbTreeEntry>>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        state.service.list_tree(&id, &query.path).await?,
+        state.service.list_tree(id.as_str(), &query.path).await?,
     )))
 }
 
@@ -229,20 +229,20 @@ struct CreateFolderRequest {
 async fn create_folder(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<CreateFolderRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KbTreeEntry>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(state.service.create_folder(&id, &req.path).await?)))
+    Ok(Json(ApiResponse::ok(state.service.create_folder(id.as_str(), &req.path).await?)))
 }
 
 async fn delete_folder(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(query): Query<TreeQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete_folder(&id, &query.path).await?;
+    state.service.delete_folder(id.as_str(), &query.path).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -255,12 +255,12 @@ struct RenameTreeEntryRequest {
 async fn rename_tree_entry(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<RenameTreeEntryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KbTreeEntry>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
-        state.service.rename_tree_entry(&id, &req.path, &req.new_name).await?,
+        state.service.rename_tree_entry(id.as_str(), &req.path, &req.new_name).await?,
     )))
 }
 
@@ -273,12 +273,12 @@ struct ExportBaseRequest {
 async fn export_base(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<ExportBaseRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ExportSummary>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
-        export::export_base(&state.service, &id, std::path::Path::new(&req.dest_path)).await?,
+        export::export_base(&state.service, id.as_str(), std::path::Path::new(&req.dest_path)).await?,
     )))
 }
 
@@ -308,8 +308,8 @@ async fn import_base(
         // Best-effort: a missing completer (409) or an empty base (400) is
         // expected and must not surface anywhere. `None`: post-import
         // backfill is a background curation task → always the default model.
-        if let Err(e) = service.generate_overview_opts(&kb_id, false, true, None).await {
-            tracing::debug!(kb_id, error = %e, "post-import knowledge autogen skipped");
+        if let Err(e) = service.generate_overview_opts(kb_id.as_str(), false, true, None).await {
+            tracing::debug!(kb_id = %kb_id, error = %e, "post-import knowledge autogen skipped");
         }
     });
 
@@ -340,10 +340,18 @@ fn model_override(
     provider_id: Option<String>,
     model: Option<String>,
 ) -> Result<Option<(String, String)>, AppError> {
-    let provider_id = provider_id.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
-    let model = model.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
     match (provider_id, model) {
-        (Some(p), Some(m)) => Ok(Some((p, m))),
+        (Some(provider_id), Some(model)) => {
+            let provider_id = nomifun_common::ProviderId::parse(provider_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid provider_id: {error}"))
+            })?;
+            if model.is_empty() || model.trim() != model {
+                return Err(AppError::BadRequest(
+                    "model must be a non-empty trimmed natural key".into(),
+                ));
+            }
+            Ok(Some((provider_id.into_string(), model)))
+        }
         (None, None) => Ok(None),
         _ => Err(AppError::BadRequest(
             "provider_id and model must be supplied together (or both omitted)".into(),
@@ -356,13 +364,13 @@ fn model_override(
 async fn autogen_base(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Option<Json<AutogenRequest>>,
 ) -> Result<Json<ApiResponse<AutogenOutcome>>, AppError> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
     let override_model = model_override(req.provider_id, req.model)?;
     Ok(Json(ApiResponse::ok(
-        state.service.generate_overview(&id, req.overwrite_readme, override_model).await?,
+        state.service.generate_overview(id.as_str(), req.overwrite_readme, override_model).await?,
     )))
 }
 
@@ -436,9 +444,9 @@ async fn polish_description(
 async fn refresh_source(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<RefreshSourceSummary>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.refresh_source(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.refresh_source(id.as_str()).await?)))
 }
 
 /// Pull a connector-backed base's remote documents into `snapshots/` (Feishu
@@ -446,9 +454,9 @@ async fn refresh_source(
 async fn sync_source(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<RefreshSourceSummary>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.sync_connector_source(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.sync_connector_source(id.as_str()).await?)))
 }
 
 #[derive(Deserialize)]
@@ -464,11 +472,11 @@ struct SetSourceRequest {
 async fn set_source(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<SetSourceRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KnowledgeBaseInfo>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(state.service.set_source(&id, req.source).await?)))
+    Ok(Json(ApiResponse::ok(state.service.set_source(id.as_str(), req.source).await?)))
 }
 
 async fn list_credentials(
@@ -501,7 +509,7 @@ async fn create_credential(
 async fn delete_credential(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConnectorCredentialId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.service.delete_credential(&id).await?;
     Ok(Json(ApiResponse::ok(())))
@@ -512,7 +520,7 @@ async fn delete_credential(
 async fn test_credential(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConnectorCredentialId>,
 ) -> Result<Json<ApiResponse<ConnectorIdentity>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.test_credential(&id).await?)))
 }
@@ -563,9 +571,9 @@ async fn delete_tag(
 async fn list_inbox(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<Vec<InboxEntry>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.list_inbox(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.list_inbox(id.as_str()).await?)))
 }
 
 /// Total unreviewed staged proposals across all bases (sidebar red-dot signal).
@@ -585,10 +593,10 @@ struct InboxItemQuery {
 async fn inbox_diff(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(q): Query<InboxItemQuery>,
 ) -> Result<Json<ApiResponse<InboxDiff>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.inbox_diff(&id, &q.scope, &q.path).await?)))
+    Ok(Json(ApiResponse::ok(state.service.inbox_diff(id.as_str(), &q.scope, &q.path).await?)))
 }
 
 #[derive(Deserialize)]
@@ -600,28 +608,28 @@ struct InboxActionRequest {
 async fn merge_inbox(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<InboxActionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<InboxMergeResult>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(state.service.merge_inbox(&id, &req.scope, &req.path).await?)))
+    Ok(Json(ApiResponse::ok(state.service.merge_inbox(id.as_str(), &req.scope, &req.path).await?)))
 }
 
 async fn discard_inbox(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<InboxActionRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.discard_inbox(&id, &req.scope, &req.path).await?;
+    state.service.discard_inbox(id.as_str(), &req.scope, &req.path).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InboxBatchRequest {
-    kb_id: String,
+    kb_id: KnowledgeBaseId,
     scope: Option<String>,
 }
 
@@ -636,7 +644,7 @@ async fn merge_all_inbox(
     body: Result<Json<InboxBatchRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<InboxBatchResult>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let count = state.service.merge_all_inbox(&req.kb_id, req.scope.as_deref()).await?;
+    let count = state.service.merge_all_inbox(req.kb_id.as_str(), req.scope.as_deref()).await?;
     Ok(Json(ApiResponse::ok(InboxBatchResult { count })))
 }
 
@@ -646,16 +654,16 @@ async fn discard_all_inbox(
     body: Result<Json<InboxBatchRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<InboxBatchResult>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let count = state.service.discard_all_inbox(&req.kb_id, req.scope.as_deref()).await?;
+    let count = state.service.discard_all_inbox(req.kb_id.as_str(), req.scope.as_deref()).await?;
     Ok(Json(ApiResponse::ok(InboxBatchResult { count })))
 }
 
 async fn list_consumers(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
 ) -> Result<Json<ApiResponse<Vec<ConsumerInfo>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.list_consumers(&id).await?)))
+    Ok(Json(ApiResponse::ok(state.service.list_consumers(id.as_str()).await?)))
 }
 
 #[derive(Deserialize)]
@@ -666,10 +674,10 @@ struct FilePathQuery {
 async fn read_file(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ApiResponse<KbFileContent>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.read_file(&id, &query.path).await?)))
+    Ok(Json(ApiResponse::ok(state.service.read_file(id.as_str(), &query.path).await?)))
 }
 
 #[derive(Deserialize)]
@@ -681,21 +689,21 @@ struct WriteFileRequest {
 async fn write_file(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     body: Result<Json<WriteFileRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    state.service.write_file(&id, &req.path, &req.content).await?;
+    state.service.write_file(id.as_str(), &req.path, &req.content).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
 async fn delete_file(
     State(state): State<KnowledgeRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<KnowledgeBaseId>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete_file(&id, &query.path).await?;
+    state.service.delete_file(id.as_str(), &query.path).await?;
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -724,7 +732,7 @@ async fn set_binding(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchBasesRequest {
-    kb_ids: Vec<String>,
+    kb_ids: Vec<KnowledgeBaseId>,
     query: String,
     limit: Option<usize>,
 }
@@ -757,12 +765,14 @@ mod tests {
     use super::*;
     use crate::testutil::make_service;
 
+    const TEST_PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+
     fn test_app(data_dir: &std::path::Path) -> Router {
         let service = Arc::new(make_service(data_dir));
         // The auth middleware normally injects `CurrentUser`; tests attach
         // it directly as a request extension.
         knowledge_routes(KnowledgeRouterState::new(service)).layer(Extension(CurrentUser {
-            id: "u1".into(),
+            id: nomifun_common::UserId::new(),
             username: "u1".into(),
         }))
     }
@@ -783,11 +793,25 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let app = test_app(dir.path());
 
+        let create = Request::post("/api/knowledge/bases")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"name":"route fixture","description":""}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(create).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let created = json_body(resp).await;
+        let kb_id = created["data"]["id"].as_str().unwrap();
+
         // Write under a trailing-slash spelling…
         let set = Request::post("/api/knowledge/binding/workpath/%2FUsers%2Fme%2Fproj%2F")
             .header("content-type", "application/json")
             .body(Body::from(
-                r#"{"enabled":true,"writeback":false,"kb_ids":["kb_x"]}"#,
+                serde_json::json!({
+                    "enabled": true,
+                    "writeback": false,
+                    "kb_ids": [kb_id],
+                })
+                .to_string(),
             ))
             .unwrap();
         let resp = app.clone().oneshot(set).await.unwrap();
@@ -802,7 +826,7 @@ mod tests {
         let v = json_body(resp).await;
         assert_eq!(v["success"], true, "{v}");
         assert_eq!(v["data"]["enabled"], true, "{v}");
-        assert_eq!(v["data"]["kb_ids"][0], "kb_x", "{v}");
+        assert_eq!(v["data"]["kb_ids"][0], kb_id, "{v}");
 
         // A never-bound workpath reads as the default (disabled) binding.
         let get = Request::get("/api/knowledge/binding/workpath/%2Felsewhere")
@@ -843,12 +867,18 @@ mod tests {
         let app = test_app(dir.path());
 
         for body in [
-            r#"{"name":"x","root_path":"/tmp/x","provider_id":"p1"}"#,
-            r#"{"name":"x","root_path":"/tmp/x","model":"m1"}"#,
+            serde_json::json!({
+                "name": "x",
+                "root_path": "/tmp/x",
+                "provider_id": TEST_PROVIDER_ID,
+            })
+            .to_string(),
+            serde_json::json!({"name": "x", "root_path": "/tmp/x", "model": "m1"})
+                .to_string(),
         ] {
             let req = Request::post("/api/knowledge/description/generate")
                 .header("content-type", "application/json")
-                .body(Body::from(body))
+                .body(Body::from(body.clone()))
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body={body}");
@@ -865,11 +895,11 @@ mod tests {
     fn model_override_requires_both_or_neither() {
         assert_eq!(model_override(None, None).unwrap(), None);
         assert_eq!(
-            model_override(Some("p".into()), Some("m".into())).unwrap(),
-            Some(("p".into(), "m".into()))
+            model_override(Some(TEST_PROVIDER_ID.into()), Some("m".into())).unwrap(),
+            Some((TEST_PROVIDER_ID.into(), "m".into()))
         );
-        // Blank strings collapse to "absent" — so blank+blank is None, not an error.
-        assert_eq!(model_override(Some("  ".into()), Some("  ".into())).unwrap(), None);
+        // Present-but-blank IDs are invalid boundary values, never aliases for absence.
+        assert!(model_override(Some("  ".into()), Some("  ".into())).is_err());
         assert!(model_override(Some("p".into()), None).is_err());
         assert!(model_override(None, Some("m".into())).is_err());
         assert!(model_override(Some("p".into()), Some("  ".into())).is_err());

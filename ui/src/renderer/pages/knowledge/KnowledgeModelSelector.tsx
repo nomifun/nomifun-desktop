@@ -14,6 +14,7 @@ import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { iconColors } from '@/renderer/styles/colors';
 import { useModelProviderList } from '@/renderer/hooks/agent/useModelProviderList';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import type { ProviderId } from '@/common/types/ids';
 
 /**
  * A picked provider+model pair for the knowledge AI generators, or `null` to
@@ -21,7 +22,7 @@ import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
  * are always sent together (or neither) — the backend rejects a half-specified
  * pair with 400.
  */
-export type KnowledgeModelChoice = { provider_id: string; model: string } | null;
+export type KnowledgeModelChoice = { provider_id: ProviderId; model: string } | null;
 
 const STORAGE_KEY = 'knowledge.autogenModel';
 

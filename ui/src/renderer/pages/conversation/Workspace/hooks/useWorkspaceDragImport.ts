@@ -11,13 +11,14 @@ import { ipcBridge } from '@/common';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import { FileService } from '@/renderer/services/FileService';
 import type { MessageApi } from '../types';
+import type { ConversationId } from '@/common/types/ids';
 
 interface UseWorkspaceDragImportOptions {
   onFilesDropped: (files: Array<{ path: string; name: string }>) => Promise<void> | void;
   messageApi: MessageApi;
   t: TFunction<'translation'>;
   /** Stable upload-tracking identity (conversation id string for WebUI HTTP uploads). */
-  sourceKey: string;
+  sourceKey?: ConversationId;
 }
 
 interface DroppedItem {
@@ -84,7 +85,7 @@ export function useWorkspaceDragImport({
 
   const createTempItemsFromFiles = useCallback(
     async (files: File[]): Promise<DroppedItem[]> => {
-      if (!files.length) return [];
+      if (!files.length || !sourceKey) return [];
       const pseudoList = Object.assign([...files], {
         length: files.length,
         item: (index: number) => files[index] || null,

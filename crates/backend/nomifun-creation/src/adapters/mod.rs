@@ -238,7 +238,7 @@ mod tests {
 
     fn provider(base: &str, is_full_url: bool) -> ResolvedProvider {
         ResolvedProvider {
-            provider_id: "prov_x".into(),
+            provider_id: nomifun_common::ProviderId::new().into_string(),
             platform: "openai".into(),
             base_url: base.into(),
             api_key: "sk".into(),

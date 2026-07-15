@@ -73,6 +73,7 @@ pub enum ProfileSource {
 /// The authoritative per-model capability record. Identity is `(provider_id, model)`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelProfile {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
     pub tasks: Vec<ModelTask>,
@@ -98,6 +99,7 @@ impl ModelProfile {
 /// Request body for `POST /api/model-profiles` (upsert one profile).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileUpsertRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
     #[serde(default)]
@@ -114,6 +116,7 @@ pub struct ModelProfileUpsertRequest {
 /// Body identifying a single profile (`POST /api/model-profiles/delete`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelProfileKeyRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
     pub provider_id: String,
     pub model: String,
 }
@@ -266,7 +269,7 @@ mod tests {
     #[test]
     fn primary_task_prefers_first() {
         let p = ModelProfile {
-            provider_id: "p".into(),
+            provider_id: "prov_018f1234-5678-7abc-8def-012345678990".into(),
             model: "m".into(),
             tasks: vec![ModelTask::ImageGeneration, ModelTask::ImageEdit],
             traits: vec![],
@@ -285,5 +288,15 @@ mod tests {
         assert_eq!(serde_json::to_string(&ModelTask::SpeechRecognition).unwrap(), "\"speech_recognition\"");
         assert_eq!(serde_json::to_string(&ModelTrait::VisionInput).unwrap(), "\"vision_input\"");
         assert_eq!(serde_json::to_string(&ProfileSource::Inferred).unwrap(), "\"inferred\"");
+    }
+
+    #[test]
+    fn model_profile_upsert_rejects_noncanonical_provider_id() {
+        let raw = serde_json::json!({
+            "provider_id": "openai",
+            "model": "gpt-5",
+            "tasks": ["chat"]
+        });
+        assert!(serde_json::from_value::<ModelProfileUpsertRequest>(raw).is_err());
     }
 }

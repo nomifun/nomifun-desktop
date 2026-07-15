@@ -40,7 +40,7 @@ async fn webhook_crud_and_secret_is_hidden() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
     assert_eq!(json["data"]["name"], "Team bot");
     // secret must NOT be echoed; has_secret signals presence.
     assert_eq!(json["data"]["has_secret"], true);
@@ -124,7 +124,7 @@ async fn webhook_test_unreachable_url_is_bad_gateway() {
         ))
         .await
         .unwrap();
-    let id = body_json(resp).await["data"]["id"].as_i64().unwrap();
+    let id = body_json(resp).await["data"]["id"].as_str().unwrap().to_owned();
 
     // /test invokes the sender; the connection fails → 502 Bad Gateway. This
     // proves the route + sender are wired (we can't reach real Lark in tests).
@@ -170,7 +170,7 @@ async fn tag_settings_get_default_and_upsert() {
         ))
         .await
         .unwrap();
-    let wh_id = body_json(resp).await["data"]["id"].as_i64().unwrap();
+    let wh_id = body_json(resp).await["data"]["id"].as_str().unwrap().to_owned();
 
     // bind it to the tag
     let resp = app
@@ -195,7 +195,7 @@ async fn tag_settings_get_default_and_upsert() {
         .oneshot(json_with_token(
             "PUT",
             "/api/tags/alpha/settings",
-            json!({ "webhook_id": 999999 }),
+            json!({ "webhook_id": "webhook_0190f5fe-7c00-7a00-8abc-012345679999" }),
             &token,
             &csrf,
         ))
@@ -231,7 +231,7 @@ async fn tag_bindings_lists_enabled_autowork_conversations() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let conv_id = body_json(resp).await["data"]["id"].as_i64().unwrap().to_string();
+    let conv_id = body_json(resp).await["data"]["id"].as_str().unwrap().to_owned().to_string();
 
     let resp = app
         .clone()
@@ -279,7 +279,7 @@ async fn admin_disable_of_idle_target_is_allowed() {
         ))
         .await
         .unwrap();
-    let conv_id = body_json(resp).await["data"]["id"].as_i64().unwrap().to_string();
+    let conv_id = body_json(resp).await["data"]["id"].as_str().unwrap().to_owned().to_string();
 
     // enable then admin-disable (idle) → both OK
     for enabled in [true, false] {

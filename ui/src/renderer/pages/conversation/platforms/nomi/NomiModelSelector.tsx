@@ -5,6 +5,7 @@
  */
 
 import type { NomiModelSelection } from './useNomiModelSelection';
+import { compositeKey } from '@/common/utils/compositeKey';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
@@ -80,9 +81,9 @@ const NomiModelSelector: React.FC<{
               <Menu.ItemGroup title={provider.name} key={provider.id}>
                 {models.map((modelName) => (
                   <Menu.Item
-                    key={`${provider.id}-${modelName}`}
+                    key={compositeKey(provider.id, modelName)}
                     data-testid={`nomi-model-option-${modelName}`}
-                    className={(current_model?.id ?? '') + (current_model?.use_model ?? '') === provider.id + modelName ? '!bg-2' : ''}
+                    className={current_model?.id === provider.id && current_model?.use_model === modelName ? '!bg-2' : ''}
                     onClick={() => void handleSelectModel(provider, modelName)}
                   >
                     <div className='flex items-center gap-8px w-full'>

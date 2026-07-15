@@ -18,11 +18,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_common::{AppError, now_ms};
+use nomifun_common::{AppError, ProviderWithModel, now_ms};
 use tokio::sync::Mutex;
 
 use crate::collector::SharedConfig;
-use crate::config::ModelConfig;
 use crate::learner::CompanionCompleter;
 use crate::prompt;
 use crate::registry::CompanionRegistry;
@@ -158,6 +157,9 @@ impl Archiver {
         if !enabled {
             return Ok(());
         }
+        let Some(model) = model else {
+            return Ok(());
+        };
         for id in self.registry.ids().await {
             if let Err(e) = self.sweep_companion(&id, &thresholds, &model).await {
                 tracing::warn!(companion = %id, error = %e, "companion archive sweep failed");
@@ -172,13 +174,10 @@ impl Archiver {
         &self,
         companion_id: &str,
         thresholds: &ArchiveThresholds,
-        model: &ModelConfig,
+        model: &ProviderWithModel,
     ) -> Result<SweepAction, AppError> {
         // No active chat thread → nothing to archive.
-        let Some(conversation_id) = crate::companion::active_thread_ptr(&self.store, companion_id)
-            .await?
-            .filter(|s| !s.is_empty())
-        else {
+        let Some(conversation_id) = crate::companion::active_thread_ptr(&self.store, companion_id).await? else {
             return Ok(SweepAction::Wait);
         };
 
@@ -258,6 +257,14 @@ mod tests {
         ArchiveThresholds { idle_minutes, min_chars }
     }
 
+    fn conversation_fixture() -> String {
+        nomifun_common::ConversationId::try_from(
+            "conv_0190f5fe-7c00-7a00-8abc-000000000001",
+        )
+        .unwrap()
+        .into_string()
+    }
+
     #[test]
     fn decide_waits_while_active() {
         // 10 min idle, threshold 30 → still active.
@@ -324,13 +331,16 @@ mod tests {
         config.archive.enabled = true;
         config.archive.idle_minutes = 30;
         config.archive.min_chars = 20;
-        config.learn.model.provider_id = "prov_t".into();
-        config.learn.model.model = "test-model".into();
+        config.learn.model = Some(ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "test-model".into(),
+            use_model: None,
+        });
         let registry = Arc::new(CompanionRegistry::scan(dir.join("companions"), dir.join("shared")));
         let companion = registry.create("测试宠", "ink").await.unwrap();
         let store = CompanionStore::open_memory().await.unwrap();
         // Point the companion at a chat thread the port will answer for.
-        crate::companion::set_active_thread_ptr(&store, &companion.id, "conv1").await.unwrap();
+        crate::companion::set_active_thread_ptr(&store, &companion.id, Some(&conversation_fixture())).await.unwrap();
         let resets = Arc::new(StdMutex::new(Vec::new()));
         let calls = Arc::new(StdMutex::new(0usize));
         let archiver = Archiver {
@@ -356,7 +366,7 @@ mod tests {
         ];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone())
+            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Wait);
@@ -378,7 +388,7 @@ mod tests {
         ];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone())
+            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Archive);
@@ -389,7 +399,7 @@ mod tests {
         assert_eq!(digests[0].status, "archived");
         assert!(digests[0].token_estimate > 0);
 
-        assert_eq!(resets.lock().unwrap().as_slice(), &["conv1".to_string()], "context was reset once");
+        assert_eq!(resets.lock().unwrap().as_slice(), &[conversation_fixture()], "context was reset once");
         assert_eq!(*calls.lock().unwrap(), 1, "exactly one digest LLM call");
 
         // A fresh window is open, boundary rolled past the archived messages.
@@ -406,7 +416,7 @@ mod tests {
         let msgs = vec![WindowMessage { is_user: false, content: "在的~".into(), created_at: old }];
         let (archiver, id, resets, calls) = make_archiver(dir.path(), msgs, GOOD_DIGEST).await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone())
+            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Skip);
@@ -424,7 +434,7 @@ mod tests {
         let msgs = vec![WindowMessage { is_user: true, content: "帮我看看这个很长的 bug 报错信息吧".into(), created_at: old }];
         let (archiver, id, resets, _calls) = make_archiver(dir.path(), msgs, "我不会输出 JSON").await;
         let action = archiver
-            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone())
+            .sweep_companion(&id, &thr(30, 20), &archiver.config.read().await.learn.model.clone().unwrap())
             .await
             .unwrap();
         assert_eq!(action, SweepAction::Skip, "unparseable digest degrades to skip");

@@ -14,11 +14,12 @@ import CharacterPicker from '../CharacterPicker';
 import { figureToCustomPatch } from '../useFigures';
 import type { useCompanion } from '../useNomi';
 import PresetApplyControl from '@/renderer/components/preset/PresetApplyControl';
+import type { CompanionId } from '@/common/types/ids';
 
 interface Props {
   companion: ReturnType<typeof useCompanion>;
   /** Called after this companion was deleted so the page can switch selection. */
-  onDeleted: (companionId: string) => void;
+  onDeleted: (companionId: CompanionId) => void;
 }
 
 /**

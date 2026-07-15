@@ -46,7 +46,7 @@ NomiFun 启动时进入三种鉴权策略之一：
 
 ### 无鉴权本地模式（`nomicore --local`，或 Web 宿主 `--insecure-no-auth`）
 
-- 鉴权与 CSRF 完全关闭。每个请求都以 `system_default_user` 身份执行。
+- 鉴权与 CSRF 完全关闭。每个请求都以数据库中记录的安装所有者身份执行。
 - 加入一层宽松的 CORS，使桌面 WebView（以及工具）可以自由调用 API。
 - 仅本地可达的路由（如 `/api/auth/internal/*` 与 `/api/webui/*`）变为
   可达。

@@ -5,7 +5,7 @@
  */
 import { filterPresetsByTags, type TagFilterState } from './presetUtils';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import type { PresetTag } from '@/common/types/agent/presetTypes';
+import type { PresetReference, PresetTag } from '@/common/types/agent/presetTypes';
 import type { PresetListItem } from './types';
 import PresetCard from './PresetCard';
 import PresetTagFilterBar from './PresetTagFilterBar';
@@ -33,7 +33,7 @@ type PresetListPanelProps = {
   onDuplicate: (preset: PresetListItem) => void;
   onCreate: () => void;
   onToggleEnabled: (preset: PresetListItem, checked: boolean) => void;
-  setActivePresetId: (id: string) => void;
+  setActivePresetId: (id: PresetReference) => void;
   /** When set, scroll to and highlight the matching preset card */
   highlightId?: string | null;
   /** Called after the highlight animation completes so the parent can clear the param */
@@ -103,8 +103,8 @@ const PresetListPanel: React.FC<PresetListPanelProps> = ({
   // facet. Drop any selected key that no longer exists. The `return prev`
   // no-change guard prevents render loops.
   useEffect(() => {
-    const audKeys = new Set(audienceTags.map((t) => t.key));
-    const scnKeys = new Set(scenarioTags.map((t) => t.key));
+    const audKeys = new Set<string>(audienceTags.map((t) => t.key));
+    const scnKeys = new Set<string>(scenarioTags.map((t) => t.key));
     setTagFilter((prev) => {
       const audience = prev.audience.filter((k) => audKeys.has(k));
       const scenario = prev.scenario.filter((k) => scnKeys.has(k));

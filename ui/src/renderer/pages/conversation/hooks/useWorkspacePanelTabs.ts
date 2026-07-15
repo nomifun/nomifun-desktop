@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { conversationTarget, isSameSessionTarget, terminalTarget, type SessionTarget } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import type { WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import {
   WORKSPACE_PANEL_TAB_EVENT,
@@ -11,11 +13,11 @@ import {
 } from '@/renderer/pages/conversation/components/ChatLayout/WorkspaceToolRail';
 import { useEffect, useState } from 'react';
 
-const workspacePanelTabStorageKey = (preferenceKey?: string) =>
-  preferenceKey ? `workspace-panel-tab-${preferenceKey}` : null;
+const workspacePanelTabStorageKey = (target?: SessionTarget) =>
+  target ? sessionStorageKey('workspace-panel-tab', target) : null;
 
-function readStoredTab(preferenceKey?: string): WorkspaceTab {
-  const key = workspacePanelTabStorageKey(preferenceKey);
+function readStoredTab(target?: SessionTarget): WorkspaceTab {
+  const key = workspacePanelTabStorageKey(target);
   if (!key || typeof window === 'undefined') return 'files';
   try {
     return localStorage.getItem(key) || 'files';
@@ -24,22 +26,29 @@ function readStoredTab(preferenceKey?: string): WorkspaceTab {
   }
 }
 
-export function useWorkspacePanelTabs(preferenceKey?: string): {
+export function useWorkspacePanelTabs(target?: SessionTarget): {
   activeWorkspaceTab: WorkspaceTab;
   setActiveWorkspaceTab: (tab: WorkspaceTab) => void;
 } {
-  const [activeWorkspaceTab, setActiveWorkspaceTabState] = useState<WorkspaceTab>(() => readStoredTab(preferenceKey));
-  const eventSourceKey = preferenceKey?.replace(/^terminal-/, '');
+  const targetKind = target?.kind;
+  const targetId = target?.id;
+  const stableTarget =
+    targetKind === 'conversation' && targetId
+      ? conversationTarget(targetId)
+      : targetKind === 'terminal' && targetId
+        ? terminalTarget(targetId)
+        : undefined;
+  const [activeWorkspaceTab, setActiveWorkspaceTabState] = useState<WorkspaceTab>(() => readStoredTab(stableTarget));
 
   useEffect(() => {
-    setActiveWorkspaceTabState(readStoredTab(preferenceKey));
-  }, [preferenceKey]);
+    setActiveWorkspaceTabState(readStoredTab(stableTarget));
+  }, [targetId, targetKind]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
     const onTabEvent = (event: Event) => {
       const detail = (event as CustomEvent<WorkspacePanelTabDetail>).detail;
-      if (detail?.sourceKey && detail.sourceKey !== eventSourceKey) {
+      if (!detail?.target || !stableTarget || !isSameSessionTarget(detail.target, stableTarget)) {
         return;
       }
       const tab = detail?.tab;
@@ -47,11 +56,11 @@ export function useWorkspacePanelTabs(preferenceKey?: string): {
     };
     window.addEventListener(WORKSPACE_PANEL_TAB_EVENT, onTabEvent);
     return () => window.removeEventListener(WORKSPACE_PANEL_TAB_EVENT, onTabEvent);
-  }, [eventSourceKey]);
+  }, [targetId, targetKind]);
 
   const setActiveWorkspaceTab = (tab: WorkspaceTab) => {
     setActiveWorkspaceTabState(tab);
-    const key = workspacePanelTabStorageKey(preferenceKey);
+    const key = workspacePanelTabStorageKey(stableTarget);
     if (!key) return;
     try {
       localStorage.setItem(key, tab);

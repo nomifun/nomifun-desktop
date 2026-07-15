@@ -4,18 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseUserId, type UserId } from '@/common/types/ids';
+
 export const QR_LOGIN_RESUME_KEY = 'nomifun:qr-login-resume';
 
 const QR_LOGIN_RESUME_MAX_AGE_MS = 30_000;
 
 export type QrLoginResumeUser = {
-  id: string;
+  id: UserId;
   username: string;
 };
 
 type QrLoginResumePayload = {
   at: number;
-  user: QrLoginResumeUser;
+  user: { id: string; username: string };
 };
 
 const isResumePayload = (value: unknown): value is QrLoginResumePayload => {
@@ -44,7 +46,7 @@ export function consumeQrLoginResume(now = Date.now()): QrLoginResumeUser | null
     const parsed = JSON.parse(raw) as unknown;
     if (!isResumePayload(parsed)) return null;
     if (now - parsed.at > QR_LOGIN_RESUME_MAX_AGE_MS) return null;
-    return parsed.user;
+    return { id: parseUserId(parsed.user.id), username: parsed.user.username };
   } catch {
     return null;
   } finally {

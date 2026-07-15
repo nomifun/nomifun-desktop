@@ -3,6 +3,7 @@ import { isDesktopShell } from '@renderer/utils/platform';
 import { configService } from '@/common/config/configService';
 import { AUTH_EXPIRED_EVENT } from '@/common/adapter/httpBridge';
 import { consumeQrLoginResume } from './qrLoginResume';
+import { parseUserId, type UserId } from '@/common/types/ids';
 // M6: CSRF removed with legacy webserver — stub functions for compatibility, re-implement in M7
 const withCsrfToken = <T extends Record<string, unknown>>(data: T): T => data;
 const hasValidCsrfToken = (): boolean => true;
@@ -12,9 +13,16 @@ const CSRF_COOKIE_NAME = 'csrf-token';
 type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated';
 
 export interface AuthUser {
-  id: string;
+  id: UserId;
   username: string;
 }
+
+const parseAuthUser = (value: unknown): AuthUser | null => {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as { id?: unknown; username?: unknown };
+  if (typeof raw.username !== 'string') return null;
+  return { id: parseUserId(raw.id), username: raw.username };
+};
 
 interface LoginParams {
   username: string;
@@ -107,10 +115,11 @@ async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null> 
 
     const data = (await response.json()) as {
       success: boolean;
-      user?: AuthUser;
+      user?: unknown;
     };
-    if (data.success && data.user) {
-      return data.user;
+    const user = parseAuthUser(data.user);
+    if (data.success && user) {
+      return user;
     }
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
@@ -247,10 +256,11 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       const data = (await response.json()) as {
         success: boolean;
         message?: string;
-        user?: AuthUser;
+        user?: unknown;
       };
+      const authenticatedUser = parseAuthUser(data.user);
 
-      if (!response.ok || !data.success || !data.user) {
+      if (!response.ok || !data.success || !authenticatedUser) {
         let code: LoginErrorCode = 'unknown';
         let message = data?.message ?? 'Login failed';
         let shouldClearCache = false;
@@ -286,7 +296,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         };
       }
 
-      setUser(data.user);
+      setUser(authenticatedUser);
       setStatus('authenticated');
       setReady(true);
 
@@ -347,10 +357,11 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       const data = (await response.json()) as {
         success: boolean;
         message?: string;
-        user?: AuthUser;
+        user?: unknown;
       };
+      const authenticatedUser = parseAuthUser(data.user);
 
-      if (!response.ok || !data.success || !data.user) {
+      if (!response.ok || !data.success || !authenticatedUser) {
         let code: LoginErrorCode = 'unknown';
         let message = data?.message ?? 'Setup failed';
         if (response.status === 409) {
@@ -368,7 +379,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
         return { success: false, message, code };
       }
 
-      setUser(data.user);
+      setUser(authenticatedUser);
       setStatus('authenticated');
       setNeedsSetup(false);
       setReady(true);

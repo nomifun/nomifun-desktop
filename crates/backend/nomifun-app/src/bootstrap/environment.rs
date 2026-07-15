@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::Result;
 use tracing::{info, warn};
 
-use crate::AppConfig;
+use crate::{AppConfig, config::load_or_create_storage_generation};
 use nomifun_db::Database;
 
 use crate::cli::Cli;
@@ -103,6 +103,16 @@ pub fn init_environment(cli: &Cli, merged_path: &str) -> Result<ServerEnvironmen
         Ok(true) => info!(target: "boot", "factory reset applied — database and derived data wiped"),
         Ok(false) => {}
         Err(e) => warn!(target: "boot", "factory reset failed: {e}"),
+    }
+
+    // Generate this only after a pending reset has removed the old dataset
+    // marker. Browser-local state is outside SQLite, so the value scopes every
+    // entity cache key to exactly this post-reset dataset generation.
+    let storage_generation = load_or_create_storage_generation(&config.data_dir)?;
+    // SAFETY: initialization is still single-threaded and happens before any
+    // service or route can read this variable.
+    unsafe {
+        std::env::set_var("NOMIFUN_STORAGE_GENERATION", &storage_generation);
     }
 
     Ok(ServerEnvironment {

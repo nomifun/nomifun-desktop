@@ -39,3 +39,22 @@ pub(crate) fn load_json_or_default<T: DeserializeOwned + Default>(path: &Path) -
         Err(_) => T::default(),
     }
 }
+
+/// Load a required JSON document. Missing, unreadable, or malformed documents
+/// are absent rather than being replaced with a fabricated entity identity.
+pub(crate) fn load_json<T: DeserializeOwned>(path: &Path) -> Option<T> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %error, path = %path.display(), "public-agent json unreadable");
+            }
+            return None;
+        }
+    };
+    serde_json::from_str(&raw)
+        .map_err(|error| {
+            tracing::warn!(error = %error, path = %path.display(), "public-agent json malformed");
+        })
+        .ok()
+}

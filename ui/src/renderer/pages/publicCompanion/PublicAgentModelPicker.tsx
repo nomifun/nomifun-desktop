@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Select } from '@arco-design/web-react';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import type { IPublicAgentModel } from '@/common/adapter/ipcBridge';
+import type { ProviderId } from '@/common/types/ids';
 
 interface Props {
   value: IPublicAgentModel;
@@ -36,7 +37,7 @@ const PublicAgentModelPicker: React.FC<Props> = ({ value, onChange }) => {
         style={{ width: 200 }}
         placeholder={t('publicCompanion.identity.modelProvider', { defaultValue: '选择模型提供商' })}
         value={value.provider_id || undefined}
-        onChange={(provider_id: string) => onChange({ provider_id, model: '' })}
+        onChange={(provider_id: ProviderId) => onChange({ provider_id, model: '' })}
       >
         {providers.map((p) => (
           <Select.Option key={p.id} value={p.id}>
@@ -50,7 +51,7 @@ const PublicAgentModelPicker: React.FC<Props> = ({ value, onChange }) => {
         placeholder={t('publicCompanion.identity.modelName', { defaultValue: '选择模型' })}
         value={value.model || undefined}
         disabled={!currentProvider}
-        onChange={(model: string) => onChange({ provider_id: value.provider_id, model })}
+        onChange={(model: string) => onChange({ ...value, model })}
       >
         {(currentProvider ? getAvailableModels(currentProvider) : []).map((m) => (
           <Select.Option key={m} value={m}>

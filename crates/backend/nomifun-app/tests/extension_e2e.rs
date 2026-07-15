@@ -12,6 +12,8 @@ use nomifun_extension::{ExtensionSource, ScanPath};
 
 use common::{body_json, build_app, build_app_with_skill_paths, get_with_token, json_with_token, setup_and_login};
 
+const EXTENSION_CHANNEL_ID: &str = "chn_018f1234-5678-7abc-8def-0123456789a0";
+
 fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
     let ext_root = tmp.path().join("extensions");
     let ext_dir = ext_root.join("legacy-suite");
@@ -100,7 +102,7 @@ fn write_legacy_extension_fixture(tmp: &TempDir) -> std::path::PathBuf {
                         "id": "legacy-preset",
                         "name": "Legacy Preset",
                         "avatar": "assets/preset.png",
-                        "preferredAgentId": "gemini",
+                        "preferred_agent_id": "agent_builtin_gemini",
                         "contextFile": "presets/context.md",
                         "models": ["gemini-2.0-flash"],
                         "enabledSkills": ["review-skill"],
@@ -480,7 +482,7 @@ async fn eq16_legacy_preset_agent_and_theme_endpoints_preserve_contract() {
     let presets = preset_json["data"].as_array().unwrap();
     assert_eq!(presets.len(), 1);
     assert_eq!(presets[0]["id"], "ext-legacy-preset");
-    assert_eq!(presets[0]["preferredAgentId"], "gemini");
+    assert_eq!(presets[0]["preferredAgentId"], "agent_builtin_gemini");
     assert_eq!(presets[0]["enabledSkills"][0], "review-skill");
     assert_eq!(presets[0]["prompts"][0], "Review the diff");
     assert_eq!(presets[0]["models"][0], "gemini-2.0-flash");
@@ -578,7 +580,7 @@ async fn eq17_legacy_channel_plugin_endpoint_preserves_contract() {
 }
 
 #[tokio::test]
-async fn eq18_channel_status_lists_builtin_and_extension_placeholders() {
+async fn eq18_channel_status_omits_non_entity_placeholders() {
     let tmp = TempDir::new().unwrap();
     let ext_root = write_legacy_extension_fixture(&tmp);
     let (mut app, services) = build_app_with_extension_root(&ext_root).await;
@@ -593,22 +595,7 @@ async fn eq18_channel_status_lists_builtin_and_extension_placeholders() {
     let json = body_json(resp).await;
     let plugins = json["data"].as_array().unwrap();
 
-    let telegram = plugins.iter().find(|plugin| plugin["type"] == "telegram").unwrap();
-    assert_eq!(telegram["enabled"], false);
-    assert_eq!(telegram["connected"], false);
-    assert_eq!(telegram["is_extension"], false);
-
-    let legacy = plugins
-        .iter()
-        .find(|plugin| plugin["type"] == "legacy-channel")
-        .unwrap();
-    assert_eq!(legacy["enabled"], false);
-    assert_eq!(legacy["connected"], false);
-    assert_eq!(legacy["status"], "stopped");
-    assert_eq!(legacy["is_extension"], true);
-    assert_eq!(legacy["extension_meta"]["extensionName"], "legacy-suite");
-    assert_eq!(legacy["extension_meta"]["credentialFields"][0]["key"], "legacyToken");
-    assert_eq!(legacy["extension_meta"]["configFields"][0]["key"], "pollingInterval");
+    assert!(plugins.is_empty());
 }
 
 #[tokio::test]
@@ -619,7 +606,7 @@ async fn eq19_channel_status_merges_extension_meta_for_persisted_row() {
     let repo = SqliteChannelRepository::new(services.database.pool().clone());
     let now = now_ms();
     repo.upsert_plugin(&nomifun_db::models::ChannelPluginRow {
-        id: "legacy-channel".to_string(),
+        id: EXTENSION_CHANNEL_ID.to_string(),
         r#type: "legacy-channel".to_string(),
         name: "Legacy Channel Persisted".to_string(),
         enabled: true,
@@ -674,7 +661,7 @@ async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
             "POST",
             "/api/channel/plugins/enable",
             json!({
-                "plugin_id": "legacy-channel",
+                "plugin_type": "legacy-channel",
                 "config": {
                     "legacyToken": "secret-token",
                     "pollingInterval": 42
@@ -689,7 +676,14 @@ async fn eq20_enable_extension_channel_persists_config_and_exposes_status() {
     let enable_json = body_json(enable_resp).await;
     assert_eq!(enable_json["data"]["success"], true);
 
-    let row = repo.get_plugin("legacy-channel").await.unwrap().unwrap();
+    let row = repo
+        .get_all_plugins()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.r#type == "legacy-channel")
+        .unwrap();
+    nomifun_common::ChannelId::parse(row.id.clone()).expect("extension channel id is canonical");
     assert!(row.enabled);
     assert_eq!(row.r#type, "legacy-channel");
     assert_eq!(row.status.as_deref(), Some("stopped"));
@@ -730,7 +724,7 @@ async fn eq21_disable_extension_channel_updates_status() {
             "POST",
             "/api/channel/plugins/enable",
             json!({
-                "plugin_id": "legacy-channel",
+                "plugin_type": "legacy-channel",
                 "config": {
                     "legacyToken": "secret-token"
                 }
@@ -741,13 +735,29 @@ async fn eq21_disable_extension_channel_updates_status() {
         .await
         .unwrap();
 
+    let status_resp = app
+        .clone()
+        .oneshot(get_with_token("/api/channel/plugins", &token))
+        .await
+        .unwrap();
+    let status_json = body_json(status_resp).await;
+    let channel_id = status_json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["type"] == "legacy-channel")
+        .and_then(|plugin| plugin["plugin_id"].as_str())
+        .expect("enabled extension exposes canonical channel id")
+        .to_owned();
+    nomifun_common::ChannelId::parse(channel_id.clone()).expect("canonical extension channel id");
+
     let disable_resp = app
         .clone()
         .oneshot(json_with_token(
             "POST",
             "/api/channel/plugins/disable",
             json!({
-                "plugin_id": "legacy-channel"
+                "plugin_id": channel_id
             }),
             &token,
             &csrf,

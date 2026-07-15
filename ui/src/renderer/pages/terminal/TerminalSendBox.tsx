@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import SendBox from '@renderer/components/chat/SendBox';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
 import { ipcBridge } from '@/common';
+import type { TerminalId } from '@/common/types/ids';
 import { useAddEventListener } from '@/renderer/utils/emitter';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { encodeStringToBase64 } from './terminalEncoding';
@@ -37,7 +38,7 @@ import './terminalSendBox.css';
  */
 
 interface TerminalSendBoxProps {
-  sessionId: number;
+  sessionId: TerminalId;
   /** Clear the visible terminal (delegated to the xterm view). */
   onClearView?: () => void;
   /** Handle to the xterm view — used to detect bracketed paste mode on submit. */

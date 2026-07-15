@@ -5,12 +5,25 @@
  */
 
 import type { SpeechToTextConfig } from '@/common/types/provider/speech';
-import type { ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type {
   TDecisionPolicy,
   TDelegationPolicy,
   TExecutionModelPool,
 } from '@/common/types/agentExecution/agentExecutionTypes';
+import type {
+  ConversationId,
+  CompanionId,
+  CronJobId,
+  ExecutionAttemptId,
+  ExecutionId,
+  ExecutionStepId,
+  ExecutionTemplateId,
+  McpServerId,
+  PresetId,
+  ProviderId,
+  RemoteAgentId,
+} from '@/common/types/ids';
 import { storage } from '@/platform';
 
 // 系统配置存储
@@ -75,9 +88,9 @@ export interface IConfigStorageRefer {
     /** Preferred session mode for new conversations / 新会话的默认模式 */
     preferredMode?: string;
   };
-  'nomi.defaultModel'?: { id: string; use_model: string };
+  'nomi.defaultModel'?: { id: ProviderId; use_model: string };
   /** 新会话的协作模型偏好。空数组表示只使用主模型。 */
-  'nomi.collaborationModels'?: { provider_id: string; model: string }[];
+  'nomi.collaborationModels'?: { provider_id: ProviderId; model: string }[];
   'tools.imageGenerationModel': TProviderWithModel & {
     /** @deprecated Image generation is now controlled via built-in MCP server toggle */
     switch?: boolean;
@@ -174,9 +187,8 @@ interface IChatConversation<T, Extra> {
   modified_at: number;
   name: string;
   desc?: string;
-  /** Conversation primary key — backend-minted INTEGER AUTOINCREMENT
-   *  (numeric-id spec). Rendered as `#N`; never minted on the frontend. */
-  id: number;
+  /** Canonical backend-minted Conversation entity id. */
+  id: ConversationId;
   type: T;
   extra: Extra;
   model: TProviderWithModel;
@@ -189,9 +201,9 @@ interface IChatConversation<T, Extra> {
   /** Cron job that spawned this conversation (promoted from extra.cronJobId to a
    *  top-level conversations column; mirrored into extra by the API mapper so
    *  existing extra-readers keep working). */
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
   /** Immutable preset lineage resolved and persisted by the backend. */
-  preset_id?: string;
+  preset_id?: PresetReference;
   preset_revision?: number;
   preset_snapshot?: ResolvedPresetSnapshot;
   /** Nomi-only collaboration policy persisted as first-class conversation fields. */
@@ -201,11 +213,11 @@ interface IChatConversation<T, Extra> {
   /** Optional collaboration authoring template. Runtime executions copy its
    * resolved snapshot and never retain this mutable reference. `null` is the
    * PATCH wire value for explicitly clearing the selection. */
-  execution_template_id?: string | null;
+  execution_template_id?: ExecutionTemplateId | null;
   /** Collaboration aggregate linked to this lead or retained Attempt transcript. */
-  linked_execution_id?: string;
-  execution_step_id?: string;
-  execution_attempt_id?: string;
+  linked_execution_id?: ExecutionId;
+  execution_step_id?: ExecutionStepId;
+  execution_attempt_id?: ExecutionAttemptId;
 }
 
 // Token 使用统计数据类型
@@ -243,7 +255,7 @@ export type TChatConversation =
            * once at creation. Join with `GET /api/skills` for descriptions. */
           skills?: string[];
           /** MCP server id snapshot chosen when the conversation was created. */
-          mcp_server_ids?: number[];
+          mcp_server_ids?: McpServerId[];
           /** MCP server name snapshot chosen when the conversation was created. */
           mcp_servers?: string[];
           /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
@@ -257,7 +269,7 @@ export type TChatConversation =
           /** ACP 后端的 session UUID，用于会话恢复 / ACP backend session UUID for session resume */
           acp_session_id?: string;
           /** Conversation ID that owns the ACP session / 拥有该 ACP session 的会话 ID */
-          acp_session_conversation_id?: number;
+          acp_session_conversation_id?: ConversationId;
           /** ACP session 最后更新时间 / Last update time of ACP session */
           acp_session_updated_at?: number;
           /** Last context usage from usage_update */
@@ -275,7 +287,7 @@ export type TChatConversation =
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
         }
       >,
       'model'
@@ -302,7 +314,7 @@ export type TChatConversation =
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
         }
       >,
       'model'
@@ -346,7 +358,7 @@ export type TChatConversation =
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
         }
       >,
       'model'
@@ -369,7 +381,7 @@ export type TChatConversation =
           pinned_at?: number;
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
           // Other legacy-only keys (session_mode, injected rules, etc.)
           // deliberately omitted — they're not read by the renderer.
         }
@@ -392,7 +404,7 @@ export type TChatConversation =
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
         }
       >,
       'model'
@@ -404,9 +416,9 @@ export type TChatConversation =
           workspace?: string;
           custom_workspace?: boolean;
           /** Remote agent config ID (FK to remote_agents table) */
-          remote_agent_id: number;
+          remote_agent_id: RemoteAgentId;
           /** Legacy UI alias kept during the snake_case migration. */
-          remoteAgentId?: number;
+          remoteAgentId?: RemoteAgentId;
           /** Remote session key for resume */
           sessionKey?: string;
           /** Skills snapshot for this conversation — authoritative list, written
@@ -419,7 +431,7 @@ export type TChatConversation =
           /** Legacy marker for pre-provider-probe health-check conversations */
           is_health_check?: boolean;
           /** Cron job ID that spawned this conversation */
-          cron_job_id?: string;
+          cron_job_id?: CronJobId;
         }
       >,
       'model'
@@ -434,7 +446,7 @@ export type TChatConversation =
          * once at creation. Join with `GET /api/skills` for descriptions. */
         skills?: string[];
         /** MCP server id snapshot chosen when the conversation was created. */
-        mcp_server_ids?: number[];
+        mcp_server_ids?: McpServerId[];
         /** MCP server name snapshot chosen when the conversation was created. */
         mcp_servers?: string[];
         /** Conversation-scoped MCP status snapshot shown in the sendbox menu. */
@@ -456,19 +468,19 @@ export type TChatConversation =
         /** Last token usage stats */
         last_token_usage?: TokenUsageData;
         /** Cron job ID that spawned this conversation */
-        cron_job_id?: string;
+        cron_job_id?: CronJobId;
         /** Marks this nomi conversation as a desktop-companion's single per-companion
          * session (单会话契约). Written by the backend at companion-session creation.
          * Drives the 桌面伙伴 session-list group, the constrained companion chat panel
          * (CompanionChatPanel), and the work-conversation list filter. */
-        companionSession?: boolean;
-        /** The companion (桌面伙伴) this session belongs to, when `companionSession` is
+        companion_session?: boolean;
+        /** The companion (桌面伙伴) this session belongs to, when `companion_session` is
          * set. Resolves the companion profile for the constrained chat panel + the
          * session-list group's active-row highlight. */
-        companionId?: string;
+        companion_id?: CompanionId;
         /** IM-channel platform when a companion turn originated from an external
          * channel (telegram/lark/…). Present on channel-sourced companion turns. */
-        channelPlatform?: string;
+        channel_platform?: string;
       }
     >;
 
@@ -518,7 +530,7 @@ export type ProfileSource = 'inferred' | 'user' | 'catalog';
 
 /** 权威 per-model 能力档案（键 (provider_id, model)）。 */
 export interface ModelProfile {
-  provider_id: string;
+  provider_id: ProviderId;
   model: string;
   tasks: ModelTask[];
   traits: ModelTrait[];
@@ -528,7 +540,7 @@ export interface ModelProfile {
 }
 
 export interface IProvider {
-  id: string;
+  id: ProviderId;
   platform: string;
   name: string;
   base_url: string;
@@ -645,7 +657,7 @@ export type IMcpServerTransport =
   | IMcpServerTransportStreamableHTTP;
 
 export interface IMcpServer {
-  id: number;
+  id: McpServerId;
   name: string;
   description?: string;
   enabled: boolean; // 是否默认启用（新会话默认勾选）
@@ -661,10 +673,9 @@ export interface IMcpServer {
 }
 
 /**
- * Conversation-scoped MCP snapshot. This intentionally does not reuse
- * `IMcpServer.id`: a session snapshot may represent either a repository-backed
- * server (numeric database key) or a session-only server (arbitrary key), so
- * its wire identifier is always a string.
+ * Conversation-scoped MCP snapshot. A snapshot may represent either a
+ * repository-backed server (canonical MCP entity ID) or a session-only server
+ * (opaque string key); the wire value is always a string.
  */
 export interface ISessionMcpServer {
   id: string;

@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use nomifun_api_types::{
     is_preview_capability, PreviewState, PreviewStatusEvent, WebSocketMessage, PREVIEW_CAPABILITY_BYTES,
 };
+use nomifun_common::UserId;
 use nomifun_realtime::UserEventSink;
 use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
 use tokio::sync::Mutex;
@@ -537,11 +538,9 @@ fn session_key(resolved_path: &str, doc_type: DocType) -> String {
 }
 
 fn require_owner(owner_id: &str) -> Result<(), OfficeError> {
-    if owner_id.trim().is_empty() {
-        Err(OfficeError::StartFailed("preview owner is required".into()))
-    } else {
-        Ok(())
-    }
+    UserId::parse(owner_id)
+        .map(|_| ())
+        .map_err(|error| OfficeError::StartFailed(format!("invalid preview owner: {error}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -699,7 +698,7 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let access = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         assert!(access.port > 0);
@@ -727,11 +726,11 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let first = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         let second = mgr
-            .start("owner-b", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678902", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -742,7 +741,7 @@ mod tests {
         assert!(mgr.resolve_capability(&second.capability).is_some());
 
         mgr.stop(
-            "owner-a",
+            "user_0190f5fe-7c00-7a00-8abc-012345678901",
             DocType::Word,
             &first.capability,
         )
@@ -763,11 +762,11 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let p1 = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         let p2 = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Excel)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
 
@@ -787,10 +786,10 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
         let path = file.to_str().unwrap();
 
-        let access = mgr.start("owner-a", path, DocType::Word).await.unwrap();
+        let access = mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", path, DocType::Word).await.unwrap();
         assert_eq!(mgr.active_session_count(), 1);
 
-        mgr.stop("owner-a", DocType::Word, &access.capability)
+        mgr.stop("user_0190f5fe-7c00-7a00-8abc-012345678901", DocType::Word, &access.capability)
             .await;
         assert!(mgr.resolve_capability(&access.capability).is_none());
         assert_eq!(mgr.active_session_count(), 0);
@@ -809,11 +808,11 @@ mod tests {
         std::fs::write(&f2, b"b").unwrap();
 
         let word = mgr
-            .start("owner-a", f1.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", f1.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         let excel = mgr
-            .start("owner-a", f2.to_str().unwrap(), DocType::Excel)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", f2.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
         assert_eq!(mgr.active_session_count(), 2);
@@ -835,7 +834,7 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let access = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         assert!(mgr.resolve_capability(&access.capability).is_some());
@@ -859,15 +858,15 @@ mod tests {
         std::fs::write(&ppt_file, b"p").unwrap();
 
         let word = mgr
-            .start("owner-a", word_file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", word_file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         let excel = mgr
-            .start("owner-a", excel_file.to_str().unwrap(), DocType::Excel)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", excel_file.to_str().unwrap(), DocType::Excel)
             .await
             .unwrap();
         let ppt = mgr
-            .start("owner-a", ppt_file.to_str().unwrap(), DocType::Ppt)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", ppt_file.to_str().unwrap(), DocType::Ppt)
             .await
             .unwrap();
 
@@ -895,17 +894,17 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
         let path = file.to_str().unwrap();
-        let access = mgr.start("owner-a", path, DocType::Word).await.unwrap();
+        let access = mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", path, DocType::Word).await.unwrap();
 
-        mgr.stop("owner-b", DocType::Word, &access.capability)
+        mgr.stop("user_0190f5fe-7c00-7a00-8abc-012345678902", DocType::Word, &access.capability)
             .await;
         assert!(mgr.resolve_capability(&access.capability).is_some());
 
-        mgr.stop("owner-a", DocType::Word, &"0".repeat(64))
+        mgr.stop("user_0190f5fe-7c00-7a00-8abc-012345678901", DocType::Word, &"0".repeat(64))
             .await;
         assert!(mgr.resolve_capability(&access.capability).is_some());
 
-        mgr.stop("owner-a", DocType::Word, &access.capability)
+        mgr.stop("user_0190f5fe-7c00-7a00-8abc-012345678901", DocType::Word, &access.capability)
             .await;
         assert!(mgr.resolve_capability(&access.capability).is_none());
     }
@@ -922,7 +921,7 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let access = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
         assert!(access.port > 0);
@@ -941,7 +940,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
+        mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -952,7 +951,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|owner| owner == "owner-a")
+                .all(|owner| owner == "user_0190f5fe-7c00-7a00-8abc-012345678901")
         );
         assert!(events.len() >= 2);
         assert_eq!(events[0].name, "word-preview.status");
@@ -972,7 +971,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
+        mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -998,7 +997,7 @@ mod tests {
         std::fs::write(&file, b"test").unwrap();
 
         let result = mgr
-            .start("owner-a", file.to_str().unwrap(), DocType::Word)
+            .start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await;
         assert!(result.is_err());
 
@@ -1034,7 +1033,7 @@ mod tests {
         let file = dir.path().join("test.pptx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start("owner-a", file.to_str().unwrap(), DocType::Ppt)
+        mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Ppt)
             .await
             .unwrap();
 
@@ -1053,7 +1052,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        mgr.start("owner-a", file.to_str().unwrap(), DocType::Word)
+        mgr.start("user_0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), DocType::Word)
             .await
             .unwrap();
 
@@ -1067,7 +1066,7 @@ mod tests {
         let broadcaster = Arc::new(RecordingBroadcaster::new());
         let mgr = make_manager(spawner, broadcaster);
 
-        mgr.stop("owner-a", DocType::Word, &"0".repeat(64))
+        mgr.stop("user_0190f5fe-7c00-7a00-8abc-012345678901", DocType::Word, &"0".repeat(64))
             .await;
         assert_eq!(mgr.active_session_count(), 0);
     }

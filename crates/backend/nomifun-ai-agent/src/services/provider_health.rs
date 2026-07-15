@@ -12,7 +12,7 @@ use nomifun_api_types::{
     resolve_dispatch_target, HealthStatus, ModelTask, ProviderHealthCheckErrorKind,
     ProviderHealthCheckRequest, ProviderHealthCheckResponse, RequestShape,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{IModelProfileRepository, IProviderRepository, models::Provider};
 use regex::Regex;
 use tracing::{info, warn};
@@ -57,14 +57,13 @@ impl ProviderHealthCheckService {
         &self,
         req: ProviderHealthCheckRequest,
     ) -> Result<ProviderHealthCheckResponse, AppError> {
-        if req.provider_id.trim().is_empty() {
-            return Err(AppError::BadRequest("provider_id is required".into()));
-        }
+        let provider_id = ProviderId::parse(req.provider_id.clone())
+            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
         if req.model.trim().is_empty() {
             return Err(AppError::BadRequest("model is required".into()));
         }
 
-        let provider_id = req.provider_id.trim();
+        let provider_id = provider_id.as_str();
         let model = req.model.trim();
         let row = self
             .provider_repo
@@ -72,6 +71,12 @@ impl ProviderHealthCheckService {
             .await
             .map_err(|e| AppError::Internal(format!("Failed to load provider config: {e}")))?
             .ok_or_else(|| AppError::BadRequest(format!("Provider '{provider_id}' not found")))?;
+        ProviderId::parse(&row.id).map_err(|error| {
+            AppError::Internal(format!(
+                "stored providers.id '{}' is not canonical: {error}",
+                row.id
+            ))
+        })?;
 
         // Z-Image is served by CreationService's in-process sd-cli adapter,
         // not by the local provider's OpenAI facade. Probing

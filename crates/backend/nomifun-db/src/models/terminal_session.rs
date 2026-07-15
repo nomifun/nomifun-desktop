@@ -1,10 +1,11 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{TerminalId, TimestampMs, UserId};
 use serde::{Deserialize, Serialize};
 
 /// Database row for the `terminal_sessions` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TerminalSessionRow {
-    pub id: i64,
+    #[sqlx(try_from = "String")]
+    pub id: TerminalId,
     pub name: String,
     pub cwd: String,
     pub command: String,
@@ -21,7 +22,8 @@ pub struct TerminalSessionRow {
     /// "running" | "exited" | "error".
     pub last_status: String,
     pub exit_code: Option<i64>,
-    pub user_id: String,
+    #[sqlx(try_from = "String")]
+    pub user_id: UserId,
     pub pinned: bool,
     pub pinned_at: Option<TimestampMs>,
     /// AutoWork config JSON `{enabled, tag, max_requirements}`, nullable. Drives
@@ -39,7 +41,7 @@ mod tests {
     #[test]
     fn terminal_session_row_roundtrip() {
         let row = TerminalSessionRow {
-            id: 1,
+            id: nomifun_common::TerminalId::new(),
             name: "claude".into(),
             cwd: "/work".into(),
             command: "claude".into(),
@@ -53,15 +55,16 @@ mod tests {
             updated_at: 2000,
             last_status: "running".into(),
             exit_code: None,
-            user_id: "user_1".into(),
+            user_id: nomifun_common::UserId::new(),
             pinned: false,
             pinned_at: None,
             autowork: None,
             idmm: None,
         };
+        let expected_id = row.id.clone();
         let json = serde_json::to_string(&row).unwrap();
         let restored: TerminalSessionRow = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.id, 1);
+        assert_eq!(restored.id, expected_id);
         assert_eq!(restored.cols, 120);
         assert_eq!(restored.last_status, "running");
         assert!(restored.exit_code.is_none());
@@ -70,7 +73,7 @@ mod tests {
     #[test]
     fn terminal_session_row_optional_none() {
         let row = TerminalSessionRow {
-            id: 2,
+            id: nomifun_common::TerminalId::new(),
             name: "shell".into(),
             cwd: "/tmp".into(),
             command: "$SHELL".into(),
@@ -84,7 +87,7 @@ mod tests {
             updated_at: 1,
             last_status: "exited".into(),
             exit_code: Some(0),
-            user_id: "u".into(),
+            user_id: nomifun_common::UserId::new(),
             pinned: true,
             pinned_at: Some(123),
             autowork: Some(r#"{"enabled":true,"tag":"t"}"#.into()),

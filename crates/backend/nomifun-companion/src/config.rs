@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use nomifun_common::ProviderWithModel;
 use serde::{Deserialize, Serialize};
 
 /// The roster character every companion falls back to when none is configured.
@@ -67,18 +68,15 @@ impl CollectConfig {
     }
 }
 
-/// The model used for learning runs + companion chat.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ModelConfig {
-    pub provider_id: String,
-    pub model: String,
-}
-
-impl ModelConfig {
-    pub fn is_configured(&self) -> bool {
-        !self.provider_id.is_empty() && !self.model.is_empty()
+pub(crate) fn deserialize_optional_model<'de, D>(deserializer: D) -> Result<Option<ProviderWithModel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let model = Option::<ProviderWithModel>::deserialize(deserializer)?;
+    if let Some(model) = model.as_ref() {
+        model.validate().map_err(serde::de::Error::custom)?;
     }
+    Ok(model)
 }
 
 /// Scheduled learning settings.
@@ -160,7 +158,8 @@ impl Default for PersonaConfig {
 #[serde(default)]
 pub struct CompanionConfig {
     pub collect: CollectConfig,
-    pub model: ModelConfig,
+    #[serde(default, deserialize_with = "deserialize_optional_model")]
+    pub model: Option<ProviderWithModel>,
     pub learn: LearnConfig,
     pub appearance: AppearanceConfig,
     pub persona: PersonaConfig,
@@ -198,14 +197,17 @@ mod tests {
 
         let mut cfg = CompanionConfig::default();
         cfg.collect.chat_user_messages = true;
-        cfg.model.provider_id = "prov_x".into();
-        cfg.model.model = "claude-fable-5".into();
+        cfg.model = Some(ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "claude-fable-5".into(),
+            use_model: None,
+        });
         cfg.learn.enabled = true;
         cfg.save(dir.path()).unwrap();
 
         let again = CompanionConfig::load(dir.path());
         assert_eq!(again, cfg);
-        assert!(again.model.is_configured());
+        assert!(again.model.is_some());
     }
 
     #[test]
@@ -213,6 +215,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(CompanionConfig::config_path(dir.path()), "{not json").unwrap();
         assert_eq!(CompanionConfig::load(dir.path()), CompanionConfig::default());
+    }
+
+    #[test]
+    fn legacy_model_selection_is_nullable_and_strict() {
+        let default_json = serde_json::to_value(CompanionConfig::default()).unwrap();
+        assert!(default_json["model"].is_null(), "unconfigured model must serialize as null");
+
+        let canonical_provider = nomifun_common::ProviderId::new().into_string();
+        for model in [
+            serde_json::json!({"provider_id": "", "model": "chat"}),
+            serde_json::json!({"provider_id": "prov_x", "model": "chat"}),
+            serde_json::json!({"provider_id": canonical_provider, "model": ""}),
+            serde_json::json!({"provider_id": canonical_provider, "model": " chat "}),
+            serde_json::json!({"provider_id": canonical_provider, "model": "chat", "use_model": ""}),
+            serde_json::json!({"provider_id": canonical_provider, "model": "chat", "use_model": " fast "}),
+        ] {
+            let result = serde_json::from_value::<CompanionConfig>(serde_json::json!({"model": model}));
+            assert!(result.is_err(), "partial or malformed model ref must be rejected");
+        }
     }
 
     #[test]

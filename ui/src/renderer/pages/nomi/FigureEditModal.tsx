@@ -11,6 +11,7 @@ import type { IFigureMeta } from '@/common/adapter/ipcBridge';
 import { figureImageUrlOf } from '@renderer/pages/companion/characters/customMeta';
 import FrameStep, { clampHeadBox, type HeadBox } from './CustomFigureWizard/FrameStep';
 import type { FigureUpdatePatch } from './useFigures';
+import type { FigureId } from '@/common/types/ids';
 
 const round4 = (v: number): number => Math.round(v * 10000) / 10000;
 
@@ -31,7 +32,7 @@ const FigureEditModal: React.FC<{
   fig: IFigureMeta;
   baseUrl: string;
   onClose: () => void;
-  onSave: (id: string, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
+  onSave: (id: FigureId, patch: FigureUpdatePatch) => Promise<IFigureMeta>;
 }> = ({ open, fig, baseUrl, onClose, onSave }) => {
   const { t } = useTranslation();
   const [name, setName] = useState(fig.name);

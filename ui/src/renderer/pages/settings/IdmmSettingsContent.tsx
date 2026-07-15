@@ -11,6 +11,7 @@ import { ipcBridge } from '@/common';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IIdmmSettings } from '@/common/adapter/ipcBridge';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
+import type { ProviderId } from '@/common/types/ids';
 
 /**
  * Global IDMM defaults: the backup provider/model the sidecar uses when a
@@ -63,7 +64,9 @@ const IdmmSettingsContent: React.FC = () => {
         <Select
           placeholder={t('idmm.settings.selectProvider')}
           value={settings.backup_provider_id}
-          onChange={(v: string) => setSettings((s) => ({ ...s, backup_provider_id: v, backup_model: undefined }))}
+          onChange={(v: ProviderId | undefined) =>
+            setSettings((s) => ({ ...s, backup_provider_id: v, backup_model: undefined }))
+          }
           options={providerOptions}
           allowClear
         />

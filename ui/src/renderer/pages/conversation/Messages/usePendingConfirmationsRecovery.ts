@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import type { IConfirmation, IMessagePermission, TMessage } from '@/common/chat/chatLib';
@@ -12,12 +13,11 @@ import { useUpdateMessageList } from './hooks';
 export const pendingConfirmationMsgId = (confirmationId: string) => `confirmation:${confirmationId}`;
 
 export function buildPendingConfirmationMessage(
-  conversation_id: number,
+  conversation_id: ConversationId,
   confirmation: IConfirmation<unknown>
 ): IMessagePermission {
   return {
     id: pendingConfirmationMsgId(confirmation.id),
-    msg_id: pendingConfirmationMsgId(confirmation.id),
     type: 'permission',
     position: 'left',
     conversation_id,
@@ -43,7 +43,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function usePendingConfirmationsRecovery(conversation_id: number, options?: { enabled?: boolean }) {
+export function usePendingConfirmationsRecovery(conversation_id: ConversationId, options?: { enabled?: boolean }) {
   const updateMessageList = useUpdateMessageList();
   const enabled = options?.enabled ?? true;
 

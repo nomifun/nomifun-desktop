@@ -26,6 +26,7 @@ import {
   shouldShowToolRowDetail,
 } from '../processTraceDisplayModel';
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
+import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState, mergeProcessStates } from '../turnProcessState';
 import MessageThinking from './MessageThinking';
 import MessagePermission from './MessagePermission';
@@ -42,7 +43,7 @@ export type ProcessTraceRenderableItem =
   | {
       type: 'file_summary';
       id: string;
-      msg_id?: string;
+      msg_id?: MessageId;
       diffs: FileChangeInfo[];
       sourceMessageIds: string[];
       created_at: number;
@@ -50,7 +51,7 @@ export type ProcessTraceRenderableItem =
   | {
       type: 'tool_summary';
       id: string;
-      msg_id?: string;
+      msg_id?: MessageId;
       messages: ToolProcessMessage[];
       sourceMessageIds: string[];
       created_at: number;

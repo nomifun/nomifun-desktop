@@ -8,9 +8,10 @@
 //! Deliberately mirrors the `nomifun-public-agent` crate shape: `fsio` (atomic
 //! temp+rename writes), `service` (the single handle the routes talk to),
 //! `state`/`routes` (the `/api/workshop/*` surface). The canvas *doc*
-//! (nodes/edges/viewport/settings) is **opaque JSON** to the backend — the
-//! service only stores it, caps its size, and derives `node_count` from it; the
-//! doc's internal shape is a frontend contract.
+//! (nodes/edges/viewport/settings) is a frontend-owned JSON contract. The
+//! backend does not duplicate its presentation schema, but it does enforce the
+//! durable identity envelope (`wsn_` nodes, `wse_` edges, and node references),
+//! caps its size, and derives `node_count` from it.
 
 mod archive;
 mod docscan;
@@ -44,7 +45,8 @@ pub const MAX_DOC_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;
 
 /// The default (empty) canvas doc written on create — a valid, minimal
-/// [`WorkshopCanvasDoc`](../../docs) the frontend can load directly. The
-/// backend treats it as opaque thereafter.
+/// [`WorkshopCanvasDoc`](../../docs) the frontend can load directly. Node/edge
+/// payloads remain frontend-owned; durable IDs are validated on every read and
+/// write.
 pub(crate) const DEFAULT_DOC: &str =
     r#"{"schema":1,"viewport":{"x":0,"y":0,"zoom":1},"background":"dots","nodes":[],"edges":[]}"#;

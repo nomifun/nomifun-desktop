@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { IMcpServer } from '@/common/config/storage';
+import { parseMcpServerId } from '@/common/types/ids';
 import { toSessionMcpServer } from './catalog';
 
 const transport: IMcpServer['transport'] = {
@@ -9,9 +10,10 @@ const transport: IMcpServer['transport'] = {
 };
 
 describe('toSessionMcpServer', () => {
-  test('serializes a catalog integer id as a session string id', () => {
-    expect(toSessionMcpServer({ id: 3, name: 'everything', transport })).toEqual({
-      id: '3',
+  test('preserves a canonical catalog id in the session snapshot', () => {
+    const id = parseMcpServerId('mcp_0190f5fe-7c00-7a00-8000-000000000003');
+    expect(toSessionMcpServer({ id, name: 'everything', transport })).toEqual({
+      id,
       name: 'everything',
       transport,
     });

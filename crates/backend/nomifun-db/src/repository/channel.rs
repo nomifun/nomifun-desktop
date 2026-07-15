@@ -89,7 +89,7 @@ pub trait IChannelRepository: Send + Sync {
     async fn update_session_activity(&self, id: &str, last_activity: TimestampMs) -> Result<(), DbError>;
 
     /// Updates the `conversation_id` of a session.
-    async fn update_session_conversation(&self, id: &str, conversation_id: i64) -> Result<(), DbError>;
+    async fn update_session_conversation(&self, id: &str, conversation_id: &str) -> Result<(), DbError>;
 
     /// Updates the `agent_type` of a session.
     async fn update_session_agent_type(&self, id: &str, agent_type: &str) -> Result<(), DbError>;

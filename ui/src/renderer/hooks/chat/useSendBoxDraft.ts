@@ -2,6 +2,7 @@ import type { TChatConversation } from '@/common/config/storage';
 import { useCallback } from 'react';
 import useSWR from 'swr';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
+import type { ConversationId } from '@/common/types/ids';
 export type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 
 type Draft =
@@ -58,7 +59,7 @@ type Draft =
  * 当前支持的对话类型以及对应的草稿对象
  */
 type SendBoxDraftStore = {
-  [K in TChatConversation['type']]: Map<string, Extract<Draft, { _type: K }>>;
+  [K in TChatConversation['type']]: Map<ConversationId, Extract<Draft, { _type: K }>>;
 };
 
 const store: SendBoxDraftStore = {
@@ -73,7 +74,7 @@ const store: SendBoxDraftStore = {
 
 const setDraft = <K extends TChatConversation['type']>(
   type: K,
-  conversation_id: string,
+  conversation_id: ConversationId,
   draft: Extract<Draft, { _type: K }> | undefined
 ) => {
   // TODO import ts-pattern for exhaustive check
@@ -127,7 +128,7 @@ const setDraft = <K extends TChatConversation['type']>(
 
 const getDraft = <K extends TChatConversation['type']>(
   type: K,
-  conversation_id: string
+  conversation_id: ConversationId
 ): Extract<Draft, { _type: K }> | undefined => {
   // TODO import ts-pattern for exhaustive check
   switch (type) {
@@ -155,7 +156,7 @@ export const getSendBoxDraftHook = <K extends TChatConversation['type']>(
   type: K,
   initialValue: Extract<Draft, { _type: K }>
 ) => {
-  function useDraft(conversation_id: string) {
+  function useDraft(conversation_id: ConversationId) {
     const swrRet = useSWR([`/send-box/${type}/draft/${conversation_id}`, conversation_id], ([_, id]) => {
       return getDraft(type, id);
     });

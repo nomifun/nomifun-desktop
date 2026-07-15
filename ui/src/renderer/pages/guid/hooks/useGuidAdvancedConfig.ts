@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import type { IIdmmConfig, IKnowledgeBinding } from '@/common/adapter/ipcBridge';
@@ -25,7 +26,7 @@ export type GuidAdvancedConfig = {
   /** Push the enabled drafts onto a freshly created conversation. Never
    * throws — a feature that fails to apply degrades to a warning toast so
    * the navigation into the conversation is not blocked. */
-  applyToConversation: (conversationId: number) => Promise<void>;
+  applyToConversation: (conversationId: ConversationId) => Promise<void>;
   reset: () => void;
 };
 
@@ -48,7 +49,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   draftsRef.current = { knowledge, autoWork, idmm };
 
   const applyToConversation = useCallback(
-    async (conversationId: number) => {
+    async (conversationId: ConversationId) => {
       const { knowledge: kb, autoWork: aw, idmm: idm } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
 

@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
+import { terminalTarget } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
 import WorkspaceRailBody from '@/renderer/pages/conversation/Workspace/WorkspaceRailBody';
 import type { MessageApi, SelectedFile, WorkspaceSource } from '@/renderer/pages/conversation/Workspace/types';
@@ -56,7 +57,8 @@ const TerminalWorkspaceRail: React.FC<{
     () => ({
       workspace: cwd,
       tree: {
-        key: String(terminalId),
+        key: terminalId,
+        target: terminalTarget(terminalId),
         listRoot: (search?: string) =>
           ipcBridge.terminal.getWorkspace.invoke({
             terminal_id: terminalId,

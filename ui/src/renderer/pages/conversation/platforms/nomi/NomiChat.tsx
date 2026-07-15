@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId, CronJobId } from '@/common/types/ids';
 
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
@@ -25,11 +26,11 @@ import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 
 const NomiChat: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   workspace: string;
   modelSelection: NomiModelSelection;
   session_mode?: string;
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;

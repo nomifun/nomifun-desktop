@@ -39,8 +39,8 @@ mod nomifun {
             Ok(self.servers.lock().await.clone())
         }
 
-        async fn find_by_id(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
-            Ok(self.servers.lock().await.iter().find(|s| s.id == id).cloned())
+        async fn find_by_id(&self, id: &nomifun_common::McpServerId) -> Result<Option<McpServerRow>, DbError> {
+            Ok(self.servers.lock().await.iter().find(|s| s.id == *id).cloned())
         }
 
         async fn find_by_name(&self, name: &str) -> Result<Option<McpServerRow>, DbError> {
@@ -51,11 +51,11 @@ mod nomifun {
             unimplemented!()
         }
 
-        async fn update(&self, _id: i64, _p: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
+        async fn update(&self, _id: &nomifun_common::McpServerId, _p: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
             unimplemented!()
         }
 
-        async fn delete(&self, _id: i64) -> Result<(), DbError> {
+        async fn delete(&self, _id: &nomifun_common::McpServerId) -> Result<(), DbError> {
             unimplemented!()
         }
 
@@ -65,21 +65,21 @@ mod nomifun {
 
         async fn update_status(
             &self,
-            _id: i64,
+            _id: &nomifun_common::McpServerId,
             _s: &str,
             _lc: Option<nomifun_common::TimestampMs>,
         ) -> Result<(), DbError> {
             unimplemented!()
         }
 
-        async fn update_tools(&self, _id: i64, _t: Option<&str>) -> Result<(), DbError> {
+        async fn update_tools(&self, _id: &nomifun_common::McpServerId, _t: Option<&str>) -> Result<(), DbError> {
             unimplemented!()
         }
     }
 
     fn make_row(name: &str, t_type: &str, t_config: &str) -> McpServerRow {
         McpServerRow {
-            id: name.bytes().map(i64::from).sum::<i64>().max(1),
+            id: nomifun_common::McpServerId::new(),
             name: name.to_owned(),
             description: None,
             enabled: true,

@@ -14,6 +14,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionTemplate {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_execution_template_id")]
     pub id: String,
     pub name: String,
     pub description: Option<String>,
@@ -27,11 +28,18 @@ pub struct AgentExecutionTemplate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionTemplateParticipant {
+    #[serde(
+        deserialize_with = "crate::serde_util::deserialize_execution_template_participant_id"
+    )]
     pub id: String,
     pub source_agent_id: String,
     pub preset_id: Option<String>,
     pub preset_revision: Option<i64>,
     pub preset_snapshot: Option<ResolvedPresetSnapshot>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
+    )]
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub role: Option<String>,
@@ -69,7 +77,10 @@ pub struct AgentExecutionTemplateParticipantInput {
     pub preset_snapshot: Option<ResolvedPresetSnapshot>,
     #[serde(default)]
     pub preset_overrides: Option<PresetOverrides>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_provider_id"
+    )]
     pub provider_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
@@ -142,8 +153,11 @@ pub struct CreateExecutionFromTemplateRequest {
     pub adaptation_policy: AdaptationPolicy,
     #[serde(default)]
     pub decision_policy: DecisionPolicy,
-    #[serde(default)]
-    pub lead_conversation_id: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub lead_conversation_id: Option<String>,
     /// Optional deterministic lead selection inside the template's existing
     /// participant authority. When omitted, sort_order=0 remains the lead;
     /// when supplied, the matching participant is promoted or the request is
@@ -152,4 +166,45 @@ pub struct CreateExecutionFromTemplateRequest {
     pub lead_model: Option<ExecutionModelRef>,
     #[serde(default)]
     pub steps: Option<Vec<PlannedExecutionStep>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn template_inputs_reject_noncanonical_durable_references() {
+        let participant = serde_json::json!({
+            "provider_id": PROVIDER_ID,
+            "model": "model-a"
+        });
+        assert!(
+            serde_json::from_value::<AgentExecutionTemplateParticipantInput>(participant).is_ok()
+        );
+        assert!(
+            serde_json::from_value::<AgentExecutionTemplateParticipantInput>(serde_json::json!({
+                "provider_id": "provider-a",
+                "model": "model-a"
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
+                "goal": "ship",
+                "lead_conversation_id": CONVERSATION_ID
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<CreateExecutionFromTemplateRequest>(serde_json::json!({
+                "goal": "ship",
+                "lead_conversation_id": "conversation-1"
+            }))
+            .is_err()
+        );
+    }
 }

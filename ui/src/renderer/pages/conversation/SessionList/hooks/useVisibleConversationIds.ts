@@ -5,6 +5,7 @@
  */
 
 import { useMemo } from 'react';
+import type { ConversationId } from '@/common/types/ids';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
 import { useTerminalSessions } from '@/renderer/pages/terminal/useTerminalSessions';
 import { useWorkpathUiState } from './useWorkpathUiState';
@@ -21,7 +22,7 @@ import { buildWorkpathTree } from '../utils/workpathTree';
  * Terminals are fed into the tree only so node (drawer) ordering matches the
  * sidebar exactly; terminal sessions themselves are never cycled.
  */
-export const useVisibleConversationIds = (): number[] => {
+export const useVisibleConversationIds = (): ConversationId[] => {
   const { conversations } = useConversationHistoryContext();
   const { sessions: terminals } = useTerminalSessions();
   const { pinnedKeys } = useWorkpathUiState();

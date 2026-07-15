@@ -18,6 +18,11 @@
  */
 
 import { buildBackendAuthHeaders } from '@/common/adapter/httpBridge';
+import {
+  tryParseEntityId,
+  type AssetId,
+  type WorkshopNodeId,
+} from '@/common/types/ids';
 import { workshopFileUrl } from '../api';
 import type { WorkshopFlowEdge, WorkshopFlowNode } from '../canvas/model';
 import type { CreationInput, MediaCapability, WorkshopAssetKind } from '../types';
@@ -25,28 +30,31 @@ import type { GenMode, MentionCandidate, ResolvedMention } from './genTypes';
 
 // ─── Mention ref encoding ──────────────────────────────────────────────────────
 
-export function mentionRefForNode(nodeId: string): string {
+export function mentionRefForNode(nodeId: WorkshopNodeId): string {
   return `node:${nodeId}`;
 }
 
-export function mentionRefForAsset(kind: WorkshopAssetKind, assetId: string): string {
+export function mentionRefForAsset(kind: WorkshopAssetKind, assetId: AssetId): string {
   return `asset:${kind}:${assetId}`;
 }
 
-export interface ParsedMention {
-  source: 'node' | 'asset';
-  id: string;
-  kind?: WorkshopAssetKind;
-}
+export type ParsedMention =
+  | { source: 'node'; id: WorkshopNodeId }
+  | { source: 'asset'; id: AssetId; kind: WorkshopAssetKind };
 
 export function parseMentionRef(ref: string): ParsedMention | null {
-  if (ref.startsWith('node:')) return { source: 'node', id: ref.slice(5) };
+  if (ref.startsWith('node:')) {
+    const id = tryParseEntityId('workshop-node', ref.slice(5));
+    return id ? { source: 'node', id } : null;
+  }
   if (ref.startsWith('asset:')) {
     const rest = ref.slice(6);
     const sep = rest.indexOf(':');
     if (sep < 0) return null;
-    const kind = rest.slice(0, sep) as WorkshopAssetKind;
-    return { source: 'asset', id: rest.slice(sep + 1), kind };
+    const kind = rest.slice(0, sep);
+    if (kind !== 'image' && kind !== 'video' && kind !== 'text') return null;
+    const id = tryParseEntityId('asset', rest.slice(sep + 1));
+    return id ? { source: 'asset', id, kind } : null;
   }
   return null;
 }
@@ -54,7 +62,7 @@ export function parseMentionRef(ref: string): ParsedMention | null {
 // ─── Node contributions ────────────────────────────────────────────────────────
 
 interface NodeContribution {
-  assetId: string | null;
+  assetId: AssetId | null;
   kind: WorkshopAssetKind;
   /** Inline text (text nodes); null when it must be fetched from `assetId`. */
   text: string | null;
@@ -64,11 +72,11 @@ interface NodeContribution {
 export function nodeContribution(node: WorkshopFlowNode): NodeContribution | null {
   const data = node.data as Record<string, unknown>;
   if (node.type === 'image') {
-    const assetId = typeof data.assetId === 'string' ? data.assetId : null;
+    const assetId = tryParseEntityId('asset', data.assetId);
     return assetId ? { assetId, kind: 'image', text: null } : null;
   }
   if (node.type === 'video') {
-    const assetId = typeof data.assetId === 'string' ? data.assetId : null;
+    const assetId = tryParseEntityId('asset', data.assetId);
     return assetId ? { assetId, kind: 'video', text: null } : null;
   }
   if (node.type === 'text') {
@@ -76,11 +84,17 @@ export function nodeContribution(node: WorkshopFlowNode): NodeContribution | nul
     return content ? { assetId: null, kind: 'text', text: content } : null;
   }
   if (node.type === 'generator') {
-    const results = Array.isArray(data.resultAssetIds) ? (data.resultAssetIds as string[]) : [];
+    const results = Array.isArray(data.resultAssetIds)
+      ? data.resultAssetIds.flatMap((value) => {
+          const id = tryParseEntityId('asset', value);
+          return id ? [id] : [];
+        })
+      : [];
     if (!results.length) return null;
     const primary =
-      (data.batch as { primary?: string } | undefined)?.primary && results.includes((data.batch as { primary?: string }).primary as string)
-        ? (data.batch as { primary?: string }).primary!
+      tryParseEntityId('asset', (data.batch as { primary?: unknown } | undefined)?.primary) &&
+        results.includes(tryParseEntityId('asset', (data.batch as { primary?: unknown }).primary)!)
+        ? tryParseEntityId('asset', (data.batch as { primary?: unknown }).primary)!
         : results[0];
     const mode = typeof data.mode === 'string' ? (data.mode as GenMode) : 'image';
     const kind: WorkshopAssetKind = mode === 'video' ? 'video' : mode === 'text' ? 'text' : 'image';
@@ -98,7 +112,7 @@ const KIND_PREFIX: Record<WorkshopAssetKind, string> = { image: '图', video: '�
  * position (top-to-bottom, left-to-right) so 图1 is the top-left-most image. The
  * card itself is excluded (a card can't reference its own pending output).
  */
-export function collectNodeCandidates(nodes: WorkshopFlowNode[], selfId: string): MentionCandidate[] {
+export function collectNodeCandidates(nodes: WorkshopFlowNode[], selfId: WorkshopNodeId): MentionCandidate[] {
   const usable = nodes
     .filter((n) => n.id !== selfId && nodeContribution(n) !== null)
     .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
@@ -108,14 +122,16 @@ export function collectNodeCandidates(nodes: WorkshopFlowNode[], selfId: string)
     const contrib = nodeContribution(n)!;
     counters[contrib.kind] += 1;
     const label = `${KIND_PREFIX[contrib.kind]}${counters[contrib.kind]}`;
-    return { ref: mentionRefForNode(n.id), label, kind: contrib.kind, source: 'node' };
+    const nodeId = tryParseEntityId('workshop-node', n.id);
+    if (!nodeId) throw new TypeError(`Invalid workshop node id: ${n.id}`);
+    return { ref: mentionRefForNode(nodeId), label, kind: contrib.kind, source: 'node' };
   });
 }
 
 // ─── Text asset loading ─────────────────────────────────────────────────────────
 
 /** Fetch a text asset's body through the auth gateway (best-effort). */
-export async function loadWorkshopText(assetId: string): Promise<string | null> {
+export async function loadWorkshopText(assetId: AssetId): Promise<string | null> {
   try {
     const res = await fetch(workshopFileUrl(assetId), { method: 'GET', headers: buildBackendAuthHeaders('GET') });
     if (!res.ok) return null;
@@ -133,7 +149,7 @@ export interface RunPlanInput {
   edges: WorkshopFlowEdge[];
   mode: GenMode;
   mentions: string[];
-  maskAssetId?: string;
+  maskAssetId?: AssetId;
   basePrompt: string;
   /**
    * Append-only (M8, loop node): keep only the image references falling in the
@@ -172,7 +188,7 @@ async function resolveMention(ref: string, nodes: WorkshopFlowNode[]): Promise<R
     return { ref, label: ref, kind: contrib.kind, assetId: contrib.assetId, text: null };
   }
   // Library asset.
-  const kind = parsed.kind ?? 'image';
+  const kind = parsed.kind;
   if (kind === 'text') {
     return { ref, label: ref, kind: 'text', assetId: null, text: await loadWorkshopText(parsed.id) };
   }
@@ -187,11 +203,11 @@ async function resolveMention(ref: string, nodes: WorkshopFlowNode[]): Promise<R
 export async function buildRunPlan(input: RunPlanInput): Promise<RunPlan> {
   const { node, nodes, edges, mode, mentions, maskAssetId, basePrompt, imageWindow, promptPrefix } = input;
 
-  const refAssets: { assetId: string; kind: WorkshopAssetKind }[] = [];
+  const refAssets: { assetId: AssetId; kind: WorkshopAssetKind }[] = [];
   const texts: string[] = [];
   const seen = new Set<string>();
 
-  const pushRef = (assetId: string | null, kind: WorkshopAssetKind): void => {
+  const pushRef = (assetId: AssetId | null, kind: WorkshopAssetKind): void => {
     if (!assetId || seen.has(assetId)) return;
     seen.add(assetId);
     refAssets.push({ assetId, kind });

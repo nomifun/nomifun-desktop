@@ -60,13 +60,14 @@ import {
 } from './turnDisclosureModel';
 import { getProcessItemState } from './turnProcessState';
 import { isSupersededPlanToolFailure } from './planToolVisibility';
+import type { MessageId } from '@/common/types/ids';
 
 type IMessageVO =
   | TMessage
   | {
       type: 'file_summary';
       id: string;
-      msg_id?: string;
+      msg_id?: MessageId;
       diffs: FileChangeInfo[];
       sourceMessageIds: string[];
       created_at: number;
@@ -74,7 +75,7 @@ type IMessageVO =
   | {
       type: 'tool_summary';
       id: string;
-      msg_id?: string;
+      msg_id?: MessageId;
       messages: Array<IMessageToolGroup | IMessageAcpToolCall | IMessageToolCall>;
       sourceMessageIds: string[];
       created_at: number;
@@ -84,7 +85,7 @@ type IRenderableItem = IMessageVO | IArtifactVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
   id: string;
-  msg_id: string;
+  msg_id: MessageId;
   processItems: IRenderableItem[];
   processItemStates: Record<string, TurnDisclosureProcessState>;
   sourceMessageIds: string[];
@@ -98,7 +99,7 @@ type ITurnProcessDisclosureVO = {
 type IProcessReceiptVO = {
   type: 'process_receipt';
   id: string;
-  msg_id?: string;
+  msg_id?: MessageId;
   item: IRenderableItem;
   sourceMessageIds: string[];
   created_at: number;
@@ -111,7 +112,7 @@ type IProcessReceiptVO = {
 type IProcessedItem = IRenderableItem | ITurnProcessDisclosureVO | IProcessReceiptVO;
 
 type ConversationLocationState = {
-  targetMessageId?: string;
+  targetMessageId?: MessageId;
   fromConversationSearch?: boolean;
 };
 
@@ -131,7 +132,7 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): string[] => {
   return 'id' in item ? [item.id] : [];
 };
 
-const matchesTargetMessage = (item: IProcessedItem, targetMessageId?: string): boolean => {
+const matchesTargetMessage = (item: IProcessedItem, targetMessageId?: MessageId): boolean => {
   if (!targetMessageId) {
     return false;
   }
@@ -172,7 +173,7 @@ const getProcessedItemProcessEndedAt = (item: IRenderableItem): number => {
   return createdAt + duration;
 };
 
-const getProcessedItemMsgId = (item: IRenderableItem): string | undefined => {
+const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => {
   if ('type' in item && (item.type === 'file_summary' || item.type === 'tool_summary')) {
     return item.msg_id;
   }
@@ -673,7 +674,7 @@ const MessageList: React.FC<{
   const location = useLocation();
   const locationState = (location.state || {}) as ConversationLocationState;
   const targetMessageId = locationState.targetMessageId;
-  const [highlightedMessageId, setHighlightedMessageId] = useState<string | undefined>();
+  const [highlightedMessageId, setHighlightedMessageId] = useState<MessageId | undefined>();
   const handledTargetKeyRef = useRef<string>('');
 
   // Pre-process message list to group tool outputs into summary cards
@@ -688,7 +689,7 @@ const MessageList: React.FC<{
       changes: FileChangeInfo,
       sourceMessageId: string,
       created_at: number,
-      msg_id?: string
+      msg_id?: MessageId
     ) => {
       if (!diffsChanges.length) {
         diffsSourceMessageIds = [];
@@ -1015,9 +1016,7 @@ const MessageList: React.FC<{
     const handleMessageJump = (event: Event) => {
       const detail = (event as CustomEvent<ChatMessageJumpDetail>).detail;
       if (!detail || !detail.conversation_id) return;
-      // detail.conversation_id arrives as a route/event string; coerce to the
-      // numeric conversation id before comparing against the context id.
-      if (!conversationContext?.conversation_id || Number(detail.conversation_id) !== conversationContext.conversation_id)
+      if (!conversationContext?.conversation_id || detail.conversation_id !== conversationContext.conversation_id)
         return;
 
       const targetIndex = displayList.findIndex((item) => {

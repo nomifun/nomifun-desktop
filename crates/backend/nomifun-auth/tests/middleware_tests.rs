@@ -247,7 +247,10 @@ async fn authenticated_action_limit_uses_user_id_key() {
         .layer(middleware::from_fn(
             |mut request: axum::extract::Request, next: axum::middleware::Next| async {
                 request.extensions_mut().insert(CurrentUser {
-                    id: "user_42".into(),
+                    id: nomifun_common::UserId::parse(
+                        "user_0190f5fe-7c00-7a00-8000-000000000042",
+                    )
+                    .unwrap(),
                     username: "admin".into(),
                 });
                 Ok::<_, std::convert::Infallible>(next.run(request).await)

@@ -2,6 +2,7 @@ import useSWR, { type SWRConfiguration } from 'swr';
 
 import { ipcBridge } from '@/common';
 import type { ModelProfile } from '@/common/config/storage';
+import type { ProviderId } from '@/common/types/ids';
 
 export const MODEL_PROFILES_SWR_KEY = 'model-profiles';
 
@@ -27,7 +28,7 @@ export const useModelProfiles = () => {
   );
 
   const profiles = data ?? [];
-  const profileFor = (providerId: string, model: string): ModelProfile | undefined =>
+  const profileFor = (providerId: ProviderId, model: string): ModelProfile | undefined =>
     profiles.find((p) => p.provider_id === providerId && p.model === model);
 
   return { profiles, profileFor, error, isLoading, mutate };

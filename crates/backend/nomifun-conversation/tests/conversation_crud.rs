@@ -7,7 +7,7 @@ use nomifun_api_types::{
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationSource, ConversationStatus, TimestampMs};
 use nomifun_conversation::ConversationService;
 use nomifun_conversation::skill_resolver::SkillResolver;
-use nomifun_db::{SqliteConversationRepository, init_database_memory};
+use nomifun_db::{IProviderRepository, SqliteConversationRepository};
 use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use std::path::PathBuf;
@@ -101,6 +101,8 @@ async fn setup_with_workspace_root(
 ) -> (ConversationService, Arc<TestBroadcaster>, Arc<dyn AgentRuntimeRegistry>) {
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+    let provider_repo = nomifun_db::SqliteProviderRepository::new(db.pool().clone());
+    provider_repo.create(nomifun_db::CreateProviderParams { id: Some("prov_0190f5fe-7c00-7a00-8000-000000000001"), platform: "openai", name: "test", base_url: "https://example.invalid", api_key_encrypted: "", models: "[\"m1\",\"gpt-4o\",\"claude-sonnet-4-20250514\"]", enabled: true, capabilities: "[]", context_limit: None, model_context_limits: None, model_protocols: None, model_descriptions: None, model_enabled: None, model_health: None, bedrock_config: None, is_full_url: false, sort_order: Some(0) }).await.unwrap();
     let broadcaster = Arc::new(TestBroadcaster::new());
     let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
         Arc::new(nomifun_db::SqliteAgentMetadataRepository::new(db.pool().clone()));
@@ -121,7 +123,14 @@ async fn setup_with_workspace_root(
     (svc, broadcaster, runtime_registry)
 }
 
-const USER_ID: &str = "system_default_user";
+const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
+async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
+    nomifun_db::init_database_memory_with_owner(
+        nomifun_common::UserId::parse(USER_ID.to_owned()).expect("canonical fixture owner"),
+    )
+    .await
+}
 
 fn make_create_req() -> CreateConversationRequest {
     serde_json::from_value(json!({
@@ -147,7 +156,7 @@ async fn t1_1_create_with_defaults() {
 
     let resp = svc.create(USER_ID, make_create_req()).await.unwrap();
 
-    assert!(resp.id > 0);
+    assert!(nomifun_common::ConversationId::parse(resp.id.clone()).is_ok());
     assert_eq!(resp.r#type, AgentType::Acp);
     assert_eq!(resp.status, ConversationStatus::Pending);
     assert_eq!(resp.source, Some(ConversationSource::Nomifun));
@@ -170,7 +179,7 @@ async fn t1_1_create_with_defaults() {
 }
 
 #[tokio::test]
-async fn auto_workspace_does_not_reuse_path_when_integer_id_restarts() {
+async fn auto_workspace_is_isolated_across_fresh_databases() {
     let root = std::env::temp_dir().join(format!(
         "nomifun-conv-reset-{}",
         nomifun_common::generate_prefixed_id("test")
@@ -182,7 +191,7 @@ async fn auto_workspace_does_not_reuse_path_when_integer_id_restarts() {
         .create(USER_ID, make_auto_workspace_create_req())
         .await
         .unwrap();
-    assert_eq!(first.id, 1, "first in-memory DB should allocate id=1");
+    assert!(nomifun_common::ConversationId::parse(first.id.clone()).is_ok());
     let first_workspace = first.extra["workspace"].as_str().unwrap().to_owned();
     std::fs::write(PathBuf::from(&first_workspace).join("old-session.txt"), "pollution").unwrap();
 
@@ -191,12 +200,13 @@ async fn auto_workspace_does_not_reuse_path_when_integer_id_restarts() {
         .create(USER_ID, make_auto_workspace_create_req())
         .await
         .unwrap();
-    assert_eq!(second.id, 1, "reset in-memory DB should allocate id=1 again");
+    assert!(nomifun_common::ConversationId::parse(second.id.clone()).is_ok());
+    assert_ne!(second.id, first.id, "fresh databases must not reuse entity IDs");
     let second_workspace = second.extra["workspace"].as_str().unwrap();
 
     assert_ne!(
         second_workspace, first_workspace,
-        "auto workspace path must not be derived solely from the reusable integer conversation id"
+        "auto workspaces must remain isolated across fresh datasets"
     );
     assert!(
         !PathBuf::from(second_workspace).join("old-session.txt").exists(),
@@ -248,7 +258,7 @@ async fn t1_2_create_each_agent_type() {
         let body = if type_str == "nomi" {
             json!({
                 "type": type_str,
-                "model": { "provider_id": "p1", "model": "m1" },
+                "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
                 "extra": {}
             })
         } else {
@@ -328,7 +338,7 @@ async fn t2_3_cursor_pagination() {
     assert_eq!(page1.total, 5);
 
     // Second page: cursor = last ID from page 1
-    let cursor = page1.items.last().unwrap().id;
+    let cursor = page1.items.last().unwrap().id.clone();
     let query2 = ListConversationsQuery {
         cursor: Some(cursor.to_string()),
         limit: Some(2),
@@ -339,7 +349,7 @@ async fn t2_3_cursor_pagination() {
     assert!(page2.has_more);
 
     // Third page
-    let cursor2 = page2.items.last().unwrap().id;
+    let cursor2 = page2.items.last().unwrap().id.clone();
     let query3 = ListConversationsQuery {
         cursor: Some(cursor2.to_string()),
         limit: Some(2),
@@ -350,14 +360,14 @@ async fn t2_3_cursor_pagination() {
     assert!(!page3.has_more);
 
     // No overlap between pages
-    let all_ids: Vec<i64> = page1
+    let all_ids: Vec<String> = page1
         .items
         .iter()
         .chain(page2.items.iter())
         .chain(page3.items.iter())
-        .map(|c| c.id)
+        .map(|c| c.id.clone())
         .collect();
-    let unique: std::collections::HashSet<&i64> = all_ids.iter().collect();
+    let unique: std::collections::HashSet<&String> = all_ids.iter().collect();
     assert_eq!(all_ids.len(), unique.len());
 }
 
@@ -423,7 +433,8 @@ async fn t3_1_get_existing() {
 #[tokio::test]
 async fn t3_2_get_not_found() {
     let (svc, _, _runtime_registry) = setup().await;
-    let err = svc.get(USER_ID, "non-existent-uuid").await.unwrap_err();
+    let missing = nomifun_common::ConversationId::new();
+    let err = svc.get(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -503,20 +514,20 @@ async fn t4_5_update_model() {
     // (Task 8 enforces the nomi-only rule in update).
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "m1" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
         "extra": {}
     }))
     .unwrap();
     let conv = svc.create(USER_ID, create_req).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({
-        "model": { "provider_id": "p2", "model": "new-model" }
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "new-model" }
     }))
     .unwrap();
     let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
 
     let model = updated.model.unwrap();
-    assert_eq!(model.provider_id, "p2");
+    assert_eq!(model.provider_id, "prov_0190f5fe-7c00-7a00-8000-000000000001");
     assert_eq!(model.model, "new-model");
 }
 
@@ -524,7 +535,8 @@ async fn t4_5_update_model() {
 async fn t4_6_update_not_found() {
     let (svc, _, runtime_registry) = setup().await;
     let req: UpdateConversationRequest = serde_json::from_value(json!({ "name": "x" })).unwrap();
-    let err = svc.update(USER_ID, "non-existent", req, &runtime_registry).await.unwrap_err();
+    let missing = nomifun_common::ConversationId::new();
+    let err = svc.update(USER_ID, missing.as_str(), req, &runtime_registry).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -562,7 +574,8 @@ async fn t5_2_delete_then_get_returns_404() {
 #[tokio::test]
 async fn t5_3_delete_not_found() {
     let (svc, _, _runtime_registry) = setup().await;
-    let err = svc.delete(USER_ID, "non-existent").await.unwrap_err();
+    let missing = nomifun_common::ConversationId::new();
+    let err = svc.delete(USER_ID, missing.as_str()).await.unwrap_err();
     assert!(matches!(err, nomifun_common::AppError::NotFound(_)));
 }
 
@@ -667,7 +680,7 @@ async fn t12_3_concurrent_creates() {
     }
 
     // All IDs unique
-    let unique: std::collections::HashSet<&i64> = ids.iter().collect();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
     assert_eq!(ids.len(), unique.len());
 }
 
@@ -717,7 +730,7 @@ async fn create_rejects_top_level_model_for_acp() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "acp",
-        "model": { "provider_id": "p1", "model": "claude-sonnet-4-20250514" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "claude-sonnet-4-20250514" },
         "extra": {}
     }))
     .unwrap();
@@ -738,7 +751,7 @@ async fn create_rejects_top_level_model_for_remote() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "remote",
-        "model": { "provider_id": "p1", "model": "m1" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "m1" },
         "extra": {}
     }))
     .unwrap();
@@ -752,7 +765,7 @@ async fn create_accepts_top_level_model_for_nomi() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "gpt-4o" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o" },
         "extra": {}
     }))
     .unwrap();
@@ -760,7 +773,7 @@ async fn create_accepts_top_level_model_for_nomi() {
     let resp = svc.create(USER_ID, req).await.unwrap();
     assert_eq!(resp.r#type, AgentType::Nomi);
     let model = resp.model.expect("nomi response should carry top-level model");
-    assert_eq!(model.provider_id, "p1");
+    assert_eq!(model.provider_id, "prov_0190f5fe-7c00-7a00-8000-000000000001");
     assert_eq!(model.model, "gpt-4o");
 }
 
@@ -770,7 +783,7 @@ async fn create_nomi_strips_extra_model_field() {
 
     let req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "gpt-4o" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o" },
         "extra": {
             "workspace": "/home/user/project",
             "model": "bogus-from-legacy-client"
@@ -794,7 +807,7 @@ async fn update_rejects_top_level_model_for_acp() {
     let conv = svc.create(USER_ID, make_create_req()).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({
-        "model": { "provider_id": "p1", "model": "claude-sonnet-4-20250514" }
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "claude-sonnet-4-20250514" }
     }))
     .unwrap();
 
@@ -811,14 +824,14 @@ async fn update_accepts_top_level_model_for_nomi() {
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "gpt-4o" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o" },
         "extra": {}
     }))
     .unwrap();
     let conv = svc.create(USER_ID, create_req).await.unwrap();
 
     let req: UpdateConversationRequest = serde_json::from_value(json!({
-        "model": { "provider_id": "p1", "model": "gpt-4o-mini" }
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o-mini" }
     }))
     .unwrap();
     let updated = svc.update(USER_ID, &conv.id.to_string(), req, &runtime_registry).await.unwrap();
@@ -850,7 +863,7 @@ async fn update_nomi_strips_extra_model_from_patch() {
 
     let create_req: CreateConversationRequest = serde_json::from_value(json!({
         "type": "nomi",
-        "model": { "provider_id": "p1", "model": "gpt-4o" },
+        "model": { "provider_id": "prov_0190f5fe-7c00-7a00-8000-000000000001", "model": "gpt-4o" },
         "extra": {}
     }))
     .unwrap();
@@ -877,7 +890,7 @@ async fn update_nomi_strips_extra_model_from_patch() {
 
 #[tokio::test]
 async fn create_acp_seeds_acp_session_runtime_from_extra() {
-    use nomifun_db::{SqliteAcpSessionRepository, init_database_memory};
+    use nomifun_db::SqliteAcpSessionRepository;
 
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
@@ -911,7 +924,7 @@ async fn create_acp_seeds_acp_session_runtime_from_extra() {
     let conv = svc.create(USER_ID, req).await.unwrap();
 
     let runtime = acp_session_repo
-        .load_runtime_state(conv.id)
+        .load_runtime_state(&conv.id)
         .await
         .unwrap()
         .expect("acp_session runtime state should exist after create");
@@ -929,7 +942,7 @@ async fn create_acp_seeds_acp_session_runtime_from_extra() {
 
 #[tokio::test]
 async fn create_acp_skips_seed_when_extra_has_empty_runtime_fields() {
-    use nomifun_db::{SqliteAcpSessionRepository, init_database_memory};
+    use nomifun_db::SqliteAcpSessionRepository;
 
     let db = init_database_memory().await.unwrap();
     let repo = Arc::new(nomifun_db::SqliteConversationRepository::new(db.pool().clone()));
@@ -959,7 +972,7 @@ async fn create_acp_skips_seed_when_extra_has_empty_runtime_fields() {
     .unwrap();
     let conv = svc.create(USER_ID, req).await.unwrap();
 
-    let runtime = acp_session_repo.load_runtime_state(conv.id).await.unwrap();
+    let runtime = acp_session_repo.load_runtime_state(&conv.id).await.unwrap();
     // Either `None` (no runtime key yet) or Some(default) — both mean "nothing seeded".
     assert!(
         runtime

@@ -91,7 +91,7 @@ pub struct CreateAgentExecutionParams {
     pub delegation_policy: DelegationPolicy,
     pub max_parallel: i64,
     pub work_dir: Option<String>,
-    pub lead_conversation_id: Option<i64>,
+    pub lead_conversation_id: Option<String>,
     /// Immutable tagged JSON command persisted in the same transaction as the
     /// Planning aggregate. Recovery must replay this value verbatim.
     pub initial_plan_input: String,
@@ -164,7 +164,7 @@ pub struct AppendAgentExecutionStepsFromAttemptParams {
     /// Stable server-derived idempotency key for one canonical delegation
     /// request. It is not accepted from the model payload.
     pub operation_id: String,
-    pub caller_conversation_id: i64,
+    pub caller_conversation_id: String,
     pub caller_step_id: String,
     pub caller_attempt_id: String,
     pub expected_caller_step_version: i64,
@@ -235,7 +235,7 @@ pub struct AttemptConversationEffectParams {
 #[derive(Debug, Clone)]
 pub struct AttemptConversationEffectResult {
     pub detail: AgentExecutionStepDetailRow,
-    pub conversation_id: i64,
+    pub conversation_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -243,7 +243,7 @@ pub struct PendingConversationCleanup {
     pub link_id: String,
     pub execution_id: String,
     pub user_id: String,
-    pub conversation_id: i64,
+    pub conversation_id: String,
 }
 
 /// Atomic reset requested when a Loop controller settles one iteration and
@@ -560,7 +560,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
         expected_step_version: i64,
         attempt_id: &str,
         expected_attempt_version: i64,
-        conversation_id: i64,
+        conversation_id: &str,
         lease: Option<&AgentExecutionLeaseToken>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
@@ -604,7 +604,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
     async fn resolve_conversation_link(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Vec<ConversationExecutionLinkRow>, DbError>;
     /// Returns whether the conversation is an execution-attempt transcript
     /// owned by `user_id`. Unlike the runtime relation read-side, this audit
@@ -612,7 +612,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
     async fn has_attempt_conversation_link(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, DbError>;
 
     /// Durable external cleanup outbox derived from inactive attempt links.

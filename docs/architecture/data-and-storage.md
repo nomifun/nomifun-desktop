@@ -73,6 +73,10 @@ lock (`doctor` is designed to run alongside a live server).
 [`nomifun-db`](../../crates/backend/nomifun-db/) is the data layer. Highlights
 from [`crates/backend/nomifun-db/src/lib.rs`](../../crates/backend/nomifun-db/src/lib.rs):
 
+Persisted entity identity follows the canonical prefixed UUIDv7 contract in
+[`id-system.md`](id-system.md). SQLite row order and auto-increment values are
+not portable entity identities.
+
 - `Database` — owns the `sqlx::SqlitePool` and the migrations. Exposed via
   `nomifun-db::SqlitePool` re-export.
 - `init_database` — opens the file, runs embedded migrations.
@@ -83,7 +87,7 @@ list (see the `pub use repository::{...}` block in `lib.rs` for all of them):
 
 | Trait | Sqlite implementation | Stores |
 | --- | --- | --- |
-| `IUserRepository` | `SqliteUserRepository` | Users, password hashes, the system default user |
+| `IUserRepository` | `SqliteUserRepository` | Users and password hashes |
 | `IConversationRepository` | `SqliteConversationRepository` | Conversations + messages, with filters and full-text search rows |
 | `IAgentMetadataRepository` | `SqliteAgentMetadataRepository` | ACP handshake results, available models, agent-binary metadata |
 | `IAcpSessionRepository` | `SqliteAcpSessionRepository` | Persistent ACP sessions for resume after restart |
@@ -120,12 +124,11 @@ supported.
 ### Scheduled-task ownership
 
 `cron_jobs.user_id` is the non-null, immutable owner of the scheduled-task
-aggregate, not a request-time hint inferred from a Conversation. Migration 038
-assigns legacy rows once and deterministically: the directly bound Conversation
-first, then the inverse `conversations.cron_job_id` binding; only a truly
-unbound legacy job is assigned to the system user. A missing direct target,
-multiple inverse owners, or disagreement between the two directions aborts and
-rolls back the migration rather than guessing or dropping data.
+aggregate, not a request-time hint inferred from a Conversation. A new task
+receives the authenticated canonical user ID explicitly. Optional Conversation
+bindings must already have the same owner; a missing target, multiple inverse
+owners, or disagreement between the two directions is rejected rather than
+guessed or silently repaired.
 
 Public HTTP, Gateway, service, and repository operations all carry `user_id`;
 cross-owner access is indistinguishable from a missing job. The scheduler is
@@ -134,19 +137,15 @@ re-verifies that pair against the persisted row before execution, closing
 delete/recreate races. Database triggers require both directions of an optional
 Conversation binding, as well as Conversation Artifacts produced by the job, to
 have the same owner; artifact status writes are owner-filtered before mutation.
-Ownership cannot be moved in place. There is no runtime system-user fallback.
-
-Migration 042 removes the obsolete Cron target discriminator and all
-terminal-only columns. Scheduled work has one target—an Agent—so target type is
-no longer represented in the domain model, API, or final schema. Historical
-terminal rows were already non-executable; the migration explicitly detaches
-their Conversation and Artifact references and deletes their run history before
-retiring them. Agent rows and their references are preserved, and all ownership
-and model-only triggers are recreated on the canonical table.
+Ownership cannot be moved in place. There is no runtime installation-owner
+fallback. Scheduled work has one target—an Agent—so target type and legacy
+terminal-only fields are not represented in the ID-v2 domain model, API, or
+baseline schema.
 
 ### Installation execution authority
 
-`system_default_user` is the one canonical installation owner. The owner may
+The canonical user referenced by `installation_identity.owner_user_id` is the
+installation owner. The owner may
 start host runtimes and use files, terminals, skills, presets, knowledge mounts,
 Office preview and Platform Gateway capabilities. Every other authenticated
 principal is limited to ordinary Nomi model calls in Conversations and
@@ -199,7 +198,7 @@ Each conversation owns a directory the agent can freely read and write:
   space the user can also drop files into.
 - `workspace_token` — a backend-minted `ws_…` token stored as
   `extra.temp_workspace_id`. It identifies this managed workspace without
-  overloading the SQLite integer conversation key.
+  overloading the canonical conversation entity ID.
 
 For a conversation without a user-selected workspace, the directory is
 provisioned immediately after the conversation row is created.
@@ -333,16 +332,73 @@ non-loopback bind address.
 
 ## Backups and reinstall
 
-- **Database** — copy `<data_dir>/nomifun-backend.db` (sqlx single-file SQLite).
-- **Encryption key** — copy `<data_dir>/encryption_key` together with the
-  database. Without this file, provider API keys, OAuth tokens, channel bot
-  tokens, and other encrypted columns cannot be decrypted.
-- **Workspaces** — copy `<work_dir>/conversations/` if you want to keep the
-  files agents wrote.
-- **Companion data** — copy `<data_dir>/companion/` (shared memory hub + per-companion
-  profiles), or use the in-app migration bundles instead (see the
+- **Database** — create a consistent SQLite snapshot with the SQLite Backup API
+  or `VACUUM INTO` while the database is open. Do **not** copy
+  `nomifun-backend.db` directly: WAL data may still be in
+  `nomifun-backend.db-wal`, and a raw file copy can be incomplete.
+- **Bundle manifest** — record schema version, storage-generation/dataset ID,
+  creation time, and checksums for every included file. Restore preserves
+  entity IDs; merge import rejects same-ID/different-content conflicts.
+- **Encryption key** — the offline bundle includes
+  `<data_dir>/encryption_key` when present. Without this file, provider API
+  keys, OAuth tokens, channel bot tokens, and other encrypted columns cannot
+  be decrypted.
+- **Workspaces** — the bundle recursively includes only the backend-managed
+  `<work_dir>/conversations/` tree. User-selected/custom workspaces elsewhere
+  on disk are external user projects and are never copied implicitly.
+- **Companion data** — the bundle recursively includes
+  `<data_dir>/companion/` (shared memory hub + per-companion profiles; see the
   [Companions guide](../guides/companions.md)).
 - **Bun runtime cache** — disposable; will be re-extracted on next boot.
+
+Offline CLI commands are provided by `nomicore`:
+
+```text
+nomicore --data-dir <source> backup --output <bundle-dir>
+nomicore restore --bundle <bundle-dir> --destination-data-dir <new-data-dir>
+```
+
+`backup` acquires the per-data-directory `server.lock` before opening SQLite,
+so it fails instead of racing a live backend. It resolves `work_dir` with the
+same CLI/persisted/environment rules as server boot. The output directory must
+not already exist and must be outside both source roots. Backup opens the
+existing ID-v2 database without running migrations, recovery, or quarantine;
+an invalid source fails closed. A complete bundle contains the WAL-safe database snapshot,
+the persistent encryption key when present, the companion file domain, and
+managed conversation workspaces. Logs, `server.lock`, database WAL/SHM
+sidecars, runtime/Bun caches, browser profiles, process/session scratch data,
+and custom external workspaces are excluded.
+
+Every payload file has a portable relative path, byte size, and SHA-256 digest
+in the manifest; directory entries preserve empty companion/workspace
+directories. Backup and restore reject symlinks, Windows junctions/reparse
+points, path traversal, special files, undeclared payload files/directories,
+and bundles above 8 GiB per file, 64 GiB total, 200,000 files, or 200,000
+directories; the JSON manifest itself is capped at 64 MiB. `restore` verifies the complete bundle
+before writing, accepts only an absent or empty destination, stages and
+validates all files beside the destination, and installs the data directory
+with one rename. A failure leaves no partial destination. All entity IDs are
+preserved, while a new `storage-generation` is written so browser caches from
+the source dataset cannot be mistaken for restored state. Managed workspaces
+from a source custom work directory are intentionally rebased to
+`<destination-data-dir>/conversations`; custom external workspaces must be
+backed up separately by their owner.
+
+The bundle contains the database encryption key and encrypted credentials.
+Treat the entire bundle as sensitive data; store and transfer it with the same
+access controls as the live data directory. If encrypted rows exist while the
+persistent key is missing, or if the key file is invalid, backup refuses to
+create an unrestorable bundle.
+
+The restore command has no destination `--work-dir` option: it intentionally
+creates the managed workspace tree below the new data directory. To use a
+separate work root, move that restored managed tree and set the normal
+work-directory override before the first server boot; never point restore at
+an existing external project.
+
+These commands implement full offline backup/restore. The logical Merge/Clone
+rules described by the ID contract are not yet exposed as a SQLite CLI
+operation; the CLI must not be described as providing merge or clone.
 
 A clean uninstall therefore deletes the data dir, the work dir (if set
 separately), and the OS cache dir.

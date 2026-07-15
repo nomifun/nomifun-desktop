@@ -17,13 +17,7 @@ pub(crate) fn images_stripped_tip_content() -> String {
 
 impl ConversationService {
     pub(crate) async fn persist_send_failure_tip(&self, conversation_id: &str, err: &AppError) -> Option<MessageRow> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            warn!(
-                conversation_id,
-                "persist_send_failure_tip: non-numeric conversation id; skipping error tip persist"
-            );
-            return None;
-        };
+        let conv_id = conversation_id.to_owned();
         let stream_error = AgentSendError::from_app_error_ref(err).into_stream_error();
         let row = MessageRow {
             id: Self::mint_msg_id(),
@@ -59,13 +53,7 @@ impl ConversationService {
 
     /// 在会话里插入一条"图片已移除"警告提示(tips)。仅供用户查看,不回传模型。
     pub(crate) async fn persist_images_stripped_tip(&self, conversation_id: &str) -> Option<MessageRow> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            warn!(
-                conversation_id,
-                "persist_images_stripped_tip: non-numeric conversation id; skipping"
-            );
-            return None;
-        };
+        let conv_id = conversation_id.to_owned();
         let row = MessageRow {
             id: Self::mint_msg_id(),
             conversation_id: conv_id,

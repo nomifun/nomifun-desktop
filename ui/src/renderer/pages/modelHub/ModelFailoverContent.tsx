@@ -13,6 +13,7 @@ import type { IModelFailoverCandidate, IModelFailoverConfig } from '@/common/ada
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import { buildModelFailoverConfigForSave } from './modelFailoverQueue';
+import type { ProviderId } from '@/common/types/ids';
 
 const DEFAULT_CONFIG: IModelFailoverConfig = {
   enabled: false,
@@ -36,7 +37,7 @@ const ModelFailoverContent: React.FC = () => {
   const [saving, setSaving] = useState(false);
 
   // Pending "add candidate" row state.
-  const [draftProvider, setDraftProvider] = useState<string | undefined>(undefined);
+  const [draftProvider, setDraftProvider] = useState<ProviderId | undefined>(undefined);
   const [draftModel, setDraftModel] = useState<string | undefined>(undefined);
 
   useEffect(() => {
@@ -56,7 +57,7 @@ const ModelFailoverContent: React.FC = () => {
     return (p?.models ?? []).map((m) => ({ label: m, value: m }));
   }, [providers, draftProvider]);
 
-  const providerName = (id: string) => (providers ?? []).find((p) => p.id === id)?.name ?? id;
+  const providerName = (id: ProviderId) => (providers ?? []).find((p) => p.id === id)?.name ?? id;
 
   const moveCandidate = (index: number, delta: number) => {
     setConfig((c) => {
@@ -170,7 +171,7 @@ const ModelFailoverContent: React.FC = () => {
             <Select
               placeholder={t('modelFailover.selectProvider')}
               value={draftProvider}
-              onChange={(v: string) => {
+              onChange={(v: ProviderId | undefined) => {
                 setDraftProvider(v);
                 setDraftModel(undefined);
               }}

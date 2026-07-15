@@ -9,7 +9,7 @@ pub trait IAttachmentRepository: Send + Sync {
     async fn get_by_id(&self, id: &str) -> Result<Option<AttachmentRow>, DbError>;
 
     /// All attachments for a requirement, oldest first.
-    async fn list_for_requirement(&self, requirement_id: i64) -> Result<Vec<AttachmentRow>, DbError>;
+    async fn list_for_requirement(&self, requirement_id: &str) -> Result<Vec<AttachmentRow>, DbError>;
 
     /// Delete by id. Returns whether a row was deleted (absent id is not an
     /// error — callers do best-effort cleanup).

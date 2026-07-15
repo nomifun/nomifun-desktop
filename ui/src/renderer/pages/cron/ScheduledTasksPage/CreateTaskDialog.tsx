@@ -18,6 +18,7 @@ import { CUSTOM_AVATAR_IMAGE_MAP } from '@/renderer/pages/guid/constants';
 import dayjs from 'dayjs';
 import { getFullAutoMode } from '@renderer/utils/model/agentModes';
 import type { TProviderWithModel } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 import { type AcpModelInfo } from '@/common/types/platform/acpTypes';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import GuidModelSelector from '@renderer/pages/guid/components/GuidModelSelector';
@@ -41,11 +42,11 @@ interface CreateTaskDialogProps {
   onClose: () => void;
   /** When provided, the dialog operates in edit mode */
   editJob?: ICronJob;
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   conversation_title?: string;
   agent_type?: string;
   /** Preset the specified conversation target on open (create mode only). */
-  initialSpecifiedConversationId?: number;
+  initialSpecifiedConversationId?: ConversationId;
   /** Prevent changing the preset target fields while still allowing task details to be edited. */
   lockInitialTarget?: boolean;
 }
@@ -153,7 +154,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
   const isEditMode = !!editJob;
   const [execution_mode, setExecutionMode] = useState<ConversationExecutionMode>('new_conversation');
-  const [specifiedConversationId, setSpecifiedConversationId] = useState<number | undefined>(undefined);
+  const [specifiedConversationId, setSpecifiedConversationId] = useState<ConversationId | undefined>(undefined);
   // When reusing an existing conversation, optionally clear the agent context
   // before each run so accumulated history does not pile up across ticks.
   const [clearContextEachRun, setClearContextEachRun] = useState(false);
@@ -170,13 +171,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   // from the picker. The task being edited is excluded from the bound set, and
   // the currently-selected value is always kept visible.
   const boundConversationIds = useMemo(() => {
-    const set = new Set<number>();
+    const set = new Set<ConversationId>();
     for (const job of allCronJobs) {
       if (editJob && job.id === editJob.id) continue;
       // Only 'existing' execution reuses metadata.conversation_id as its bound
       // target. (new_conversation jobs merely anchor there for UI grouping and
       // spawn a fresh conversation each run — not a reuse bind, so don't hide it.)
-      if (job.execution_mode === 'existing' && job.metadata.conversation_id > 0) {
+      if (job.execution_mode === 'existing') {
         set.add(job.metadata.conversation_id);
       }
     }
@@ -514,7 +515,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       // ─── Agent / conversation target (new_conversation / existing) ───
       // `specified` is handled above, so execution_mode is already a backend mode here.
       const backendExecutionMode: BackendExecutionMode = execution_mode;
-      const effectiveConversationId = _conversation_id ?? 0;
       const effectiveConversationTitle = conversation_title;
 
       setSubmitting(true);
@@ -539,12 +539,16 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         });
         Message.success(t('cron.page.updateSuccess'));
       } else {
+        if (_conversation_id == null) {
+          Message.error(t('cron.page.form.specifiedConversationRequired'));
+          return;
+        }
         const params: ICreateCronJobParams = {
           name: values.name,
           description: values.description,
           schedule,
           prompt: values.prompt,
-          conversation_id: effectiveConversationId,
+          conversation_id: _conversation_id,
           conversation_title: effectiveConversationTitle,
           agent_type: resolvedAgentType,
           created_by: 'user',
@@ -744,18 +748,18 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                   placeholder={t('cron.page.form.selectConversationPlaceholder')}
                   notFoundContent={conversationEmptyText}
                   renderFormat={(_option, value) => {
-                    const conv = conversations.find((c) => c.id === (value as unknown as number));
+                    const conv = conversations.find((c) => c.id === value);
                     if (!conv) return '';
                     return conv.name ? `${conv.name}  #${conv.id}` : `#${conv.id}`;
                   }}
                   filterOption={(input, option) => {
-                    const id = (option as React.ReactElement<{ value?: number }>)?.props?.value;
+                    const id = (option as React.ReactElement<{ value?: ConversationId }>)?.props?.value;
                     const conv = conversations.find((c) => c.id === id);
                     if (!conv) return false;
                     const lower = input.toLowerCase();
                     const ws = ((conv.extra as unknown as { workspace?: string } | undefined)?.workspace ?? '').toLowerCase();
                     // 按名称 / 工作路径 / 会话 ID 子串匹配（#N 短编号体系已退役）。
-                    return conv.name.toLowerCase().includes(lower) || String(conv.id).includes(lower) || ws.includes(lower);
+                    return conv.name.toLowerCase().includes(lower) || conv.id.includes(lower) || ws.includes(lower);
                   }}
                 >
                   {visibleConversations.map((conv) => (

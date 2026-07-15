@@ -1,5 +1,6 @@
 import type { TMessage } from '@/common/chat/chatLib';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 
 const INVALID_FILENAME_CHARS_RE = /[<>:"/\\|?*\u0000-\u001F]+/g;
 const padTimestampPart = (value: number): string => String(value).padStart(2, '0');
@@ -18,10 +19,7 @@ const normalizeDefaultExportSegment = (name: string): string => {
   return normalized || 'conversation';
 };
 
-const getShortConversationId = (conversation_id?: string): string => {
-  const normalized = (conversation_id || '').trim();
-  return normalized.slice(0, 8) || 'conversation';
-};
+const getShortConversationId = (conversation_id: ConversationId): string => conversation_id.slice(0, 8);
 
 export const joinFilePath = (dir: string, file_name: string): string => {
   const separator = dir.includes('\\') ? '\\' : '/';
@@ -107,7 +105,7 @@ export const buildConversationExportText = (
   return lines.join('\n').trimEnd();
 };
 
-export const buildDefaultExportFileName = (conversation_id: string, conversationName: string): string => {
+export const buildDefaultExportFileName = (conversation_id: ConversationId, conversationName: string): string => {
   const safeName = normalizeDefaultExportSegment(conversationName).slice(0, 48).replace(/-+$/g, '') || 'conversation';
   return `${formatDefaultExportFileDate()}-${getShortConversationId(conversation_id)}-${safeName}.txt`;
 };

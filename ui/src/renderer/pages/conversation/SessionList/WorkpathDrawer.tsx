@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 import CapabilityIcon, { CAPABILITY_COLORS } from '@/renderer/components/capability/CapabilityIcon';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import PathText from '@/renderer/components/base/PathText';
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 
 import SessionKindGroup from './SessionKindGroup';
 import type { WorkpathUiState } from './hooks/useWorkpathUiState';
@@ -47,7 +48,7 @@ export interface WorkpathDrawerProps {
    * containing subgroup) is forced open — visually only, never written back to
    * localStorage.
    */
-  activeSessionId: number | null;
+  activeSessionId: ConversationId | TerminalId | null;
   onCreateInteractive: (node: WorkpathNode) => void;
   onCreateTerminal: (node: WorkpathNode) => void;
   onRemoveProjectWorkpath?: (node: WorkpathNode) => void;
@@ -97,16 +98,25 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
   const twoLineWorkpath = workpathDisplay?.kind === 'twoLine';
   const sessionCount = node.interactive.length + node.terminal.length;
 
-  const activeKind: SessionKind | null = activeSessionId
-    ? node.interactive.some((entry) => entry.id === activeSessionId)
-      ? 'interactive'
-      : node.terminal.some((entry) => entry.id === activeSessionId)
-        ? 'terminal'
-        : null
-    : null;
+  const activeKind: SessionKind | null =
+    activeSessionId === null
+      ? null
+      : node.interactive.some((entry) => entry.id === activeSessionId)
+        ? 'interactive'
+        : node.terminal.some((entry) => entry.id === activeSessionId)
+          ? 'terminal'
+          : null;
   const activeDisplayIndex =
     activeKind && activeSessionId !== null
-      ? getWorkpathEntryDisplayIndex(node, { kind: activeKind, id: activeSessionId })
+      ? activeKind === 'interactive'
+        ? getWorkpathEntryDisplayIndex(node, {
+            kind: 'interactive',
+            id: activeSessionId as ConversationId,
+          })
+        : getWorkpathEntryDisplayIndex(node, {
+            kind: 'terminal',
+            id: activeSessionId as TerminalId,
+          })
       : null;
   const forceShowAllForActiveKind: Record<SessionKind, boolean> = {
     interactive: activeKind === 'interactive' && activeDisplayIndex !== null && activeDisplayIndex >= WORKPATH_COLLAPSED_SESSION_LIMIT,
@@ -129,8 +139,8 @@ const WorkpathDrawer: React.FC<WorkpathDrawerProps> = ({
   // binding enabled）— Task 11 / P3 切到 workpath 级单次查询后由 hook 内部替换。
   const knowledgeLit = useWorkpathKnowledgeLit(node, expanded);
   const selectedState = batchSelectionState ?? {
-    conversationIds: new Set<number>(),
-    terminalIds: new Set<number>(),
+    conversationIds: new Set<ConversationId>(),
+    terminalIds: new Set<TerminalId>(),
   };
   const workpathSelectionScope = getWorkpathBatchSelectionScope(node);
   const workpathSelectionState = getBatchSelectionScopeState(workpathSelectionScope, selectedState);

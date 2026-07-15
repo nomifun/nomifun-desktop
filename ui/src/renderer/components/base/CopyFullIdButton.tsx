@@ -12,10 +12,8 @@ import { useTranslation } from 'react-i18next';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 
 type CopyFullIdButtonProps = {
-  /** The full entity ID to copy (never rendered as text). Numeric for the
-   *  integer-keyed entities (conversation/requirement/terminal); string for
-   *  TEXT short-id entities. */
-  id: string | number;
+  /** The full canonical entity ID to copy (never rendered as text). */
+  id: string;
   /** Button size, defaults to 'mini'. */
   size?: 'mini' | 'small' | 'default' | 'large';
   className?: string;
@@ -32,7 +30,7 @@ const CopyFullIdButton: React.FC<CopyFullIdButtonProps> = ({ id, size = 'mini', 
   const handleClick = useCallback(
     (event: Event) => {
       event.stopPropagation();
-      copyText(String(id))
+      copyText(id)
         .then(() => Message.success(t('common.copySuccess')))
         .catch(() => Message.error(t('common.copyFailed')));
     },

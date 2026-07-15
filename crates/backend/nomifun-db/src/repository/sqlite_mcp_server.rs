@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use nomifun_common::TimestampMs;
+use nomifun_common::{McpServerId, TimestampMs};
 use sqlx::QueryBuilder;
 use sqlx::SqlitePool;
 
@@ -32,9 +32,9 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(rows)
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
+    async fn find_by_id(&self, id: &McpServerId) -> Result<Option<McpServerRow>, DbError> {
         let row = sqlx::query_as::<_, McpServerRow>("SELECT * FROM mcp_servers WHERE id = ? AND deleted_at IS NULL")
-            .bind(id)
+            .bind(id.as_str())
             .fetch_optional(&self.pool)
             .await?;
 
@@ -50,9 +50,9 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(row)
     }
 
-    async fn find_by_id_any(&self, id: i64) -> Result<Option<McpServerRow>, DbError> {
+    async fn find_by_id_any(&self, id: &McpServerId) -> Result<Option<McpServerRow>, DbError> {
         let row = sqlx::query_as::<_, McpServerRow>("SELECT * FROM mcp_servers WHERE id = ?")
-            .bind(id)
+            .bind(id.as_str())
             .fetch_optional(&self.pool)
             .await?;
 
@@ -68,7 +68,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(row)
     }
 
-    async fn list_by_ids_any(&self, ids: &[i64]) -> Result<Vec<McpServerRow>, DbError> {
+    async fn list_by_ids_any(&self, ids: &[McpServerId]) -> Result<Vec<McpServerRow>, DbError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -76,12 +76,12 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         let mut query = QueryBuilder::new("SELECT * FROM mcp_servers WHERE id IN (");
         let mut separated = query.separated(", ");
         for id in ids {
-            separated.push_bind(*id);
+            separated.push_bind(id.as_str());
         }
         separated.push_unseparated(") ORDER BY created_at ASC");
 
         let rows = query.build_query_as::<McpServerRow>().fetch_all(&self.pool).await?;
-        let rows_by_id: HashMap<_, _> = rows.into_iter().map(|row| (row.id, row)).collect();
+        let rows_by_id: HashMap<_, _> = rows.into_iter().map(|row| (row.id.clone(), row)).collect();
 
         Ok(ids.iter().filter_map(|id| rows_by_id.get(id).cloned()).collect())
     }
@@ -90,13 +90,15 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         let now = nomifun_common::now_ms();
         let last_test_status = "disconnected";
 
-        let result = sqlx::query(
+        let id = McpServerId::new();
+        sqlx::query(
             "INSERT INTO mcp_servers \
-                (name, description, enabled, transport_type, transport_config, \
+                (id, name, description, enabled, transport_type, transport_config, \
                  tools, last_test_status, last_connected, original_json, builtin, \
                  deleted_at, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(id.as_str())
         .bind(params.name)
         .bind(params.description)
         .bind(params.enabled)
@@ -119,8 +121,6 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
             _ => DbError::Query(e),
         })?;
 
-        let id = result.last_insert_rowid();
-
         Ok(McpServerRow {
             id,
             name: params.name.to_string(),
@@ -139,7 +139,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         })
     }
 
-    async fn update(&self, id: i64, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
+    async fn update(&self, id: &McpServerId, params: UpdateMcpServerParams<'_>) -> Result<McpServerRow, DbError> {
         let existing = self
             .find_by_id_any(id)
             .await?
@@ -164,7 +164,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         .bind(merged.builtin)
         .bind(merged.deleted_at)
         .bind(merged.updated_at)
-        .bind(id)
+        .bind(id.as_str())
         .execute(&self.pool)
         .await
         .map_err(|e| match &e {
@@ -177,14 +177,14 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(merged)
     }
 
-    async fn delete(&self, id: i64) -> Result<(), DbError> {
+    async fn delete(&self, id: &McpServerId) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
         let result = sqlx::query(
             "UPDATE mcp_servers SET enabled = 0, deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(now)
         .bind(now)
-        .bind(id)
+        .bind(id.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -211,7 +211,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
                         builtin: Some(params.builtin),
                         ..Default::default()
                     };
-                    self.update(existing.id, update_params).await?
+                    self.update(&existing.id, update_params).await?
                 }
                 None => self.create(params.clone()).await?,
             };
@@ -221,7 +221,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(results)
     }
 
-    async fn update_status(&self, id: i64, status: &str, last_connected: Option<TimestampMs>) -> Result<(), DbError> {
+    async fn update_status(&self, id: &McpServerId, status: &str, last_connected: Option<TimestampMs>) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
 
         let result = sqlx::query(
@@ -232,7 +232,7 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         .bind(status)
         .bind(last_connected)
         .bind(now)
-        .bind(id)
+        .bind(id.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -243,14 +243,14 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         Ok(())
     }
 
-    async fn update_tools(&self, id: i64, tools: Option<&str>) -> Result<(), DbError> {
+    async fn update_tools(&self, id: &McpServerId, tools: Option<&str>) -> Result<(), DbError> {
         let now = nomifun_common::now_ms();
 
         let result =
             sqlx::query("UPDATE mcp_servers SET tools = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL")
                 .bind(tools)
                 .bind(now)
-                .bind(id)
+                .bind(id.as_str())
                 .execute(&self.pool)
                 .await?;
 
@@ -341,7 +341,7 @@ mod tests {
         let (repo, _db) = setup().await;
         let server = repo.create(stdio_params()).await.unwrap();
 
-        assert!(server.id > 0);
+        assert!(server.id.as_str().starts_with("mcp_"));
         assert_eq!(server.name, "test-mcp");
         assert_eq!(server.description.as_deref(), Some("A test MCP server"));
         assert!(!server.enabled);
@@ -370,7 +370,7 @@ mod tests {
         let (repo, _db) = setup().await;
         let created = repo.create(stdio_params()).await.unwrap();
 
-        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        let found = repo.find_by_id(&created.id).await.unwrap().unwrap();
         assert_eq!(found.id, created.id);
         assert_eq!(found.name, "test-mcp");
     }
@@ -378,7 +378,7 @@ mod tests {
     #[tokio::test]
     async fn find_by_id_nonexistent() {
         let (repo, _db) = setup().await;
-        assert!(repo.find_by_id(999_999).await.unwrap().is_none());
+        assert!(repo.find_by_id(&McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap()).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -415,7 +415,7 @@ mod tests {
 
         let updated = repo
             .update(
-                created.id,
+                &created.id,
                 UpdateMcpServerParams {
                     enabled: Some(true),
                     ..Default::default()
@@ -438,7 +438,7 @@ mod tests {
 
         let err = repo
             .update(
-                s2.id,
+                &s2.id,
                 UpdateMcpServerParams {
                     name: Some("test-mcp"),
                     ..Default::default()
@@ -457,7 +457,7 @@ mod tests {
 
         let updated = repo
             .update(
-                created.id,
+                &created.id,
                 UpdateMcpServerParams {
                     description: Some(None),
                     original_json: Some(None),
@@ -475,7 +475,7 @@ mod tests {
     async fn update_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
         let err = repo
-            .update(999_999, UpdateMcpServerParams::default())
+            .update(&McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap(), UpdateMcpServerParams::default())
             .await
             .unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
@@ -486,14 +486,14 @@ mod tests {
         let (repo, _db) = setup().await;
         let created = repo.create(stdio_params()).await.unwrap();
 
-        repo.delete(created.id).await.unwrap();
-        assert!(repo.find_by_id(created.id).await.unwrap().is_none());
+        repo.delete(&created.id).await.unwrap();
+        assert!(repo.find_by_id(&created.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn delete_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.delete(999_999).await.unwrap_err();
+        let err = repo.delete(&McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap()).await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -520,7 +520,7 @@ mod tests {
         assert!(results[0].enabled);
         // New was created
         assert_eq!(results[1].name, "http-mcp");
-        assert!(results[1].id > 0);
+        assert!(results[1].id.as_str().starts_with("mcp_"));
     }
 
     #[tokio::test]
@@ -529,9 +529,9 @@ mod tests {
         let created = repo.create(stdio_params()).await.unwrap();
 
         let ts = nomifun_common::now_ms();
-        repo.update_status(created.id, "connected", Some(ts)).await.unwrap();
+        repo.update_status(&created.id, "connected", Some(ts)).await.unwrap();
 
-        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        let found = repo.find_by_id(&created.id).await.unwrap().unwrap();
         assert_eq!(found.last_test_status, "connected");
         assert_eq!(found.last_connected, Some(ts));
     }
@@ -542,11 +542,11 @@ mod tests {
         let created = repo.create(stdio_params()).await.unwrap();
 
         let ts = nomifun_common::now_ms();
-        repo.update_status(created.id, "connected", Some(ts)).await.unwrap();
+        repo.update_status(&created.id, "connected", Some(ts)).await.unwrap();
 
-        repo.update_status(created.id, "error", None).await.unwrap();
+        repo.update_status(&created.id, "error", None).await.unwrap();
 
-        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        let found = repo.find_by_id(&created.id).await.unwrap().unwrap();
         assert_eq!(found.last_test_status, "error");
         assert_eq!(found.last_connected, Some(ts));
     }
@@ -554,7 +554,7 @@ mod tests {
     #[tokio::test]
     async fn update_status_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.update_status(999_999, "connected", None).await.unwrap_err();
+        let err = repo.update_status(&McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap(), "connected", None).await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 
@@ -565,9 +565,9 @@ mod tests {
         assert!(created.tools.is_none());
 
         let tools_json = r#"[{"name":"read_file","description":"Read a file"}]"#;
-        repo.update_tools(created.id, Some(tools_json)).await.unwrap();
+        repo.update_tools(&created.id, Some(tools_json)).await.unwrap();
 
-        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        let found = repo.find_by_id(&created.id).await.unwrap().unwrap();
         assert_eq!(found.tools.as_deref(), Some(tools_json));
     }
 
@@ -583,16 +583,16 @@ mod tests {
             .unwrap();
         assert!(created.tools.is_some());
 
-        repo.update_tools(created.id, None).await.unwrap();
+        repo.update_tools(&created.id, None).await.unwrap();
 
-        let found = repo.find_by_id(created.id).await.unwrap().unwrap();
+        let found = repo.find_by_id(&created.id).await.unwrap().unwrap();
         assert!(found.tools.is_none());
     }
 
     #[tokio::test]
     async fn update_tools_nonexistent_returns_not_found() {
         let (repo, _db) = setup().await;
-        let err = repo.update_tools(999_999, Some("[]")).await.unwrap_err();
+        let err = repo.update_tools(&McpServerId::parse("mcp_0190f5fe-7c00-7a00-8000-000000000999").unwrap(), Some("[]")).await.unwrap_err();
         assert!(matches!(err, DbError::NotFound(_)));
     }
 }

@@ -6,6 +6,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use nomifun_common::ConversationId;
+
 use crate::collector::CollectedEvent;
 use crate::evolution::transcript::TranscriptAnchor;
 
@@ -57,16 +59,15 @@ pub fn mine_patterns(events: &[CollectedEvent], min_count: i64, min_distinct_ses
         if name.is_empty() {
             continue;
         }
-        let conv = ev
+        let Some(conv) = ev
             .data
             .get("conversation_id")
             .and_then(|c| c.as_str())
-            .map(|s| s.to_owned())
-            .or_else(|| ev.data.get("conversation_id").and_then(|c| c.as_i64()).map(|n| n.to_string()))
-            .unwrap_or_default();
-        if conv.is_empty() {
+            .and_then(|id| ConversationId::try_from(id).ok())
+            .map(ConversationId::into_string)
+        else {
             continue;
-        }
+        };
         let call_id = ev.data.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_owned();
         by_conv.entry(conv).or_default().push((name.to_owned(), call_id, ev.ts));
     }
@@ -191,16 +192,15 @@ pub fn mine_reflection_candidates(events: &[CollectedEvent], min_steps: usize, m
         if name.is_empty() {
             continue;
         }
-        let conv = ev
+        let Some(conv) = ev
             .data
             .get("conversation_id")
             .and_then(|c| c.as_str())
-            .map(|s| s.to_owned())
-            .or_else(|| ev.data.get("conversation_id").and_then(|c| c.as_i64()).map(|n| n.to_string()))
-            .unwrap_or_default();
-        if conv.is_empty() {
+            .and_then(|id| ConversationId::try_from(id).ok())
+            .map(ConversationId::into_string)
+        else {
             continue;
-        }
+        };
         let call_id = ev.data.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_owned();
         by_conv.entry(conv).or_default().push((name.to_owned(), call_id, ev.ts));
     }
@@ -248,6 +248,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     fn tool_event(conv: &str, name: &str, call_id: &str, ts: i64) -> CollectedEvent {
         CollectedEvent {
             ts,
@@ -262,7 +267,8 @@ mod tests {
     fn mines_repeated_three_step_pattern_once() {
         let mut events = Vec::new();
         let mut ts = 0;
-        for conv in ["conv-1", "conv-2", "conv-3"] {
+        let conversations = [conversation_fixture(1), conversation_fixture(2), conversation_fixture(3)];
+        for conv in &conversations {
             for (i, tool) in ["grep", "read", "edit"].iter().enumerate() {
                 ts += 1;
                 events.push(tool_event(conv, tool, &format!("{conv}-{i}"), ts));
@@ -278,7 +284,7 @@ mod tests {
         assert_eq!(patterns[0].signature, "grep\u{1f}read\u{1f}edit");
         // 锚指向一个代表性会话窗口(供重水合定位"那一段")。
         let a = &patterns[0].anchor;
-        assert!(["conv-1", "conv-2", "conv-3"].contains(&a.conversation_id.as_str()), "anchor conv: {a:?}");
+        assert!(conversations.contains(&a.conversation_id), "anchor conv: {a:?}");
         assert!(a.start_ts > 0 && a.end_ts >= a.start_ts, "anchor ts bounds: {a:?}");
         assert_eq!(a.call_ids.len(), 3, "3 步窗 → 3 个 call_id: {a:?}");
         assert!(a.call_ids.iter().all(|c| c.starts_with(&a.conversation_id)), "call_ids 同会话: {a:?}");
@@ -288,13 +294,14 @@ mod tests {
     #[test]
     fn reflection_candidate_carries_anchor() {
         let mut events = Vec::new();
+        let conversation = conversation_fixture(4);
         for (i, tool) in ["a", "b", "c", "d", "e"].iter().enumerate() {
-            events.push(tool_event("sess-x", tool, &format!("sess-x-{i}"), (i as i64) + 10));
+            events.push(tool_event(&conversation, tool, &format!("{conversation}-{i}"), (i as i64) + 10));
         }
         let cands = mine_reflection_candidates(&events, 4, 3);
         assert_eq!(cands.len(), 1);
         let a = &cands[0].anchor;
-        assert_eq!(a.conversation_id, "sess-x");
+        assert_eq!(a.conversation_id, conversation);
         assert_eq!(a.start_ts, 10);
         assert!(a.end_ts >= a.start_ts);
         assert!(!a.call_ids.is_empty());
@@ -304,10 +311,11 @@ mod tests {
     #[test]
     fn excludes_single_session_sequences() {
         let mut events = Vec::new();
+        let conversation = conversation_fixture(5);
         // 反复出现但只在一个会话里 → distinct_sessions = 1
         for i in 0..5 {
-            events.push(tool_event("only-conv", "foo", &format!("a{i}"), i * 2));
-            events.push(tool_event("only-conv", "bar", &format!("b{i}"), i * 2 + 1));
+            events.push(tool_event(&conversation, "foo", &format!("a{i}"), i * 2));
+            events.push(tool_event(&conversation, "bar", &format!("b{i}"), i * 2 + 1));
         }
         let patterns = mine_patterns(&events, 2, 2);
         assert!(patterns.is_empty(), "single-session pattern must be excluded, got {patterns:?}");
@@ -318,10 +326,10 @@ mod tests {
     fn collapses_consecutive_duplicates() {
         let mut events = Vec::new();
         let mut ts = 0;
-        for conv in ["c1", "c2"] {
+        for conv in [conversation_fixture(6), conversation_fixture(7)] {
             for tool in ["grep", "grep", "grep", "read"] {
                 ts += 1;
-                events.push(tool_event(conv, tool, &format!("{conv}-{ts}"), ts));
+                events.push(tool_event(&conv, tool, &format!("{conv}-{ts}"), ts));
             }
         }
         let patterns = mine_patterns(&events, 2, 2);
@@ -346,11 +354,12 @@ mod tests {
     fn reflection_candidate_from_single_long_session() {
         let mut events = Vec::new();
         let mut ts = 0;
+        let conversation = conversation_fixture(8);
         for tool in ["grep", "read", "edit", "write"] {
             ts += 1;
-            events.push(tool_event("solo", tool, &format!("e{ts}"), ts));
+            events.push(tool_event(&conversation, tool, &format!("e{ts}"), ts));
         }
-        events.push(tool_event("short", "ls", "x", 100)); // 1-step session: excluded
+        events.push(tool_event(&conversation_fixture(9), "ls", "x", 100)); // 1-step session: excluded
         let cands = mine_reflection_candidates(&events, 4, 5);
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].steps, vec!["grep".to_string(), "read".into(), "edit".into(), "write".into()]);

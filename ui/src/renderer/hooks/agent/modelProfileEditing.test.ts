@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { ModelProfile } from '@/common/config/storage';
+import { parseProviderId } from '@/common/types/ids';
 import {
   buildModelProfileUpsertRequest,
   editableModelTasks,
@@ -8,8 +9,10 @@ import {
   visibleModelTaskBadges,
 } from './modelProfileEditing';
 
+const providerId = parseProviderId('prov_0190f5fe-7c00-7a00-8000-000000000001');
+
 const profile = (source: ModelProfile['source'], tasks: ModelProfile['tasks'], traits: ModelProfile['traits'] = []): ModelProfile => ({
-  provider_id: 'prov_1',
+  provider_id: providerId,
   model: 'happyhorse-1.0',
   tasks,
   traits,
@@ -36,8 +39,8 @@ describe('model profile editing helpers', () => {
   });
 
   test('persists an empty user profile instead of falling back to a default task', () => {
-    expect(buildModelProfileUpsertRequest('prov_1', 'happyhorse-1.0', [], [])).toEqual({
-      provider_id: 'prov_1',
+    expect(buildModelProfileUpsertRequest(providerId, 'happyhorse-1.0', [], [])).toEqual({
+      provider_id: providerId,
       model: 'happyhorse-1.0',
       tasks: [],
       traits: [],

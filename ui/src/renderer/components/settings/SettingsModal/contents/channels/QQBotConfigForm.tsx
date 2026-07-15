@@ -99,7 +99,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
               : { companion_id: channelTarget.companionId }),
             config,
           }
-        : { plugin_id: 'qqbot', config }
+        : { plugin_type: 'qqbot', config }
     );
     if (!result.success) {
       throw new Error(
@@ -116,7 +116,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
       // row id differs from what we targeted — then fall back to the owner match.
       const row = findEnabledChannelStatus(plugins, {
         platform: 'qqbot',
-        enabledPluginId: result.message,
+        enabledPluginId: result.channel_id,
         companionId: channelTarget?.companionId,
         publicAgentId: channelTarget?.publicAgentId,
       });
@@ -133,7 +133,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
     }
     setTestLoading(true);
     try {
-      const result = await channel.testPlugin.invoke({ plugin_id: 'qqbot', token: appId.trim(), extra_config: { app_secret: clientSecret.trim() } });
+      const result = await channel.testPlugin.invoke({ plugin_type: 'qqbot', token: appId.trim(), extra_config: { app_secret: clientSecret.trim() } });
       if (result.success) {
         Message.success(t('settings.qqbot.connectionSuccess', { defaultValue: 'Connected! AppID: {{appId}}', appId: result.bot_username || appId.trim() }));
         await handleAutoEnable();
@@ -165,7 +165,7 @@ const QQBotConfigForm: React.FC<QQBotConfigFormProps> = ({
       Message.error(error instanceof Error ? error.message : String(error));
     }
   };
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       await loadAuthorizedUsers();

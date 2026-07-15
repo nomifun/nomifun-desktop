@@ -12,9 +12,10 @@ import Diff2Html from '@renderer/components/media/Diff2Html';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeInboxDiff, IKnowledgeInboxEntry } from '@/common/adapter/ipcBridge';
 import { knowledgeErrorText } from './useKnowledge';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 
 interface InboxReviewPanelProps {
-  baseId: string;
+  baseId: KnowledgeBaseId;
   items: IKnowledgeInboxEntry[];
   loading: boolean;
   /** Refetch inbox + base after a merge/discard. */

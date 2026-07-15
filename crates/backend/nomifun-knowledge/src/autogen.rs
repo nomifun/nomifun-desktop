@@ -312,8 +312,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         std::fs::write(root.join("README.md"), "# old readme").unwrap();
-        std::fs::create_dir_all(root.join("_inbox/conv_1")).unwrap();
-        std::fs::write(root.join("_inbox/conv_1/draft.md"), "# draft").unwrap();
+        let inbox = root.join("_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("draft.md"), "# draft").unwrap();
         // 25 real files, one larger than the per-file cap.
         for i in 0..25 {
             std::fs::write(root.join(format!("f{i:02}.md")), format!("# 文件 {i}\n正文")).unwrap();

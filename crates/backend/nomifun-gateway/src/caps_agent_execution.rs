@@ -347,7 +347,7 @@ fn attempt_actor_allows_update(
 struct CreateContext {
     conversation: Option<ConversationResponse>,
     lead_preset: Option<ResolvedPresetSnapshot>,
-    lead_conversation_id: Option<i64>,
+    lead_conversation_id: Option<String>,
     /// Present only when the calling Conversation is an active Attempt. Work
     /// is appended to this aggregate; no child execution is created.
     current_execution_id: Option<String>,
@@ -364,13 +364,11 @@ struct CreateContext {
     actor: AgentExecutionActor,
 }
 
-fn caller_conversation_id(ctx: &CallerCtx) -> Result<i64, String> {
-    if ctx.conversation_id.trim().is_empty() {
-        return Err("Agent Execution tools require a calling conversation".to_owned());
-    }
+fn caller_conversation_id(ctx: &CallerCtx) -> Result<String, String> {
     ctx.conversation_id
-        .parse::<i64>()
-        .map_err(|_| "calling conversation id is invalid".to_owned())
+        .clone()
+        .map(nomifun_common::ConversationId::into_string)
+        .ok_or_else(|| "Agent Execution tools require a calling conversation".to_owned())
 }
 
 fn finite_pool_models(pool: &ExecutionModelPool) -> Option<Vec<ExecutionModelRef>> {
@@ -468,10 +466,10 @@ async fn create_context(
     let conversation_id = caller_conversation_id(ctx)?;
     let conversation = deps
         .conversation_service
-        .get(&ctx.user_id, &conversation_id.to_string())
+        .get(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
-    let conversation_id = conversation.id;
+    let conversation_id = conversation.id.clone();
     let lead_model = conversation.model.as_ref().map(|model| {
         ExecutionModelRef {
             provider_id: model.provider_id.clone(),
@@ -485,21 +483,21 @@ async fn create_context(
         .map(str::to_owned);
     let current_execution_id = deps
         .agent_execution_engine
-        .execution_for_attempt_conversation(&ctx.user_id, conversation_id)
+        .execution_for_attempt_conversation(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     let actor = deps
         .agent_execution_engine
-        .agent_caller_for_delegation(&ctx.user_id, conversation_id)
+        .agent_caller_for_delegation(ctx.user_id.as_str(), &conversation_id)
         .await
         .map_err(|error| error.to_string())?;
     if let Some(execution_id) = current_execution_id {
         let execution = deps
             .agent_execution_engine
-            .get(&ctx.user_id, &execution_id)
+            .get(ctx.user_id.as_str(), &execution_id)
             .await
             .map_err(|error| error.to_string())?;
-        let inherited_model_pool = execution_model_authority(deps, &ctx.user_id, &execution_id)
+        let inherited_model_pool = execution_model_authority(deps, ctx.user_id.as_str(), &execution_id)
             .await
             .map_err(|error| error.to_string())?;
         let model_pool = narrow_model_pool(
@@ -580,9 +578,8 @@ async fn remote_create_context(
 ) -> Result<CreateContext, String> {
     let companion_id = ctx
         .companion_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .as_ref()
+        .map(|id| id.as_str())
         .ok_or_else(|| "Remote delegation requires a companion-bound token".to_owned())?;
     let profile = deps
         .companion_service
@@ -595,7 +592,7 @@ async fn remote_create_context(
         .await
         .map_err(|error| error.to_string())?
     {
-        Some(id) => deps.conversation_service.get(&ctx.user_id, &id).await.ok(),
+        Some(id) => deps.conversation_service.get(ctx.user_id.as_str(), &id).await.ok(),
         None => None,
     };
     let (model, _) = provider_support::resolve_nomi_model(deps, ctx, None, None)
@@ -803,7 +800,7 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
             .delegate_from_attempt(
                 &owner_id,
                 &actor,
-                conversation_id,
+                &conversation_id,
                 goal,
                 defaults.model_pool,
                 requested_model_pool,
@@ -851,7 +848,7 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
             plan_gate: request.plan_gate,
             adaptation_policy: request.adaptation_policy,
             decision_policy: request.decision_policy,
-            lead_conversation_id: request.lead_conversation_id,
+            lead_conversation_id: request.lead_conversation_id.clone(),
             lead_model: request.lead_model,
             steps,
         };
@@ -872,7 +869,7 @@ async fn delegate(deps: Arc<GatewayDeps>, ctx: CallerCtx, params: DelegateParams
             )),
         }
     } else {
-        match (conversation.as_ref(), request.lead_conversation_id) {
+        match (conversation.as_ref(), request.lead_conversation_id.as_ref()) {
             (Some(conversation), Some(_)) => {
             deps.agent_execution_engine
                 .create_from_conversation(&owner_id, &actor, conversation, request)
@@ -905,18 +902,17 @@ async fn authorize_remote_execution(
 ) -> Result<AgentExecutionActor, nomifun_common::AppError> {
     let companion_id = ctx
         .companion_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .as_ref()
+        .map(|id| id.as_str())
         .ok_or_else(|| {
             nomifun_common::AppError::NotFound(format!("Agent Execution {execution_id}"))
         })?;
     deps.agent_execution_engine
-        .get(&ctx.user_id, execution_id)
+        .get(ctx.user_id.as_str(), execution_id)
         .await?;
     let created = deps
         .agent_execution_engine
-        .events(&ctx.user_id, execution_id, None, Some(1))
+        .events(ctx.user_id.as_str(), execution_id, None, Some(1))
         .await
         .map_err(|_| nomifun_common::AppError::NotFound(format!("Agent Execution {execution_id}")))?
         .into_iter()
@@ -947,7 +943,7 @@ async fn authorize_execution_caller(
         let conversation_id = caller_conversation_id(ctx)
             .map_err(nomifun_common::AppError::BadRequest)?;
         deps.agent_execution_engine
-            .authorize_agent_caller(&ctx.user_id, execution_id, conversation_id)
+            .authorize_agent_caller(ctx.user_id.as_str(), execution_id, &conversation_id)
             .await
     }
 }
@@ -994,7 +990,7 @@ async fn execution_update(
         None => match caller_conversation_id(&ctx) {
             Ok(conversation_id) => deps
                 .agent_execution_engine
-                .agent_caller_for_delegation(&owner_id, conversation_id)
+                .agent_caller_for_delegation(&owner_id, &conversation_id)
                 .await,
             Err(error) => Err(nomifun_common::AppError::BadRequest(error)),
         },
@@ -1304,14 +1300,14 @@ async fn execution_update(
             .await
             .and_then(to_value),
         ExecutionUpdateParams::RequestUserDecision { question } => {
-            let conversation_id = match ctx.conversation_id.parse::<i64>() {
+            let conversation_id = match caller_conversation_id(&ctx) {
                 Ok(value) => value,
                 Err(_) => {
                     return json!({"error":"request_user_decision requires an active attempt conversation"});
                 }
             };
             deps.agent_execution_engine
-                .request_user_decision(&owner_id, &actor, conversation_id, question)
+                .request_user_decision(&owner_id, &actor, &conversation_id, question)
                 .await
                 .map(|_| decision_waiting_projection())
         }
@@ -1361,6 +1357,13 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use crate::registry::Registry;
+
+    const ATTEMPT_ID: &str = "eattempt_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const EXECUTION_ID: &str = "exec_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID_A: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID_B: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const STEP_ID: &str = "execstep_0190f5fe-7c00-7a00-8000-000000000001";
 
     #[test]
     fn model_surface_is_exactly_three_execution_tools() {
@@ -1513,17 +1516,17 @@ mod tests {
     fn gateway_delegate_returns_the_canonical_receipt_without_deployment_marker() {
         let response = ok(
             delegate_receipt(
-                "exec_test",
+                EXECUTION_ID,
                 AgentExecutionStatus::Running,
                 "accepted",
             )
-            .with_step_ids(vec!["execstep_1".to_owned()]),
+            .with_step_ids(vec![STEP_ID.to_owned()]),
         );
         let receipt = &response["result"];
-        assert_eq!(receipt["execution_id"], "exec_test");
+        assert_eq!(receipt["execution_id"], EXECUTION_ID);
         assert_eq!(receipt["status"], "running");
         assert_eq!(receipt["message"], "accepted");
-        assert_eq!(receipt["step_ids"][0], "execstep_1");
+        assert_eq!(receipt["step_ids"][0], STEP_ID);
         assert!(receipt.get("mode").is_none());
         assert!(receipt.get("execution_mode").is_none());
         assert!(receipt.get("results").is_none());
@@ -1558,11 +1561,11 @@ mod tests {
     #[test]
     fn explicit_model_pool_can_only_narrow_inherited_authority() {
         let allowed = ExecutionModelRef {
-            provider_id: "provider-a".to_owned(),
+            provider_id: PROVIDER_ID_A.to_owned(),
             model: "model-a".to_owned(),
         };
         let denied = ExecutionModelRef {
-            provider_id: "provider-b".to_owned(),
+            provider_id: PROVIDER_ID_B.to_owned(),
             model: "model-b".to_owned(),
         };
         let inherited = ExecutionModelPool::Range {
@@ -1593,9 +1596,9 @@ mod tests {
 
     #[test]
     fn attempt_actor_cannot_bypass_delegate_with_generic_graph_commands() {
-        let actor = AgentExecutionActor::agent(42, Some("attempt-1".to_owned()));
+        let actor = AgentExecutionActor::agent(CONVERSATION_ID, Some(ATTEMPT_ID.to_owned()));
         let add = ExecutionUpdateParams::Add {
-            execution_id: "execution-1".to_owned(),
+            execution_id: EXECUTION_ID.to_owned(),
             expected_version: 1,
             steps: vec![AgentDelegationTask {
                 name: "bypass".to_owned(),
@@ -1613,7 +1616,7 @@ mod tests {
             },
         ));
         assert!(attempt_actor_allows_update(
-            &AgentExecutionActor::agent(7, None),
+            &AgentExecutionActor::agent(CONVERSATION_ID, None),
             &add,
         ));
     }
@@ -1621,7 +1624,7 @@ mod tests {
     #[test]
     fn cancel_dispatch_gate_uses_the_destructive_surface_matrix() {
         let cancel = |confirm| ExecutionUpdateParams::Cancel {
-            execution_id: "exec-1".to_owned(),
+            execution_id: EXECUTION_ID.to_owned(),
             expected_version: 3,
             confirm,
         };

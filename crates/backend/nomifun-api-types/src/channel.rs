@@ -11,27 +11,38 @@ use serde::{Deserialize, Serialize};
 /// field is a JSON object containing platform-specific credentials and
 /// connection options (`{ credentials, config }`).
 ///
-/// Addressing: `plugin_id` updates an existing channel row (legacy callers
-/// pass the platform name); an empty/absent `plugin_id` with `plugin_type`
-/// creates a new bot channel. `companion_id` binds the bot to a companion.
+/// Addressing: a canonical `plugin_id` updates an existing channel row. An
+/// absent `plugin_id` with `plugin_type` creates a new bot channel. Empty
+/// strings are invalid IDs and are never treated as create mode.
+/// `companion_id` binds the bot to a companion.
 #[derive(Debug, Deserialize)]
 pub struct EnablePluginRequest {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub plugin_id: Option<String>,
     pub config: serde_json::Value,
     #[serde(default)]
     pub plugin_type: Option<String>,
-    #[serde(default, alias = "companionId")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_companion_id"
+    )]
     pub companion_id: Option<String>,
     /// 对外伙伴 (public agent) to bind this bot to. Mutually exclusive with
     /// `companion_id` — a bot serves EITHER a companion OR a public agent.
-    #[serde(default, alias = "publicAgentId")]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_public_agent_id"
+    )]
     pub public_agent_id: Option<String>,
 }
 
 /// Request body for `POST /api/channel/plugins/disable`.
 #[derive(Debug, Deserialize)]
 pub struct DisablePluginRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_id")]
     pub plugin_id: String,
 }
 
@@ -42,7 +53,9 @@ pub struct DisablePluginRequest {
 /// pass them in `extra_config`.
 #[derive(Debug, Deserialize)]
 pub struct TestPluginRequest {
-    pub plugin_id: String,
+    /// Stable channel implementation key (for example `telegram` or `lark`).
+    /// This is not a persisted channel entity ID.
+    pub plugin_type: String,
     pub token: String,
     #[serde(default)]
     pub extra_config: Option<TestPluginExtraConfig>,
@@ -97,6 +110,7 @@ pub struct RejectPairingRequest {
 /// Request body for `POST /api/channel/users/revoke`.
 #[derive(Debug, Deserialize)]
 pub struct RevokeUserRequest {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_user_id")]
     pub user_id: String,
 }
 
@@ -124,6 +138,7 @@ pub struct SyncChannelSettingsRequest {
 /// Excludes encrypted config data for security.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginStatusResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_id")]
     pub plugin_id: String,
     #[serde(rename = "type")]
     pub plugin_type: String,
@@ -134,11 +149,19 @@ pub struct PluginStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_connected: Option<TimestampMs>,
     /// Companion bound to this bot channel (one bot ↔ at most one companion).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_companion_id"
+    )]
     pub companion_id: Option<String>,
     /// 对外伙伴 (public agent) bound to this bot channel. Row-level mutually
     /// exclusive with `companion_id`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_public_agent_id"
+    )]
     pub public_agent_id: Option<String>,
     /// Platform-level bot identity (lark app_id, telegram bot id, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,7 +210,11 @@ pub struct PairingRequestResponse {
     pub code: String,
     pub platform_user_id: String,
     pub platform_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -204,10 +231,15 @@ pub struct PairingRequestResponse {
 /// Corresponds to `IChannelUser`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelUserResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_user_id")]
     pub id: String,
     pub platform_user_id: String,
     pub platform_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -225,17 +257,27 @@ pub struct ChannelUserResponse {
 /// Corresponds to `IChannelSession`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelSessionResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_session_id")]
     pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_user_id")]
     pub user_id: String,
     pub agent_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation_id: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
+    pub conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
     /// Channel row this session arrived through.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub channel_id: Option<String>,
     pub created_at: TimestampMs,
     pub last_activity: TimestampMs,
@@ -254,7 +296,11 @@ pub struct PairingRequestedPayload {
     pub code: String,
     pub platform_user_id: String,
     pub platform_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -266,6 +312,7 @@ pub struct PairingRequestedPayload {
 /// Pushed when a plugin starts, stops, or encounters an error.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginStatusChangedPayload {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_id")]
     pub plugin_id: String,
     pub status: PluginStatusResponse,
 }
@@ -275,10 +322,15 @@ pub struct PluginStatusChangedPayload {
 /// Pushed after a pairing code is approved and the user record is created.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserAuthorizedPayload {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_channel_user_id")]
     pub id: String,
     pub platform_user_id: String,
     pub platform_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_channel_id"
+    )]
     pub channel_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -293,19 +345,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const CHANNEL_ID: &str = "chn_018f1234-5678-7abc-8def-012345678990";
+    const COMPANION_ID: &str = "companion_018f1234-5678-7abc-8def-012345678991";
+    const CHANNEL_USER_ID: &str = "chu_018f1234-5678-7abc-8def-012345678992";
+    const CHANNEL_SESSION_ID: &str = "chs_018f1234-5678-7abc-8def-012345678993";
+
     // -- A. Plugin management requests ----------------------------------------
 
     #[test]
     fn test_enable_plugin_request_deserialize() {
         let raw = json!({
-            "plugin_id": "telegram",
+            "plugin_id": CHANNEL_ID,
             "config": {
                 "credentials": { "token": "bot123:ABC" },
                 "config": { "mode": "polling" }
             }
         });
         let req: EnablePluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id.as_deref(), Some("telegram"));
+        assert_eq!(req.plugin_id.as_deref(), Some(CHANNEL_ID));
         assert!(req.plugin_type.is_none());
         assert!(req.companion_id.is_none());
         assert_eq!(req.config["credentials"]["token"], "bot123:ABC");
@@ -327,28 +384,27 @@ mod tests {
     fn test_enable_plugin_request_create_mode_with_companion() {
         let raw = json!({
             "plugin_type": "lark",
-            "companionId": "companion_1",
+            "companion_id": COMPANION_ID,
             "config": { "credentials": { "app_id": "cli_a" } }
         });
         let req: EnablePluginRequest = serde_json::from_value(raw).unwrap();
         assert!(req.plugin_id.is_none());
         assert_eq!(req.plugin_type.as_deref(), Some("lark"));
-        // `companionId` alias maps onto companion_id.
-        assert_eq!(req.companion_id.as_deref(), Some("companion_1"));
+        assert_eq!(req.companion_id.as_deref(), Some(COMPANION_ID));
     }
 
     #[test]
     fn test_enable_plugin_request_missing_config() {
-        let raw = json!({ "plugin_id": "telegram" });
+        let raw = json!({ "plugin_id": CHANNEL_ID });
         let result = serde_json::from_value::<EnablePluginRequest>(raw);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_disable_plugin_request_deserialize() {
-        let raw = json!({ "plugin_id": "lark" });
+        let raw = json!({ "plugin_id": CHANNEL_ID });
         let req: DisablePluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id, "lark");
+        assert_eq!(req.plugin_id, CHANNEL_ID);
     }
 
     #[test]
@@ -361,11 +417,11 @@ mod tests {
     #[test]
     fn test_test_plugin_request_telegram() {
         let raw = json!({
-            "plugin_id": "telegram",
+            "plugin_type": "telegram",
             "token": "bot123:ABC"
         });
         let req: TestPluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id, "telegram");
+        assert_eq!(req.plugin_type, "telegram");
         assert_eq!(req.token, "bot123:ABC");
         assert!(req.extra_config.is_none());
     }
@@ -373,7 +429,7 @@ mod tests {
     #[test]
     fn test_test_plugin_request_lark_with_extra_config() {
         let raw = json!({
-            "plugin_id": "lark",
+            "plugin_type": "lark",
             "token": "xxx",
             "extra_config": {
                 "app_id": "cli_abc",
@@ -381,7 +437,7 @@ mod tests {
             }
         });
         let req: TestPluginRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.plugin_id, "lark");
+        assert_eq!(req.plugin_type, "lark");
         let extra = req.extra_config.unwrap();
         assert_eq!(extra.app_id.as_deref(), Some("cli_abc"));
         assert_eq!(extra.app_secret.as_deref(), Some("secret123"));
@@ -389,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_test_plugin_request_missing_token() {
-        let raw = json!({ "plugin_id": "telegram" });
+        let raw = json!({ "plugin_type": "telegram" });
         let result = serde_json::from_value::<TestPluginRequest>(raw);
         assert!(result.is_err());
     }
@@ -397,7 +453,7 @@ mod tests {
     #[test]
     fn test_test_plugin_extra_config_partial() {
         let raw = json!({
-            "plugin_id": "lark",
+            "plugin_type": "lark",
             "token": "xxx",
             "extra_config": { "app_id": "cli_abc" }
         });
@@ -434,9 +490,9 @@ mod tests {
 
     #[test]
     fn test_revoke_user_request_deserialize() {
-        let raw = json!({ "user_id": "user-1" });
+        let raw = json!({ "user_id": CHANNEL_USER_ID });
         let req: RevokeUserRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.user_id, "user-1");
+        assert_eq!(req.user_id, CHANNEL_USER_ID);
     }
 
     #[test]
@@ -467,13 +523,13 @@ mod tests {
     #[test]
     fn test_plugin_status_response_serde() {
         let resp = PluginStatusResponse {
-            plugin_id: "telegram".into(),
+            plugin_id: CHANNEL_ID.into(),
             plugin_type: "telegram".into(),
             name: "Telegram Bot".into(),
             enabled: true,
             status: Some("running".into()),
             last_connected: Some(1700000000000),
-            companion_id: Some("companion_1".into()),
+            companion_id: Some(COMPANION_ID.into()),
             public_agent_id: None,
             bot_key: Some("123456".into()),
             created_at: 1699000000000,
@@ -484,8 +540,8 @@ mod tests {
             active_users: 5,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["plugin_id"], "telegram");
-        assert_eq!(json["companion_id"], "companion_1");
+        assert_eq!(json["plugin_id"], CHANNEL_ID);
+        assert_eq!(json["companion_id"], COMPANION_ID);
         assert_eq!(json["bot_key"], "123456");
         assert_eq!(json["type"], "telegram");
         assert_eq!(json["name"], "Telegram Bot");
@@ -503,7 +559,7 @@ mod tests {
     #[test]
     fn test_plugin_status_response_optional_fields_omitted() {
         let resp = PluginStatusResponse {
-            plugin_id: "lark".into(),
+            plugin_id: CHANNEL_ID.into(),
             plugin_type: "lark".into(),
             name: "Lark Bot".into(),
             enabled: false,
@@ -604,7 +660,7 @@ mod tests {
             code: "123456".into(),
             platform_user_id: "tg_user_42".into(),
             platform_type: "telegram".into(),
-            channel_id: Some("achn_1".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             display_name: Some("Alice".into()),
             requested_at: 1700000000000,
             expires_at: 1700000600000,
@@ -613,7 +669,7 @@ mod tests {
         assert_eq!(json["code"], "123456");
         assert_eq!(json["platform_user_id"], "tg_user_42");
         assert_eq!(json["platform_type"], "telegram");
-        assert_eq!(json["channel_id"], "achn_1");
+        assert_eq!(json["channel_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Alice");
         assert_eq!(json["requested_at"], 1700000000000_i64);
         assert_eq!(json["expires_at"], 1700000600000_i64);
@@ -640,19 +696,19 @@ mod tests {
     #[test]
     fn test_channel_user_response_serde() {
         let resp = ChannelUserResponse {
-            id: "usr_1".into(),
+            id: CHANNEL_USER_ID.into(),
             platform_user_id: "tg_42".into(),
             platform_type: "telegram".into(),
-            channel_id: Some("achn_1".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             display_name: Some("Bob".into()),
             authorized_at: 1700000000000,
             last_active: Some(1700001000000),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], "usr_1");
+        assert_eq!(json["id"], CHANNEL_USER_ID);
         assert_eq!(json["platform_user_id"], "tg_42");
         assert_eq!(json["platform_type"], "telegram");
-        assert_eq!(json["channel_id"], "achn_1");
+        assert_eq!(json["channel_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Bob");
         assert_eq!(json["authorized_at"], 1700000000000_i64);
         assert_eq!(json["last_active"], 1700001000000_i64);
@@ -661,7 +717,7 @@ mod tests {
     #[test]
     fn test_channel_user_response_optional_fields_omitted() {
         let resp = ChannelUserResponse {
-            id: "usr_2".into(),
+            id: CHANNEL_USER_ID.into(),
             platform_user_id: "lark_1".into(),
             platform_type: "lark".into(),
             channel_id: None,
@@ -680,22 +736,25 @@ mod tests {
     #[test]
     fn test_channel_session_response_serde() {
         let resp = ChannelSessionResponse {
-            id: "sess_1".into(),
-            user_id: "usr_1".into(),
+            id: CHANNEL_SESSION_ID.into(),
+            user_id: CHANNEL_USER_ID.into(),
             agent_type: "gemini".into(),
-            conversation_id: Some(789),
+            conversation_id: Some("conv_0190f5fe-7c00-7a00-8000-000000000001".into()),
             workspace: Some("/workspace".into()),
             chat_id: Some("chat_123".into()),
-            channel_id: Some("achn_1".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             created_at: 1700000000000,
             last_activity: 1700001000000,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], "sess_1");
-        assert_eq!(json["channel_id"], "achn_1");
-        assert_eq!(json["user_id"], "usr_1");
+        assert_eq!(json["id"], CHANNEL_SESSION_ID);
+        assert_eq!(json["channel_id"], CHANNEL_ID);
+        assert_eq!(json["user_id"], CHANNEL_USER_ID);
         assert_eq!(json["agent_type"], "gemini");
-        assert_eq!(json["conversation_id"], 789);
+        assert_eq!(
+            json["conversation_id"],
+            "conv_0190f5fe-7c00-7a00-8000-000000000001"
+        );
         assert_eq!(json["workspace"], "/workspace");
         assert_eq!(json["chat_id"], "chat_123");
         assert_eq!(json["created_at"], 1700000000000_i64);
@@ -705,8 +764,8 @@ mod tests {
     #[test]
     fn test_channel_session_response_optional_fields_omitted() {
         let resp = ChannelSessionResponse {
-            id: "sess_2".into(),
-            user_id: "usr_2".into(),
+            id: CHANNEL_SESSION_ID.into(),
+            user_id: CHANNEL_USER_ID.into(),
             agent_type: "acp".into(),
             conversation_id: None,
             workspace: None,
@@ -730,7 +789,7 @@ mod tests {
             code: "123456".into(),
             platform_user_id: "tg_42".into(),
             platform_type: "telegram".into(),
-            channel_id: Some("achn_1".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             display_name: Some("Alice".into()),
             expires_at: 1700000600000,
         };
@@ -738,7 +797,7 @@ mod tests {
         assert_eq!(json["code"], "123456");
         assert_eq!(json["platform_user_id"], "tg_42");
         assert_eq!(json["platform_type"], "telegram");
-        assert_eq!(json["channel_id"], "achn_1");
+        assert_eq!(json["channel_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Alice");
         assert_eq!(json["expires_at"], 1700000600000_i64);
     }
@@ -761,9 +820,9 @@ mod tests {
     #[test]
     fn test_plugin_status_changed_payload_serde() {
         let payload = PluginStatusChangedPayload {
-            plugin_id: "telegram".into(),
+            plugin_id: CHANNEL_ID.into(),
             status: PluginStatusResponse {
-                plugin_id: "telegram".into(),
+                plugin_id: CHANNEL_ID.into(),
                 plugin_type: "telegram".into(),
                 name: "Telegram Bot".into(),
                 enabled: true,
@@ -781,7 +840,7 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["plugin_id"], "telegram");
+        assert_eq!(json["plugin_id"], CHANNEL_ID);
         assert_eq!(json["status"]["type"], "telegram");
         assert_eq!(json["status"]["status"], "running");
         assert_eq!(json["status"]["enabled"], true);
@@ -790,24 +849,24 @@ mod tests {
     #[test]
     fn test_user_authorized_payload_serde() {
         let payload = UserAuthorizedPayload {
-            id: "usr_1".into(),
+            id: CHANNEL_USER_ID.into(),
             platform_user_id: "tg_42".into(),
             platform_type: "telegram".into(),
-            channel_id: Some("achn_1".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             display_name: Some("Alice".into()),
         };
         let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(json["id"], "usr_1");
+        assert_eq!(json["id"], CHANNEL_USER_ID);
         assert_eq!(json["platform_user_id"], "tg_42");
         assert_eq!(json["platform_type"], "telegram");
-        assert_eq!(json["channel_id"], "achn_1");
+        assert_eq!(json["channel_id"], CHANNEL_ID);
         assert_eq!(json["display_name"], "Alice");
     }
 
     #[test]
     fn test_user_authorized_payload_no_display_name() {
         let payload = UserAuthorizedPayload {
-            id: "usr_2".into(),
+            id: CHANNEL_USER_ID.into(),
             platform_user_id: "lk_1".into(),
             platform_type: "lark".into(),
             channel_id: None,
@@ -823,13 +882,13 @@ mod tests {
     #[test]
     fn test_plugin_status_response_roundtrip() {
         let resp = PluginStatusResponse {
-            plugin_id: "dingtalk".into(),
+            plugin_id: CHANNEL_ID.into(),
             plugin_type: "dingtalk".into(),
             name: "DingTalk Bot".into(),
             enabled: true,
             status: Some("ready".into()),
             last_connected: None,
-            companion_id: Some("companion_2".into()),
+            companion_id: Some(COMPANION_ID.into()),
             public_agent_id: None,
             bot_key: Some("cli_app".into()),
             created_at: 1699000000000,
@@ -859,18 +918,47 @@ mod tests {
     #[test]
     fn test_channel_session_response_roundtrip() {
         let resp = ChannelSessionResponse {
-            id: "s1".into(),
-            user_id: "u1".into(),
+            id: CHANNEL_SESSION_ID.into(),
+            user_id: CHANNEL_USER_ID.into(),
             agent_type: "acp".into(),
-            conversation_id: Some(1),
+            conversation_id: Some("conv_0190f5fe-7c00-7a00-8000-000000000001".into()),
             workspace: None,
             chat_id: Some("ch1".into()),
-            channel_id: Some("achn_9".into()),
+            channel_id: Some(CHANNEL_ID.into()),
             created_at: 1000,
             last_activity: 2000,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: ChannelSessionResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, resp);
+    }
+
+    #[test]
+    fn enable_plugin_request_rejects_noncanonical_entity_ids() {
+        let raw = json!({
+            "plugin_id": "telegram",
+            "config": {},
+            "companion_id": "companion_1"
+        });
+        assert!(serde_json::from_value::<EnablePluginRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn revoke_user_request_rejects_noncanonical_channel_user_id() {
+        let raw = json!({ "user_id": "user_018f1234-5678-7abc-8def-012345678992" });
+        assert!(serde_json::from_value::<RevokeUserRequest>(raw).is_err());
+    }
+
+    #[test]
+    fn channel_session_response_rejects_noncanonical_durable_ids() {
+        let raw = json!({
+            "id": "session-1",
+            "user_id": CHANNEL_USER_ID,
+            "agent_type": "acp",
+            "conversation_id": 42,
+            "created_at": 1000,
+            "last_activity": 2000
+        });
+        assert!(serde_json::from_value::<ChannelSessionResponse>(raw).is_err());
     }
 }

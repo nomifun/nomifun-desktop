@@ -104,11 +104,15 @@ async fn call_tool(
         )
             .into_response();
     }
-    let ctx = CallerCtx {
-        remote: true,
-        user_id: state.deps.authoritative_user_id.to_string(),
-        companion_id: Some(companion_id),
-        ..Default::default()
+    let ctx = match CallerCtx::try_remote(&state.deps.authoritative_user_id, &companion_id) {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": format!("invalid authenticated identity: {error}") })),
+            )
+                .into_response();
+        }
     };
     match Registry::global()
         .dispatch_opt(state.deps.clone(), ctx, &name, &args)
@@ -161,11 +165,17 @@ async fn stream_tool(
                 .await;
             return;
         }
-        let ctx = CallerCtx {
-            remote: true,
-            user_id: deps.authoritative_user_id.to_string(),
-            companion_id: Some(companion_id),
-            ..Default::default()
+        let ctx = match CallerCtx::try_remote(&deps.authoritative_user_id, &companion_id) {
+            Ok(ctx) => ctx,
+            Err(error) => {
+                let _ = tx
+                    .send(json!({
+                        "type": "__result__",
+                        "data": { "error": format!("invalid authenticated identity: {error}") }
+                    }))
+                    .await;
+                return;
+            }
         };
         let final_val = match Registry::global()
             .dispatch_stream(deps, ctx, &name, &args, tx.clone())

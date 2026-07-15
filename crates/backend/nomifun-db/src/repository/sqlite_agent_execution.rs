@@ -60,7 +60,7 @@ async fn switch_current_lead_tx(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: &str,
     execution_id: &str,
-    conversation_id: i64,
+    conversation_id: &str,
     now: i64,
 ) -> Result<ConversationExecutionLinkRow, DbError> {
     let valid_identity: i64 = sqlx::query_scalar(
@@ -166,7 +166,7 @@ async fn activate_execution_lead_tx(
     execution_id: &str,
     now: i64,
 ) -> Result<(), DbError> {
-    let lead_identity: Option<(i64, bool)> = sqlx::query_as(
+    let lead_identity: Option<(String, bool)> = sqlx::query_as(
         "SELECT conversation_id, active FROM conversation_execution_links \
          WHERE execution_id = ? AND relation = 'lead' \
          ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -180,7 +180,7 @@ async fn activate_execution_lead_tx(
     if active {
         return Ok(());
     }
-    switch_current_lead_tx(tx, user_id, execution_id, conversation_id, now).await?;
+    switch_current_lead_tx(tx, user_id, execution_id, &conversation_id, now).await?;
     Ok(())
 }
 
@@ -221,8 +221,8 @@ async fn active_attempt_conversation_tx(
     execution_id: &str,
     step_id: &str,
     attempt_id: &str,
-) -> Result<i64, DbError> {
-    let rows: Vec<i64> = sqlx::query_scalar(
+) -> Result<String, DbError> {
+    let rows: Vec<String> = sqlx::query_scalar(
         "SELECT link.conversation_id FROM conversation_execution_links link \
          JOIN agent_executions execution ON execution.id = link.execution_id \
          JOIN conversations conversation ON conversation.id = link.conversation_id \
@@ -240,7 +240,7 @@ async fn active_attempt_conversation_tx(
     .fetch_all(&mut **tx)
     .await?;
     match rows.as_slice() {
-        [conversation_id] => Ok(*conversation_id),
+        [conversation_id] => Ok(conversation_id.clone()),
         [] => Err(DbError::Conflict(
             "waiting attempt has no active Agent conversation".to_owned(),
         )),
@@ -311,7 +311,7 @@ async fn append_event_tx(
                 ));
             }
             if let Some(conversation_id) = conversation_id {
-                if agent_id != &conversation_id.to_string() {
+                if agent_id != conversation_id {
                     return Err(DbError::Conflict(
                         "a conversation-backed Agent actor id must be its Conversation id"
                             .to_owned(),
@@ -397,7 +397,7 @@ async fn append_event_tx(
             (
                 "agent".to_owned(),
                 Some(agent_id.clone()),
-                *conversation_id,
+                conversation_id.clone(),
                 attempt_id.clone(),
             )
         }
@@ -427,7 +427,7 @@ async fn append_event_tx(
     .bind(&event.attempt_id)
     .bind(&actor_type)
     .bind(&actor_id)
-    .bind(actor_conversation_id)
+    .bind(&actor_conversation_id)
     .bind(&actor_attempt_id)
     .bind(&on_behalf_of_user_id)
     .bind(&event.payload)
@@ -932,7 +932,7 @@ async fn attempt_details_tx(
         .fetch_all(&mut **tx)
         .await?
     };
-    let links: Vec<(String, String, i64)> = sqlx::query_as(
+    let links: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT step_id, attempt_id, conversation_id \
          FROM conversation_execution_links \
          WHERE execution_id = ? AND relation = 'attempt' \
@@ -941,7 +941,7 @@ async fn attempt_details_tx(
     .bind(execution_id)
     .fetch_all(&mut **tx)
     .await?;
-    let conversations: HashMap<(String, String), i64> = links
+    let conversations: HashMap<(String, String), String> = links
         .into_iter()
         .map(|(step, attempt, conversation)| ((step, attempt), conversation))
         .collect();
@@ -950,7 +950,7 @@ async fn attempt_details_tx(
         .map(|attempt| {
             let conversation_id = conversations
                 .get(&(attempt.step_id.clone(), attempt.id.clone()))
-                .copied();
+                .cloned();
             AgentExecutionAttemptDetailRow {
                 attempt,
                 conversation_id,
@@ -1074,7 +1074,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         let execution_id = generate_prefixed_id("exec");
         let now = now_ms();
         let mut tx = self.pool.begin().await?;
-        if let Some(conversation_id) = params.lead_conversation_id {
+        if let Some(conversation_id) = params.lead_conversation_id.as_deref() {
             let is_attempt_conversation: i64 = sqlx::query_scalar(
                 "SELECT EXISTS( \
                     SELECT 1 FROM conversation_execution_links link \
@@ -1094,7 +1094,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 ));
             }
         }
-        if let Some(conversation_id) = params.lead_conversation_id {
+        if let Some(conversation_id) = params.lead_conversation_id.as_deref() {
             let active_execution_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(DISTINCT execution.id) \
                    FROM conversation_execution_links link \
@@ -1142,7 +1142,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         for participant in participants {
             insert_participant_tx(&mut tx, &execution_id, participant, 0, now).await?;
         }
-        if let Some(conversation_id) = params.lead_conversation_id {
+        if let Some(conversation_id) = params.lead_conversation_id.as_deref() {
             switch_current_lead_tx(&mut tx, user_id, &execution_id, conversation_id, now)
                 .await?;
         }
@@ -2018,7 +2018,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 conversation_id: Some(conversation_id),
                 attempt_id: Some(attempt_id),
                 ..
-            } if *conversation_id == params.caller_conversation_id
+            } if conversation_id == &params.caller_conversation_id
                 && attempt_id == &params.caller_attempt_id => {}
             _ => {
                 return Err(DbError::Conflict(
@@ -2046,7 +2046,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             return Err(conflict("delegating Agent Execution"));
         }
 
-        let replay_rows: Vec<(String, Option<i64>, Option<String>)> = sqlx::query_as(
+        let replay_rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT payload, actor_conversation_id, actor_attempt_id \
              FROM agent_execution_events \
              WHERE execution_id = ? AND event_type = 'plan_changed' \
@@ -2058,7 +2058,8 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .fetch_all(&mut *tx)
         .await?;
         if let [(payload, actor_conversation_id, actor_attempt_id)] = replay_rows.as_slice() {
-            if *actor_conversation_id != Some(params.caller_conversation_id)
+            if actor_conversation_id.as_deref()
+                != Some(params.caller_conversation_id.as_str())
                 || actor_attempt_id.as_deref() != Some(params.caller_attempt_id.as_str())
             {
                 return Err(DbError::Conflict(
@@ -2132,7 +2133,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .bind(params.expected_caller_step_version)
         .bind(&params.caller_attempt_id)
         .bind(params.expected_caller_attempt_version)
-        .bind(params.caller_conversation_id)
+        .bind(&params.caller_conversation_id)
         .bind(user_id)
         .bind(user_id)
         .fetch_all(&mut *tx)
@@ -2872,7 +2873,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             ));
         }
 
-        let latest: Option<(Option<String>, String, Option<i64>)> = sqlx::query_as(
+        let latest: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
             "SELECT attempt.participant_id, attempt.effective_config, \
                 (SELECT link.conversation_id FROM conversation_execution_links link \
                  WHERE link.execution_id = attempt.execution_id \
@@ -3365,7 +3366,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         expected_step_version: i64,
         attempt_id: &str,
         expected_attempt_version: i64,
-        conversation_id: i64,
+        conversation_id: &str,
         lease: Option<&AgentExecutionLeaseToken>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError> {
@@ -3696,7 +3697,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
     async fn resolve_conversation_link(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<Vec<ConversationExecutionLinkRow>, DbError> {
         Ok(sqlx::query_as::<_, ConversationExecutionLinkRow>(
             "SELECT link.* FROM conversation_execution_links link \
@@ -3716,7 +3717,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
     async fn has_attempt_conversation_link(
         &self,
         user_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, DbError> {
         let exists: i64 = sqlx::query_scalar(
             "SELECT EXISTS(\
@@ -3740,7 +3741,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         execution_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<PendingConversationCleanup>, DbError> {
-        Ok(sqlx::query_as::<_, (String, String, String, i64)>(
+        Ok(sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT link.id, link.execution_id, execution.user_id, link.conversation_id \
              FROM conversation_execution_links link \
              JOIN agent_executions execution ON execution.id = link.execution_id \

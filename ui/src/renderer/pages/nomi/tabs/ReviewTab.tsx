@@ -9,9 +9,10 @@ import { useTranslation } from 'react-i18next';
 import { Empty, Radio, Spin, Tag } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { ICompanionDayDigest } from '@/common/adapter/ipcBridge';
+import type { CompanionId } from '@/common/types/ids';
 
 interface Props {
-  companionId: string;
+  companionId: CompanionId;
 }
 
 /** `YYYYMMDD` → `YYYY-MM-DD` (defensive on unexpected shapes). */

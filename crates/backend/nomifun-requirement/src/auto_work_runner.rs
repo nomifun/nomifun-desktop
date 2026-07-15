@@ -10,7 +10,7 @@ use nomifun_ai_agent::registry::AgentRegistry;
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus, SendMessageRequest};
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConversationId, TerminalId, UserId};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IConversationRepository;
 use nomifun_terminal::{LifecycleKind, TerminalDriver};
@@ -89,16 +89,16 @@ pub struct AutoWorkRunnerDeps {
 /// API (`get_autowork`). Read by `AutoWorkRunner::live_progress`.
 #[derive(Default)]
 struct LiveProgress {
-    current_requirement_id: Mutex<Option<i64>>,
+    current_requirement_id: Mutex<Option<String>>,
     completed_count: AtomicU32,
 }
 
 impl LiveProgress {
-    fn set_current(&self, id: Option<i64>) {
+    fn set_current(&self, id: Option<String>) {
         *self.current_requirement_id.lock().expect("progress lock") = id;
     }
-    fn current(&self) -> Option<i64> {
-        *self.current_requirement_id.lock().expect("progress lock")
+    fn current(&self) -> Option<String> {
+        self.current_requirement_id.lock().expect("progress lock").clone()
     }
     fn incr_completed(&self) -> u32 {
         self.completed_count.fetch_add(1, Ordering::SeqCst) + 1
@@ -110,7 +110,7 @@ impl LiveProgress {
 
 /// Domain-qualified key for the per-target loop maps. After integerization a
 /// conversation and a terminal can share a numeric id (`conv#5` vs `term#5`), so
-/// the loop registry MUST key on `(kind, target_id)` — a bare id would let one
+/// the loop registry MUST key on `(kind, target_id)` —a bare id would let one
 /// domain's `start`/`stop` clobber the other's loop (spec §2.2 C4).
 type TargetKey = (AutoWorkTargetKind, String);
 
@@ -130,7 +130,7 @@ struct AutoWorkHandle {
     generation: u64,
 }
 
-/// Removes a loop's handle from the map on task exit — normal OR panic (Drop runs
+/// Removes a loop's handle from the map on task exit —normal OR panic (Drop runs
 /// during unwind). The generation guard prevents clobbering a fresh handle that a
 /// concurrent `start()` may have inserted.
 struct HandleGuard {
@@ -169,25 +169,36 @@ impl AutoWorkRunner {
     }
 
     pub fn is_running(&self, kind: AutoWorkTargetKind, target_id: &str) -> bool {
-        self.handles.contains_key(&(kind, target_id.to_string()))
+        valid_target_id(kind, target_id)
+            && self.handles.contains_key(&(kind, target_id.to_string()))
     }
 
     pub fn running_tag(&self, kind: AutoWorkTargetKind, target_id: &str) -> Option<String> {
+        if !valid_target_id(kind, target_id) {
+            return None;
+        }
         self.handles.get(&(kind, target_id.to_string())).map(|h| h.tag.clone())
     }
 
     /// Live progress for a running loop: `(current_requirement_id, completed_count)`.
     /// `current_requirement_id` is stringified at this API boundary (the AutoWork
-    /// DTO carries it as a string), the id itself is the single-track integer.
+    /// DTO carries it as a canonical string ID.
     pub fn live_progress(&self, kind: AutoWorkTargetKind, target_id: &str) -> Option<(Option<String>, u32)> {
+        if !valid_target_id(kind, target_id) {
+            return None;
+        }
         self.handles
             .get(&(kind, target_id.to_string()))
-            .map(|h| (h.progress.current().map(|id| id.to_string()), h.progress.completed()))
+            .map(|h| (h.progress.current(), h.progress.completed()))
     }
 
     /// Start (or restart) the autowork loop for a target bound to `tag`.
     /// Stops after `max_requirements` completions when set.
     pub fn start(&self, kind: AutoWorkTargetKind, target_id: String, tag: String, max_requirements: Option<u32>) {
+        if !valid_target_id(kind, &target_id) {
+            error!(target_id, ?kind, "Refusing to start AutoWork for an invalid target id");
+            return;
+        }
         self.stop(kind, &target_id);
 
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
@@ -243,10 +254,13 @@ impl AutoWorkRunner {
     /// the in-flight agent turn (conversation targets), and releases the
     /// in-flight claim (if any) back to `pending` so the requirement is not
     /// orphaned `in_progress` until the sweeper runs. Cancelling the live turn
-    /// matters: disabling AutoWork must actually stop the work — historically
+    /// matters: disabling AutoWork must actually stop the work —historically
     /// the orphan turn kept the conversation showing "running" after the user
     /// flipped the switch off, and raced any later re-enable.
     pub fn stop(&self, kind: AutoWorkTargetKind, target_id: &str) {
+        if !valid_target_id(kind, target_id) {
+            return;
+        }
         if let Some((_, handle)) = self.handles.remove(&(kind, target_id.to_string())) {
             handle.cancelled.store(true, Ordering::SeqCst);
             handle.join.abort();
@@ -261,17 +275,14 @@ impl AutoWorkRunner {
                         }
                     });
                 }
-                // `release_claim` is conversation-domain only (it pairs owner_kind
-                // == conversation); a terminal loop's in-flight claim is released by
-                // its own finalize/sweeper path. Only attempt the release for a
-                // conversation target, and only when its id parses to the integer
-                // owner key.
+                // `release_claim` is conversation-domain only; a terminal loop's
+                // in-flight claim is released by its own finalize/sweeper path.
                 if handle.kind == AutoWorkTargetKind::Conversation
-                    && let Ok(conv_id) = target_id.parse::<i64>()
                 {
                     let service = self.deps.service.clone();
+                    let conversation_id = target_id.to_string();
                     tokio::spawn(async move {
-                        if let Err(e) = service.release_claim(req_id, conv_id).await {
+                        if let Err(e) = service.release_claim(&req_id, &conversation_id).await {
                             warn!(requirement_id = req_id, error = %e, "Failed to release claim on autowork stop");
                         }
                     });
@@ -292,20 +303,25 @@ impl AutoWorkRunner {
             loop {
                 ticker.tick().await;
                 // The active set is keyed by `(kind, target_id)`. The sweep
-                // matches the dual-domain owner `(owner_kind, owner_session_id)`,
-                // so map each live loop to its `(owner_kind_str, i64)` pair. A
-                // target id that does not parse to an integer cannot own a
-                // numeric requirement, so it is simply not in the exclusion set.
-                let active: Vec<(String, i64)> = handles
+                // matches each typed owner column against its corresponding
+                // canonical string-ID set.
+                let active_conversations: Vec<String> = handles
                     .iter()
-                    .filter_map(|e| {
-                        let (kind, target_id) = e.key();
-                        target_id.parse::<i64>().ok().map(|id| (kind.as_str().to_string(), id))
-                    })
+                    .filter(|entry| entry.key().0 == AutoWorkTargetKind::Conversation)
+                    .map(|entry| entry.key().1.clone())
+                    .collect();
+                let active_terminals: Vec<String> = handles
+                    .iter()
+                    .filter(|entry| entry.key().0 == AutoWorkTargetKind::Terminal)
+                    .map(|entry| entry.key().1.clone())
                     .collect();
                 match service
                     .repo()
-                    .sweep_expired_leases(&active, nomifun_common::now_ms())
+                    .sweep_expired_leases(
+                        &active_conversations,
+                        &active_terminals,
+                        nomifun_common::now_ms(),
+                    )
                     .await
                 {
                     Ok(n) if n > 0 => info!(reset = n, "Requirement lease sweeper re-pended stale claims"),
@@ -321,12 +337,12 @@ impl AutoWorkRunner {
     /// The running set (`handles`) is in-memory, but the enabled/tag config is
     /// persisted (conversation `extra.autowork` / terminal `autowork` column). On
     /// a process restart nothing would drive those bindings until a user opened
-    /// each session page — the old behaviour that made AutoWork look like it
+    /// each session page —the old behaviour that made AutoWork look like it
     /// "only works in the foreground". Spawning the loops here makes the backend
     /// the single source of truth: a bound session works in the background from
     /// boot, no UI visit required. Conversation loops start driving immediately;
     /// a terminal whose PTY is not yet live idles until the user relaunches it
-    /// (the loop self-heals — see `run_loop`). Detached + best-effort.
+    /// (the loop self-heals —see `run_loop`). Detached + best-effort.
     pub fn resume_persisted_bindings(&self) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -363,10 +379,17 @@ impl AutoWorkRunner {
     }
 }
 
+fn valid_target_id(kind: AutoWorkTargetKind, target_id: &str) -> bool {
+    match kind {
+        AutoWorkTargetKind::Conversation => ConversationId::try_from(target_id).is_ok(),
+        AutoWorkTargetKind::Terminal => TerminalId::try_from(target_id).is_ok(),
+    }
+}
+
 /// The autowork loop body. Claims → injects → waits → finalizes → repeats.
 ///
 /// The loop is *persistent*: it does NOT exit when the tag drains or a claim
-/// errors — it idles (waking on `deps.wake`, with `IDLE_POLL` as a fallback) and
+/// errors —it idles (waking on `deps.wake`, with `IDLE_POLL` as a fallback) and
 /// keeps claiming, so a bound session keeps picking up new requirements in the
 /// background forever. It exits only on cancel (disable / stop), after
 /// `max_requirements` completions, or when a terminal target's session row is
@@ -382,7 +405,7 @@ enum TurnResult {
     Busy,
     /// The USER deliberately stopped the turn (conversation cancel). The tag
     /// was paused (`user_interrupted`) and the claim released without consuming
-    /// an attempt — the loop idles until the user resumes the tag. NOT a
+    /// an attempt —the loop idles until the user resumes the tag. NOT a
     /// failure: no backoff, no retry.
     UserInterrupted,
 }
@@ -402,10 +425,10 @@ enum TurnEnd {
 }
 
 /// Broadcast this loop target's live AutoWork run-state so EVERY surface stays in
-/// sync across idle↔active transitions. The per-session control GETs fresh state
+/// sync across idle→active transitions. The per-session control GETs fresh state
 /// on open, but the session-list capability icon updates ONLY from this event (no
 /// per-row GET); without an emit on claim/finish it kept the run-state from its
-/// initial bulk load and showed a stale colour — active/green in the header but
+/// initial bulk load and showed a stale colour —active/green in the header but
 /// idle/orange in the sidebar for the same session. `enabled=false` is emitted
 /// when the max-requirements cap just disabled the binding so the icon drops off.
 fn emit_autowork_progress(
@@ -416,7 +439,7 @@ fn emit_autowork_progress(
     progress: &LiveProgress,
     enabled: bool,
 ) {
-    let current_requirement_id = progress.current().map(|id| id.to_string());
+    let current_requirement_id = progress.current();
     deps.service.emit_autowork_state(&AutoWorkState {
         kind,
         target_id: target_id.to_string(),
@@ -438,14 +461,7 @@ async fn run_loop(
     progress: Arc<LiveProgress>,
     max_requirements: Option<u32>,
 ) {
-    // The integer owner key for the requirement service / terminal driver (both
-    // now keyed by i64). The AutoWork `target_id` is a string (the kind-agnostic
-    // target handle); a non-numeric one cannot own/drive a numeric session, so
-    // the loop cannot do useful work — log and exit rather than spin.
-    let Ok(owner_id) = target_id.parse::<i64>() else {
-        warn!(target_id, tag, "AutoWork loop target id is not an integer — not starting");
-        return;
-    };
+    let owner_id = target_id;
     let owner_check = match kind {
         AutoWorkTargetKind::Conversation => {
             deps.service
@@ -459,7 +475,7 @@ async fn run_loop(
         }
     };
     if let Err(error) = owner_check {
-        warn!(target_id, ?kind, %error, "AutoWork target is not installation-owner owned — not starting");
+        warn!(target_id, ?kind, %error, "AutoWork target is not installation-owner owned —not starting");
         return;
     }
     // Count of back-to-back failed/busy turns, driving the failure backoff so a
@@ -474,7 +490,7 @@ async fn run_loop(
 
         // NOTE: IDMM is armed PER TURN inside `inject_and_wait` /
         // `inject_and_wait_terminal` (right after the Agent runtime/PTY exists), NOT here.
-        // Arming at the loop top fired on every idle poll too — and since an idle
+        // Arming at the loop top fired on every idle poll too —and since an idle
         // conversation has no live Agent runtime, IDMM's probe.observe() got a closed
         // channel and the supervisor died instantly, only to be re-armed 10s later:
         // a runaway "IDMM supervisor armed" churn that did no work. Arming once the
@@ -482,13 +498,13 @@ async fn run_loop(
 
         // Terminal target whose PTY is not live: distinguish "deleted" (stop for
         // good) from "exited but relaunch-able" (idle and re-check, so the user
-        // relaunching the terminal seamlessly resumes AutoWork — no re-toggle).
+        // relaunching the terminal seamlessly resumes AutoWork —no re-toggle).
         if kind == AutoWorkTargetKind::Terminal
             && let Some(driver) = &deps.terminal_driver
             && !driver.is_alive(owner_id)
         {
             if matches!(driver.describe(owner_id).await, Ok(None)) {
-                info!(target_id, tag, "AutoWork terminal removed — stopping");
+                info!(target_id, tag, "AutoWork terminal removed —stopping");
                 break;
             }
             sleep(IDLE_POLL).await;
@@ -498,7 +514,7 @@ async fn run_loop(
         // Claim the next requirement. The wake future is armed BEFORE the claim
         // (and dropped right after) so a requirement created/re-pended between the
         // claim returning None and our await is never lost. On drain or a transient
-        // error the loop idles and retries instead of exiting — persistent by design.
+        // error the loop idles and retries instead of exiting —persistent by design.
         let claimed = {
             let wake = deps.wake.notified();
             tokio::pin!(wake);
@@ -515,7 +531,7 @@ async fn run_loop(
                     continue;
                 }
                 Err(e) => {
-                    warn!(target_id, tag, error = %e, "AutoWork claim failed — retrying");
+                    warn!(target_id, tag, error = %e, "AutoWork claim failed —retrying");
                     tokio::select! {
                         _ = wake.as_mut() => {}
                         _ = sleep(IDLE_POLL) => {}
@@ -524,8 +540,8 @@ async fn run_loop(
                 }
             }
         };
-        let req_id = claimed.id;
-        progress.set_current(Some(req_id));
+        let req_id = claimed.id.clone();
+        progress.set_current(Some(req_id.clone()));
         info!(target_id, tag, requirement_id = req_id, "AutoWork claimed requirement");
         // active: a requirement is now in flight → broadcast so the session-list
         // icon turns active-coloured in step with the per-session control.
@@ -545,7 +561,7 @@ async fn run_loop(
                         // user hit the cancel endpoint during the turn (covers
                         // engines whose cancel path surfaces as a generic
                         // Error). Pause the tag and release the claim instead
-                        // of finalizing — re-pending a deliberate stop is what
+                        // of finalizing —re-pending a deliberate stop is what
                         // made AutoWork "resume by itself" seconds after the
                         // user pressed stop.
                         let user_cancelled = end == TurnEnd::Cancelled
@@ -557,9 +573,9 @@ async fn run_loop(
                                 target_id,
                                 tag,
                                 requirement_id = req_id,
-                                "AutoWork turn stopped by user — pausing tag"
+                                "AutoWork turn stopped by user —pausing tag"
                             );
-                            if let Err(e) = deps.service.user_interrupt(req_id, owner_id, tag).await {
+                            if let Err(e) = deps.service.user_interrupt(&req_id, owner_id, tag).await {
                                 error!(target_id, requirement_id = req_id, error = %e, "AutoWork user-interrupt failed");
                             }
                             TurnResult::UserInterrupted
@@ -569,7 +585,7 @@ async fn run_loop(
                             // engines (ACP/codex/gemini) so the platform records what was done.
                             if let Err(e) = deps
                                 .service
-                                .finalize_if_needed(req_id, turn_errored, note, expects_verdict)
+                                .finalize_if_needed(&req_id, turn_errored, note, expects_verdict)
                                 .await
                             {
                                 error!(target_id, requirement_id = req_id, error = %e, "AutoWork finalize failed");
@@ -578,7 +594,7 @@ async fn run_loop(
                         }
                     }
                     // The session was busy (a foreground user turn or IDMM owns turn
-                    // admission). The requirement's turn never ran — revert its work claim
+                    // admission). The requirement's turn never ran —revert its work claim
                     // WITHOUT consuming an attempt, then back off and retry. Without
                     // this, a transient busy window burns the requirement's retries
                     // and falsely fails it (and pauses its tag).
@@ -586,9 +602,9 @@ async fn run_loop(
                         warn!(
                             target_id,
                             requirement_id = req_id,
-                            "AutoWork inject hit a busy session — unclaiming without consuming an attempt"
+                            "AutoWork inject hit a busy session —unclaiming without consuming an attempt"
                         );
-                        if let Err(e) = deps.service.unclaim_busy(req_id, owner_id).await {
+                        if let Err(e) = deps.service.unclaim_busy(&req_id, owner_id, kind).await {
                             error!(target_id, requirement_id = req_id, error = %e, "AutoWork unclaim_busy failed");
                         }
                         TurnResult::Busy
@@ -605,9 +621,9 @@ async fn run_loop(
                         warn!(
                             target_id,
                             requirement_id = req_id,
-                            "AutoWork target conversation is gone — unclaiming (no attempt) and stopping loop"
+                            "AutoWork target conversation is gone —unclaiming (no attempt) and stopping loop"
                         );
-                        if let Err(e) = deps.service.unclaim_busy(req_id, owner_id).await {
+                        if let Err(e) = deps.service.unclaim_busy(&req_id, owner_id, kind).await {
                             error!(target_id, requirement_id = req_id, error = %e, "AutoWork unclaim_busy failed");
                         }
                         break;
@@ -615,7 +631,7 @@ async fn run_loop(
                     Err(e) => {
                         error!(target_id, requirement_id = req_id, error = %e, "AutoWork inject failed");
                         // errored turn → expects_verdict is irrelevant (re-pend / fail).
-                        if let Err(e) = deps.service.finalize_if_needed(req_id, true, None, false).await {
+                        if let Err(e) = deps.service.finalize_if_needed(&req_id, true, None, false).await {
                             error!(target_id, requirement_id = req_id, error = %e, "AutoWork finalize failed");
                         }
                         TurnResult::Errored
@@ -637,7 +653,7 @@ async fn run_loop(
                 // → needs_review (not silently done). An errored turn (PTY died /
                 // hard timeout) re-pends or fails after max attempts.
                 let expects_verdict = crate::prompt::terminal_expects_verdict(deps.requirement_mcp_enabled);
-                if let Err(e) = deps.service.finalize_if_needed(req_id, errored, None, expects_verdict).await {
+                if let Err(e) = deps.service.finalize_if_needed(&req_id, errored, None, expects_verdict).await {
                     error!(target_id, requirement_id = req_id, error = %e, "AutoWork finalize failed");
                 }
                 if errored { TurnResult::Errored } else { TurnResult::Done }
@@ -645,7 +661,7 @@ async fn run_loop(
         };
 
         // 3. Re-read the final status to count completions + honor max.
-        let final_status = deps.service.get(req_id).await.ok().map(|d| d.status);
+        let final_status = deps.service.get(&req_id).await.ok().map(|d| d.status);
         progress.set_current(None);
 
         if final_status == Some(RequirementStatus::Done) {
@@ -657,7 +673,7 @@ async fn run_loop(
                     target_id,
                     tag,
                     completed = done_n,
-                    "AutoWork reached max_requirements — stopping"
+                    "AutoWork reached max_requirements —stopping"
                 );
                 // Persist disabled so the cap survives restarts: boot resume must
                 // not resurrect a binding that already met its completion cap.
@@ -716,30 +732,23 @@ async fn inject_and_wait(
     tag: &str,
     req: &Requirement,
 ) -> Result<(TurnEnd, Option<String>, bool), AppError> {
-    // The conversation repo / lease renewal are keyed by the integer id; the
-    // conversation service + runtime registry stay string-keyed (their public API).
-    let conv_id_i64 = conversation_id
-        .parse::<i64>()
-        .map_err(|_| AppError::NotFound(format!("conversation {conversation_id}")))?;
+    let conv_id = conversation_id;
     // Load the conversation row to resolve agent_type / model / workspace / user.
     let row = deps
         .conversation_repo
-        .get(conv_id_i64)
+        .get(conv_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("conversation {conversation_id}")))?;
 
-    let user_id = row.user_id.trim();
-    if user_id.is_empty() {
-        return Err(AppError::Forbidden(
-            "AutoWork conversation has no owner identity".into(),
-        ));
-    }
-    if user_id != deps.authoritative_user_id.as_ref() {
+    let user_id = UserId::parse(&row.user_id).map_err(|error| {
+        AppError::Forbidden(format!("AutoWork conversation has invalid owner identity: {error}"))
+    })?;
+    if user_id.as_str() != deps.authoritative_user_id.as_ref() {
         return Err(AppError::Forbidden(
             "AutoWork requires an installation-owner Conversation".into(),
         ));
     }
-    let user_id = user_id.to_owned();
+    let user_id = user_id.into_string();
 
     // AutoWork is a public/background initiator, not Agent Execution
     // infrastructure. Reject an Attempt transcript before runtime creation,
@@ -751,7 +760,7 @@ async fn inject_and_wait(
         .await?;
 
     let agent_type = parse_agent_type(&deps.agent_registry, &row.r#type).await;
-    let model = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
+    let model = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)?;
     let delegation_policy =
         nomifun_conversation::runtime_options::delegation_policy_from_conversation_row(&row)?;
     let extra: serde_json::Value = serde_json::from_str(&row.extra).unwrap_or_default();
@@ -762,7 +771,7 @@ async fn inject_and_wait(
         .trim()
         .to_string();
 
-    // Keep a copy for attachment staging below — the original string moves into
+    // Keep a copy for attachment staging below —the original string moves into
     // the runtime options.
     let workspace_for_stage = workspace.clone();
 
@@ -781,7 +790,7 @@ async fn inject_and_wait(
 
     let agent = deps.runtime_registry.get_or_create_runtime(conversation_id, options).await?;
     // Arm IDMM now that THIS turn's runtime exists (so its probe.observe() attaches
-    // to this turn's event stream), and ONLY now — never on an idle poll. Mirrors
+    // to this turn's event stream), and ONLY now —never on an idle poll. Mirrors
     // the user-driven path's `on_turn_start` hook (which also arms right after
     // get_or_create_runtime). Idempotent + no-op when IDMM is disabled for the target.
     if let Some(idmm) = &deps.idmm {
@@ -794,7 +803,7 @@ async fn inject_and_wait(
     // `get_or_create_runtime` could interfere with the runtime's own
     // workspace-initialization checks (e.g. "does the workspace exist yet").
     let ws_path = (!workspace_for_stage.is_empty()).then(|| std::path::Path::new(workspace_for_stage.as_str()));
-    let attachments = deps.service.stage_attachments_for_prompt(req.id, ws_path).await;
+    let attachments = deps.service.stage_attachments_for_prompt(&req.id, ws_path).await;
 
     let prompt = build_requirement_prompt(tag, req, agent_type, deps.requirement_mcp_enabled, &attachments);
     let send_req = SendMessageRequest {
@@ -809,7 +818,7 @@ async fn inject_and_wait(
         .send_message(&user_id, conversation_id, send_req, &deps.runtime_registry)
         .await?;
 
-    let outcome = wait_for_terminal_with_renewal(deps, conversation_id, conv_id_i64, req.id, rx).await;
+    let outcome = wait_for_terminal_with_renewal(deps, conversation_id, conv_id, req.id.clone(), rx).await;
     // The session has a declaration channel when it exposes the requirement
     // tools: Nomi natively, or ACP once the requirement MCP is injected
     // (`requirement_mcp_enabled`). Driven by the same bootstrap flag that gates
@@ -826,15 +835,15 @@ async fn inject_and_wait(
 async fn wait_for_terminal_with_renewal(
     deps: &Arc<AutoWorkRunnerDeps>,
     conversation_id: &str,
-    conv_id: i64,
-    req_id: i64,
+    conv_id: &str,
+    req_id: String,
     mut rx: broadcast::Receiver<AgentStreamEvent>,
 ) -> (TurnEnd, Option<String>) {
     let mut renew = interval(LEASE_RENEW_INTERVAL);
     renew.tick().await; // consume the immediate first tick
     let mut note_buf = String::new();
     // The CURRENT turn's assistant text, reset at each turn boundary. Used to
-    // decide the decision-yield from the text we already have IN MEMORY — never
+    // decide the decision-yield from the text we already have IN MEMORY —never
     // racing the stream relay's persisted message-status write (which `pending_signal`
     // would). The decision (menu / question) lives at the turn's tail, which
     // `append_bounded` keeps.
@@ -856,7 +865,16 @@ async fn wait_for_terminal_with_renewal(
             let ride_until = decision_ride_until;
             tokio::select! {
                 _ = renew.tick() => {
-                    if let Err(e) = deps.service.renew_lease(req_id, conv_id, DEFAULT_LEASE_MS).await {
+                    if let Err(e) = deps
+                        .service
+                        .renew_lease(
+                            &req_id,
+                            conv_id,
+                            AutoWorkTargetKind::Conversation,
+                            DEFAULT_LEASE_MS,
+                        )
+                        .await
+                    {
                         warn!(conversation_id, requirement_id = req_id, error = %e, "Lease renewal failed");
                     }
                 }
@@ -872,7 +890,7 @@ async fn wait_for_terminal_with_renewal(
                     info!(
                         conversation_id,
                         requirement_id = req_id,
-                        "AutoWork decision-yield window elapsed without IDMM answering — finalizing turn"
+                        "AutoWork decision-yield window elapsed without IDMM answering —finalizing turn"
                     );
                     return TurnEnd::Clean;
                 }
@@ -888,15 +906,15 @@ async fn wait_for_terminal_with_renewal(
                             append_bounded(&mut turn_text, &t.content);
                         }
                         // A clean Finish is NOT necessarily the requirement's terminal
-                        // state: the agent may have ended its turn on a 选择题/开放式提问.
+                        // state: the agent may have ended its turn on a 閫夋嫨棰?寮€鏀惧紡鎻愰棶.
                         // When IDMM is supervising and a pending decision exists, IDMM
-                        // will answer it — so YIELD instead of finalizing here (which
+                        // will answer it —so YIELD instead of finalizing here (which
                         // would park the requirement needs_review, burn an attempt, and
                         // let run_loop race a fresh requirement into the session,
-                        // stomping IDMM's pending answer — the 代码乱套). Keep waiting on
+                        // stomping IDMM's pending answer —the protocol mismatch). Keep waiting on
                         // the SAME broadcast (without owning turn admission) until the
                         // work reaches a real terminal Finish. A refusal/truncation
-                        // (Errored) or user cancel (Cancelled) is never yielded — those
+                        // (Errored) or user cancel (Cancelled) is never yielded —those
                         // are genuine terminal ends.
                         Ok(AgentStreamEvent::Finish(d)) => {
                             let end = turn_end_from(&d.stop_reason);
@@ -929,7 +947,7 @@ async fn wait_for_terminal_with_renewal(
                         // retryable provider fault is IDMM's job to recover (retry /
                         // sidecar via a fresh turn). Failing the turn here would
                         // abandon it and race a fresh requirement into the same
-                        // session — the historical "代码乱套". Wait through up to
+                        // session —the historical "protocol mismatch". Wait through up to
                         // MAX_RECOVERY_WAITS such errors; otherwise (non-retryable, no
                         // IDMM, or grace exhausted) fail.
                         Ok(AgentStreamEvent::Error(d)) => {
@@ -953,7 +971,7 @@ async fn wait_for_terminal_with_renewal(
                         }
                         // A closed channel means the Agent runtime was torn down
                         // (eviction on terminal error, process death, dropped
-                        // connection) — the turn did NOT finish cleanly. Treat as
+                        // connection) —the turn did NOT finish cleanly. Treat as
                         // errored, matching the terminal path's `Closed => errored`.
                         Err(broadcast::error::RecvError::Closed) => return TurnEnd::Errored,
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -973,7 +991,7 @@ async fn wait_for_terminal_with_renewal(
 /// turn cannot grow the buffer without limit. Truncation respects char boundaries.
 fn append_bounded(buf: &mut String, chunk: &str) {
     buf.push_str(chunk);
-    // chars are ≤4 bytes; keep roughly twice the char cap as a byte ceiling.
+    // chars are 鈮? bytes; keep roughly twice the char cap as a byte ceiling.
     let max_bytes = MAX_NOTE_CHARS * 4 * 2;
     if buf.len() > max_bytes {
         let mut cut = buf.len() - MAX_NOTE_CHARS * 4;
@@ -987,7 +1005,7 @@ fn append_bounded(buf: &mut String, chunk: &str) {
 /// Classify a turn's terminal `stop_reason` into how the turn ENDED.
 /// `None` (backend didn't report) and `EndTurn` are success; truncations and
 /// refusals are failures so AutoWork does not record them as done; `Cancelled`
-/// is a deliberate user stop — surfaced distinctly so the loop pauses the tag
+/// is a deliberate user stop —surfaced distinctly so the loop pauses the tag
 /// instead of burning a retry attempt on it.
 fn turn_end_from(reason: &Option<TurnStopReason>) -> TurnEnd {
     match reason {
@@ -1022,7 +1040,7 @@ fn should_wait_for_recovery(retryable: bool, idmm_supervising: bool, waits_so_fa
 /// Decide whether AutoWork should YIELD a clean-finish turn to IDMM rather than
 /// finalize it as the requirement's terminal state. We yield only on a CLEAN
 /// finish (a refusal/truncation Errored or a user Cancelled is a real terminal
-/// end) AND when IDMM is supervising (it owns answering 选择题/开放式提问), bounded by
+/// end) AND when IDMM is supervising (it owns answering 閫夋嫨棰?寮€鏀惧紡鎻愰棶), bounded by
 /// `MAX_DECISION_WAITS` so a runaway question loop can't ride forever. The caller
 /// additionally confirms (async) that a pending decision actually exists before
 /// yielding, and arms a watchdog so a non-answering IDMM falls back to finalize.
@@ -1051,7 +1069,7 @@ fn finalize_note(buf: &str) -> Option<String> {
 /// How a terminal turn ended (structured completion via lifecycle / error).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TerminalTurnEnd {
-    /// The lifecycle reported a `TurnEnd` event — the agent finished its turn.
+    /// The lifecycle reported a `TurnEnd` event —the agent finished its turn.
     /// Whether the agent called `requirement_complete` is reflected in the DB
     /// row's status; the AutoWork runner just knows the turn ended cleanly.
     Clean,
@@ -1063,16 +1081,15 @@ enum TerminalTurnEnd {
 /// and the submit CR are written as SEPARATE PTY writes, with
 /// `TERMINAL_SUBMIT_DELAY` between them. A CR that rides in the same write as
 /// the paste-end marker is swallowed by the paste-burst detection modern agent
-/// TUIs (claude/codex/gemini) use to keep a pasted block from auto-running — it
+/// TUIs (claude/codex/gemini) use to keep a pasted block from auto-running —it
 /// leaves the requirement text sitting unsubmitted in the input box (the bug
 /// this fixes). Writing the CR on its own, a beat later, makes the TUI treat it
 /// as a real Enter keystroke. Mirrors the cron terminal executor's fix.
 async fn submit_terminal_prompt(
     driver: &Arc<dyn TerminalDriver>,
-    terminal_id: i64,
+    terminal_id: &str,
     prompt: &str,
 ) -> Result<(), AppError> {
-    // AutoWork 只驱动 lifecycle-capable 的 agent CLI（claude/codex），故 is_agent_tui=true。
     match nomifun_terminal::encode_submit_chunks(prompt, true) {
         nomifun_terminal::SubmitChunks::PasteThenCr { paste, cr } => {
             driver.write_input(terminal_id, &paste).await?;
@@ -1092,11 +1109,11 @@ async fn submit_terminal_prompt(
 /// **No quiescence fallback:** a lifecycle subscription is the ONLY structured
 /// turn-end signal. When lifecycle is unavailable (server not wired / non-agent
 /// CLI) the turn runs until the hard `TURN_TIMEOUT` and then ends as
-/// `TerminalTurnEnd::Errored` — honest (no false "done"). The finalize with
+/// `TerminalTurnEnd::Errored` —honest (no false "done"). The finalize with
 /// `expects_verdict=true` parks it as `needs_review`.
 async fn inject_and_wait_terminal(
     deps: &Arc<AutoWorkRunnerDeps>,
-    terminal_id: i64,
+    terminal_id: &str,
     tag: &str,
     req: &Requirement,
 ) -> Result<TerminalTurnEnd, AppError> {
@@ -1105,9 +1122,9 @@ async fn inject_and_wait_terminal(
         .as_ref()
         .ok_or_else(|| AppError::Internal("terminal driver not attached".into()))?;
 
-    // Terminals have no workspace concept — the prompt carries absolute paths
+    // Terminals have no workspace concept —the prompt carries absolute paths
     // into the data dir and the CLI reads them directly.
-    let attachments = deps.service.stage_attachments_for_prompt(req.id, None).await;
+    let attachments = deps.service.stage_attachments_for_prompt(&req.id, None).await;
     let prompt = build_terminal_requirement_prompt(tag, req, &attachments);
     // Inject the prompt and submit it. The bracketed-paste body and the submit CR
     // go out as SEPARATE writes (see `submit_terminal_prompt`) so the CR is not
@@ -1116,7 +1133,7 @@ async fn inject_and_wait_terminal(
 
     // Arm IDMM for THIS terminal turn (its probe subscribes to the durable PTY
     // output/lifecycle, so it attaches regardless of task state). Per-turn, not on
-    // every idle poll — same churn fix as the conversation path. Idempotent + a
+    // every idle poll —same churn fix as the conversation path. Idempotent + a
     // no-op when IDMM is disabled for the terminal.
     if let Some(idmm) = &deps.idmm {
         idmm.ensure_supervising(AutoWorkTargetKind::Terminal, &terminal_id.to_string());
@@ -1126,7 +1143,14 @@ async fn inject_and_wait_terminal(
     // turn-end, not the injection itself).
     let lifecycle_rx = driver.subscribe_lifecycle(terminal_id);
 
-    Ok(wait_terminal_turn_end(deps, driver, terminal_id, req.id, lifecycle_rx).await)
+    Ok(wait_terminal_turn_end(
+        deps,
+        driver,
+        terminal_id,
+        req.id.clone(),
+        lifecycle_rx,
+    )
+    .await)
 }
 
 /// Await a terminal turn's structured completion signal, renewing the lease on a
@@ -1134,8 +1158,8 @@ async fn inject_and_wait_terminal(
 async fn wait_terminal_turn_end(
     deps: &Arc<AutoWorkRunnerDeps>,
     driver: &Arc<dyn TerminalDriver>,
-    terminal_id: i64,
-    req_id: i64,
+    terminal_id: &str,
+    req_id: String,
     lifecycle_rx: Option<broadcast::Receiver<nomifun_terminal::TerminalLifecycleEvent>>,
 ) -> TerminalTurnEnd {
     let mut renew = interval(LEASE_RENEW_INTERVAL);
@@ -1150,7 +1174,16 @@ async fn wait_terminal_turn_end(
                 loop {
                     tokio::select! {
                         _ = renew.tick() => {
-                            if let Err(e) = deps.service.renew_lease(req_id, terminal_id, DEFAULT_LEASE_MS).await {
+                            if let Err(e) = deps
+                                .service
+                                .renew_lease(
+                                    &req_id,
+                                    terminal_id,
+                                    AutoWorkTargetKind::Terminal,
+                                    DEFAULT_LEASE_MS,
+                                )
+                                .await
+                            {
                                 warn!(terminal_id, requirement_id = req_id, error = %e, "Lease renewal failed");
                             }
                         }
@@ -1164,7 +1197,7 @@ async fn wait_terminal_turn_end(
                                 Ok(event) if event.kind == LifecycleKind::TurnEnd => {
                                     return TerminalTurnEnd::Clean;
                                 }
-                                Ok(_) => continue, // ToolUse / Notification / SessionStart — activity, keep waiting
+                                Ok(_) => continue, // ToolUse / Notification / SessionStart —activity, keep waiting
                                 Err(broadcast::error::RecvError::Closed) => {
                                     return TerminalTurnEnd::Errored; // lifecycle server gone
                                 }
@@ -1175,13 +1208,22 @@ async fn wait_terminal_turn_end(
                 }
             }
             None => {
-                // No lifecycle server — no structured turn-end signal. Wait for
+                // No lifecycle server —no structured turn-end signal. Wait for
                 // PTY death or the hard timeout. Do NOT fall back to quiescence-
                 // as-done (honest: no false "done").
                 loop {
                     tokio::select! {
                         _ = renew.tick() => {
-                            if let Err(e) = deps.service.renew_lease(req_id, terminal_id, DEFAULT_LEASE_MS).await {
+                            if let Err(e) = deps
+                                .service
+                                .renew_lease(
+                                    &req_id,
+                                    terminal_id,
+                                    AutoWorkTargetKind::Terminal,
+                                    DEFAULT_LEASE_MS,
+                                )
+                                .await
+                            {
                                 warn!(terminal_id, requirement_id = req_id, error = %e, "Lease renewal failed (no lifecycle)");
                             }
                         }
@@ -1236,7 +1278,7 @@ mod tests {
             TurnEnd::Errored,
             "MaxTurnRequests is a failure"
         );
-        // A user cancel is a deliberate interrupt — NOT a failure to retry
+        // A user cancel is a deliberate interrupt —NOT a failure to retry
         // (retrying a user stop was the "paused it and it started running
         // again by itself" bug) and NOT a clean completion to record as done.
         assert_eq!(
@@ -1256,7 +1298,7 @@ mod tests {
         assert_eq!(failure_backoff(5), Duration::from_secs(16));
         assert_eq!(failure_backoff(6), Duration::from_secs(30), "capped at 30s");
         assert_eq!(failure_backoff(100), Duration::from_secs(30), "stays capped");
-        // Never zero — a failure must always insert some delay before re-claim.
+        // Never zero —a failure must always insert some delay before re-claim.
         assert!(failure_backoff(1) > Duration::ZERO);
     }
 
@@ -1307,7 +1349,7 @@ mod tests {
         // Root-cause guard: the submit CR must NOT ride in the same byte burst as
         // the bracketed-paste body. Modern agent TUIs (claude/codex/gemini) use
         // paste-burst detection and SUPPRESS auto-submit for a CR that arrives in
-        // the same read() as the paste-end marker — the requirement text would
+        // the same read() as the paste-end marker —the requirement text would
         // then sit unsubmitted in the input box (the reported bug). The CR is
         // therefore returned as a SEPARATE chunk, written after a beat. Now backed
         // by the shared encoder (`nomifun_terminal::encode_submit_chunks`).
@@ -1334,34 +1376,34 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TerminalDriver for RecordingDriver {
-        async fn write_input(&self, _id: i64, bytes: &[u8]) -> Result<(), TerminalError> {
+        async fn write_input(&self, _id: &str, bytes: &[u8]) -> Result<(), TerminalError> {
             self.writes.lock().unwrap().push(bytes.to_vec());
             Ok(())
         }
-        fn subscribe_output(&self, _id: i64) -> Option<broadcast::Receiver<Vec<u8>>> {
+        fn subscribe_output(&self, _id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
             None
         }
-        fn is_alive(&self, _id: i64) -> bool {
+        fn is_alive(&self, _id: &str) -> bool {
             true
         }
-        async fn describe(&self, _id: i64) -> Result<Option<TerminalDescription>, TerminalError> {
+        async fn describe(&self, _id: &str) -> Result<Option<TerminalDescription>, TerminalError> {
             Ok(None)
         }
-        async fn read_autowork(&self, _id: i64) -> Result<Option<String>, TerminalError> {
+        async fn read_autowork(&self, _id: &str) -> Result<Option<String>, TerminalError> {
             Ok(None)
         }
-        async fn write_autowork(&self, _id: i64, _autowork: Option<&str>) -> Result<(), TerminalError> {
+        async fn write_autowork(&self, _id: &str, _autowork: Option<&str>) -> Result<(), TerminalError> {
             Ok(())
         }
-        async fn read_idmm(&self, _id: i64) -> Result<Option<String>, TerminalError> {
+        async fn read_idmm(&self, _id: &str) -> Result<Option<String>, TerminalError> {
             Ok(None)
         }
-        async fn write_idmm(&self, _id: i64, _idmm: Option<&str>) -> Result<(), TerminalError> {
+        async fn write_idmm(&self, _id: &str, _idmm: Option<&str>) -> Result<(), TerminalError> {
             Ok(())
         }
         fn subscribe_lifecycle(
             &self,
-            _id: i64,
+            _id: &str,
         ) -> Option<tokio::sync::broadcast::Receiver<nomifun_terminal::TerminalLifecycleEvent>> {
             None
         }
@@ -1374,7 +1416,8 @@ mod tests {
         // real Enter). Mirrors the fix the cron terminal executor already applies.
         let recorder = Arc::new(RecordingDriver::default());
         let driver: Arc<dyn TerminalDriver> = recorder.clone();
-        submit_terminal_prompt(&driver, 1, "do the thing\nthen stop")
+        let terminal_id = nomifun_common::TerminalId::new().into_string();
+        submit_terminal_prompt(&driver, &terminal_id, "do the thing\nthen stop")
             .await
             .expect("submit must succeed");
         let writes = recorder.writes.lock().unwrap().clone();
@@ -1390,36 +1433,34 @@ mod tests {
         assert_eq!(writes[1], b"\r", "second write is the lone submit CR");
     }
 
-    // ── C4 (spec §2.2): cross-domain loop-registry isolation ────────────────
+    // -- C4 (spec §2.2): cross-domain loop-registry isolation ----------------
     //
     // The AutoWork loop registry keys on `TargetKey = (AutoWorkTargetKind,
-    // String)`. After integerization `conv#5` and `term#5` share the numeric
-    // id "5"; a bare-id key would let `start(Terminal, "5")` (whose first line
-    // is `self.stop(kind, "5")`) stop the conversation #5 loop, and would make
-    // `is_running` / `live_progress` report one domain's state for the other.
-    // These tests pin the key down to the composite so that regression is
-    // caught at the data-structure level without spinning a full loop (which
-    // needs the whole agent stack).
+    // canonical entity ID)`. Conversation and terminal prefixes already make
+    // the ID spaces disjoint; retaining the explicit kind also keeps dispatch
+    // and lookup domain-scoped without sniffing prefixes.
 
     #[test]
-    fn c4_target_key_distinguishes_domains_at_same_id() {
-        let conv5: TargetKey = (AutoWorkTargetKind::Conversation, "5".to_string());
-        let term5: TargetKey = (AutoWorkTargetKind::Terminal, "5".to_string());
-        assert_ne!(conv5, term5, "conv#5 and term#5 must be DISTINCT registry keys");
+    fn c4_target_key_distinguishes_canonical_session_domains() {
+        let conversation_id = ConversationId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        let conversation: TargetKey = (AutoWorkTargetKind::Conversation, conversation_id);
+        let terminal: TargetKey = (AutoWorkTargetKind::Terminal, terminal_id);
+        assert_ne!(conversation, terminal, "conversation and terminal keys must be distinct");
 
         // The registry is a DashMap<TargetKey, _>; mirror its keying to prove
         // the two domains never collide and `stop` of one leaves the other.
         let map: DashMap<TargetKey, u32> = DashMap::new();
-        map.insert(conv5.clone(), 1);
-        map.insert(term5.clone(), 2);
-        assert_eq!(map.len(), 2, "both domains coexist at id 5");
-        assert_eq!(map.get(&conv5).map(|v| *v), Some(1));
-        assert_eq!(map.get(&term5).map(|v| *v), Some(2));
+        map.insert(conversation.clone(), 1);
+        map.insert(terminal.clone(), 2);
+        assert_eq!(map.len(), 2, "both domains coexist");
+        assert_eq!(map.get(&conversation).map(|v| *v), Some(1));
+        assert_eq!(map.get(&terminal).map(|v| *v), Some(2));
 
         // Stopping the terminal domain leaves the conversation entry intact.
-        map.remove(&term5);
-        assert!(map.contains_key(&conv5), "conv#5 survives a term#5 removal");
-        assert!(!map.contains_key(&term5));
+        map.remove(&terminal);
+        assert!(map.contains_key(&conversation));
+        assert!(!map.contains_key(&terminal));
     }
 
     #[test]
@@ -1428,15 +1469,18 @@ mod tests {
         // an entry under one domain is invisible to the other domain's lookup.
         // Mirror the exact `contains_key` the AutoWork runner uses.
         let handles: DashMap<TargetKey, ()> = DashMap::new();
-        handles.insert((AutoWorkTargetKind::Conversation, "5".to_string()), ());
+        let conversation_id = ConversationId::new().into_string();
+        let terminal_id = TerminalId::new().into_string();
+        handles.insert((AutoWorkTargetKind::Conversation, conversation_id.clone()), ());
 
-        let conv_lookup = handles.contains_key(&(AutoWorkTargetKind::Conversation, "5".to_string()));
-        let term_lookup = handles.contains_key(&(AutoWorkTargetKind::Terminal, "5".to_string()));
-        assert!(conv_lookup, "conv#5 is running");
-        assert!(!term_lookup, "term#5 must NOT read as running just because conv#5 is");
+        let conversation_lookup =
+            handles.contains_key(&(AutoWorkTargetKind::Conversation, conversation_id));
+        let terminal_lookup = handles.contains_key(&(AutoWorkTargetKind::Terminal, terminal_id));
+        assert!(conversation_lookup);
+        assert!(!terminal_lookup);
     }
 
-    // ── Terminal turn-end classification tests ──────────────────────────────
+    // -- Terminal turn-end classification tests ------------------------------
     //
     // The terminal rewrite uses TerminalTurnEnd { Clean, Errored } to classify
     // the outcome. These tests pin the decision logic and the expects_verdict
@@ -1479,10 +1523,10 @@ mod tests {
         use nomifun_terminal::TerminalLifecycleEvent;
 
         let (tx, rx) = broadcast::channel::<TerminalLifecycleEvent>(4);
-        // Send a TurnEnd BEFORE any consumer picks it up — the broadcast
+        // Send a TurnEnd BEFORE any consumer picks it up —the broadcast
         // channel buffers it.
         tx.send(TerminalLifecycleEvent {
-            terminal_id: 1,
+            terminal_id: nomifun_common::TerminalId::new(),
             kind: LifecycleKind::TurnEnd,
             payload: serde_json::json!({}),
         })

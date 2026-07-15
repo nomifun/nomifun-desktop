@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId, CronJobId } from '@/common/types/ids';
 
 import type { IConversationMcpStatus } from '@/common/config/storage';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
@@ -25,13 +26,13 @@ import { useAcpInitialMessage } from './useAcpInitialMessage';
 import { useAcpMessage } from './useAcpMessage';
 
 const AcpChat: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   workspace?: string;
   backend: string;
   initialModelId?: string;
   session_mode?: string;
   agent_name?: string;
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;

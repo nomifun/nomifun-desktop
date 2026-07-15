@@ -1,6 +1,12 @@
 # 图片不支持模型的优雅降级 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **ID-contract v2 note:** This is a historical feature plan, not executable
+> current guidance. Entity-ID snippets written before ID-contract v2 are
+> superseded by [`../../architecture/id-system.md`](../../architecture/id-system.md):
+> boundaries must validate canonical typed IDs and must never coerce entity IDs.
+
+> **Archived plan:** The steps below record the original implementation history
+> and must not be executed against the ID-v2 codebase.
 
 **Goal:** 当模型不支持图片输入时，会话不再因 `image_url` 400 中断，而是自动剔除图片、重试并在会话内提示用户。
 
@@ -672,33 +678,11 @@ Expected: 编译失败（`images_stripped_tip_content` 未定义）。
 
 - [ ] **Step 3: 写最小实现**
 
-`message_persistence.rs`：加上 Step 1 的 `images_stripped_tip_content`，并新增 persist 方法（镜像同文件 `persist_send_failure_tip`，但 type=warning、position=center、status=None）：
-
-```rust
-    /// 在会话里插入一条"图片已移除"警告提示(tips)。仅供用户查看,不回传模型。
-    pub(crate) async fn persist_images_stripped_tip(&self, conversation_id: &str) -> Option<MessageRow> {
-        let Ok(conv_id) = conversation_id.parse::<i64>() else {
-            warn!(conversation_id, "persist_images_stripped_tip: non-numeric conversation id; skipping");
-            return None;
-        };
-        let row = MessageRow {
-            id: Self::mint_msg_id(),
-            conversation_id: conv_id,
-            msg_id: None,
-            r#type: "tips".into(),
-            content: images_stripped_tip_content(),
-            position: Some("center".into()),
-            status: None,
-            hidden: false,
-            created_at: now_ms(),
-        };
-        if let Err(store_err) = self.conversation_repo().insert_message(&row).await {
-            warn!(conversation_id, error = %ErrorChain(&store_err), "Failed to persist images-stripped tip");
-            return None;
-        }
-        Some(row)
-    }
-```
+`message_persistence.rs`：加上 Step 1 的 `images_stripped_tip_content`，并新增
+persist 方法（镜像同文件 `persist_send_failure_tip`，但 type=warning、
+position=center、status=None）。当前实现必须让协议边界先得到严格校验的
+`ConversationId`，为提示消息生成新的 `MessageId`，并把两个 canonical 字符串原样
+写入 repository；不得解析成整数、跳过非法 ID 或提供缺省 ID。
 
 `failover_seam.rs`：在 `impl ConversationService { ... }` 内新增（复用 `parse_conv_id`/`string_to_enum`/`provider_model_from_conversation_row`/`build_task_options`，均已在本文件/crate 可用）：
 

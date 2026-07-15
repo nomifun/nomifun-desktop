@@ -24,6 +24,7 @@ import SkillsTab from './tabs/SkillsTab';
 import CompanionSessionRail from './CompanionSessionRail';
 import FigureLibraryPage from './FigureLibraryPage';
 import { useCompanion, useCompanions, useCompanionShared } from './useNomi';
+import type { CompanionId } from '@/common/types/ids';
 
 /** Companion-domain tabs follow the selected companion; shared-domain tabs are cross-companion.
  *  Sub-tab render order under the workbench puts 总览 (overview) first — see the right-pane strip.
@@ -63,7 +64,10 @@ const NomiConfigPage: React.FC = () => {
   // ?companion= selection; fall back to the first companion in the roster.
   const companionParam = searchParams.get('companion');
   const selectedCompanionId = useMemo(() => {
-    if (companionParam && companions.some((p) => p.id === companionParam)) return companionParam;
+    if (companionParam) {
+      const matched = companions.find((p) => p.id === companionParam);
+      if (matched) return matched.id;
+    }
     return companions[0]?.id ?? null;
   }, [companionParam, companions]);
 
@@ -72,7 +76,7 @@ const NomiConfigPage: React.FC = () => {
   // 打开伙伴聊天：解析（幂等 ensure）其唯一会话并跳转标准 /conversation/:id。未配置模型时
   // ensure 返回 400 → 留在管理中心引导配置（不跳走）。供「打开聊天」按钮与旧 ?tab=chat 深链复用。
   const openChat = useCallback(
-    async (companionId: string | null) => {
+    async (companionId: CompanionId | null) => {
       if (!companionId) return;
       try {
         const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: companionId });
@@ -123,7 +127,7 @@ const NomiConfigPage: React.FC = () => {
   );
 
   const selectCompanion = useCallback(
-    (id: string) => {
+    (id: CompanionId) => {
       setSearchParams(
         (prev) => {
           prev.set('companion', id);
@@ -141,7 +145,7 @@ const NomiConfigPage: React.FC = () => {
   );
 
   const handleCreated = useCallback(
-    (profile: { id: string }) => {
+    (profile: { id: CompanionId }) => {
       void companionsApi.refresh();
       void shared.refresh();
       // 新建后落到 总览(overview)：新伙伴尚未配置模型，先在管理中心引导配置，配置后再从
@@ -161,7 +165,7 @@ const NomiConfigPage: React.FC = () => {
   );
 
   const handleDeleted = useCallback(
-    (deletedId: string) => {
+    (deletedId: CompanionId) => {
       const rest = companions.filter((p) => p.id !== deletedId);
       setSearchParams(
         (prev) => {

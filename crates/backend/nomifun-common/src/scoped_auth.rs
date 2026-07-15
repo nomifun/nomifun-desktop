@@ -14,6 +14,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::{ConversationId, TerminalId, UserId};
+
 type HmacSha256 = Hmac<Sha256>;
 
 pub const LOOPBACK_CAPABILITY_VERSION: u16 = 2;
@@ -87,13 +89,40 @@ impl LoopbackSessionKind {
 /// Identity that a backend issuer resolved before spawning a child process.
 /// `conversation_id` is explicit so downstream services never infer a
 /// conversation from an unrelated session identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoopbackSessionBinding {
     pub kind: LoopbackSessionKind,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LoopbackSessionBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireBinding {
+            kind: LoopbackSessionKind,
+            session_id: String,
+            #[serde(default)]
+            conversation_id: Option<String>,
+        }
+
+        let wire = WireBinding::deserialize(deserializer)?;
+        let binding = Self {
+            kind: wire.kind,
+            session_id: wire.session_id,
+            conversation_id: wire.conversation_id,
+        };
+        binding
+            .validate_identity()
+            .map_err(serde::de::Error::custom)?;
+        Ok(binding)
+    }
 }
 
 impl LoopbackSessionBinding {
@@ -124,6 +153,30 @@ impl LoopbackSessionBinding {
             conversation_id: None,
         }
     }
+
+    fn validate_identity(&self) -> Result<(), LoopbackCapabilityError> {
+        match self.kind {
+            LoopbackSessionKind::Conversation
+                if self.conversation_id.as_deref() == Some(self.session_id.as_str())
+                    && ConversationId::parse(&self.session_id).is_ok() =>
+            {
+                Ok(())
+            }
+            LoopbackSessionKind::Terminal
+                if self.conversation_id.is_none()
+                    && TerminalId::parse(&self.session_id).is_ok() =>
+            {
+                Ok(())
+            }
+            LoopbackSessionKind::ExternalProcess
+                if self.conversation_id.is_none()
+                    && canonical_required(&self.session_id) =>
+            {
+                Ok(())
+            }
+            _ => Err(LoopbackCapabilityError::InvalidIdentity),
+        }
+    }
 }
 
 /// Common signed envelope. `S` is the domain-specific, server-authoritative
@@ -136,7 +189,7 @@ pub struct LoopbackCapabilityClaims<S> {
     pub expires_at_unix_secs: u64,
     pub lease_id: String,
     pub nonce: String,
-    pub user_id: String,
+    pub user_id: UserId,
     pub session: LoopbackSessionBinding,
     pub allowed_tools: Vec<String>,
     pub scope: S,
@@ -197,7 +250,7 @@ impl<C: std::fmt::Debug> std::fmt::Debug for LoopbackCapabilityAccess<C> {
 struct LoopbackCapabilityAuthorization<S> {
     version: u16,
     lease_id: String,
-    user_id: String,
+    user_id: UserId,
     session: LoopbackSessionBinding,
     allowed_tools: Vec<String>,
     scope: S,
@@ -241,7 +294,7 @@ where
 struct ActiveLoopbackLease {
     domain: String,
     authorization_json: String,
-    user_id: String,
+    user_id: UserId,
     session: LoopbackSessionBinding,
 }
 
@@ -587,7 +640,7 @@ where
     S: Serialize + for<'de> Deserialize<'de>,
 {
     pub fn issue(
-        user_id: impl Into<String>,
+        user_id: impl AsRef<str>,
         session: LoopbackSessionBinding,
         allowed_tools: impl IntoIterator<Item = impl Into<String>>,
         scope: S,
@@ -603,7 +656,7 @@ where
     }
 
     pub fn issue_at(
-        user_id: impl Into<String>,
+        user_id: impl AsRef<str>,
         session: LoopbackSessionBinding,
         allowed_tools: impl IntoIterator<Item = impl Into<String>>,
         scope: S,
@@ -613,13 +666,15 @@ where
         let mut allowed_tools: Vec<String> = allowed_tools.into_iter().map(Into::into).collect();
         allowed_tools.sort();
         allowed_tools.dedup();
+        let user_id = UserId::parse(user_id.as_ref())
+            .map_err(|_| LoopbackCapabilityError::InvalidIdentity)?;
         let claims = Self {
             version: LOOPBACK_CAPABILITY_VERSION,
             issued_at_unix_secs: now,
             expires_at_unix_secs: now.saturating_add(ttl_secs),
             lease_id: generate_loopback_lease_id()?,
             nonce: crate::generate_id(),
-            user_id: user_id.into(),
+            user_id,
             session,
             allowed_tools,
             scope,
@@ -636,21 +691,13 @@ where
         if self.version != LOOPBACK_CAPABILITY_VERSION {
             return Err(LoopbackCapabilityError::UnsupportedVersion);
         }
-        if !canonical_required(&self.user_id)
-            || !canonical_required(&self.lease_id)
+        if !canonical_required(&self.lease_id)
             || !canonical_required(&self.nonce)
             || !canonical_required(&self.session.session_id)
         {
             return Err(LoopbackCapabilityError::InvalidIdentity);
         }
-        match self.session.kind {
-            LoopbackSessionKind::Conversation
-                if self.session.conversation_id.as_deref()
-                    == Some(self.session.session_id.as_str()) => {}
-            LoopbackSessionKind::Terminal if self.session.conversation_id.is_none() => {}
-            LoopbackSessionKind::ExternalProcess if self.session.conversation_id.is_none() => {}
-            _ => return Err(LoopbackCapabilityError::InvalidIdentity),
-        }
+        self.session.validate_identity()?;
         if self.expires_at_unix_secs <= self.issued_at_unix_secs
             || self.expires_at_unix_secs - self.issued_at_unix_secs
                 > LOOPBACK_CAPABILITY_TTL_SECS
@@ -725,6 +772,9 @@ where
 mod tests {
     use super::*;
 
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const TEST_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     struct Scope {
         resource: String,
@@ -732,8 +782,8 @@ mod tests {
 
     fn claims(now: u64) -> LoopbackCapabilityClaims<Scope> {
         LoopbackCapabilityClaims::issue_at(
-            "user-1",
-            LoopbackSessionBinding::conversation("42"),
+            TEST_USER_ID,
+            LoopbackSessionBinding::conversation(TEST_CONVERSATION_ID),
             ["read"],
             Scope {
                 resource: "alpha".into(),
@@ -770,7 +820,7 @@ mod tests {
         assert_eq!(future.validate_at(now), Err(LoopbackCapabilityError::InvalidLifetime));
 
         let mut mismatched = claims(now);
-        mismatched.session.session_id = "43".into();
+        mismatched.session.session_id = "conv_0190f5fe-7c00-7a00-8000-000000000002".into();
         assert_eq!(mismatched.validate_at(now), Err(LoopbackCapabilityError::InvalidIdentity));
     }
 
@@ -790,7 +840,7 @@ mod tests {
     fn external_process_binding_requires_no_conversation_identity() {
         let now = 10_000;
         let external = LoopbackCapabilityClaims::issue_at(
-            "owner",
+            TEST_USER_ID,
             LoopbackSessionBinding::external_process("external-random"),
             ["read"],
             Scope {
@@ -809,6 +859,30 @@ mod tests {
             forged.validate_at(now),
             Err(LoopbackCapabilityError::InvalidIdentity)
         );
+    }
+
+    #[test]
+    fn session_binding_deserialization_rejects_wrong_or_noncanonical_entity_ids() {
+        let wrong_prefix = serde_json::json!({
+            "kind": "conversation",
+            "session_id": "term_0190f5fe-7c00-7a00-8000-000000000001",
+            "conversation_id": "term_0190f5fe-7c00-7a00-8000-000000000001"
+        });
+        assert!(serde_json::from_value::<LoopbackSessionBinding>(wrong_prefix).is_err());
+
+        let mismatched = serde_json::json!({
+            "kind": "conversation",
+            "session_id": TEST_CONVERSATION_ID,
+            "conversation_id": "conv_0190f5fe-7c00-7a00-8000-000000000002"
+        });
+        assert!(serde_json::from_value::<LoopbackSessionBinding>(mismatched).is_err());
+    }
+
+    #[test]
+    fn capability_claim_deserialization_rejects_noncanonical_user_id() {
+        let mut value = serde_json::to_value(claims(unix_time_secs())).unwrap();
+        value["user_id"] = serde_json::json!("1");
+        assert!(serde_json::from_value::<LoopbackCapabilityClaims<Scope>>(value).is_err());
     }
 
     #[test]

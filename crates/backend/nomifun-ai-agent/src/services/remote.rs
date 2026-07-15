@@ -9,7 +9,7 @@ use nomifun_api_types::{
     TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use nomifun_common::{
-    AppError, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
+    AppError, RemoteAgentId, RemoteAgentAuthType, RemoteAgentProtocol, RemoteAgentStatus, decrypt_string, encrypt_string,
 };
 use nomifun_db::models::RemoteAgentRow;
 use nomifun_db::{IRemoteAgentRepository, UpdateRemoteAgentParams};
@@ -40,8 +40,7 @@ impl RemoteAgentService {
     }
 
     /// Get a single remote agent by ID (auth_token masked).
-    pub async fn get(&self, id: &str) -> Result<RemoteAgentResponse, AppError> {
-        let id = parse_id(id)?;
+    pub async fn get(&self, id: &RemoteAgentId) -> Result<RemoteAgentResponse, AppError> {
         let row = self
             .repo
             .find_by_id(id)
@@ -91,8 +90,7 @@ impl RemoteAgentService {
     }
 
     /// Update an existing remote agent.
-    pub async fn update(&self, id: &str, req: UpdateRemoteAgentRequest) -> Result<RemoteAgentResponse, AppError> {
-        let id = parse_id(id)?;
+    pub async fn update(&self, id: &RemoteAgentId, req: UpdateRemoteAgentRequest) -> Result<RemoteAgentResponse, AppError> {
         let existing = self
             .repo
             .find_by_id(id)
@@ -167,8 +165,7 @@ impl RemoteAgentService {
     }
 
     /// Delete a remote agent.
-    pub async fn delete(&self, id: &str) -> Result<(), AppError> {
-        let id = parse_id(id)?;
+    pub async fn delete(&self, id: &RemoteAgentId) -> Result<(), AppError> {
         self.repo.delete(id).await.map_err(|e| match e {
             nomifun_db::DbError::NotFound(msg) => AppError::NotFound(msg),
             other => AppError::Internal(other.to_string()),
@@ -196,8 +193,7 @@ impl RemoteAgentService {
     }
 
     /// OpenClaw protocol handshake (15s timeout).
-    pub async fn handshake(&self, id: &str) -> Result<HandshakeResponse, AppError> {
-        let id = parse_id(id)?;
+    pub async fn handshake(&self, id: &RemoteAgentId) -> Result<HandshakeResponse, AppError> {
         let row = self
             .repo
             .find_by_id(id)
@@ -238,12 +234,12 @@ impl RemoteAgentService {
                 if let Some(device_token) = hello.auth.device_token {
                     let encrypted = encrypt_string(&device_token, &self.encryption_key)?;
                     self.repo
-                        .update_device_token(id, Some(&encrypted))
+                        .update_device_token(&id, Some(&encrypted))
                         .await
                         .map_err(db_err)?;
                 }
                 let now = nomifun_common::now_ms();
-                let _ = self.repo.update_status(id, "connected", Some(now)).await;
+                let _ = self.repo.update_status(&id, "connected", Some(now)).await;
                 Ok(HandshakeResponse {
                     status: "ok".to_string(),
                     error: None,
@@ -251,18 +247,18 @@ impl RemoteAgentService {
             }
             Ok(Err(e)) => {
                 if is_pairing_required_error(&e) {
-                    let _ = self.repo.update_status(id, "pending", None).await;
+                    let _ = self.repo.update_status(&id, "pending", None).await;
                     Ok(HandshakeResponse {
                         status: "pending_approval".to_string(),
                         error: Some(e.to_string()),
                     })
                 } else {
-                    let _ = self.repo.update_status(id, "error", None).await;
+                    let _ = self.repo.update_status(&id, "error", None).await;
                     Err(e)
                 }
             }
             Err(_) => {
-                let _ = self.repo.update_status(id, "error", None).await;
+                let _ = self.repo.update_status(&id, "error", None).await;
                 Err(AppError::Timeout("Handshake timed out after 15 seconds".into()))
             }
         }
@@ -487,15 +483,6 @@ fn db_err(e: nomifun_db::DbError) -> AppError {
     AppError::Internal(e.to_string())
 }
 
-/// Parse a remote-agent path id (`Path<String>`) into the i64 primary key.
-/// A non-numeric id can never match an i64-keyed row, so it surfaces as
-/// `NotFound` rather than a 400 — matching the "missing agent" semantics
-/// callers already handle.
-fn parse_id(id: &str) -> Result<i64, AppError> {
-    id.parse::<i64>()
-        .map_err(|_| AppError::NotFound(format!("Remote agent '{id}' not found")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,7 +647,7 @@ mod tests {
 
     fn sample_remote_agent_row() -> RemoteAgentRow {
         RemoteAgentRow {
-            id: 1,
+            id: nomifun_common::RemoteAgentId::new(),
             name: "Remote".into(),
             protocol: "openclaw".into(),
             url: "wss://example.com".into(),

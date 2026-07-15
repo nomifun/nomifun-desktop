@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_common::{generate_id, now_ms};
+use nomifun_common::{ChannelUserId, now_ms};
 use nomifun_db::models::{ChannelUserRow, ChannelPluginRow};
 use nomifun_db::{IChannelRepository, SqliteChannelRepository, init_database_memory};
 use nomifun_realtime::UserEventSink;
@@ -19,6 +19,9 @@ use nomifun_channel::types::{
     ActionBehavior, ActionCategory, ActionContext, MessageContentType, PluginType, UnifiedAction,
     UnifiedIncomingMessage, UnifiedMessageContent, UnifiedUser,
 };
+
+const CHANNEL_ID: &str = "chn_018f1234-5678-7abc-8def-012345678920";
+const OWNER_ID: &str = "user_018f1234-5678-7abc-8def-012345678921";
 
 // ── Test infrastructure ─────────────────────────────────────────────
 
@@ -51,11 +54,11 @@ async fn setup() -> (
     let bc: Arc<dyn UserEventSink> = Arc::new(MockBroadcaster::new());
 
     let session_mgr = SessionManager::new(repo.clone());
-    let pairing = PairingService::new(repo.clone(), bc, "owner-a");
+    let pairing = PairingService::new(repo.clone(), bc, OWNER_ID);
     let pairing_arc = Arc::new(PairingService::new(
         repo.clone(),
         Arc::new(MockBroadcaster::new()),
-        "owner-a",
+        OWNER_ID,
     ));
     let session_mgr_arc = Arc::new(SessionManager::new(repo.clone()));
     let pref_repo: Arc<dyn nomifun_db::IClientPreferenceRepository> =
@@ -63,12 +66,12 @@ async fn setup() -> (
     let settings = Arc::new(ChannelSettingsService::new(pref_repo));
     let executor = ActionExecutor::new(pairing_arc, session_mgr_arc, settings, "gemini");
 
-    // Every test message arrives through the "tg-1" channel. channel_sessions
+    // Every test message arrives through one canonical channel. channel_sessions
     // now has an FK channel_id → channel_plugins(id), so the plugin row must
     // exist before any session is created. bot_key=None avoids the
     // UNIQUE(type, bot_key) index.
     repo.upsert_plugin(&ChannelPluginRow {
-        id: "tg-1".into(),
+        id: CHANNEL_ID.into(),
         r#type: "telegram".into(),
         name: "Test Bot".into(),
         enabled: true,
@@ -91,12 +94,12 @@ async fn setup() -> (
 
 /// Create a channel_users record (required for FK on sessions).
 async fn create_user(repo: &Arc<dyn IChannelRepository>, platform_user_id: &str, platform_type: &str) -> String {
-    let user_id = generate_id();
+    let user_id = ChannelUserId::new().into_string();
     let row = ChannelUserRow {
         id: user_id.clone(),
         platform_user_id: platform_user_id.to_owned(),
         platform_type: platform_type.to_owned(),
-        channel_id: Some("tg-1".into()),
+        channel_id: Some(CHANNEL_ID.into()),
         display_name: Some("Test User".into()),
         authorized_at: now_ms(),
         last_active: None,
@@ -171,7 +174,7 @@ fn make_action_message(
 /// Helper: authorize a user via the pairing flow.
 async fn authorize_user(pairing: &PairingService, platform_user_id: &str, platform_type: &str) {
     let code = pairing
-        .request_pairing(platform_user_id, platform_type, "tg-1", Some("Test"))
+        .request_pairing(platform_user_id, platform_type, CHANNEL_ID, Some("Test"))
         .await
         .unwrap();
     pairing.approve_pairing(&code).await.unwrap();
@@ -197,11 +200,11 @@ async fn gs2_multiple_sessions_returned() {
     let uid2 = create_user(&repo, "p2", "telegram").await;
 
     session_mgr
-        .get_or_create_session(&uid1, "c1", "tg-1", "gemini", None)
+        .get_or_create_session(&uid1, "c1", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid2, "c2", "tg-1", "acp", None)
+        .get_or_create_session(&uid2, "c2", CHANNEL_ID, "acp", None)
         .await
         .unwrap();
 
@@ -227,11 +230,11 @@ async fn pc1_same_user_different_chat() {
     let uid = create_user(&repo, "p1", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid, "chatA", "tg-1", "gemini", None)
+        .get_or_create_session(&uid, "chatA", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid, "chatB", "tg-1", "gemini", None)
+        .get_or_create_session(&uid, "chatB", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
 
@@ -252,11 +255,11 @@ async fn pc2_different_users_same_chat() {
     let uid2 = create_user(&repo, "p2", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid1, "chatA", "tg-1", "gemini", None)
+        .get_or_create_session(&uid1, "chatA", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid2, "chatA", "tg-1", "gemini", None)
+        .get_or_create_session(&uid2, "chatA", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
 
@@ -272,11 +275,11 @@ async fn pc3_same_user_same_chat_reuses() {
     let uid = create_user(&repo, "p1", "telegram").await;
 
     let s1 = session_mgr
-        .get_or_create_session(&uid, "chatA", "tg-1", "gemini", None)
+        .get_or_create_session(&uid, "chatA", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
     let s2 = session_mgr
-        .get_or_create_session(&uid, "chatA", "tg-1", "gemini", None)
+        .get_or_create_session(&uid, "chatA", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
 
@@ -293,15 +296,15 @@ async fn ru3_revoke_clears_sessions() {
     let uid2 = create_user(&repo, "p2", "telegram").await;
 
     session_mgr
-        .get_or_create_session(&uid1, "c1", "tg-1", "gemini", None)
+        .get_or_create_session(&uid1, "c1", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid1, "c2", "tg-1", "acp", None)
+        .get_or_create_session(&uid1, "c2", CHANNEL_ID, "acp", None)
         .await
         .unwrap();
     session_mgr
-        .get_or_create_session(&uid2, "c1", "tg-1", "gemini", None)
+        .get_or_create_session(&uid2, "c1", CHANNEL_ID, "gemini", None)
         .await
         .unwrap();
 
@@ -320,7 +323,7 @@ async fn action_unauthorized_triggers_pairing() {
     let (_, executor, _, _) = setup().await;
 
     let msg = make_text_message("new_user", "chat1", "Hello");
-    let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
+    let result = executor.handle_incoming_message(&msg, CHANNEL_ID).await.unwrap();
 
     match result {
         MessageResult::Action(resp) => {
@@ -342,7 +345,7 @@ async fn action_authorized_dispatches() {
     authorize_user(&pairing, "tg_42", "telegram").await;
 
     let msg = make_text_message("tg_42", "chat1", "Hello AI");
-    let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
+    let result = executor.handle_incoming_message(&msg, CHANNEL_ID).await.unwrap();
 
     match result {
         MessageResult::Dispatched { session_id, .. } => {
@@ -361,7 +364,7 @@ async fn action_help_show() {
     authorize_user(&pairing, "tg_42", "telegram").await;
 
     let msg = make_action_message("tg_42", "chat1", "help.show", ActionCategory::System);
-    let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
+    let result = executor.handle_incoming_message(&msg, CHANNEL_ID).await.unwrap();
 
     match result {
         MessageResult::Action(resp) => {
@@ -383,7 +386,7 @@ async fn action_session_new() {
     authorize_user(&pairing, "tg_42", "telegram").await;
 
     let msg = make_action_message("tg_42", "chat1", "session.new", ActionCategory::System);
-    let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
+    let result = executor.handle_incoming_message(&msg, CHANNEL_ID).await.unwrap();
 
     match result {
         MessageResult::Action(resp) => {
@@ -406,7 +409,7 @@ async fn action_session_new_resets_existing() {
 
     // Create a session by sending a text message
     let msg1 = make_text_message("tg_42", "chat1", "Hello");
-    let r1 = executor.handle_incoming_message(&msg1, "tg-1").await.unwrap();
+    let r1 = executor.handle_incoming_message(&msg1, CHANNEL_ID).await.unwrap();
     let sid1 = match r1 {
         MessageResult::Dispatched { session_id, .. } => session_id,
         _ => panic!("Expected Dispatched"),
@@ -414,7 +417,7 @@ async fn action_session_new_resets_existing() {
 
     // session.new should delete old and create fresh
     let new_msg = make_action_message("tg_42", "chat1", "session.new", ActionCategory::System);
-    let r2 = executor.handle_incoming_message(&new_msg, "tg-1").await.unwrap();
+    let r2 = executor.handle_incoming_message(&new_msg, CHANNEL_ID).await.unwrap();
     match r2 {
         MessageResult::Action(resp) => {
             let text = resp.text.unwrap();
@@ -425,7 +428,7 @@ async fn action_session_new_resets_existing() {
 
     // Send another text message — should get a different session ID
     let msg3 = make_text_message("tg_42", "chat1", "Hello again");
-    let r3 = executor.handle_incoming_message(&msg3, "tg-1").await.unwrap();
+    let r3 = executor.handle_incoming_message(&msg3, CHANNEL_ID).await.unwrap();
     let sid3 = match r3 {
         MessageResult::Dispatched { session_id, .. } => session_id,
         _ => panic!("Expected Dispatched"),
@@ -450,7 +453,7 @@ async fn action_agent_select_persists() {
 
     // Create a session (default agent is "gemini")
     let msg1 = make_text_message("tg_42", "chat1", "Hello");
-    executor.handle_incoming_message(&msg1, "tg-1").await.unwrap();
+    executor.handle_incoming_message(&msg1, CHANNEL_ID).await.unwrap();
 
     // Switch agent to "acp"
     let select_msg = UnifiedIncomingMessage {
@@ -484,7 +487,7 @@ async fn action_agent_select_persists() {
         }),
         raw: None,
     };
-    let r = executor.handle_incoming_message(&select_msg, "tg-1").await.unwrap();
+    let r = executor.handle_incoming_message(&select_msg, CHANNEL_ID).await.unwrap();
     match r {
         MessageResult::Action(resp) => {
             let text = resp.text.unwrap();
@@ -514,8 +517,8 @@ async fn action_session_isolation() {
     let msg1 = make_text_message("tg_42", "chatA", "Hello 1");
     let msg2 = make_text_message("tg_42", "chatB", "Hello 2");
 
-    let r1 = executor.handle_incoming_message(&msg1, "tg-1").await.unwrap();
-    let r2 = executor.handle_incoming_message(&msg2, "tg-1").await.unwrap();
+    let r1 = executor.handle_incoming_message(&msg1, CHANNEL_ID).await.unwrap();
+    let r2 = executor.handle_incoming_message(&msg2, CHANNEL_ID).await.unwrap();
 
     let sid1 = match r1 {
         MessageResult::Dispatched { session_id, .. } => session_id,
@@ -531,7 +534,7 @@ async fn action_session_isolation() {
 
     // Same chat again → reuse
     let msg3 = make_text_message("tg_42", "chatA", "Hello 3");
-    let r3 = executor.handle_incoming_message(&msg3, "tg-1").await.unwrap();
+    let r3 = executor.handle_incoming_message(&msg3, CHANNEL_ID).await.unwrap();
     let sid3 = match r3 {
         MessageResult::Dispatched { session_id, .. } => session_id,
         _ => panic!("Expected Dispatched"),

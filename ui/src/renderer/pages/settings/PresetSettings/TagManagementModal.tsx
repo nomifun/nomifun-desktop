@@ -9,6 +9,7 @@
 import type {
   PresetTag,
   PresetTagDimension,
+  PresetTagReference,
   CreatePresetTagRequest,
 } from '@/common/types/agent/presetTypes';
 import type { ArcoMessageInstance } from '@/renderer/utils/ui/useArcoMessage';
@@ -24,8 +25,8 @@ type TagManagementModalProps = {
   scenarioTags: PresetTag[];
   localeKey: string;
   onCreate: (req: CreatePresetTagRequest) => Promise<unknown>;
-  onRename: (key: string, label: string) => Promise<void>;
-  onDelete: (key: string) => Promise<void>;
+  onRename: (key: PresetTagReference, label: string) => Promise<void>;
+  onDelete: (key: PresetTagReference) => Promise<void>;
   message: ArcoMessageInstance;
 };
 
@@ -40,7 +41,7 @@ const TagRow: React.FC<{
   tag: PresetTag;
   localeKey: string;
   busy: boolean;
-  onRename: (key: string, label: string) => void;
+  onRename: (key: PresetTagReference, label: string) => void;
   onDelete: (tag: PresetTag) => void;
 }> = ({ tag, localeKey, busy, onRename, onDelete }) => {
   const { t } = useTranslation();
@@ -156,7 +157,7 @@ const TagColumn: React.FC<{
   localeKey: string;
   busy: boolean;
   onCreate: (label: string) => void;
-  onRename: (key: string, label: string) => void;
+  onRename: (key: PresetTagReference, label: string) => void;
   onDelete: (tag: PresetTag) => void;
 }> = ({ title, dimension, tags, localeKey, busy, onCreate, onRename, onDelete }) => {
   const { t } = useTranslation();
@@ -259,7 +260,7 @@ const TagManagementModal: React.FC<TagManagementModalProps> = ({
     }
   };
 
-  const handleRename = async (key: string, label: string) => {
+  const handleRename = async (key: PresetTagReference, label: string) => {
     setBusy(true);
     try {
       await onRename(key, label);

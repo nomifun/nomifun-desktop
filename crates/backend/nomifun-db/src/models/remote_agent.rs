@@ -1,4 +1,4 @@
-use nomifun_common::TimestampMs;
+use nomifun_common::{RemoteAgentId, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 /// Row mapping for the `remote_agents` table.
@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 /// `device_token`) are stored AES-encrypted; callers handle encryption/decryption.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RemoteAgentRow {
-    pub id: i64,
+    #[sqlx(try_from = "String")]
+    pub id: RemoteAgentId,
     pub name: String,
     /// One of: "openClaw", "zeroClaw", "acp".
     pub protocol: String,

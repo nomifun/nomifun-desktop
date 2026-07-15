@@ -255,7 +255,7 @@ impl Registry {
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
         if cap.meta.access_scope == AccessScope::InstanceOwner
-            && ctx.user_id != deps.authoritative_user_id.as_ref()
+            && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(json!({
                 "error": "installation_owner_required",
@@ -299,7 +299,7 @@ impl Registry {
     ) -> Option<Value> {
         let cap = self.by_name.get(name)?;
         if cap.meta.access_scope == AccessScope::InstanceOwner
-            && ctx.user_id != deps.authoritative_user_id.as_ref()
+            && ctx.user_id.as_str() != deps.authoritative_user_id.as_ref()
         {
             return Some(json!({
                 "error": "installation_owner_required",

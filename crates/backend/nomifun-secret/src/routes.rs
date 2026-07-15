@@ -1,11 +1,11 @@
 //! `/api/browser-secrets/*` route handlers (P3-X2).
 //!
-//! Per-pet browser-use credential CRUD. Handlers do request/response transformation
+//! Global browser-use credential CRUD. Handlers do request/response transformation
 //! only; all logic lives in [`SecretService`](crate::service::SecretService). Auth is
 //! layered externally in nomifun-app (mirrors the knowledge / webhook routes).
 //!
 //! **安全红线**：the secret *value* is write-only — accepted on `POST` (register) and
-//! then encrypted into the per-pet vault. **No endpoint ever returns it.** `GET`
+//! then encrypted into the shared vault. **No endpoint ever returns it.** `GET`
 //! (list) returns only name + bound origins (the [`SecretListItem`] metadata).
 
 use axum::Router;
@@ -22,40 +22,38 @@ use crate::state::SecretRouterState;
 
 pub fn secret_routes(state: SecretRouterState) -> Router {
     Router::new()
-        // List (metadata only — NEVER the value) + register for a pet.
-        .route("/api/browser-secrets/{pet_id}", get(list_secrets).post(register_secret))
+        // List (metadata only — NEVER the value) + register globally.
+        .route("/api/browser-secrets", get(list_secrets).post(register_secret))
         // Remove a single secret by name.
-        .route("/api/browser-secrets/{pet_id}/{name}", delete(remove_secret))
+        .route("/api/browser-secrets/{name}", delete(remove_secret))
         .with_state(state)
 }
 
 async fn list_secrets(
     State(state): State<SecretRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(pet_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<SecretListItem>>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.list(&pet_id))))
+    Ok(Json(ApiResponse::ok(state.service.list())))
 }
 
 async fn register_secret(
     State(state): State<SecretRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(pet_id): Path<String>,
     body: Result<Json<RegisterSecretRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<()>>), AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .service
-        .register(&pet_id, &req.name, &req.value, req.allowed_origins)?;
+        .register(&req.name, &req.value, req.allowed_origins)?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(()))))
 }
 
 async fn remove_secret(
     State(state): State<SecretRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path((pet_id, name)): Path<(String, String)>,
+    Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.remove(&pet_id, &name)?;
+    state.service.remove(&name)?;
     Ok(Json(ApiResponse::ok(())))
 }
 
@@ -75,7 +73,7 @@ mod tests {
             // Inject a CurrentUser directly (the real auth middleware is layered in
             // nomifun-app; tests attach the extension so the Extension extractor resolves).
             .layer(axum::Extension(CurrentUser {
-                id: "u1".into(),
+                id: nomifun_common::UserId::new(),
                 username: "tester".into(),
             }))
     }
@@ -96,7 +94,7 @@ mod tests {
         // Register.
         let reg = Request::builder()
             .method("POST")
-            .uri("/api/browser-secrets/pet-1")
+            .uri("/api/browser-secrets")
             .header("content-type", "application/json")
             .body(Body::from(
                 r#"{"name":"github","value":"ghp_supersecret","allowed_origins":["github.com"]}"#,
@@ -108,7 +106,7 @@ mod tests {
         // List — must carry name + origins, NEVER the value.
         let list = Request::builder()
             .method("GET")
-            .uri("/api/browser-secrets/pet-1")
+            .uri("/api/browser-secrets")
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(list).await.unwrap();
@@ -125,7 +123,7 @@ mod tests {
         let app = router_with_user(dir.path());
         let reg = Request::builder()
             .method("POST")
-            .uri("/api/browser-secrets/pet-1")
+            .uri("/api/browser-secrets")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"name":"n","value":"v","allowed_origins":["co.uk"]}"#))
             .unwrap();
@@ -139,7 +137,7 @@ mod tests {
         let app = router_with_user(dir.path());
         let reg = Request::builder()
             .method("POST")
-            .uri("/api/browser-secrets/pet-1")
+            .uri("/api/browser-secrets")
             .header("content-type", "application/json")
             .body(Body::from(r#"{"name":"pw","value":"v","allowed_origins":["x.com"]}"#))
             .unwrap();
@@ -147,7 +145,7 @@ mod tests {
 
         let del = Request::builder()
             .method("DELETE")
-            .uri("/api/browser-secrets/pet-1/pw")
+            .uri("/api/browser-secrets/pw")
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(del).await.unwrap();
@@ -155,7 +153,7 @@ mod tests {
 
         let list = Request::builder()
             .method("GET")
-            .uri("/api/browser-secrets/pet-1")
+            .uri("/api/browser-secrets")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(list).await.unwrap();

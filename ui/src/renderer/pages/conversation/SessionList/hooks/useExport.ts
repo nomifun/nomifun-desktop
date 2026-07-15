@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useRef, useState } from 'react';
@@ -25,8 +26,8 @@ import {
 
 type UseExportParams = {
   conversations: TChatConversation[];
-  selectedConversationIds: Set<number>;
-  setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<number>>>;
+  selectedConversationIds: Set<ConversationId>;
+  setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<ConversationId>>>;
   onBatchModeChange?: (value: boolean) => void;
 };
 
@@ -138,7 +139,7 @@ export const useExport = ({
     }
   }, [exportModalLoading, exportTargetPath, getDesktopPath, t]);
 
-  const fetchConversationMessages = useCallback(async (conversation_id: number): Promise<TMessage[]> => {
+  const fetchConversationMessages = useCallback(async (conversation_id: ConversationId): Promise<TMessage[]> => {
     try {
       const result = await withTimeout(
         ipcBridge.database.getConversationMessages.invoke({
@@ -261,7 +262,7 @@ export const useExport = ({
       if (exportTask.mode === 'single') {
         throwIfCanceled();
         const conversation = exportTask.conversation;
-        const shortTopicName = sanitizeFileName(conversation.name || String(conversation.id)).slice(0, 40) || 'topic';
+        const shortTopicName = sanitizeFileName(conversation.name || conversation.id).slice(0, 40) || 'topic';
         const zipFileName = `${shortTopicName}-${formatTimestamp()}`;
         const exportPath = await createUniqueFilePath(directory, zipFileName, 'zip');
         throwIfCanceled();

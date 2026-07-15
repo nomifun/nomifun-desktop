@@ -5,20 +5,21 @@
  */
 
 import type { IChannelPluginStatus } from '@/common/types/channel/channel';
+import type { ChannelId, CompanionId, PublicAgentId } from '@/common/types/ids';
 import type { ChannelPlatform } from '@/renderer/components/settings/SettingsModal/contents/channels/channelTarget';
 
 export interface EnabledChannelStatusQuery {
   platform: ChannelPlatform;
-  enabledPluginId?: string;
-  companionId?: string;
-  publicAgentId?: string;
+  enabledPluginId?: ChannelId;
+  companionId?: CompanionId;
+  publicAgentId?: PublicAgentId;
 }
 
-export type ChannelConfigTarget = { platform: ChannelPlatform; channelId?: string } | null;
+export type ChannelConfigTarget = { platform: ChannelPlatform; channelId?: ChannelId } | null;
 
 export interface ChannelOwnerQuery {
-  companionId?: string;
-  publicAgentId?: string;
+  companionId?: CompanionId;
+  publicAgentId?: PublicAgentId;
 }
 
 const nonEmpty = (value: string | null | undefined) => value?.trim() || undefined;

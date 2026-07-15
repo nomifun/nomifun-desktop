@@ -6,6 +6,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use nomifun_common::TerminalId;
+
 /// One MCP server to inject into a terminal-launched CLI. Backend-agnostic; a
 /// per-CLI renderer turns this into that CLI's native MCP config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +30,7 @@ pub struct McpServerSpec {
 pub struct LifecycleHookWiring {
     pub port: u16,
     pub token: String,
-    pub terminal_id: i64,
+    pub terminal_id: TerminalId,
     /// Absolute path to the backend binary (`nomicore`); used as the hook command
     /// prefix (`<bin> terminal-hook --event <kind>`).
     pub binary_path: String,
@@ -395,7 +397,7 @@ mod tests {
         assert!(!e.is_empty());
         let e2 = TerminalLaunchEnhancement {
             mcp_servers: vec![],
-            lifecycle: Some(LifecycleHookWiring { port: 1, token: "t".into(), terminal_id: 1, binary_path: "/bin".into() }),
+            lifecycle: Some(LifecycleHookWiring { port: 1, token: "t".into(), terminal_id: TerminalId::new(), binary_path: "/bin".into() }),
         };
         assert!(!e2.is_empty());
     }
@@ -425,7 +427,6 @@ mod tests {
         assert!(argv[1].ends_with("mcp.json"));
         assert!(std::path::Path::new(&argv[1]).starts_with(dir.path())); // 不在用户 cwd
 
-        // 文件只含非敏感 server command/args；capability bootstrap 走进程环境。
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&argv[1]).unwrap()).unwrap();
         let srv = &doc["mcpServers"]["nomifun-knowledge"];
@@ -449,7 +450,6 @@ mod tests {
         assert!(!joined.contains("NOMI_KB_MCP_CAPABILITY"));
         // 每个 override 前都有独立的 -c (command + args = 2)
         assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
-        // 不含 CODEX_HOME（那会丢用户 auth.json）
         assert!(!joined.contains("CODEX_HOME"));
         // Loose KB_IDS must never appear; scope lives in signed claims.
         assert!(!joined.contains("KB_MCP_KB_IDS"), "kb_ids must not be baked");
@@ -485,13 +485,18 @@ mod tests {
             Some("scoped-bootstrap")
         );
 
-        // 未知 CLI → 原样（诚实不注入）
-        let (out, env) = apply_enhancement("/bin/bash", vec!["-l".into()], &enh, dir.path(), None);
+        let (out, env) =
+            apply_enhancement("/bin/bash", vec!["-l".into()], &enh, dir.path(), None);
         assert_eq!(out, vec!["-l".to_owned()]);
         assert!(env.is_empty());
 
-        // 空 enhancement → 原样（任何 CLI）
-        let (out, env) = apply_enhancement("claude", vec!["-x".into()], &TerminalLaunchEnhancement::default(), dir.path(), None);
+        let (out, env) = apply_enhancement(
+            "claude",
+            vec!["-x".into()],
+            &TerminalLaunchEnhancement::default(),
+            dir.path(),
+            None,
+        );
         assert_eq!(out, vec!["-x".to_owned()]);
         assert!(env.is_empty());
     }
@@ -544,12 +549,13 @@ mod tests {
     #[test]
     fn apply_enhancement_with_lifecycle_renders_hooks_and_env() {
         let dir = tempfile::TempDir::new().unwrap();
+        let terminal_id = TerminalId::new();
         let enh = TerminalLaunchEnhancement {
             mcp_servers: vec![],
             lifecycle: Some(LifecycleHookWiring {
                 port: 5151,
                 token: "htok".into(),
-                terminal_id: 42,
+                terminal_id: terminal_id.clone(),
                 binary_path: "/opt/nomi/nomicore".into(),
             }),
         };
@@ -560,7 +566,10 @@ mod tests {
         let env_map: HashMap<String, String> = env.into_iter().collect();
         assert_eq!(env_map.get("NOMI_TERM_HOOK_PORT").map(String::as_str), Some("5151"));
         assert_eq!(env_map.get("NOMI_TERM_HOOK_TOKEN").map(String::as_str), Some("htok"));
-        assert_eq!(env_map.get("NOMI_TERM_HOOK_ID").map(String::as_str), Some("42"));
+        assert_eq!(
+            env_map.get("NOMI_TERM_HOOK_ID").map(String::as_str),
+            Some(terminal_id.as_str())
+        );
         // settings file contains Stop/PostToolUse/Notification hooks calling `terminal-hook`
         let settings_path = args.iter().position(|a| a == "--settings").map(|i| args[i + 1].clone()).unwrap();
         let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
@@ -574,7 +583,10 @@ mod tests {
         let cenv_map: HashMap<String, String> = cenv.into_iter().collect();
         assert_eq!(cenv_map.get("NOMI_TERM_HOOK_PORT").map(String::as_str), Some("5151"));
         assert_eq!(cenv_map.get("NOMI_TERM_HOOK_TOKEN").map(String::as_str), Some("htok"));
-        assert_eq!(cenv_map.get("NOMI_TERM_HOOK_ID").map(String::as_str), Some("42"));
+        assert_eq!(
+            cenv_map.get("NOMI_TERM_HOOK_ID").map(String::as_str),
+            Some(terminal_id.as_str())
+        );
         // codex hooks: Stop, PostToolUse, SessionStart (no Notification)
         let joined = cargs.join(" ");
         assert!(joined.contains("hooks.Stop="));
@@ -599,7 +611,7 @@ mod tests {
             lifecycle: Some(LifecycleHookWiring {
                 port: 5151,
                 token: "htok".into(),
-                terminal_id: 42,
+                terminal_id: TerminalId::new(),
                 binary_path: "/Users/John Doe/bin/nomicore".into(),
             }),
         };

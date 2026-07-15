@@ -17,14 +17,15 @@ import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
 import CharacterPicker from './CharacterPicker';
 import { figureToCustomPatch } from './useFigures';
+import type { CompanionId } from '@/common/types/ids';
 
 interface Props {
   companions: ICompanionWithStatus[];
-  selectedId: string | null;
-  onSelect: (id: string) => void;
+  selectedId: CompanionId | null;
+  onSelect: (id: CompanionId) => void;
   onCreated: (profile: ICompanionProfile) => void;
   /** Called after a companion is deleted (quick-delete) so the page reselects. */
-  onDeleted: (companionId: string) => void;
+  onDeleted: (companionId: CompanionId) => void;
   className?: string;
 }
 
@@ -133,7 +134,7 @@ const CompanionSessionRail: React.FC<Props> = ({
       <div className='flex-1 min-h-0 overflow-y-auto px-6px pb-6px pt-0 flex flex-col gap-3px'>
         {companions.map((p) => {
           const active = p.id === selectedId;
-          const modelReady = Boolean(p.model.provider_id && p.model.model);
+          const modelReady = p.model !== null;
           return (
             <div
               key={p.id}

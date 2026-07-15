@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import type { FigureId } from '@/common/types/ids';
 
 /** Moods every character must express (driven by the learner / chat). */
 export type CompanionMood = 'happy' | 'content' | 'sleepy' | 'worried' | 'excited';
@@ -43,7 +44,7 @@ export interface CustomFigureMeta {
   sizePx?: number;
   /** Library figure backing this companion (`figure_…`). When set, the image comes
    *  from the shared figure library; absent for legacy per-companion figures. */
-  figureId?: string;
+  figureId?: FigureId;
 }
 
 export interface CharacterMeta {

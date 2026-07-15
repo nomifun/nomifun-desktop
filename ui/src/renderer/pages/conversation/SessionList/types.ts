@@ -6,6 +6,7 @@
 
 import type { AutoWorkRunState, IdmmRunState } from '@/common/adapter/ipcBridge';
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 
 export type ExportZipFile = {
   name: string;
@@ -15,7 +16,7 @@ export type ExportZipFile = {
 
 export type ExportTask =
   | { mode: 'single'; conversation: TChatConversation }
-  | { mode: 'batch'; conversation_ids: number[] }
+  | { mode: 'batch'; conversation_ids: ConversationId[] }
   | null;
 
 export type ConversationRowProps = {
@@ -31,12 +32,12 @@ export type ConversationRowProps = {
   onToggleChecked: (conversation: TChatConversation) => void;
   onConversationClick: (conversation: TChatConversation) => void;
   onOpenMenu: (conversation: TChatConversation) => void;
-  onMenuVisibleChange: (conversation_id: number, visible: boolean) => void;
+  onMenuVisibleChange: (conversation_id: ConversationId, visible: boolean) => void;
   onEditStart: (conversation: TChatConversation) => void;
-  onDelete: (conversation_id: number) => void;
+  onDelete: (conversation_id: ConversationId) => void;
   onExport?: (conversation: TChatConversation) => void;
   onTogglePin: (conversation: TChatConversation) => void;
-  getJobStatus: (conversation_id: number) => 'none' | 'active' | 'paused' | 'error' | 'unread';
+  getJobStatus: (conversation_id: ConversationId) => 'none' | 'active' | 'paused' | 'error' | 'unread';
   /** AutoWork run state when enabled for this conversation (undefined = not enabled / unknown). */
   autoworkState?: AutoWorkRunState;
   /** IDMM run state when enabled for this conversation (undefined = not enabled / unknown). */

@@ -2,7 +2,7 @@
 //!
 //! The standalone web host (`nomifun-web`) runs the backend in authenticated
 //! (non-`--local`) mode: every request needs a valid session. A brand-new data
-//! dir seeds only the `system_default_user` with an EMPTY password hash, so
+//! dir seeds only the canonical installation owner with an EMPTY password hash, so
 //! `has_users()` is false and there is no in-band HTTP endpoint to create the
 //! first admin — the `/api/webui/*` and `/api/auth/internal/*` setup routes are
 //! gated to local mode (`ensure_local_mode`).

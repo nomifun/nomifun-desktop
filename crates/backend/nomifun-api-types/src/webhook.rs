@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use nomifun_common::WebhookId;
 
 use crate::requirement::{AutoWorkRunState, AutoWorkTargetKind};
 
@@ -51,7 +52,7 @@ impl WebhookPlatform {
 /// `has_secret` indicates whether one is stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Webhook {
-    pub id: i64,
+    pub id: WebhookId,
     pub name: String,
     pub platform: WebhookPlatform,
     pub url: String,
@@ -99,7 +100,7 @@ pub struct UpdateWebhookRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagSetting {
     pub tag: String,
-    pub webhook_id: Option<i64>,
+    pub webhook_id: Option<WebhookId>,
     pub description: String,
     /// Which completion events fire the bound webhook. Subset of
     /// `done`/`failed`/`needs_review`; empty means "never notify".
@@ -110,7 +111,7 @@ pub struct TagSetting {
 pub struct UpsertTagSettingRequest {
     /// `Some(Some(id))` binds, `Some(None)` clears, `None` keeps current.
     #[serde(default, deserialize_with = "double_option")]
-    pub webhook_id: Option<Option<i64>>,
+    pub webhook_id: Option<Option<WebhookId>>,
     #[serde(default)]
     pub description: Option<String>,
     /// `None` keeps the current set; `Some(events)` replaces it.
@@ -122,6 +123,7 @@ pub struct UpsertTagSettingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagBinding {
     pub kind: AutoWorkTargetKind,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_session_target_id")]
     pub target_id: String,
     pub name: String,
     pub run_state: AutoWorkRunState,
@@ -133,4 +135,49 @@ pub struct TagBinding {
 pub struct TagBindings {
     pub tag: String,
     pub bindings: Vec<TagBinding>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_response_serializes_canonical_string_id() {
+        let id = WebhookId::new();
+        let value = serde_json::to_value(Webhook {
+            id: id.clone(),
+            name: "bot".into(),
+            platform: WebhookPlatform::Http,
+            url: "https://example.invalid/hook".into(),
+            description: String::new(),
+            has_secret: false,
+            enabled: true,
+            created_at: 1,
+            updated_at: 2,
+        })
+        .unwrap();
+        assert_eq!(value["id"], id.as_str());
+        assert!(!value["id"].is_number());
+    }
+
+    #[test]
+    fn tag_setting_rejects_numeric_webhook_id() {
+        let value = serde_json::json!({
+            "tag": "alpha",
+            "webhook_id": 42,
+            "description": "",
+            "notify_events": []
+        });
+        assert!(serde_json::from_value::<TagSetting>(value).is_err());
+    }
+
+    #[test]
+    fn upsert_tag_setting_rejects_numeric_webhook_id() {
+        assert!(
+            serde_json::from_value::<UpsertTagSettingRequest>(
+                serde_json::json!({ "webhook_id": 42 })
+            )
+            .is_err()
+        );
+    }
 }

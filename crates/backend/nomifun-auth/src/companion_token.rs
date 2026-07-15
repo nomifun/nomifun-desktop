@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use sha2::{Digest, Sha256};
+use nomifun_common::CompanionId;
 
 /// SHA-256 of `token`, lowercase hex (64 chars).
 pub fn token_sha256_hex(token: &str) -> String {
@@ -41,18 +42,18 @@ fn ct_eq(a: &str, b: &str) -> bool {
 #[derive(Debug, Default)]
 pub struct CompanionTokenValidator {
     /// companion_id -> token_hash
-    tokens: RwLock<HashMap<String, String>>,
+    tokens: RwLock<HashMap<CompanionId, String>>,
 }
 
 impl CompanionTokenValidator {
     /// Build a validator seeded with persisted `(companion_id, token_hash)` pairs.
-    pub fn new(initial: Vec<(String, String)>) -> Self {
+    pub fn new(initial: Vec<(CompanionId, String)>) -> Self {
         Self { tokens: RwLock::new(initial.into_iter().collect()) }
     }
 
     /// Resolve a presented token to its bound `companion_id`, or `None` if it
     /// matches no companion. Constant-time per-entry compare.
-    pub fn resolve(&self, presented_token: &str) -> Option<String> {
+    pub fn resolve(&self, presented_token: &str) -> Option<CompanionId> {
         if presented_token.is_empty() {
             return None;
         }
@@ -67,17 +68,17 @@ impl CompanionTokenValidator {
     }
 
     /// Mint/rotate the token for a companion (replaces any prior token).
-    pub fn insert_token(&self, companion_id: String, token_hash: String) {
+    pub fn insert_token(&self, companion_id: CompanionId, token_hash: String) {
         self.tokens.write().expect("companion token lock poisoned").insert(companion_id, token_hash);
     }
 
     /// Revoke a companion's token.
-    pub fn remove_token(&self, companion_id: &str) {
+    pub fn remove_token(&self, companion_id: &CompanionId) {
         self.tokens.write().expect("companion token lock poisoned").remove(companion_id);
     }
 
     /// Whether a companion currently has a token configured (status endpoint).
-    pub fn is_configured_for(&self, companion_id: &str) -> bool {
+    pub fn is_configured_for(&self, companion_id: &CompanionId) -> bool {
         self.tokens.read().expect("companion token lock poisoned").contains_key(companion_id)
     }
 }
@@ -90,22 +91,24 @@ mod tests {
     fn resolves_minted_token_to_its_companion() {
         let token_a = crate::generate_random_hex_secret();
         let token_b = crate::generate_random_hex_secret();
-        let v = CompanionTokenValidator::new(vec![("comp-a".into(), token_sha256_hex(&token_a))]);
-        assert!(v.is_configured_for("comp-a"));
-        assert_eq!(v.resolve(&token_a).as_deref(), Some("comp-a"));
+        let companion_a = CompanionId::new();
+        let companion_b = CompanionId::new();
+        let v = CompanionTokenValidator::new(vec![(companion_a.clone(), token_sha256_hex(&token_a))]);
+        assert!(v.is_configured_for(&companion_a));
+        assert_eq!(v.resolve(&token_a).as_ref(), Some(&companion_a));
         assert_eq!(v.resolve(&token_b), None);
         assert_eq!(v.resolve("wrong"), None);
         assert_eq!(v.resolve(""), None);
 
         // Mint for a second companion.
-        v.insert_token("comp-b".into(), token_sha256_hex(&token_b));
-        assert_eq!(v.resolve(&token_b).as_deref(), Some("comp-b"));
+        v.insert_token(companion_b.clone(), token_sha256_hex(&token_b));
+        assert_eq!(v.resolve(&token_b).as_ref(), Some(&companion_b));
 
         // Revocation closes that companion's door only.
-        v.remove_token("comp-a");
-        assert!(!v.is_configured_for("comp-a"));
+        v.remove_token(&companion_a);
+        assert!(!v.is_configured_for(&companion_a));
         assert_eq!(v.resolve(&token_a), None);
-        assert_eq!(v.resolve(&token_b).as_deref(), Some("comp-b"));
+        assert_eq!(v.resolve(&token_b).as_ref(), Some(&companion_b));
     }
 
     #[test]
@@ -113,9 +116,10 @@ mod tests {
         let old = crate::generate_random_hex_secret();
         let new = crate::generate_random_hex_secret();
         let v = CompanionTokenValidator::default();
-        v.insert_token("comp".into(), token_sha256_hex(&old));
-        v.insert_token("comp".into(), token_sha256_hex(&new));
+        let companion = CompanionId::new();
+        v.insert_token(companion.clone(), token_sha256_hex(&old));
+        v.insert_token(companion.clone(), token_sha256_hex(&new));
         assert_eq!(v.resolve(&old), None);
-        assert_eq!(v.resolve(&new).as_deref(), Some("comp"));
+        assert_eq!(v.resolve(&new).as_ref(), Some(&companion));
     }
 }

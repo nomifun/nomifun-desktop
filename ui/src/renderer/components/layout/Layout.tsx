@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { ICssTheme } from '@/common/config/storage';
+import { parseConversationId } from '@/common/types/ids';
 import PwaPullToRefresh from '@/renderer/components/layout/PwaPullToRefresh';
 import Titlebar from '@/renderer/components/layout/Titlebar';
 import { Layout as ArcoLayout } from '@arco-design/web-react';
@@ -375,7 +376,7 @@ const Layout: React.FC<{
 
     // Navigate to conversation when requested from tray / 托盘请求导航到对话页面
     const handleNavigateToConversation = (event: CustomEvent<{ conversation_id: string }>) => {
-      void navigate(`/conversation/${event.detail.conversation_id}`);
+      void navigate(`/conversation/${parseConversationId(event.detail.conversation_id)}`);
     };
 
     // Open about dialog when requested from tray / 托盘请求打开关于对话框

@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
+import type { ConversationId } from '@/common/types/ids';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
 import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
@@ -25,7 +26,7 @@ import {
 
 interface Props {
   /** Active conversation id parsed from the `/conversation/:id` route, for row highlight. */
-  activeConversationId: number | null;
+  activeConversationId: ConversationId | null;
   /** Icon-only rail variant (parent sider collapsed). */
   collapsed?: boolean;
   /** Closes the mobile drawer / clears tooltips after navigating, mirrors the workpath list. */
@@ -64,7 +65,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
 
   // companionId → 其唯一会话 id（只读解析，用于活动行高亮 + 点击直达，避免无谓 ensure）。
   // 随花名册变化重解析；getCompanionSession 对未建会话返回 null（不入表）。
-  const [sessionMap, setSessionMap] = useState<Map<string, number>>(new Map());
+  const [sessionMap, setSessionMap] = useState<Map<string, ConversationId>>(new Map());
   const rosterKey = companions.map((c) => c.id).join(',');
   useEffect(() => {
     if (companions.length === 0) {
@@ -83,7 +84,7 @@ const CompanionSessionGroup: React.FC<Props> = ({
       })
     ).then((entries) => {
       if (cancelled) return;
-      const next = new Map<string, number>();
+      const next = new Map<string, ConversationId>();
       for (const [id, cid] of entries) if (cid != null) next.set(id, cid);
       setSessionMap(next);
     });

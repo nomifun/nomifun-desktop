@@ -1,5 +1,6 @@
 //! Integration tests for the webhook + tag_settings repositories.
 
+use nomifun_common::WebhookId;
 use nomifun_db::models::{TagSettingRow, WebhookRow};
 use nomifun_db::{
     ITagSettingRepository, IWebhookRepository, SqliteTagSettingRepository, SqliteWebhookRepository,
@@ -9,8 +10,7 @@ use std::sync::Arc;
 
 fn sample_webhook() -> WebhookRow {
     WebhookRow {
-        // id is ignored on insert (AUTOINCREMENT assigns it); any value works.
-        id: 0,
+        id: WebhookId::new(),
         name: "Team bot".into(),
         platform: "lark".into(),
         url: "https://open.feishu.cn/open-apis/bot/v2/hook/abc".into(),
@@ -30,7 +30,7 @@ async fn webhook_crud_roundtrip() {
     // create
     let id = repo.insert(&sample_webhook()).await.unwrap();
     // get
-    let got = repo.get_by_id(id).await.unwrap().expect("present");
+    let got = repo.get_by_id(&id).await.unwrap().expect("present");
     assert_eq!(got.name, "Team bot");
     assert_eq!(got.secret.as_deref(), Some("s3cr3t"));
     // list
@@ -43,22 +43,22 @@ async fn webhook_crud_roundtrip() {
     upd.enabled = false;
     upd.updated_at = 9;
     repo.update(&upd).await.unwrap();
-    let after = repo.get_by_id(id).await.unwrap().unwrap();
+    let after = repo.get_by_id(&id).await.unwrap().unwrap();
     assert_eq!(after.name, "Renamed");
     assert!(!after.enabled);
     // delete
-    repo.delete(id).await.unwrap();
-    assert!(repo.get_by_id(id).await.unwrap().is_none());
+    repo.delete(&id).await.unwrap();
+    assert!(repo.get_by_id(&id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn webhook_update_and_delete_missing_is_not_found() {
     let db = init_database_memory().await.unwrap();
     let repo: Arc<dyn IWebhookRepository> = Arc::new(SqliteWebhookRepository::new(db.pool().clone()));
-    let err = repo.delete(9999).await.unwrap_err();
+    let err = repo.delete(&WebhookId::parse("webhook_0190f5fe-7c00-7a00-8000-000000000999").unwrap()).await.unwrap_err();
     assert!(matches!(err, nomifun_db::DbError::NotFound(_)));
     let mut ghost = sample_webhook();
-    ghost.id = 9999;
+    ghost.id = WebhookId::parse("webhook_0190f5fe-7c00-7a00-8000-000000000998").unwrap();
     let err = repo.update(&ghost).await.unwrap_err();
     assert!(matches!(err, nomifun_db::DbError::NotFound(_)));
 }
@@ -78,7 +78,7 @@ async fn tag_setting_upsert_get_list_delete() {
     // upsert (insert)
     repo.upsert(&TagSettingRow {
         tag: "alpha".into(),
-        webhook_id: Some(wh_id),
+        webhook_id: Some(wh_id.clone()),
         description: "queue alpha".into(),
         notify_events: "done,failed,needs_review".to_string(),
         updated_at: 5,

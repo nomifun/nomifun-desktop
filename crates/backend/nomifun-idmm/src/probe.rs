@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use nomifun_ai_agent::{AcpPermissionEventData, AcpPermissionOptionKind, AcpToolCallKind, AgentStreamEvent, TurnStopReason};
 use nomifun_ai_agent::runtime_registry::AgentRuntimeRegistry;
 use nomifun_api_types::{ConfirmRequest, IdmmTargetKind, SendMessageRequest};
-use nomifun_common::{AppError, Confirmation};
+use nomifun_common::{
+    AppError, CompanionId, Confirmation, ConversationId, PublicAgentId, TerminalId, UserId,
+};
 use nomifun_conversation::ConversationService;
 use nomifun_db::{IConversationRepository, SortOrder};
 use nomifun_terminal::TerminalDriver;
@@ -246,17 +248,22 @@ fn push_turn_text(buf: &mut String, chunk: &str) {
 /// channel relay or companion session.
 ///
 /// Transport is determined separately from the row-level `channel_chat_id` in
-/// [`conversation_is_routed`]. Presentation metadata such as `channelPlatform`
+/// [`conversation_is_routed`]. Presentation metadata such as `channel_platform`
 /// is intentionally not routing state. Pure + unit-tested.
 fn extra_marks_routed_conversation(extra: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(extra) else {
         return false;
     };
-    let truthy_str = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false);
     let truthy_bool = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
-    truthy_bool("companionSession")
-        || truthy_str("companionId")
-        || truthy_str("public_agent_id")
+    truthy_bool("companion_session")
+        || v
+            .get("companion_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| CompanionId::parse(id).is_ok())
+        || v
+            .get("public_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| PublicAgentId::parse(id).is_ok())
 }
 
 /// Whether a conversation routes its decisions to a REMOTE human, so IDMM must
@@ -413,42 +420,39 @@ pub struct ConversationProbe {
     pub runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     pub conversation_service: ConversationService,
     pub conversation_repo: Arc<dyn IConversationRepository>,
-    pub conversation_id: String,
+    pub conversation_id: ConversationId,
 }
 
 impl ConversationProbe {
     async fn owner_id(&self) -> Result<String, AppError> {
-        let conversation_id = self
-            .conversation_id
-            .parse::<i64>()
-            .map_err(|_| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
         let row = self
             .conversation_repo
-            .get(conversation_id)
+            .get(self.conversation_id.as_ref())
             .await
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
-        if row.user_id.trim().is_empty() {
-            return Err(AppError::Internal(format!(
-                "conversation {} has no owner",
-                self.conversation_id
-            )));
-        }
-        Ok(row.user_id)
+        UserId::parse(&row.user_id)
+            .map(UserId::into_string)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "conversation {} has invalid owner: {error}",
+                    self.conversation_id
+                ))
+            })
     }
 }
 
 #[async_trait]
 impl SessionProbe for ConversationProbe {
     fn target(&self) -> (IdmmTargetKind, String) {
-        (IdmmTargetKind::Conversation, self.conversation_id.clone())
+        (IdmmTargetKind::Conversation, self.conversation_id.clone().into_string())
     }
 
     fn observe(&self, idle_threshold: Duration) -> mpsc::Receiver<SessionSignal> {
         let (tx, rx) = mpsc::channel(64);
         // Attach lazily: if no agent exists yet there is nothing to observe; the
         // supervisor re-arms on the next loop tick / status fetch.
-        let Some(instance) = self.runtime_registry.get_runtime(&self.conversation_id) else {
+        let Some(instance) = self.runtime_registry.get_runtime(self.conversation_id.as_str()) else {
             // Closed receiver-with-no-sender-task: drop tx so observe yields nothing.
             return rx;
         };
@@ -465,13 +469,10 @@ impl SessionProbe for ConversationProbe {
             // must NOT be auto-answered (the menu is their human-in-the-loop
             // wire contract). Default false (no text-scan) when the row/extra
             // can't be read — conservative: never hijack when unsure.
-            let is_plain_desktop = match conversation_id.parse::<i64>() {
-                Ok(id) => matches!(
-                    conversation_repo.get(id).await,
-                    Ok(Some(ref row)) if !conversation_is_routed(&row.extra, row.channel_chat_id.as_deref())
-                ),
-                Err(_) => false,
-            };
+            let is_plain_desktop = matches!(
+                conversation_repo.get(conversation_id.as_ref()).await,
+                Ok(Some(ref row)) if !conversation_is_routed(&row.extra, row.channel_chat_id.as_deref())
+            );
 
             let mut ticker = tokio::time::interval(idle_threshold);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -501,7 +502,7 @@ impl SessionProbe for ConversationProbe {
                             let sig = match &ev {
                                 AgentStreamEvent::Finish(d) => {
                                     let cancelled = conversation_service
-                                        .user_cancelled_since(&conversation_id, work_epoch_ms);
+                                        .user_cancelled_since(conversation_id.as_str(), work_epoch_ms);
                                     let s = finish_signal(d.stop_reason, &turn_text, is_plain_desktop, cancelled);
                                     turn_text.clear();
                                     Some(s)
@@ -526,7 +527,7 @@ impl SessionProbe for ConversationProbe {
                     },
                     _ = ticker.tick() => {
                         let cancelled = conversation_service
-                            .user_cancelled_since(&conversation_id, work_epoch_ms);
+                            .user_cancelled_since(conversation_id.as_str(), work_epoch_ms);
                         if cancelled {
                             tracing::debug!(
                                 "IDMM idle-tick observed user cancel — standing down"
@@ -564,7 +565,13 @@ impl SessionProbe for ConversationProbe {
             };
             return self
                 .conversation_service
-                .confirm(&owner_id, &self.conversation_id, call_id, req, &self.runtime_registry)
+                .confirm(
+                    &owner_id,
+                    self.conversation_id.as_str(),
+                    call_id,
+                    req,
+                    &self.runtime_registry,
+                )
                 .await;
         }
         // Model failover (D6): switch to the next queue candidate and re-drive
@@ -582,7 +589,11 @@ impl SessionProbe for ConversationProbe {
         if matches!(action, WakeAction::Failover) {
             let switched = self
                 .conversation_service
-                .idmm_failover_conversation(&owner_id, &self.conversation_id, &self.runtime_registry)
+                .idmm_failover_conversation(
+                    &owner_id,
+                    self.conversation_id.as_str(),
+                    &self.runtime_registry,
+                )
                 .await?;
             if switched {
                 return Ok(());
@@ -603,19 +614,20 @@ impl SessionProbe for ConversationProbe {
             channel_platform: None,
         };
         self.conversation_service
-            .send_message(&owner_id, &self.conversation_id, req, &self.runtime_registry)
+            .send_message(
+                &owner_id,
+                self.conversation_id.as_str(),
+                req,
+                &self.runtime_registry,
+            )
             .await
             .map(|_| ())
     }
 
     async fn snapshot_context(&self, max_chars: usize) -> Result<String, AppError> {
-        let conv_id = self
-            .conversation_id
-            .parse::<i64>()
-            .map_err(|_| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
         let page = self
             .conversation_repo
-            .get_messages(conv_id, 0, 20, SortOrder::Desc)
+            .get_messages(self.conversation_id.as_ref(), 0, 20, SortOrder::Desc)
             .await
             .map_err(AppError::from)?;
         // Oldest→newest for readability (repo returned newest-first).
@@ -641,17 +653,15 @@ impl SessionProbe for ConversationProbe {
     }
 
     fn is_alive(&self) -> bool {
-        self.runtime_registry.get_runtime(&self.conversation_id).is_some()
+        self.runtime_registry
+            .get_runtime(self.conversation_id.as_str())
+            .is_some()
     }
 
     async fn describe(&self) -> Result<SessionDescription, AppError> {
-        let conv_id = self
-            .conversation_id
-            .parse::<i64>()
-            .map_err(|_| AppError::NotFound(format!("conversation {}", self.conversation_id)))?;
         let row = self
             .conversation_repo
-            .get(conv_id)
+            .get(self.conversation_id.as_ref())
             .await
             .map_err(AppError::from)?;
         let row = row.ok_or_else(|| {
@@ -666,22 +676,26 @@ impl SessionProbe for ConversationProbe {
     }
 
     async fn fallback_model(&self) -> Option<(String, String)> {
-        let conv_id = self.conversation_id.parse::<i64>().ok()?;
-        let row = self.conversation_repo.get(conv_id).await.ok()??;
-        let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row);
-        if pm.provider_id.trim().is_empty() {
-            return None;
-        }
+        let row = self
+            .conversation_repo
+            .get(self.conversation_id.as_ref())
+            .await
+            .ok()??;
+        let pm = nomifun_conversation::runtime_options::provider_model_from_conversation_row(&row)
+            .ok()??;
         Some((pm.provider_id, pm.model))
     }
 
     async fn pending_signal(&self) -> Option<SessionSignal> {
-        let conv_id = self.conversation_id.parse::<i64>().ok()?;
         // Gate on plain-desktop via the row (same gating as `observe`): routed
         // conversations (channel/companion by extra marker, or any channel
         // session by row-level `channel_chat_id`) route decisions to a remote
         // human and must never be auto-answered.
-        let row = self.conversation_repo.get(conv_id).await.ok()??;
+        let row = self
+            .conversation_repo
+            .get(self.conversation_id.as_ref())
+            .await
+            .ok()??;
         if conversation_is_routed(&row.extra, row.channel_chat_id.as_deref()) {
             return None;
         }
@@ -690,12 +704,19 @@ impl SessionProbe for ConversationProbe {
         // text scan below never sees a structured confirmation, so this is the
         // ONLY lane that can recover it on arm — check it first (the block is the
         // most urgent pending decision). See [`pending_confirmation_signal`].
-        if let Some(sig) = pending_confirmation_signal(&self.runtime_registry, &self.conversation_id) {
+        if let Some(sig) =
+            pending_confirmation_signal(&self.runtime_registry, self.conversation_id.as_str())
+        {
             return Some(sig);
         }
         let page = self
             .conversation_repo
-            .get_messages(conv_id, 0, PENDING_SCAN_PAGE_SIZE, SortOrder::Desc)
+            .get_messages(
+                self.conversation_id.as_ref(),
+                0,
+                PENDING_SCAN_PAGE_SIZE,
+                SortOrder::Desc,
+            )
             .await
             .ok()?;
         let (sig, candidate_at) = pending_signal_from_page(&row.extra, &page.items)?;
@@ -703,7 +724,10 @@ impl SessionProbe for ConversationProbe {
         // this candidate decision row was written, do NOT auto-answer/revive it
         // — mirror the live idle/finish path's `user_cancelled_since` cross-check
         // (a stand-down the on-arm replay must honour just as the stream does).
-        if self.conversation_service.user_cancelled_since(&self.conversation_id, candidate_at) {
+        if self
+            .conversation_service
+            .user_cancelled_since(self.conversation_id.as_str(), candidate_at)
+        {
             return None;
         }
         Some(sig)
@@ -713,12 +737,13 @@ impl SessionProbe for ConversationProbe {
         if turn_text.trim().is_empty() {
             return false;
         }
-        let Ok(conv_id) = self.conversation_id.parse::<i64>() else {
-            return false;
-        };
         // Plain-desktop gate (same as observe/pending_signal): routed channel /
         // companion conversations send menus to a remote human → never auto-answer.
-        let Ok(Some(row)) = self.conversation_repo.get(conv_id).await else {
+        let Ok(Some(row)) = self
+            .conversation_repo
+            .get(self.conversation_id.as_ref())
+            .await
+        else {
             return false;
         };
         if conversation_is_routed(&row.extra, row.channel_chat_id.as_deref()) {
@@ -945,7 +970,7 @@ fn dedupe_should_send(sig: &SessionSignal, last_decision_text: &mut Option<Strin
 #[derive(Clone)]
 pub struct TerminalProbe {
     pub driver: Arc<dyn TerminalDriver>,
-    pub terminal_id: i64,
+    pub terminal_id: TerminalId,
     /// Scrollback kept for sidecar context (shared with the observe task).
     scrollback: Arc<std::sync::Mutex<String>>,
     /// Text recently injected into the PTY, shared with the observe task's
@@ -959,7 +984,7 @@ impl TerminalProbe {
     /// Cap on tracked pending echoes (one per recent injection line).
     const MAX_PENDING_ECHO: usize = 16;
 
-    pub fn new(driver: Arc<dyn TerminalDriver>, terminal_id: i64) -> Self {
+    pub fn new(driver: Arc<dyn TerminalDriver>, terminal_id: TerminalId) -> Self {
         Self {
             driver,
             terminal_id,
@@ -984,7 +1009,7 @@ impl TerminalProbe {
 #[async_trait]
 impl SessionProbe for TerminalProbe {
     fn target(&self) -> (IdmmTargetKind, String) {
-        (IdmmTargetKind::Terminal, self.terminal_id.to_string())
+        (IdmmTargetKind::Terminal, self.terminal_id.clone().into_string())
     }
 
     fn observe(&self, idle_threshold: Duration) -> mpsc::Receiver<SessionSignal> {
@@ -993,14 +1018,14 @@ impl SessionProbe for TerminalProbe {
         let _ = idle_threshold;
 
         let (tx, rx) = mpsc::channel(64);
-        let Some(mut out) = self.driver.subscribe_output(self.terminal_id) else {
+        let Some(mut out) = self.driver.subscribe_output(self.terminal_id.as_str()) else {
             return rx;
         };
         let driver = self.driver.clone();
-        let id = self.terminal_id;
+        let id = self.terminal_id.clone();
         let scrollback = self.scrollback.clone();
         let recent_injections = self.recent_injections.clone();
-        let mut lifecycle_rx = self.driver.subscribe_lifecycle(self.terminal_id);
+        let mut lifecycle_rx = self.driver.subscribe_lifecycle(self.terminal_id.as_str());
         tokio::spawn(async move {
             let mut detector = TerminalDetector::with_echo_guard(recent_injections);
             let mut ticker = tokio::time::interval(Duration::from_secs(2));
@@ -1064,7 +1089,7 @@ impl SessionProbe for TerminalProbe {
                         }
                     },
                     _ = ticker.tick() => {
-                        if !driver.is_alive(id) {
+                        if !driver.is_alive(id.as_str()) {
                             let _ = tx.send(SessionSignal::Exited).await;
                             return;
                         }
@@ -1093,7 +1118,7 @@ impl SessionProbe for TerminalProbe {
         // shared paste-then-CR submit path.
         let is_agent = self
             .driver
-            .describe(self.terminal_id)
+            .describe(self.terminal_id.as_str())
             .await
             .ok()
             .flatten()
@@ -1105,17 +1130,17 @@ impl SessionProbe for TerminalProbe {
         match nomifun_terminal::encode_submit_chunks(&text, is_agent) {
             nomifun_terminal::SubmitChunks::Single(bytes) => self
                 .driver
-                .write_input(self.terminal_id, &bytes)
+                .write_input(self.terminal_id.as_str(), &bytes)
                 .await
                 .map_err(|e| AppError::Internal(format!("terminal inject failed: {e}"))),
             nomifun_terminal::SubmitChunks::PasteThenCr { paste, cr } => {
                 self.driver
-                    .write_input(self.terminal_id, &paste)
+                    .write_input(self.terminal_id.as_str(), &paste)
                     .await
                     .map_err(|e| AppError::Internal(format!("terminal inject failed: {e}")))?;
                 tokio::time::sleep(nomifun_terminal::TERMINAL_SUBMIT_DELAY).await;
                 self.driver
-                    .write_input(self.terminal_id, &cr)
+                    .write_input(self.terminal_id.as_str(), &cr)
                     .await
                     .map_err(|e| AppError::Internal(format!("terminal inject failed: {e}")))
             }
@@ -1142,13 +1167,13 @@ impl SessionProbe for TerminalProbe {
     }
 
     fn is_alive(&self) -> bool {
-        self.driver.is_alive(self.terminal_id)
+        self.driver.is_alive(self.terminal_id.as_str())
     }
 
     async fn describe(&self) -> Result<SessionDescription, AppError> {
         let desc = self
             .driver
-            .describe(self.terminal_id)
+            .describe(self.terminal_id.as_str())
             .await
             .map_err(|e| AppError::Internal(format!("describe failed: {e}")))?;
         match desc {
@@ -1167,6 +1192,17 @@ impl SessionProbe for TerminalProbe {
 mod tests {
     use super::*;
     use nomifun_api_types::{AgentErrorCode, AgentErrorOwnership, AgentStreamErrorData};
+    use nomifun_common::MessageId;
+
+    const TEST_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+
+    fn test_terminal_id() -> TerminalId {
+        TerminalId::parse("term_0190f5fe-7c00-7a00-8000-000000000001").unwrap()
+    }
+
+    fn alternate_test_terminal_id() -> TerminalId {
+        TerminalId::parse("term_0190f5fe-7c00-7a00-8000-000000000007").unwrap()
+    }
 
     #[test]
     fn map_agent_event_error_maps_to_provider_or_agent() {
@@ -1310,19 +1346,19 @@ mod tests {
         // Companion and public-service conversations route numbered menus to a
         // remote human — IDMM must not auto-answer them.
         assert!(extra_marks_routed_conversation(
-            r#"{"companionSession":true,"companionId":"companion_42"}"#
+            r#"{"companion_session":true,"companion_id":"companion_0190f5fe-7c00-7a00-8abc-012345678942"}"#
         ));
         assert!(extra_marks_routed_conversation(
-            r#"{"public_agent_id":"public_42"}"#
+            r#"{"public_agent_id":"pubagent_0190f5fe-7c00-7a00-8abc-012345678943"}"#
         ));
         // A plain desktop conversation is NOT routed.
         assert!(!extra_marks_routed_conversation(r#"{"workspace":"/project"}"#));
         // Presentation-only metadata, blank ids, empty, and invalid extra do
         // not count as routed.
         assert!(!extra_marks_routed_conversation(
-            r#"{"channelPlatform":"telegram"}"#
+            r#"{"channel_platform":"telegram"}"#
         ));
-        assert!(!extra_marks_routed_conversation(r#"{"companionId":""}"#));
+        assert!(!extra_marks_routed_conversation(r#"{"companion_id":""}"#));
         assert!(!extra_marks_routed_conversation(r#"{"public_agent_id":" "}"#));
         assert!(!extra_marks_routed_conversation(""));
         assert!(!extra_marks_routed_conversation("{}"));
@@ -1331,9 +1367,9 @@ mod tests {
     #[test]
     fn conversation_is_routed_combines_extra_and_channel_chat_id() {
         // Shared companion/public sessions carry canonical business markers.
-        assert!(conversation_is_routed(r#"{"companionSession":true}"#, None));
+        assert!(conversation_is_routed(r#"{"companion_session":true}"#, None));
         assert!(conversation_is_routed(
-            r#"{"public_agent_id":"public_42"}"#,
+            r#"{"public_agent_id":"pubagent_0190f5fe-7c00-7a00-8abc-012345678943"}"#,
             None
         ));
         // Every dedicated channel session is routed by its first-class row field,
@@ -1639,31 +1675,31 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TerminalDriverTrait for FakeDriver {
-        async fn write_input(&self, _id: i64, _bytes: &[u8]) -> Result<(), TermError> {
+        async fn write_input(&self, _id: &str, _bytes: &[u8]) -> Result<(), TermError> {
             unimplemented!()
         }
-        fn subscribe_output(&self, _id: i64) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        fn subscribe_output(&self, _id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
             Some(self.out_tx.subscribe())
         }
-        fn is_alive(&self, _id: i64) -> bool {
+        fn is_alive(&self, _id: &str) -> bool {
             true
         }
-        async fn describe(&self, _id: i64) -> Result<Option<nomifun_terminal::TerminalDescription>, TermError> {
+        async fn describe(&self, _id: &str) -> Result<Option<nomifun_terminal::TerminalDescription>, TermError> {
             unimplemented!()
         }
-        async fn read_autowork(&self, _id: i64) -> Result<Option<String>, TermError> {
+        async fn read_autowork(&self, _id: &str) -> Result<Option<String>, TermError> {
             unimplemented!()
         }
-        async fn write_autowork(&self, _id: i64, _autowork: Option<&str>) -> Result<(), TermError> {
+        async fn write_autowork(&self, _id: &str, _autowork: Option<&str>) -> Result<(), TermError> {
             unimplemented!()
         }
-        async fn read_idmm(&self, _id: i64) -> Result<Option<String>, TermError> {
+        async fn read_idmm(&self, _id: &str) -> Result<Option<String>, TermError> {
             unimplemented!()
         }
-        async fn write_idmm(&self, _id: i64, _idmm: Option<&str>) -> Result<(), TermError> {
+        async fn write_idmm(&self, _id: &str, _idmm: Option<&str>) -> Result<(), TermError> {
             unimplemented!()
         }
-        fn subscribe_lifecycle(&self, _id: i64) -> Option<tokio::sync::broadcast::Receiver<TerminalLifecycleEvent>> {
+        fn subscribe_lifecycle(&self, _id: &str) -> Option<tokio::sync::broadcast::Receiver<TerminalLifecycleEvent>> {
             self.life_tx.as_ref().map(|tx| tx.subscribe())
         }
     }
@@ -1671,12 +1707,12 @@ mod tests {
     #[tokio::test]
     async fn observe_maps_lifecycle_turn_end_to_done() {
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         // Let the spawned task subscribe before we push.
         tokio::time::sleep(Duration::from_millis(50)).await;
         driver.life_tx.as_ref().unwrap().send(TerminalLifecycleEvent {
-            terminal_id: 1,
+            terminal_id: test_terminal_id(),
             kind: LifecycleKind::TurnEnd,
             payload: serde_json::Value::Null,
         }).unwrap();
@@ -1690,7 +1726,7 @@ mod tests {
     #[tokio::test]
     async fn observe_emits_decision_from_output_bytes() {
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         // A line ending in "(y/n)" triggers detect_decision in TerminalDetector.
@@ -1705,11 +1741,11 @@ mod tests {
     #[tokio::test]
     async fn observe_maps_notification_to_idle() {
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         driver.life_tx.as_ref().unwrap().send(TerminalLifecycleEvent {
-            terminal_id: 1,
+            terminal_id: test_terminal_id(),
             kind: LifecycleKind::Notification,
             payload: serde_json::Value::Null,
         }).unwrap();
@@ -1724,7 +1760,7 @@ mod tests {
     async fn observe_without_lifecycle_still_scans_output() {
         // lifecycle=None: no panic, content channel still works.
         let driver = Arc::new(FakeDriver::new(false));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         driver.out_tx.send(b"Do you want to proceed? (y/n)\n".to_vec()).unwrap();
@@ -1741,7 +1777,7 @@ mod tests {
         // its turn (TurnEnd lifecycle), and observe emits an OpenQuestion
         // Decision (scanned from scrollback) instead of swallowing it as Done.
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         // The assistant's open question + chrome lands in scrollback first.
@@ -1760,7 +1796,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .send(TerminalLifecycleEvent {
-                terminal_id: 1,
+                terminal_id: test_terminal_id(),
                 kind: LifecycleKind::TurnEnd,
                 payload: serde_json::Value::Null,
             })
@@ -1785,7 +1821,7 @@ mod tests {
     async fn observe_turn_end_clean_finish_is_done() {
         // A clean (non-interrogative) turn-end still maps to Done.
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let mut rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         driver
@@ -1797,7 +1833,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .send(TerminalLifecycleEvent {
-                terminal_id: 1,
+                terminal_id: test_terminal_id(),
                 kind: LifecycleKind::TurnEnd,
                 payload: serde_json::Value::Null,
             })
@@ -1829,19 +1865,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TerminalDriverTrait for CapturingDriver {
-        async fn write_input(&self, _id: i64, bytes: &[u8]) -> Result<(), TermError> {
+        async fn write_input(&self, _id: &str, bytes: &[u8]) -> Result<(), TermError> {
             self.written.lock().unwrap().push(bytes.to_vec());
             Ok(())
         }
-        fn subscribe_output(&self, _id: i64) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        fn subscribe_output(&self, _id: &str) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
             None
         }
-        fn is_alive(&self, _id: i64) -> bool {
+        fn is_alive(&self, _id: &str) -> bool {
             true
         }
-        async fn describe(&self, _id: i64) -> Result<Option<nomifun_terminal::TerminalDescription>, TermError> {
+        async fn describe(&self, _id: &str) -> Result<Option<nomifun_terminal::TerminalDescription>, TermError> {
             Ok(Some(nomifun_terminal::TerminalDescription {
-                user_id: "u1".into(),
+                user_id: TEST_USER_ID.into(),
                 cwd: ".".into(),
                 command: "$SHELL".into(),
                 args: vec![],
@@ -1850,19 +1886,19 @@ mod tests {
                 last_status: "running".into(),
             }))
         }
-        async fn read_autowork(&self, _id: i64) -> Result<Option<String>, TermError> {
+        async fn read_autowork(&self, _id: &str) -> Result<Option<String>, TermError> {
             unimplemented!()
         }
-        async fn write_autowork(&self, _id: i64, _autowork: Option<&str>) -> Result<(), TermError> {
+        async fn write_autowork(&self, _id: &str, _autowork: Option<&str>) -> Result<(), TermError> {
             unimplemented!()
         }
-        async fn read_idmm(&self, _id: i64) -> Result<Option<String>, TermError> {
+        async fn read_idmm(&self, _id: &str) -> Result<Option<String>, TermError> {
             unimplemented!()
         }
-        async fn write_idmm(&self, _id: i64, _idmm: Option<&str>) -> Result<(), TermError> {
+        async fn write_idmm(&self, _id: &str, _idmm: Option<&str>) -> Result<(), TermError> {
             unimplemented!()
         }
-        fn subscribe_lifecycle(&self, _id: i64) -> Option<tokio::sync::broadcast::Receiver<TerminalLifecycleEvent>> {
+        fn subscribe_lifecycle(&self, _id: &str) -> Option<tokio::sync::broadcast::Receiver<TerminalLifecycleEvent>> {
             None
         }
     }
@@ -1877,7 +1913,7 @@ mod tests {
             written: written.clone(),
             backend: None,
         });
-        let probe = TerminalProbe::new(driver.clone(), 7);
+        let probe = TerminalProbe::new(driver.clone(), alternate_test_terminal_id());
 
         probe.inject(&WakeAction::Failover).await.expect("failover inject ok");
         probe.inject(&WakeAction::Retry).await.expect("retry inject ok");
@@ -1896,7 +1932,7 @@ mod tests {
             written: written.clone(),
             backend: Some("claude".into()),
         });
-        let probe = TerminalProbe::new(driver.clone(), 7);
+        let probe = TerminalProbe::new(driver.clone(), alternate_test_terminal_id());
 
         probe
             .inject(&WakeAction::AnswerChoice("line one\nline two".into()))
@@ -1921,7 +1957,7 @@ mod tests {
         // and surface the OpenQuestion Decision (so the model tier answers it),
         // mirroring the conversation probe's on-arm replay.
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         // Run observe so the scrollback Arc gets populated from the detector.
         let _rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1945,7 +1981,7 @@ mod tests {
     async fn terminal_pending_signal_clean_scrollback_is_none() {
         // No pending question in scrollback → None (nothing to answer on arm).
         let driver = Arc::new(FakeDriver::new(true));
-        let probe = TerminalProbe::new(driver.clone(), 1);
+        let probe = TerminalProbe::new(driver.clone(), test_terminal_id());
         let _rx = probe.observe(Duration::from_secs(60));
         tokio::time::sleep(Duration::from_millis(50)).await;
         driver
@@ -1991,8 +2027,8 @@ mod tests {
         created_at: i64,
     ) -> nomifun_db::models::MessageRow {
         nomifun_db::models::MessageRow {
-            id: format!("m_{position}_{}", text.len()),
-            conversation_id: 1,
+            id: MessageId::new().into_string(),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8000-000000000001".into(),
             msg_id: None,
             r#type: r#type.to_string(),
             content: serde_json::json!({ "content": text }).to_string(),
@@ -2067,11 +2103,14 @@ mod tests {
         // auto-answered — the menu is its human-in-the-loop wire contract.
         let msgs = vec![msg_row("left", false, "text", pending_decision_text())];
         assert_eq!(
-            pending_signal_from_page(r#"{"companionSession":true}"#, &msgs),
+            pending_signal_from_page(r#"{"companion_session":true}"#, &msgs),
             None
         );
         assert_eq!(
-            pending_signal_from_page(r#"{"public_agent_id":"public_42"}"#, &msgs),
+            pending_signal_from_page(
+                r#"{"public_agent_id":"pubagent_0190f5fe-7c00-7a00-8abc-012345678943"}"#,
+                &msgs,
+            ),
             None
         );
     }
@@ -2151,7 +2190,7 @@ mod tests {
     }
 
     // ── A stub conversation repo proves `pending_signal` reads get()+get_messages
-    //    and feeds the pure scan; non-numeric / missing id → None. ──
+    //    and feeds the pure scan; non-canonical / missing id → None. ──
 
     struct StubConvRepo {
         row: Option<nomifun_db::models::ConversationRow>,
@@ -2160,20 +2199,20 @@ mod tests {
 
     #[async_trait]
     impl IConversationRepository for StubConvRepo {
-        async fn get(&self, _id: i64) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
+        async fn get(&self, _id: &str) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             Ok(self.row.clone())
         }
-        async fn create(&self, _row: &nomifun_db::models::ConversationRow) -> Result<i64, nomifun_db::DbError> {
+        async fn create(&self, _row: &nomifun_db::models::ConversationRow) -> Result<String, nomifun_db::DbError> {
             unimplemented!()
         }
         async fn update(
             &self,
-            _id: i64,
+            _id: &str,
             _updates: &nomifun_db::ConversationRowUpdate,
         ) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
         }
-        async fn delete(&self, _id: i64) -> Result<(), nomifun_db::DbError> {
+        async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
         }
         async fn list_paginated(
@@ -2202,13 +2241,13 @@ mod tests {
         async fn list_associated(
             &self,
             _user_id: &str,
-            _conversation_id: i64,
+            _conversation_id: &str,
         ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
             unimplemented!()
         }
         async fn get_messages(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _page: u32,
             _page_size: u32,
             _order: SortOrder,
@@ -2230,12 +2269,12 @@ mod tests {
         ) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
         }
-        async fn delete_messages_by_conversation(&self, _conv_id: i64) -> Result<(), nomifun_db::DbError> {
+        async fn delete_messages_by_conversation(&self, _conv_id: &str) -> Result<(), nomifun_db::DbError> {
             unimplemented!()
         }
         async fn get_message_by_msg_id(
             &self,
-            _conv_id: i64,
+            _conv_id: &str,
             _msg_id: &str,
             _msg_type: &str,
         ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
@@ -2254,8 +2293,8 @@ mod tests {
 
     fn conv_row(extra: &str) -> nomifun_db::models::ConversationRow {
         nomifun_db::models::ConversationRow {
-            id: 1,
-            user_id: "u".into(),
+            id: "conv_0190f5fe-7c00-7a00-8000-000000000001".into(),
+            user_id: TEST_USER_ID.into(),
             name: "c".into(),
             r#type: "nomi".into(),
             extra: extra.into(),
@@ -2293,10 +2332,10 @@ mod tests {
         repo: Arc<StubConvRepo>,
         cancel_stamp_ms: Option<i64>,
     ) -> Option<SessionSignal> {
-        let Ok(id) = conversation_id.parse::<i64>() else {
+        let Ok(id) = ConversationId::try_from(conversation_id) else {
             return None;
         };
-        let Ok(Some(row)) = repo.get(id).await else {
+        let Ok(Some(row)) = repo.get(id.as_ref()).await else {
             return None;
         };
         // Mirror `ConversationProbe::pending_signal`: routed conversations
@@ -2305,7 +2344,10 @@ mod tests {
         if conversation_is_routed(&row.extra, row.channel_chat_id.as_deref()) {
             return None;
         }
-        let page = repo.get_messages(id, 0, PENDING_SCAN_PAGE_SIZE, SortOrder::Desc).await.ok()?;
+        let page = repo
+            .get_messages(id.as_ref(), 0, PENDING_SCAN_PAGE_SIZE, SortOrder::Desc)
+            .await
+            .ok()?;
         let (sig, candidate_at) = pending_signal_from_page(&row.extra, &page.items)?;
         // Mirror `ConversationService::user_cancelled_since`: cancelled iff a
         // stamp exists at or after the candidate row's created_at.
@@ -2316,7 +2358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_signal_non_numeric_id_is_none() {
+    async fn pending_signal_noncanonical_id_is_none() {
         let repo = Arc::new(StubConvRepo {
             row: Some(conv_row(r#"{"workspace":"/p"}"#)),
             messages: vec![msg_row("left", false, "text", pending_decision_text())],
@@ -2330,7 +2372,7 @@ mod tests {
             row: Some(conv_row(r#"{"workspace":"/p"}"#)),
             messages: vec![msg_row("left", false, "text", pending_decision_text())],
         });
-        match pending_signal_with_repo("1", repo).await {
+        match pending_signal_with_repo("conv_0190f5fe-7c00-7a00-8000-000000000001", repo).await {
             Some(SessionSignal::Decision(dp)) => assert_eq!(dp.options.len(), 2),
             other => panic!("expected an options Decision, got {other:?}"),
         }
@@ -2349,7 +2391,7 @@ mod tests {
             row: Some(row),
             messages: vec![msg_row("left", false, "text", pending_decision_text())],
         });
-        assert_eq!(pending_signal_with_repo("1", repo).await, None);
+        assert_eq!(pending_signal_with_repo("conv_0190f5fe-7c00-7a00-8000-000000000001", repo).await, None);
     }
 
     #[tokio::test]
@@ -2364,17 +2406,17 @@ mod tests {
         });
         // Cancelled at/after the row → None.
         assert_eq!(
-            pending_signal_with_repo_cancel("1", repo.clone(), Some(100)).await,
+            pending_signal_with_repo_cancel("conv_0190f5fe-7c00-7a00-8000-000000000001", repo.clone(), Some(100)).await,
             None,
             "a cancel at/after the candidate row must suppress the on-arm replay"
         );
         // A cancel strictly BEFORE the row (an older, unrelated stop) does not.
-        match pending_signal_with_repo_cancel("1", repo.clone(), Some(99)).await {
+        match pending_signal_with_repo_cancel("conv_0190f5fe-7c00-7a00-8000-000000000001", repo.clone(), Some(99)).await {
             Some(SessionSignal::Decision(dp)) => assert_eq!(dp.options.len(), 2),
             other => panic!("a pre-candidate cancel must not suppress; got {other:?}"),
         }
         // No cancel at all → fires.
-        match pending_signal_with_repo_cancel("1", repo, None).await {
+        match pending_signal_with_repo_cancel("conv_0190f5fe-7c00-7a00-8000-000000000001", repo, None).await {
             Some(SessionSignal::Decision(dp)) => assert_eq!(dp.options.len(), 2),
             other => panic!("expected an options Decision with no cancel; got {other:?}"),
         }

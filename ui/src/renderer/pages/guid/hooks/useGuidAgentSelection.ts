@@ -9,7 +9,7 @@ import { DEFAULT_CODEX_MODELS } from '@/common/types/codex/codexModels';
 import { CODEX_MODE_NATIVE_FULL_ACCESS, normalizeCodexMode } from '@/common/types/codex/codexModes';
 import type { IProvider } from '@/common/config/storage';
 import { configService } from '@/common/config/configService';
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
 import type { AcpSessionModes } from '@/common/types/platform/acpTypes';
 import type { AcpModelInfo, AvailableAgent, EffectiveAgentInfo } from '../types';
 import {
@@ -53,7 +53,7 @@ export type GuidAgentSelectionResult = {
   }) => string;
   findAgentByKey: (key: string) => AvailableAgent | undefined;
   resolvePresetAgentType: (
-    agentInfo: { agent_type: string; backend?: string; preset_id?: string } | undefined
+    agentInfo: { agent_type: string; backend?: string; preset_id?: PresetReference } | undefined
   ) => string;
   isMainAgentAvailable: (agent_type: string) => boolean;
   getEffectiveAgentType: (
@@ -276,11 +276,8 @@ export const useGuidAgentSelection = ({
       .map((ra) => ({
         agent_type: 'remote',
         name: ra.name,
-        // remote_agents.id is an integer row key; the agent-selection layer is
-        // string-keyed (shares the namespace with custom ACP slugs), so stringify
-        // here and parse back to a number at the create boundary.
-        id: String(ra.id),
-        custom_agent_id: String(ra.id),
+        id: ra.id,
+        remote_agent_id: ra.id,
         avatar: ra.avatar,
       }));
     setAvailableAgents([...normalisedDetected, ...remoteAsAvailable]);

@@ -18,12 +18,13 @@
  */
 
 import { buildBackendAuthHeaders } from '@/common/adapter/httpBridge';
+import type { AssetId } from '@/common/types/ids';
 import { workshopFileUrl } from '../api';
 
 const objectUrls = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
 
-function cacheKey(assetId: string, thumb: boolean): string {
+function cacheKey(assetId: AssetId, thumb: boolean): string {
   return thumb ? `${assetId}#thumb` : assetId;
 }
 
@@ -32,7 +33,7 @@ function cacheKey(assetId: string, thumb: boolean): string {
  * Concurrent callers share one request; results are cached until
  * {@link revokeAllWorkshopMedia} (or {@link revokeWorkshopMedia}) is called.
  */
-export async function loadWorkshopMedia(assetId: string, opts: { thumb?: boolean } = {}): Promise<string> {
+export async function loadWorkshopMedia(assetId: AssetId, opts: { thumb?: boolean } = {}): Promise<string> {
   const thumb = opts.thumb === true;
   const key = cacheKey(assetId, thumb);
   const cached = objectUrls.get(key);
@@ -63,7 +64,7 @@ export async function loadWorkshopMedia(assetId: string, opts: { thumb?: boolean
 }
 
 /** Drop one asset's cached object URLs (e.g. after replacing its binary). */
-export function revokeWorkshopMedia(assetId: string): void {
+export function revokeWorkshopMedia(assetId: AssetId): void {
   for (const key of [cacheKey(assetId, false), cacheKey(assetId, true)]) {
     const url = objectUrls.get(key);
     if (url) {

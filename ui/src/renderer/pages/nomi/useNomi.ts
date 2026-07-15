@@ -15,6 +15,7 @@ import type {
   ICompanionWithStatus,
 } from '@/common/adapter/ipcBridge';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CompanionId } from '@/common/types/ids';
 
 /** Optimistic RFC 7396-style merge of a shared-config patch (client mirror). */
 const mergeSharedConfig = (prev: ICompanionSharedConfig, patch: ICompanionSharedConfigPatch): ICompanionSharedConfig => ({
@@ -32,7 +33,7 @@ const mergeProfile = (prev: ICompanionProfile, patch: ICompanionProfilePatch): I
   ...(patch.name !== undefined ? { name: patch.name } : {}),
   ...(patch.character !== undefined ? { character: patch.character } : {}),
   ...(patch.persona ? { persona: { ...prev.persona, ...patch.persona } } : {}),
-  ...(patch.model ? { model: { ...prev.model, ...patch.model } } : {}),
+  ...(patch.model !== undefined ? { model: patch.model } : {}),
   ...(patch.appearance ? { appearance: { ...prev.appearance, ...patch.appearance } } : {}),
 });
 
@@ -48,7 +49,7 @@ export const useCompanionShared = () => {
   const configRef = useRef<ICompanionSharedConfig | null>(null);
   configRef.current = sharedConfig;
 
-  const refreshStatus = useCallback(async (defaultCompanionId?: string | null) => {
+  const refreshStatus = useCallback(async (defaultCompanionId?: CompanionId | null) => {
     const companionId = defaultCompanionId !== undefined ? defaultCompanionId : configRef.current?.default_companion_id;
     if (!companionId) {
       setStatus(null);
@@ -119,9 +120,9 @@ export const useCompanionShared = () => {
  *  model-less companion look "model configured" → ChatTab fired
  *  ensureCompanionSession → 400「companion model not configured」, and (b) let the
  *  rail overlay rewrite the selected row's id/key → 侧栏切换疯狂复制. */
-export const useCompanion = (companionId: string | null) => {
+export const useCompanion = (companionId: CompanionId | null) => {
   const [data, setData] = useState<{
-    id: string | null;
+    id: CompanionId | null;
     profile: ICompanionProfile | null;
     status: ICompanionStatus | null;
   }>({ id: null, profile: null, status: null });
@@ -245,7 +246,7 @@ export const useCompanions = () => {
 
   /** Incremental refresh of a single roster row (insert-or-replace). */
   const refreshOne = useCallback(
-    async (companionId: string) => {
+    async (companionId: CompanionId) => {
       // Guard against an undefined/empty id (e.g. a companion event fired mid-create
       // before the row has an id) — `/api/companion/companions/undefined` would 404-noise.
       if (!companionId) return;

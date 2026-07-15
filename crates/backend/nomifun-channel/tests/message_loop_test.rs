@@ -33,7 +33,10 @@ use nomifun_realtime::UserEventSink;
 use tokio::sync::{broadcast, mpsc};
 
 /// The channel row id every test message arrives through.
-const TEST_CHANNEL: &str = "tg-1";
+const TEST_CHANNEL: &str = "chn_018f1234-5678-7abc-8def-012345678930";
+const TEST_CHANNEL_USER: &str = "chu_018f1234-5678-7abc-8def-012345678931";
+const TEST_PROVIDER: &str = "prov_018f1234-5678-7abc-8def-012345678932";
+const TEST_OWNER: &str = "user_018f1234-5678-7abc-8def-012345678933";
 
 /// Stamps a platform message with the test channel id, the way the
 /// manager's per-instance forwarder does in production.
@@ -114,7 +117,7 @@ async fn unauthorized_user_gets_pairing_response() {
         Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(pool));
     let settings = Arc::new(ChannelSettingsService::new(pref_repo));
 
-    let pairing = Arc::new(PairingService::new(repo.clone(), bus, "owner-a"));
+    let pairing = Arc::new(PairingService::new(repo.clone(), bus, TEST_OWNER));
     let session_mgr = Arc::new(SessionManager::new(repo.clone()));
     let executor = Arc::new(ActionExecutor::new(pairing, Arc::clone(&session_mgr), settings, "acp"));
 
@@ -308,6 +311,7 @@ struct Harness {
     channel_repo: Arc<dyn IChannelRepository>,
     conversation_svc: Arc<ConversationService>,
     runtime: Arc<ConversationRuntimeStateService>,
+    installation_owner: String,
     /// The shared pending-decision store the message loop's relay/interception
     /// uses, so tests can seed and inspect pending decisions.
     pending_decisions: Arc<nomifun_channel::pending_decision::PendingDecisionStore>,
@@ -315,6 +319,7 @@ struct Harness {
 
 async fn build_harness() -> Harness {
     let db = nomifun_db::init_database_memory().await.unwrap();
+    let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
     let pool = db.pool().clone();
 
     let channel_repo: Arc<dyn IChannelRepository> = Arc::new(SqliteChannelRepository::new(pool.clone()));
@@ -325,7 +330,7 @@ async fn build_harness() -> Harness {
     let provider_repo = SqliteProviderRepository::new(pool.clone());
     provider_repo
         .create(CreateProviderParams {
-            id: Some("channel-test-provider"),
+            id: Some(TEST_PROVIDER),
             platform: "openai",
             name: "Channel test provider",
             base_url: "https://example.invalid/v1",
@@ -349,12 +354,12 @@ async fn build_harness() -> Harness {
     pref_repo
         .upsert_batch(&[(
             "channels.telegram.defaultModel",
-            r#"{"id":"channel-test-provider","use_model":"channel-test-model"}"#,
+            &format!(r#"{{"id":"{TEST_PROVIDER}","use_model":"channel-test-model"}}"#),
         )])
         .await
         .unwrap();
     let settings = Arc::new(ChannelSettingsService::new(pref_repo));
-    let pairing = Arc::new(PairingService::new(channel_repo.clone(), bus, "owner-a"));
+    let pairing = Arc::new(PairingService::new(channel_repo.clone(), bus, installation_owner.clone()));
     let session_mgr = Arc::new(SessionManager::new(channel_repo.clone()));
     let executor = Arc::new(ActionExecutor::new(
         pairing,
@@ -363,7 +368,7 @@ async fn build_harness() -> Harness {
         "nomi",
     ));
 
-    // Every test message arrives through TEST_CHANNEL ("tg-1"). channel_sessions
+    // Every test message arrives through the canonical TEST_CHANNEL. channel_sessions
     // now has an FK channel_id → channel_plugins(id), so the plugin row must
     // exist before any session is created. bot_key=None avoids the
     // UNIQUE(type, bot_key) index.
@@ -388,7 +393,7 @@ async fn build_harness() -> Harness {
     // Authorize the test user so messages reach the dispatch path.
     channel_repo
         .create_user(&ChannelUserRow {
-            id: "user_tg_42".into(),
+            id: TEST_CHANNEL_USER.into(),
             platform_user_id: "tg_42".into(),
             platform_type: "telegram".into(),
             channel_id: Some(TEST_CHANNEL.into()),
@@ -404,7 +409,7 @@ async fn build_harness() -> Harness {
     let runtime = Arc::new(ConversationRuntimeStateService::default());
     let conversation_svc = Arc::new(
         ConversationService::new(
-            Arc::<str>::from("system_default_user"),
+            Arc::<str>::from(installation_owner.as_str()),
             std::env::temp_dir(),
             Arc::new(TestBroadcaster),
             Arc::new(NoopSkillResolver),
@@ -421,7 +426,7 @@ async fn build_harness() -> Harness {
         Arc::clone(&runtime_registry),
         settings,
         channel_repo.clone(),
-        "system_default_user".to_owned(),
+        installation_owner.clone(),
     ));
     let pending_decisions = message_svc.pending_decisions();
 
@@ -444,6 +449,7 @@ async fn build_harness() -> Harness {
         channel_repo,
         conversation_svc,
         runtime,
+        installation_owner,
         pending_decisions,
     }
 }
@@ -455,9 +461,7 @@ async fn wait_for_bound_conversation(
 ) -> String {
     for _ in 0..500 {
         let sessions = repo.get_all_sessions().await.unwrap();
-        // Session FK is now i64; this helper returns a String for the
-        // string-keyed downstream calls (Option A).
-        if let Some(cid) = sessions.iter().find_map(|s| s.conversation_id.map(|id| id.to_string())) {
+        if let Some(cid) = sessions.iter().find_map(|s| s.conversation_id.clone()) {
             return cid;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -499,7 +503,11 @@ async fn wait_for_send_containing(recorder: &Arc<MessageRecorder>, needle: &str)
 }
 
 /// Returns the visible user (`right`) message texts of a conversation.
-async fn user_messages(svc: &Arc<ConversationService>, conversation_id: &str) -> Vec<String> {
+async fn user_messages(
+    svc: &Arc<ConversationService>,
+    installation_owner: &str,
+    conversation_id: &str,
+) -> Vec<String> {
     let query = ListMessagesQuery {
         page: Some(1),
         page_size: Some(50),
@@ -508,7 +516,7 @@ async fn user_messages(svc: &Arc<ConversationService>, conversation_id: &str) ->
         cursor: None,
     };
     let result = svc
-        .list_messages("system_default_user", conversation_id, query)
+        .list_messages(installation_owner, conversation_id, query)
         .await
         .unwrap();
     result
@@ -522,12 +530,13 @@ async fn user_messages(svc: &Arc<ConversationService>, conversation_id: &str) ->
 /// Polls until the conversation has `expected` visible user messages.
 async fn wait_for_user_message_count(
     svc: &Arc<ConversationService>,
+    installation_owner: &str,
     conversation_id: &str,
     expected: usize,
 ) -> Vec<String> {
     let mut last = Vec::new();
     for _ in 0..500 {
-        last = user_messages(svc, conversation_id).await;
+        last = user_messages(svc, installation_owner, conversation_id).await;
         if last.len() >= expected {
             return last;
         }
@@ -563,7 +572,12 @@ async fn busy_conversation_replies_with_processing_notice() {
 
     // The guard fired before send_to_agent: no second user message was
     // persisted into the conversation.
-    let messages = user_messages(&harness.conversation_svc, &cid).await;
+    let messages = user_messages(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+    )
+    .await;
     assert_eq!(messages, vec!["hello world".to_string()]);
 }
 
@@ -587,7 +601,13 @@ async fn chat_continue_sends_continue_prompt_to_agent() {
         .await
         .unwrap();
 
-    let messages = wait_for_user_message_count(&harness.conversation_svc, &cid, 2).await;
+    let messages = wait_for_user_message_count(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+        2,
+    )
+    .await;
     assert_eq!(messages, vec![
         "hello world".to_string(),
         nomifun_channel::action::CONTINUE_PROMPT.to_string()
@@ -613,7 +633,13 @@ async fn chat_regenerate_resends_last_user_message() {
         .await
         .unwrap();
 
-    let messages = wait_for_user_message_count(&harness.conversation_svc, &cid, 2).await;
+    let messages = wait_for_user_message_count(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+        2,
+    )
+    .await;
     assert_eq!(messages, vec!["hello world".to_string(), "hello world".to_string()]);
 }
 
@@ -695,7 +721,12 @@ async fn decision_numeric_reply_resolves_and_does_not_dispatch() {
     assert!(harness.pending_decisions.peek(&cid).is_none(), "pending decision must be cleared");
 
     // No second user message was dispatched — the reply was consumed.
-    let messages = user_messages(&harness.conversation_svc, &cid).await;
+    let messages = user_messages(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+    )
+    .await;
     assert_eq!(messages, vec!["hello world".to_string()]);
 }
 
@@ -731,6 +762,11 @@ async fn decision_non_numeric_reply_reshows_list_and_does_not_dispatch() {
     assert!(harness.pending_decisions.peek(&cid).is_some(), "pending decision must survive a bad reply");
 
     // No new user message dispatched.
-    let messages = user_messages(&harness.conversation_svc, &cid).await;
+    let messages = user_messages(
+        &harness.conversation_svc,
+        &harness.installation_owner,
+        &cid,
+    )
+    .await;
     assert_eq!(messages, vec!["hello world".to_string()]);
 }

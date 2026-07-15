@@ -58,7 +58,7 @@
 - 在 zh-CN 与 en-US 的 `sessionList.json` 增加 `sessionList.companionGroup`（"桌面伙伴" / "Desktop Companions"）。
 
 ### 6. 保持不动（不可破坏）
-- `ensureCompanionSession`/`getCompanionSession`、`extra` 标记（companionSession/companionId/channelPlatform）、工作会话过滤器、`sync_companion_windows`、`conversation_id` 的 string/number 边界强转、IM 渠道折叠入单会话。**无 Rust/后端改动。**
+- `ensureCompanionSession`/`getCompanionSession`、`extra` 标记（companionSession/companionId/channelPlatform）、工作会话过滤器、`sync_companion_windows`、`conversation_id` 的 canonical `ConversationId` 边界校验、IM 渠道折叠入单会话。禁止 string/number 兼容强转。**无 Rust/后端改动。**
 
 ## 受影响文件（预估）
 

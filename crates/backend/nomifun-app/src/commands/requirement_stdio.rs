@@ -25,6 +25,7 @@ use nomifun_api_types::{
     RequirementMcpConfig,
 };
 use nomifun_common::{LoopbackCapabilityError, LoopbackCapabilityClaims};
+use nomifun_common::RequirementId;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{schemars, service::ServiceExt, tool, tool_router, transport};
 use serde::Deserialize;
@@ -93,7 +94,8 @@ fn validate_requirement_claims(
 struct CompleteParams {
     /// The id of the requirement you are completing. It is given to you verbatim
     /// in the AutoWork prompt ("id: ...").
-    id: i64,
+    #[schemars(with = "String")]
+    id: RequirementId,
     /// A concise note describing what you did to complete the requirement.
     #[serde(default)]
     completion_note: Option<String>,
@@ -103,7 +105,8 @@ struct CompleteParams {
 struct UpdateStatusParams {
     /// The id of the requirement to update. It is given to you verbatim in the
     /// AutoWork prompt ("id: ...").
-    id: i64,
+    #[schemars(with = "String")]
+    id: RequirementId,
     /// New status. One of: "in_progress", "done", "failed".
     status: String,
     /// Optional note or failure reason (recommended when status is "failed").

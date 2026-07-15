@@ -5,6 +5,7 @@ import type {
   ModelPreference,
   Preset,
   PresetKnowledgePolicy,
+  PresetReference,
   PresetTarget,
   UpdatePresetRequest,
 } from '@/common/types/agent/presetTypes';
@@ -22,12 +23,13 @@ import {
 } from '@/renderer/pages/settings/skill/agentSkillImportUtils';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { parseKnowledgeBaseId, type KnowledgeBaseId } from '@/common/types/ids';
 
 type UsePresetEditorParams = {
   localeKey: string;
   activePreset: PresetListItem | null;
   isExtensionPreset: (preset: PresetListItem | null | undefined) => boolean;
-  setActivePresetId: (id: string | null) => void;
+  setActivePresetId: (id: PresetReference | null) => void;
   loadPresets: () => Promise<void>;
   refreshAgentDetection: () => Promise<void>;
   message: Required<ReturnType<typeof Message.useMessage>[0]>;
@@ -69,7 +71,7 @@ export const usePresetEditor = ({
     writeback: false,
     grounded: false,
   });
-  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<string[]>([]);
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState<KnowledgeBaseId[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [promptViewMode, setPromptViewMode] = useState<'edit' | 'preview'>('preview');
@@ -269,7 +271,10 @@ export const usePresetEditor = ({
         included_skills: finalSelectedSkills.map((skill_name) => ({ skill_name, required: false })),
         excluded_auto_skills: disabledBuiltinSkills,
         knowledge_policy: knowledgePolicy,
-        knowledge_bases: knowledgeBaseIds.map((knowledge_base_id) => ({ knowledge_base_id, required: false })),
+        knowledge_bases: knowledgeBaseIds.map((knowledge_base_id) => ({
+          knowledge_base_id: parseKnowledgeBaseId(knowledge_base_id),
+          required: false,
+        })),
         audience_tags: editAudienceTags,
         scenario_tags: editScenarioTags,
       };

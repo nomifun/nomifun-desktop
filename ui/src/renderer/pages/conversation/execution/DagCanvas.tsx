@@ -11,6 +11,7 @@ import type {
   TExecutionStep,
 } from '@/common/types/agentExecution/agentExecutionTypes';
 import { latestAttemptForStep } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { ExecutionId, ExecutionStepId } from '@/common/types/ids';
 import ParticipantProfilePanel from './ParticipantProfilePanel';
 import { layoutExecutionDag } from './layoutExecutionDag';
 import { participantLogo, participantShortLabel } from './participantLabel';
@@ -94,18 +95,18 @@ export interface OpenStepPayload {
   participant?: TExecutionParticipant;
   participants: TExecutionParticipant[];
   attempt?: TExecutionAttempt;
-  executionId: string;
+  executionId: ExecutionId;
   refetch: () => Promise<void>;
 }
 
 interface DagCanvasProps {
-  executionId: string;
+  executionId: ExecutionId;
   detail: TAgentExecutionDetail | null;
   loading: boolean;
   refetch: () => Promise<void>;
   onOpenStep: (payload: OpenStepPayload) => void;
   leadThinking?: LeadThinkingState;
-  activeStepId?: string | null;
+  activeStepId?: ExecutionStepId | null;
 }
 
 const DagCanvas: React.FC<DagCanvasProps> = ({ executionId, detail, loading, refetch, onOpenStep, leadThinking, activeStepId }) => {

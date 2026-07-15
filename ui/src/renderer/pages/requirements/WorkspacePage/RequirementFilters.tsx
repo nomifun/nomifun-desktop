@@ -23,6 +23,7 @@ import {
   isRequirementSearchExpanded,
   shouldCollapseRequirementSearch,
 } from './requirementFilterToolbarState';
+import type { RequirementId } from '@/common/types/ids';
 
 const STATUS_OPTIONS: RequirementStatus[] = [
   'pending',
@@ -101,9 +102,9 @@ interface RequirementFiltersProps {
   onBatchDelete: () => void; // shown only when selectedCount>0, as a stable bar
   listSelection?: {
     total: number;
-    pageIds: number[];
-    selectedIds: Set<number>;
-    onToggleSelectAll: (pageIds: number[], checked: boolean) => void;
+    pageIds: RequirementId[];
+    selectedIds: Set<RequirementId>;
+    onToggleSelectAll: (pageIds: RequirementId[], checked: boolean) => void;
     onClearSelection: () => void;
   };
 }

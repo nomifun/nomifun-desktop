@@ -10,7 +10,7 @@ use nomifun_api_types::{
     Requirement, ResumeTagRequest, TagBindings, TagSummary, UpdateRequirementRequest, UpdateStatusRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AppError, PaginatedResult};
+use nomifun_common::{AppError, ConversationId, PaginatedResult, RequirementId, TerminalId};
 use serde::Deserialize;
 
 use crate::state::RequirementRouterState;
@@ -57,29 +57,29 @@ async fn list_requirements(
 async fn get_requirement(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<i64>,
+    Path(id): Path<RequirementId>,
 ) -> Result<Json<ApiResponse<Requirement>>, AppError> {
-    let req = state.requirement_service.get(id).await?;
+    let req = state.requirement_service.get(id.as_str()).await?;
     Ok(Json(ApiResponse::ok(req)))
 }
 
 async fn update_requirement(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<i64>,
+    Path(id): Path<RequirementId>,
     body: Result<Json<UpdateRequirementRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Requirement>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let updated = state.requirement_service.update(id, req).await?;
+    let updated = state.requirement_service.update(id.as_str(), req).await?;
     Ok(Json(ApiResponse::ok(updated)))
 }
 
 async fn delete_requirement(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<i64>,
+    Path(id): Path<RequirementId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.requirement_service.delete(id).await?;
+    state.requirement_service.delete(id.as_str()).await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -111,7 +111,7 @@ async fn resume_tag(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
     Path(tag): Path<String>,
-    body: Result<Json<ResumeTagRequest>, JsonRejection>,
+    body: Option<Json<ResumeTagRequest>>,
 ) -> Result<Json<ApiResponse<TagSummary>>, AppError> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
     let mut requeue_ids = req.requeue_ids;
@@ -175,12 +175,12 @@ async fn claim_requirement(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .requirement_service
-        .verify_conversation_owner(req.conversation_id, &user.id)
+        .verify_conversation_owner(&req.conversation_id, &user.id)
         .await?;
     let lease = req.lease_ms.unwrap_or(crate::service::DEFAULT_LEASE_MS);
     let claimed = state
         .requirement_service
-        .claim_next(&req.tag, req.conversation_id, AutoWorkTargetKind::Conversation, lease)
+        .claim_next(&req.tag, &req.conversation_id, AutoWorkTargetKind::Conversation, lease)
         .await?;
     Ok(Json(ApiResponse::ok(claimed)))
 }
@@ -188,22 +188,22 @@ async fn claim_requirement(
 async fn update_requirement_status(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<i64>,
+    Path(id): Path<RequirementId>,
     body: Result<Json<UpdateStatusRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Requirement>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let updated = state.requirement_service.set_status(id, req.status, req.note).await?;
+    let updated = state.requirement_service.set_status(id.as_str(), req.status, req.note).await?;
     Ok(Json(ApiResponse::ok(updated)))
 }
 
 async fn complete_requirement(
     State(state): State<RequirementRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<i64>,
+    Path(id): Path<RequirementId>,
     body: Result<Json<CompleteRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Requirement>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let done = state.requirement_service.complete(id, req.completion_note).await?;
+    let done = state.requirement_service.complete(id.as_str(), req.completion_note).await?;
     Ok(Json(ApiResponse::ok(done)))
 }
 
@@ -213,13 +213,11 @@ async fn set_autowork(
     body: Result<Json<AutoWorkConfigRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AutoWorkState>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    if req.target_id.trim().is_empty() {
-        return Err(AppError::BadRequest("target_id is required".into()));
-    }
+    validate_target_id(req.kind, &req.target_id)?;
     if req.enabled && req.tag.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest("tag is required when enabling autowork".into()));
     }
-    // Admin guard (标签会话管理): refuse to disable a session that is actively
+    // Admin guard (tag/session management): refuse to disable a session that is actively
     // executing a requirement when the request comes from the admin backend. The
     // user must stop it from the session page so a live turn is not interrupted.
     // Session-page toggles leave `from_admin` false and may always disable.
@@ -234,15 +232,10 @@ async fn set_autowork(
     // Ownership + (terminal) eligibility, per target kind.
     match req.kind {
         AutoWorkTargetKind::Conversation => {
-            // `target_id` is the AutoWork (string) target handle; the conversation
-            // owner check is keyed by the integer conversation id.
-            let conv_id = req
-                .target_id
-                .parse::<i64>()
-                .map_err(|_| AppError::NotFound(format!("conversation {}", req.target_id)))?;
+            // Validate ownership in the conversation ID domain.
             state
                 .requirement_service
-                .verify_conversation_owner(conv_id, &user.id)
+                .verify_conversation_owner(&req.target_id, &user.id)
                 .await?;
         }
         AutoWorkTargetKind::Terminal => {
@@ -299,14 +292,12 @@ async fn get_autowork(
 ) -> Result<Json<ApiResponse<AutoWorkState>>, AppError> {
     let kind = AutoWorkTargetKind::parse(&kind)
         .ok_or_else(|| AppError::BadRequest(format!("unknown autowork target kind: {kind}")))?;
+    validate_target_id(kind, &target_id)?;
     match kind {
         AutoWorkTargetKind::Conversation => {
-            let conv_id = target_id
-                .parse::<i64>()
-                .map_err(|_| AppError::NotFound(format!("conversation {target_id}")))?;
             state
                 .requirement_service
-                .verify_conversation_owner(conv_id, &user.id)
+                .verify_conversation_owner(&target_id, &user.id)
                 .await?;
         }
         AutoWorkTargetKind::Terminal => {
@@ -318,6 +309,21 @@ async fn get_autowork(
     }
     let st = build_autowork_state(&state, kind, &target_id).await?;
     Ok(Json(ApiResponse::ok(st)))
+}
+
+fn validate_target_id(kind: AutoWorkTargetKind, target_id: &str) -> Result<(), AppError> {
+    let valid = match kind {
+        AutoWorkTargetKind::Conversation => ConversationId::try_from(target_id).is_ok(),
+        AutoWorkTargetKind::Terminal => TerminalId::try_from(target_id).is_ok(),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "target_id is not a canonical {} ID",
+            kind.as_str()
+        )))
+    }
 }
 
 async fn build_autowork_state(

@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { parseConversationId, parseMessageId, type MessageId } from '@/common/types/ids';
 import type { TMessage } from '@/common/chat/chatLib';
 import {
   composeMessageForTest,
@@ -13,18 +14,30 @@ import {
   normalizeDbMessage,
 } from './hooks';
 
-const baseMessage = (overrides: Partial<TMessage>): TMessage =>
+const messageId = (label: string): MessageId => {
+  const suffix = Array.from(label)
+    .map((char) => char.charCodeAt(0).toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, 12)
+    .padEnd(12, '0');
+  return parseMessageId(`msg_019b0000-0000-7000-8000-${suffix}`);
+};
+
+type MessageOverrides = Omit<Partial<TMessage>, 'msg_id'> & { msg_id?: string | MessageId };
+
+const baseMessage = (overrides: MessageOverrides): TMessage =>
   ({
     id: 'msg',
-    msg_id: 'msg',
+    msg_id: messageId('default'),
     type: 'text',
     position: 'left',
     status: 'finish',
     hidden: false,
-    conversation_id: 53,
+    conversation_id: parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004'),
     created_at: 1000,
     content: { content: '' },
     ...overrides,
+    ...(overrides.msg_id == null ? {} : { msg_id: messageId(overrides.msg_id) }),
   }) as TMessage;
 
 describe('mergeFetchedMessagesForConversation', () => {
@@ -49,7 +62,7 @@ describe('mergeFetchedMessagesForConversation', () => {
       },
     });
 
-    const merged = mergeFetchedMessagesForConversation([streamingThinking], [persistedThinking], 53);
+    const merged = mergeFetchedMessagesForConversation([streamingThinking], [persistedThinking], parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004'));
 
     expect(merged).toHaveLength(1);
     expect(merged[0]).toEqual(persistedThinking);
@@ -75,7 +88,7 @@ describe('mergeFetchedMessagesForConversation', () => {
       },
     });
 
-    const merged = mergeFetchedMessagesForConversation([streamingThinking], [stalePersistedThinking], 53);
+    const merged = mergeFetchedMessagesForConversation([streamingThinking], [stalePersistedThinking], parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004'));
 
     expect(merged).toHaveLength(1);
     expect(merged[0]).toEqual(streamingThinking);
@@ -122,7 +135,7 @@ describe('composeMessageForTest', () => {
     const merged = composeMessageForTest(secondTurn, [firstTurn]);
 
     expect(merged).toHaveLength(2);
-    expect(merged.map((message) => message.msg_id)).toEqual(['turn-1', 'turn-2']);
+    expect(merged.map((message) => message.msg_id)).toEqual([messageId('turn-1'), messageId('turn-2')]);
   });
 
   test('replaces the current plan by session_id even when the incoming msg_id changes', () => {
@@ -354,7 +367,7 @@ describe('normalizeDbMessage', () => {
       },
     });
 
-    const merged = mergeFetchedMessagesForConversation([streaming], [persisted], 53);
+    const merged = mergeFetchedMessagesForConversation([streaming], [persisted], parseConversationId('conv_0190f5fe-7c00-7a00-8000-000000000004'));
 
     expect(merged).toHaveLength(1);
     expect(merged[0].type).toBe('text');

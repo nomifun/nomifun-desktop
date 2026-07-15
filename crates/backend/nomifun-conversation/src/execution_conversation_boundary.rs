@@ -6,7 +6,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nomifun_common::{AppError, ConversationExecutionRelation};
+use nomifun_common::{
+    AgentExecutionAttemptId, AgentExecutionId, AgentExecutionStepId, AppError, ConversationExecutionRelation,
+    ConversationId,
+};
 use nomifun_db::IAgentExecutionRepository;
 
 /// Read-model projection exposed on a conversation response.
@@ -26,19 +29,19 @@ pub trait ExecutionConversationBoundary: Send + Sync {
     async fn projection(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<ConversationExecutionProjection, AppError>;
 
     async fn is_active_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, AppError>;
 
     async fn is_retained_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, AppError>;
 }
 
@@ -55,7 +58,7 @@ impl ExecutionConversationBoundary for NoExecutionConversationBoundary {
     async fn projection(
         &self,
         _owner_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
     ) -> Result<ConversationExecutionProjection, AppError> {
         Ok(ConversationExecutionProjection::default())
     }
@@ -63,7 +66,7 @@ impl ExecutionConversationBoundary for NoExecutionConversationBoundary {
     async fn is_active_attempt(
         &self,
         _owner_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
     ) -> Result<bool, AppError> {
         Ok(false)
     }
@@ -71,7 +74,7 @@ impl ExecutionConversationBoundary for NoExecutionConversationBoundary {
     async fn is_retained_attempt(
         &self,
         _owner_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
     ) -> Result<bool, AppError> {
         Ok(false)
     }
@@ -94,12 +97,29 @@ impl ExecutionConversationBoundary for RepositoryExecutionConversationBoundary {
     async fn projection(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<ConversationExecutionProjection, AppError> {
+        ConversationId::try_from(conversation_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid conversation_id: {error}")))?;
         let links = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
             .await?;
+        for link in &links {
+            AgentExecutionId::try_from(link.execution_id.as_str()).map_err(|error| {
+                AppError::Internal(format!("invalid persisted execution link execution_id: {error}"))
+            })?;
+            if let Some(step_id) = link.step_id.as_deref() {
+                AgentExecutionStepId::try_from(step_id).map_err(|error| {
+                    AppError::Internal(format!("invalid persisted execution link step_id: {error}"))
+                })?;
+            }
+            if let Some(attempt_id) = link.attempt_id.as_deref() {
+                AgentExecutionAttemptId::try_from(attempt_id).map_err(|error| {
+                    AppError::Internal(format!("invalid persisted execution link attempt_id: {error}"))
+                })?;
+            }
+        }
 
         let mut active_attempts = links.iter().filter(|link| {
             link.active && link.relation == ConversationExecutionRelation::Attempt.as_str()
@@ -153,7 +173,7 @@ impl ExecutionConversationBoundary for RepositoryExecutionConversationBoundary {
     async fn is_active_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, AppError> {
         let links = self
             .repository
@@ -169,7 +189,7 @@ impl ExecutionConversationBoundary for RepositoryExecutionConversationBoundary {
     async fn is_retained_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<bool, AppError> {
         Ok(self
             .repository

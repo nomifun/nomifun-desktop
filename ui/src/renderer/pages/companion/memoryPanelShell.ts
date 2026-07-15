@@ -1,6 +1,7 @@
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import type { GeomRect } from './windowGeometry';
 import { MEMORY_PANEL_LABEL } from './memoryPanelProtocol';
+import type { CompanionId } from '@/common/types/ids';
 
 const invoke = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
   const core = await import('@tauri-apps/api/core');
@@ -10,10 +11,10 @@ const invoke = async <T>(command: string, args?: Record<string, unknown>): Promi
 export async function prepareMemoryPanelWindow(): Promise<void> {
   if (isTauriRuntime()) await invoke('prepare_companion_memory_panel');
 }
-export async function placeMemoryPanelWindow(args: { requestId: string; ownerCompanionId: string; rect: GeomRect }): Promise<void> {
+export async function placeMemoryPanelWindow(args: { requestId: string; ownerCompanionId: CompanionId; rect: GeomRect }): Promise<void> {
   if (isTauriRuntime()) await invoke('place_companion_memory_panel', args);
 }
-export async function showMemoryPanelWindow(args: { requestId: string; ownerCompanionId: string }): Promise<boolean> {
+export async function showMemoryPanelWindow(args: { requestId: string; ownerCompanionId: CompanionId }): Promise<boolean> {
   return isTauriRuntime() ? invoke<boolean>('show_companion_memory_panel', args) : false;
 }
 export async function hideMemoryPanelWindow(requestId: string): Promise<boolean> {

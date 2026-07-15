@@ -4,6 +4,7 @@
 //! write policy, and disk writes.
 
 use nomifun_api_types::KnowledgeMountInfo;
+use nomifun_common::KnowledgeBaseId;
 use serde::Deserialize;
 
 use crate::context::WritebackEagerness;
@@ -41,8 +42,7 @@ Rules:\n\
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TurnWritebackCandidate {
-    #[serde(default)]
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     #[serde(default)]
     pub rel_path: String,
     #[serde(default)]
@@ -185,23 +185,33 @@ mod tests {
 
     #[test]
     fn parse_tolerates_fences_and_surrounding_text() {
-        let out = parse_turn_writeback_output(
-            "```json\n{\"candidates\":[{\"kb_id\":\"kb\",\"rel_path\":\"a.md\",\"content\":\"# A\"}]}\n```",
-        )
-        .unwrap();
+        let kb_id = KnowledgeBaseId::new();
+        let raw = format!(
+            "```json\n{{\"candidates\":[{{\"kb_id\":\"{kb_id}\",\"rel_path\":\"a.md\",\"content\":\"# A\"}}]}}\n```"
+        );
+        let out = parse_turn_writeback_output(&raw).unwrap();
         assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].kb_id, kb_id);
         assert_eq!(out.candidates[0].rel_path, "a.md");
+    }
+
+    #[test]
+    fn parse_rejects_noncanonical_knowledge_base_id() {
+        let raw = r##"{"candidates":[{"kb_id":"kb_1","rel_path":"a.md","content":"# A"}]}"##;
+        assert!(parse_turn_writeback_output(raw).is_err());
     }
 
     #[test]
     fn prompt_labels_eagerness_without_changing_placement() {
         let prompt = build_turn_writeback_prompt(
             &[KnowledgeMountInfo {
-                id: "kb1".into(),
+                id: nomifun_common::KnowledgeBaseId::new(),
                 name: "Ops".into(),
+                description: String::new(),
                 rel_path: ".nomi/knowledge/Ops".into(),
                 toc: vec!["runbook.md — Runbook".into()],
-                ..Default::default()
+                summary: None,
+                live_sources: Vec::new(),
             }],
             WritebackEagerness::Aggressive,
             "u",

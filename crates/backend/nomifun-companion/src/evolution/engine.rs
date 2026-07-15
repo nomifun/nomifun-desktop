@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nomifun_common::{AppError, generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, generate_id, now_ms};
 use nomifun_extension::constants::SKILL_MANIFEST_FILE;
 use nomifun_extension::skill_service::{self, SkillDraftInput, SkillPaths, SkillScope};
 use tokio::sync::Mutex;
@@ -135,9 +135,11 @@ impl EvolutionEngine {
             if n > 0 {
                 let owner = {
                     let did = { self.config.read().await.default_companion_id.clone() };
-                    self.registry.resolve_default(&did).await
+                    self.registry.resolve_default(did.as_deref()).await
                 };
-                self.emitter.emit_skill_archived(&owner, "");
+                if let Some(owner) = owner.as_deref() {
+                    self.emitter.emit_skill_archived(owner, "");
+                }
             }
         }
 
@@ -146,11 +148,7 @@ impl EvolutionEngine {
             // One model for the whole flywheel: fall back to the learn model when no
             // dedicated evolve model is configured, so default-on works out of the box
             // once the user has set the shared learning model.
-            let model = if cfg.evolve.model.is_configured() {
-                cfg.evolve.model.clone()
-            } else {
-                cfg.learn.model.clone()
-            };
+            let model = cfg.evolve.model.clone().or_else(|| cfg.learn.model.clone());
             (
                 model,
                 cfg.evolve.min_pattern_count,
@@ -161,7 +159,10 @@ impl EvolutionEngine {
             )
         };
         let mut run = EvolveRun {
-            id: generate_prefixed_id("evr"),
+            // This summary is returned to the current caller only. It is not
+            // persisted, exported, or referenced after the call, so use an
+            // operation token rather than registering a durable entity type.
+            id: generate_id(),
             started_at,
             finished_at: None,
             status: "ok".into(),
@@ -171,22 +172,21 @@ impl EvolutionEngine {
             error: None,
         };
 
-        if !model.is_configured() {
+        let Some(model) = model else {
             run.status = "model_unconfigured".into();
             run.finished_at = Some(now_ms());
             return Ok(run);
-        }
+        };
 
         // 自生成技能必须归属某个伙伴（伙伴级专属成长）。默认体解析复用 registry 单一事实源。
-        let owner = {
+        let Some(owner) = ({
             let did = { self.config.read().await.default_companion_id.clone() };
-            self.registry.resolve_default(&did).await
-        };
-        if owner.is_empty() {
+            self.registry.resolve_default(did.as_deref()).await
+        }) else {
             run.status = "no_companion".into();
             run.finished_at = Some(now_ms());
             return Ok(run);
-        }
+        };
 
         let cursor = self.store.get_state_i64("evolve_cursor_ts").await?;
         let (events, _truncated) = read_events_since(&self.companion_dir, cursor, MAX_EVENTS_PER_RUN);
@@ -365,7 +365,7 @@ impl EvolutionEngine {
         let skill = CompanionSkill {
             skill_name: name.clone(),
             scope_kind: "companion".into(),
-            scope_companion_id: owner.to_owned(),
+            scope_companion_id: Some(owner.to_owned()),
             status: if auto { "active".into() } else { "draft".into() },
             source: "mined".into(),
             confidence,
@@ -417,16 +417,18 @@ impl EvolutionEngine {
         anchor: TranscriptAnchor,
         owner: &str,
     ) -> Result<Option<String>, AppError> {
-        if steps.len() < 2 || owner.is_empty() {
+        if steps.len() < 2 {
             return Ok(None);
         }
+        nomifun_common::CompanionId::try_from(owner)
+            .map_err(|error| AppError::BadRequest(format!("invalid companion id: {error}")))?;
         let model = {
             let cfg = self.config.read().await;
-            if cfg.evolve.model.is_configured() { cfg.evolve.model.clone() } else { cfg.learn.model.clone() }
+            cfg.evolve.model.clone().or_else(|| cfg.learn.model.clone())
         };
-        if !model.is_configured() {
+        let Some(model) = model else {
             return Err(AppError::BadRequest("尚未配置学习模型".into()));
-        }
+        };
         let p = MinedPattern {
             signature: crate::evolution::tool_call_signature(&steps),
             steps: steps.clone(),
@@ -473,7 +475,7 @@ impl EvolutionEngine {
             .insert_skill(&CompanionSkill {
                 skill_name: name.clone(),
                 scope_kind: "companion".into(),
-                scope_companion_id: owner.to_owned(),
+                scope_companion_id: Some(owner.to_owned()),
                 status: "draft".into(),
                 source: "demonstrated".into(),
                 confidence: 0.5,
@@ -524,6 +526,11 @@ mod tests {
     use nomifun_realtime::BroadcastEventBus;
     use tokio::sync::RwLock;
 
+    fn conversation_fixture(sequence: u64) -> String {
+        let raw = format!("conv_0190f5fe-7c00-7a00-8abc-{sequence:012}");
+        nomifun_common::ConversationId::try_from(raw.as_str()).unwrap().into_string()
+    }
+
     /// 按 system 提示区分起草/评审两次调用。
     struct ScriptedCompleter {
         draft: String,
@@ -573,7 +580,7 @@ mod tests {
     fn seed_tool_calls(dir: &std::path::Path) {
         let base = now_ms();
         let mut k = 0i64;
-        for conv in ["c1", "c2", "c3"] {
+        for conv in [conversation_fixture(1), conversation_fixture(2), conversation_fixture(3)] {
             for tool in ["grep", "read", "edit"] {
                 k += 1;
                 append_event(
@@ -597,13 +604,16 @@ mod tests {
     async fn make_engine_with(dir: &std::path::Path, completer: Arc<dyn CompanionCompleter>) -> (EvolutionEngine, String) {
         let mut config = SharedCompanionConfig::default();
         config.evolve.enabled = true;
-        config.evolve.model.provider_id = "prov_t".into();
-        config.evolve.model.model = "test-model".into();
+        config.evolve.model = Some(nomifun_common::ProviderWithModel {
+            provider_id: nomifun_common::ProviderId::new().into_string(),
+            model: "test-model".into(),
+            use_model: None,
+        });
         config.evolve.min_pattern_count = 3;
         config.evolve.min_distinct_sessions = 2;
         let registry = Arc::new(CompanionRegistry::scan(dir.join("companions"), dir.join("shared")));
         let companion = registry.create("测试", "ink").await.unwrap();
-        config.default_companion_id = companion.id.clone();
+        config.default_companion_id = Some(companion.id.clone());
         let engine = EvolutionEngine {
             companion_dir: dir.to_path_buf(),
             config: Arc::new(RwLock::new(config)),
@@ -676,15 +686,18 @@ mod tests {
         {
             let mut cfg = engine.config.write().await;
             cfg.evolve.model = Default::default(); // no dedicated evolve model
-            cfg.learn.model.provider_id = "prov_t".into(); // learn model configured
-            cfg.learn.model.model = "test-model".into();
+            cfg.learn.model = Some(nomifun_common::ProviderWithModel {
+                provider_id: nomifun_common::ProviderId::new().into_string(),
+                model: "test-model".into(),
+                use_model: None,
+            }); // learn model configured
         }
         let run = engine.run_once().await.unwrap();
         assert_ne!(run.status, "model_unconfigured", "should fall back to the learn model");
         assert_eq!(run.drafts_created, 1);
     }
 
-    fn seed_repeated(dir: &std::path::Path, convs: &[&str], tools: &[&str]) {
+    fn seed_repeated(dir: &std::path::Path, convs: &[String], tools: &[&str]) {
         let base = now_ms();
         let mut k = 0i64;
         for conv in convs {
@@ -708,7 +721,11 @@ mod tests {
     async fn high_confidence_pattern_auto_activates_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
         // 4 distinct sessions repeating the same 3-step pattern → confidence ≥ 0.85.
-        seed_repeated(dir.path(), &["c1", "c2", "c3", "c4"], &["grep", "read", "edit"]);
+        seed_repeated(
+            dir.path(),
+            &[conversation_fixture(1), conversation_fixture(2), conversation_fixture(3), conversation_fixture(4)],
+            &["grep", "read", "edit"],
+        );
         let draft = r#"{"name":"auto-skill","description":"d","when_to_use":"w","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
         engine.config.write().await.evolve.auto_activate = true;
@@ -726,7 +743,7 @@ mod tests {
     async fn reflection_drafts_single_complex_session_and_never_auto_activates() {
         let dir = tempfile::tempdir().unwrap();
         // one session, a long non-repeating tool sequence (5 steps) → reflection candidate.
-        seed_repeated(dir.path(), &["solo"], &["grep", "read", "edit", "write", "bash"]);
+        seed_repeated(dir.path(), &[conversation_fixture(5)], &["grep", "read", "edit", "write", "bash"]);
         let draft = r#"{"name":"reflect-skill","description":"d","when_to_use":"w","body":"b"}"#;
         let (engine, cid) = make_engine(dir.path(), draft, true).await;
         // even with auto on, a single-session reflection (distinct=1, low confidence) stays a draft.
@@ -756,7 +773,11 @@ mod tests {
     #[tokio::test]
     async fn evolve_improves_similar_skill_in_place_not_duplicate() {
         let dir = tempfile::tempdir().unwrap();
-        seed_repeated(dir.path(), &["c1", "c2", "c3"], &["grep", "read", "edit"]);
+        seed_repeated(
+            dir.path(),
+            &[conversation_fixture(1), conversation_fixture(2), conversation_fixture(3)],
+            &["grep", "read", "edit"],
+        );
         let (engine, cid) = make_engine_with(dir.path(), Arc::new(VersioningCompleter)).await;
         // Pre-existing active skill whose name the new draft ("grep-read-edit-flow") is similar to.
         let input = SkillDraftInput {
@@ -774,7 +795,7 @@ mod tests {
             .insert_skill(&CompanionSkill {
                 skill_name: "grep-read-edit".into(),
                 scope_kind: "companion".into(),
-                scope_companion_id: cid.clone(),
+                scope_companion_id: Some(cid.clone()),
                 status: "active".into(),
                 source: "mined".into(),
                 confidence: 0.7,

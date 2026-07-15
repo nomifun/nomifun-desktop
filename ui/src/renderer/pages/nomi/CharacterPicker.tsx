@@ -11,6 +11,7 @@ import { Message, Modal } from '@arco-design/web-react';
 import { IconDelete, IconPlus } from '@arco-design/web-react/icon';
 import { getBaseUrl, isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { IFigureMeta } from '@/common/adapter/ipcBridge';
+import type { FigureId } from '@/common/types/ids';
 import { CHARACTERS, CUSTOM_CHARACTER_ID } from '@renderer/pages/companion/characters';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
 import { figureImageUrlOf } from '@renderer/pages/companion/characters/customMeta';
@@ -29,7 +30,7 @@ const CharacterPicker: React.FC<{
   /** Selected character id ('mochi'…'custom'). */
   value: string;
   /** Selected library figure id when `value === 'custom'`. */
-  figureId?: string;
+  figureId?: FigureId;
   /** A built-in roster character was chosen. */
   onSelectCharacter: (id: string) => void;
   /** A library figure was chosen (or just created). */

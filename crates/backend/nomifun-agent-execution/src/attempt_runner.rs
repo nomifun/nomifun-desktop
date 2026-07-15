@@ -19,7 +19,8 @@ use nomifun_api_types::{
     ListMessagesQuery, SendMessageRequest,
 };
 use nomifun_common::{
-    AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy, ProviderWithModel,
+    AgentToolPolicy, AgentType, AppError, DecisionPolicy, DelegationPolicy, ProviderId,
+    ProviderWithModel,
     MAX_AGENT_DELEGATION_DEPTH,
 };
 use nomifun_conversation::{AgentExecutionConversationPort, ConversationService};
@@ -29,12 +30,12 @@ use serde_json::{Value, json};
 /// and before its first message is sent. The scheduler uses it to persist the
 /// attempt link and make cancellation/recovery race-free.
 pub(crate) type AttemptStarted = Box<
-    dyn FnOnce(i64) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>> + Send,
+    dyn FnOnce(String) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>> + Send,
 >;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptOutcome {
-    pub conversation_id: i64,
+    pub conversation_id: String,
     pub text: Option<String>,
     pub ok: bool,
     pub tokens: Option<i64>,
@@ -66,7 +67,7 @@ pub(crate) trait AttemptRunner: Send + Sync {
     async fn continue_with_input(
         &self,
         _owner_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
         _operation_id: &str,
         _input: &str,
         _timeout: Duration,
@@ -88,19 +89,19 @@ pub(crate) trait AttemptRunner: Send + Sync {
         Ok(())
     }
 
-    async fn read_final_output(&self, _owner_id: &str, _conversation_id: i64) -> Option<String> {
+    async fn read_final_output(&self, _owner_id: &str, _conversation_id: &str) -> Option<String> {
         None
     }
 
-    async fn last_error_retryable(&self, _owner_id: &str, _conversation_id: i64) -> bool {
+    async fn last_error_retryable(&self, _owner_id: &str, _conversation_id: &str) -> bool {
         false
     }
 
-    async fn last_error_present(&self, _owner_id: &str, _conversation_id: i64) -> bool {
+    async fn last_error_present(&self, _owner_id: &str, _conversation_id: &str) -> bool {
         false
     }
 
-    async fn last_error_summary(&self, _owner_id: &str, _conversation_id: i64) -> Option<String> {
+    async fn last_error_summary(&self, _owner_id: &str, _conversation_id: &str) -> Option<String> {
         None
     }
 }
@@ -121,11 +122,10 @@ impl ConversationAttemptRunner {
         }
     }
 
-    async fn await_turn(&self, conversation_id: i64, timeout: Duration, poll: Duration) -> bool {
+    async fn await_turn(&self, conversation_id: &str, timeout: Duration, poll: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        let id = conversation_id.to_string();
         loop {
-            if !self.conv.runtime_summary_for(&id).await.is_processing {
+            if !self.conv.runtime_summary_for(conversation_id).await.is_processing {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -135,12 +135,12 @@ impl ConversationAttemptRunner {
         }
     }
 
-    async fn recent_messages(&self, owner_id: &str, conversation_id: i64) -> Option<Value> {
+    async fn recent_messages(&self, owner_id: &str, conversation_id: &str) -> Option<Value> {
         let messages = self
             .conv
             .list_messages(
                 owner_id,
-                &conversation_id.to_string(),
+                conversation_id,
                 ListMessagesQuery {
                     page: Some(1),
                     page_size: Some(10),
@@ -158,18 +158,17 @@ impl ConversationAttemptRunner {
     async fn deliver_turn(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         content: &str,
         origin: &str,
         timeout: Duration,
     ) -> Result<AttemptOutcome, AppError> {
-        let id = conversation_id.to_string();
         let delivery = self
             .execution_port
             .deliver_turn(
                 owner_id,
-                &id,
+                conversation_id,
                 operation_id,
                 SendMessageRequest {
                     content: content.to_owned(),
@@ -183,10 +182,10 @@ impl ConversationAttemptRunner {
             .await?;
         if delivery.completed {
             return Ok(AttemptOutcome {
-                conversation_id,
+                conversation_id: conversation_id.to_owned(),
                 text: delivery.result_text,
                 ok: delivery.result_ok.unwrap_or(false),
-                tokens: self.conv.take_turn_tokens(&id),
+                tokens: self.conv.take_turn_tokens(conversation_id),
             });
         }
         if !self
@@ -194,10 +193,10 @@ impl ConversationAttemptRunner {
             .await
         {
             return Ok(AttemptOutcome {
-                conversation_id,
+                conversation_id: conversation_id.to_owned(),
                 text: None,
                 ok: false,
-                tokens: self.conv.take_turn_tokens(&id),
+                tokens: self.conv.take_turn_tokens(conversation_id),
             });
         }
         let _ = self
@@ -209,15 +208,15 @@ impl ConversationAttemptRunner {
             .await;
         if let Some(receipt) = self
             .execution_port
-            .delivery_result(owner_id, &id, operation_id)
+            .delivery_result(owner_id, conversation_id, operation_id)
             .await?
             .filter(|receipt| receipt.completed)
         {
             return Ok(AttemptOutcome {
-                conversation_id,
+                conversation_id: conversation_id.to_owned(),
                 text: receipt.result_text,
                 ok: receipt.result_ok.unwrap_or(false),
-                tokens: self.conv.take_turn_tokens(&id),
+                tokens: self.conv.take_turn_tokens(conversation_id),
             });
         }
         let text = self
@@ -226,10 +225,10 @@ impl ConversationAttemptRunner {
             .as_ref()
             .and_then(latest_assistant_text);
         Ok(AttemptOutcome {
-            conversation_id,
+            conversation_id: conversation_id.to_owned(),
             ok: text.is_some(),
             text,
-            tokens: self.conv.take_turn_tokens(&id),
+            tokens: self.conv.take_turn_tokens(conversation_id),
         })
     }
 }
@@ -261,6 +260,16 @@ impl AttemptRunner for ConversationAttemptRunner {
                 "execution participant needs a provider and model".to_owned(),
             ));
         };
+        ProviderId::try_from(provider_id.as_str()).map_err(|_| {
+            AppError::BadRequest(
+                "execution participant has a non-canonical provider_id".to_owned(),
+            )
+        })?;
+        if model.trim().is_empty() || model.trim() != model {
+            return Err(AppError::BadRequest(
+                "execution participant has an invalid model".to_owned(),
+            ));
+        }
         let provider = ProviderWithModel {
             provider_id,
             model: model.clone(),
@@ -333,7 +342,7 @@ impl AttemptRunner for ConversationAttemptRunner {
 
         // This callback is awaited before the Agent can start. An outbox/link
         // failure leaves no untracked in-flight turn.
-        if let Err(error) = on_started(conversation.id).await {
+        if let Err(error) = on_started(conversation.id.clone()).await {
             // If the link commit succeeded but its acknowledgement was lost,
             // the Conversation deletion guard rejects this cleanup.  Otherwise
             // the creation key and row are removed together, leaving no orphan.
@@ -354,7 +363,7 @@ impl AttemptRunner for ConversationAttemptRunner {
         let operation_id = format!("{attempt_creation_key}:initial-turn");
         self.deliver_turn(
             owner_id,
-            conversation.id,
+            &conversation.id,
             &operation_id,
             step_spec,
             "agent_execution",
@@ -366,7 +375,7 @@ impl AttemptRunner for ConversationAttemptRunner {
     async fn continue_with_input(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         input: &str,
         timeout: Duration,
@@ -392,28 +401,28 @@ impl AttemptRunner for ConversationAttemptRunner {
             .await
     }
 
-    async fn read_final_output(&self, owner_id: &str, conversation_id: i64) -> Option<String> {
+    async fn read_final_output(&self, owner_id: &str, conversation_id: &str) -> Option<String> {
         self.recent_messages(owner_id, conversation_id)
             .await
             .as_ref()
             .and_then(latest_assistant_text)
     }
 
-    async fn last_error_retryable(&self, owner_id: &str, conversation_id: i64) -> bool {
+    async fn last_error_retryable(&self, owner_id: &str, conversation_id: &str) -> bool {
         self.recent_messages(owner_id, conversation_id)
             .await
             .as_ref()
             .is_some_and(latest_error_retryable)
     }
 
-    async fn last_error_present(&self, owner_id: &str, conversation_id: i64) -> bool {
+    async fn last_error_present(&self, owner_id: &str, conversation_id: &str) -> bool {
         self.recent_messages(owner_id, conversation_id)
             .await
             .as_ref()
             .is_some_and(latest_error_present)
     }
 
-    async fn last_error_summary(&self, owner_id: &str, conversation_id: i64) -> Option<String> {
+    async fn last_error_summary(&self, owner_id: &str, conversation_id: &str) -> Option<String> {
         self.recent_messages(owner_id, conversation_id)
             .await
             .as_ref()

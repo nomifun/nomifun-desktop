@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_auth::AuthPolicy;
+use nomifun_common::validate_uuidv7;
 use sha2::{Digest, Sha256};
 
-const DATA_ENCRYPTION_KEY_FILE: &str = "encryption_key";
+pub(crate) const DATA_ENCRYPTION_KEY_FILE: &str = "encryption_key";
+const STORAGE_GENERATION_FILE: &str = "storage-generation";
 
 /// Application configuration parsed from CLI arguments.
 #[derive(Debug, Clone)]
@@ -36,6 +38,34 @@ impl AppConfig {
     pub fn database_path(&self) -> PathBuf {
         self.data_dir.join("nomifun-backend.db")
     }
+}
+
+/// Return the opaque identity of the current on-disk dataset, creating it on
+/// first boot.
+///
+/// Browser-local caches and future backup manifests use this value to scope
+/// state that is not stored in the main database. Rotating the data directory
+/// or applying a factory reset therefore cannot make stale per-entity browser
+/// state look current merely because an entity identifier was reused.
+pub fn load_or_create_storage_generation(data_dir: &Path) -> anyhow::Result<String> {
+    let path = data_dir.join(STORAGE_GENERATION_FILE);
+    if path.exists() {
+        let value = fs::read_to_string(&path)?;
+        if validate_uuidv7(&value).is_err() {
+            anyhow::bail!(
+                "Invalid storage generation at {}: expected canonical lowercase UUIDv7",
+                path.display()
+            );
+        }
+        return Ok(value);
+    }
+
+    fs::create_dir_all(data_dir)?;
+    let value = uuid::Uuid::now_v7().to_string();
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &value)?;
+    fs::rename(&tmp_path, &path)?;
+    Ok(value)
 }
 
 impl Default for AppConfig {
@@ -101,6 +131,15 @@ pub fn load_or_create_data_encryption_key(data_dir: &Path, jwt_secret: &str) -> 
     }
     fs::rename(&tmp_path, &key_path)?;
     Ok(key)
+}
+
+/// Validate an existing persistent encryption-key file without creating or
+/// changing it. Offline backup uses this to avoid producing a bundle that
+/// carries an unusable key beside encrypted database rows.
+pub(crate) fn validate_existing_data_encryption_key(path: &Path) -> anyhow::Result<()> {
+    let raw = fs::read_to_string(path)?;
+    parse_hex_key(raw.trim(), path)?;
+    Ok(())
 }
 
 fn hex_encode_key(key: &[u8; 32]) -> String {
@@ -189,5 +228,37 @@ mod tests {
         assert_eq!(first, derive_encryption_key("jwt-secret-before"));
         assert_eq!(second, first);
         assert_ne!(second, derive_encryption_key("jwt-secret-after"));
+    }
+
+    #[test]
+    fn storage_generation_is_stable_until_its_file_is_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = load_or_create_storage_generation(tmp.path()).unwrap();
+        let second = load_or_create_storage_generation(tmp.path()).unwrap();
+        assert_eq!(first, second);
+        assert!(nomifun_common::validate_uuidv7(&first).is_ok());
+
+        std::fs::remove_file(tmp.path().join(STORAGE_GENERATION_FILE)).unwrap();
+        let rotated = load_or_create_storage_generation(tmp.path()).unwrap();
+        assert_ne!(rotated, first);
+    }
+
+    #[test]
+    fn storage_generation_rejects_noncanonical_or_non_v7_values() {
+        let canonical = uuid::Uuid::now_v7().to_string();
+        let invalid_values = [
+            "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            format!("{canonical}\n"),
+            format!("{canonical} "),
+            canonical.to_ascii_uppercase(),
+        ];
+        for invalid in invalid_values {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(tmp.path().join(STORAGE_GENERATION_FILE), &invalid).unwrap();
+            assert!(
+                load_or_create_storage_generation(tmp.path()).is_err(),
+                "accepted invalid storage generation {invalid:?}"
+            );
+        }
     }
 }

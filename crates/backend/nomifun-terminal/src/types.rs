@@ -102,7 +102,7 @@ mod tests {
 
     fn sample_row() -> TerminalSessionRow {
         TerminalSessionRow {
-            id: 1,
+            id: nomifun_common::TerminalId::new(),
             name: "shell".into(),
             cwd: "/tmp".into(),
             command: "$SHELL".into(),
@@ -116,7 +116,7 @@ mod tests {
             updated_at: 20,
             last_status: "running".into(),
             exit_code: None,
-            user_id: "u".into(),
+            user_id: nomifun_common::UserId::new(),
             pinned: false,
             pinned_at: None,
             autowork: None,
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn row_to_response_parses_args_and_maps_fields() {
         let resp = row_to_response(&sample_row(), Some("c2I=".into()), Path::new("/work"));
-        assert_eq!(resp.id, 1);
+        assert!(resp.id.starts_with("term_"));
         assert_eq!(resp.args, vec!["-l".to_owned()]);
         assert_eq!((resp.cols, resp.rows), (100, 30));
         assert_eq!(resp.scrollback_b64.as_deref(), Some("c2I="));

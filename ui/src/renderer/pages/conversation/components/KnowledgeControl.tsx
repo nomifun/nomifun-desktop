@@ -30,6 +30,7 @@ import { Button, Input, Message, Popover, Switch, Tooltip } from '@arco-design/w
 import { BookOne } from '@icon-park/react';
 import { useNavigate } from 'react-router-dom';
 import { ipcBridge } from '@/common';
+import type { CompanionId, ConversationId, KnowledgeBaseId, TerminalId } from '@/common/types/ids';
 import type {
   IKnowledgeBase,
   IKnowledgeBinding,
@@ -53,9 +54,9 @@ import {
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
 
 export type KnowledgeTarget =
-  | { kind: 'conversation'; id: number }
-  | { kind: 'terminal'; id: number }
-  | { kind: 'companion'; id: string }
+  | { kind: 'conversation'; id: ConversationId }
+  | { kind: 'terminal'; id: TerminalId }
+  | { kind: 'companion'; id: CompanionId }
   | { kind: 'workpath'; id: string };
 
 /** Draft (pre-creation) mode: the binding lives in the parent's state and is
@@ -322,7 +323,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   };
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
-  const handleToggleBase = (baseId: string) => {
+  const handleToggleBase = (baseId: KnowledgeBaseId) => {
     const isSelected = binding.kb_ids.includes(baseId);
     const nextIds = isSelected ? binding.kb_ids.filter((x) => x !== baseId) : [...binding.kb_ids, baseId];
     // Auto-enable when first base selected; auto-disable when last removed

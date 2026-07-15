@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MessageRow {
     pub id: String,
-    pub conversation_id: i64,
+    pub conversation_id: String,
     /// Source message ID for streaming message merge identification.
     pub msg_id: Option<String>,
     /// Message type string (e.g. "text", "tips", "tool_call").

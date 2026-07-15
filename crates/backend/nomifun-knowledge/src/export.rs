@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use nomifun_common::{AppError, TimestampMs, now_ms};
+use nomifun_common::{AppError, KnowledgeBaseId, TimestampMs, now_ms};
 use serde::{Deserialize, Serialize};
 
 use crate::KB_MANAGED_REL_DIR;
@@ -43,7 +43,7 @@ pub struct ExportSummary {
 /// Result of a successful import, returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImportSummary {
-    pub kb_id: String,
+    pub kb_id: KnowledgeBaseId,
     /// Final name after duplicate-name suffixing (`"name (2)"`, …).
     pub name: String,
     pub file_count: u64,
@@ -470,7 +470,11 @@ mod tests {
         source.write_file(&kb.id, "guide.md", "# 指南\n正文").await.unwrap();
         source.write_file(&kb.id, "sub/notes.md", "嵌套内容").await.unwrap();
         source
-            .write_file(&kb.id, "_inbox/conv_x/draft.md", "# 草稿")
+            .write_file(
+                &kb.id,
+                "_inbox/conv_0190f5fe-7c00-7a00-8000-000000000001/draft.md",
+                "# 草稿",
+            )
             .await
             .unwrap();
 

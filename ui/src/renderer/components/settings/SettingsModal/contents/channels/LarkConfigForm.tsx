@@ -169,7 +169,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
     try {
       // testPlugin returns { success, botUsername?, error? } directly
       const result = await channel.testPlugin.invoke({
-        plugin_id: 'lark',
+        plugin_type: 'lark',
         token: '',
         extra_config: {
           app_id: appId.trim(),
@@ -209,7 +209,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
       const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'lark', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-          : { plugin_id: 'lark', config }
+          : { plugin_type: 'lark', config }
       );
       if (!result.success) {
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
@@ -265,7 +265,7 @@ const LarkConfigForm: React.FC<LarkConfigFormProps> = ({
   };
 
   // Revoke user
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));

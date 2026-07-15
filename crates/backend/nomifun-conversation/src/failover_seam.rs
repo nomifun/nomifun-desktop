@@ -172,7 +172,7 @@ impl ConversationService {
         let Some((provider_repo, _)) = self.failover_deps() else {
             return None;
         };
-        let conv_id = parse_conv_id(conversation_id).ok()?;
+        let conv_id = conversation_id;
         let row = match self.conversation_repo().get(conv_id).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -205,7 +205,17 @@ impl ConversationService {
             return None;
         }
 
-        let failed = provider_model_from_conversation_row(&row);
+        let failed = match provider_model_from_conversation_row(&row) {
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                warn!(conversation_id, "Failover skipped: conversation has no configured model");
+                return None;
+            }
+            Err(e) => {
+                warn!(error = %ErrorChain(&e), conversation_id, "Failover skipped: invalid persisted conversation model");
+                return None;
+            }
+        };
         let providers = match provider_repo.list().await {
             Ok(providers) => providers,
             Err(e) => {
@@ -308,7 +318,7 @@ impl ConversationService {
         conversation_id: &str,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Option<AgentRuntimeHandle> {
-        let conv_id = parse_conv_id(conversation_id).ok()?;
+        let conv_id = conversation_id;
         let row = match self.conversation_repo().get(conv_id).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -324,7 +334,17 @@ impl ConversationService {
         if agent_type != AgentType::Nomi {
             return None;
         }
-        let pm = provider_model_from_conversation_row(&row);
+        let pm = match provider_model_from_conversation_row(&row) {
+            Ok(Some(model)) => model,
+            Ok(None) => {
+                warn!(conversation_id, "strip_images_and_rebuild skipped: conversation has no configured model");
+                return None;
+            }
+            Err(e) => {
+                warn!(error = %ErrorChain(&e), conversation_id, "strip_images_and_rebuild skipped: invalid persisted model");
+                return None;
+            }
+        };
         nomifun_common::VisionUnsupportedRegistry::global().mark_unsupported(&pm.provider_id, &pm.model);
 
         runtime_registry
@@ -495,6 +515,10 @@ impl ConversationService {
 mod tests {
     use super::*;
 
+    const FAILED_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PICKED_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const OTHER_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8000-000000000003";
+
     fn provider(provider_id: &str, model: &str) -> ProviderWithModel {
         ProviderWithModel {
             provider_id: provider_id.to_owned(),
@@ -507,16 +531,16 @@ mod tests {
     fn failover_atomically_replaces_the_lead_and_preserves_collaborator_order() {
         let encoded = serde_json::to_string(&ExecutionModelPool::Range {
             models: vec![
-                selected_model_ref(&provider("failed", "m1")),
-                selected_model_ref(&provider("picked", "m2")),
-                selected_model_ref(&provider("other", "m3")),
+                selected_model_ref(&provider(FAILED_PROVIDER, "m1")),
+                selected_model_ref(&provider(PICKED_PROVIDER, "m2")),
+                selected_model_ref(&provider(OTHER_PROVIDER, "m3")),
             ],
         })
         .unwrap();
         let rewritten = rewrite_execution_model_pool_for_failover(
             Some(&encoded),
-            &provider("failed", "m1"),
-            &provider("picked", "m2"),
+            &provider(FAILED_PROVIDER, "m1"),
+            &provider(PICKED_PROVIDER, "m2"),
         )
         .unwrap()
         .unwrap();
@@ -524,8 +548,8 @@ mod tests {
             serde_json::from_str::<ExecutionModelPool>(&rewritten).unwrap(),
             ExecutionModelPool::Range {
                 models: vec![
-                    selected_model_ref(&provider("picked", "m2")),
-                    selected_model_ref(&provider("other", "m3")),
+                    selected_model_ref(&provider(PICKED_PROVIDER, "m2")),
+                    selected_model_ref(&provider(OTHER_PROVIDER, "m3")),
                 ],
             }
         );
@@ -536,8 +560,8 @@ mod tests {
         assert_eq!(
             rewrite_execution_model_pool_for_failover(
                 None,
-                &provider("failed", "m1"),
-                &provider("picked", "m2"),
+                &provider(FAILED_PROVIDER, "m1"),
+                &provider(PICKED_PROVIDER, "m2"),
             )
             .unwrap(),
             None,
@@ -545,8 +569,8 @@ mod tests {
         let automatic = serde_json::to_string(&ExecutionModelPool::Automatic).unwrap();
         let rewritten = rewrite_execution_model_pool_for_failover(
             Some(&automatic),
-            &provider("failed", "m1"),
-            &provider("picked", "m2"),
+            &provider(FAILED_PROVIDER, "m1"),
+            &provider(PICKED_PROVIDER, "m2"),
         )
         .unwrap()
         .unwrap();

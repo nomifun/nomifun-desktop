@@ -1,9 +1,18 @@
+import type { ConversationId } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
+import {
+  conversationTarget,
+  isSameSessionTarget,
+  terminalTarget,
+  type SessionTarget,
+} from '@/common/types/ids';
 import { blurActiveElement } from '@/renderer/utils/ui/focus';
 import {
   WORKSPACE_HAS_FILES_EVENT,
   WORKSPACE_TOGGLE_EVENT,
   dispatchWorkspaceStateEvent,
   type WorkspaceHasFilesDetail,
+  type WorkspaceToggleDetail,
 } from '@/renderer/utils/workspace/workspaceEvents';
 import { useEffect, useRef, useState } from 'react';
 
@@ -11,15 +20,12 @@ type UseWorkspaceCollapseParams = {
   workspaceEnabled: boolean;
   isMobile: boolean;
   /**
-   * Identifier whose change forces a mobile collapse (typically the active
-   * conversation id).
+   * Legacy render identity whose change forces a mobile collapse. It is not
+   * used for event matching or persistence; `target` owns those concerns.
    */
-  conversation_id?: number;
-  /**
-   * Stable key used to persist the user's manual toggle preference. Defaults
-   * to the conversation id; callers may provide a broader stable scope.
-   */
-  preferenceKey?: string;
+  conversation_id?: ConversationId;
+  /** Namespaced session that owns this workspace rail. */
+  target?: SessionTarget;
   /**
    * True when the current workspace is an auto-created temporary one (no folder
    * picked by the user). When file-driven auto-expand is enabled, initial temp
@@ -32,12 +38,6 @@ type UseWorkspaceCollapseParams = {
    * toggles and persisted manual preferences still work.
    */
   autoExpandOnFiles?: boolean;
-  /**
-   * String identity emitted by the workspace tree. Filters the global
-   * WORKSPACE_HAS_FILES_EVENT channel so another mounted rail cannot affect this
-   * one.
-   */
-  workspaceEventKey?: string;
 };
 
 type UseWorkspaceCollapseReturn = {
@@ -55,7 +55,7 @@ type ResolveWorkspaceCollapseAfterHasFilesParams = {
   autoExpandOnFiles: boolean;
   isTemporaryWorkspace?: boolean;
   userPreference: WorkspaceCollapsePreference;
-  workspaceEventKey?: string;
+  target?: SessionTarget;
 };
 
 export function resolveWorkspaceCollapseAfterHasFiles({
@@ -65,9 +65,9 @@ export function resolveWorkspaceCollapseAfterHasFiles({
   autoExpandOnFiles,
   isTemporaryWorkspace,
   userPreference,
-  workspaceEventKey,
+  target,
 }: ResolveWorkspaceCollapseAfterHasFilesParams): boolean {
-  if (workspaceEventKey && detail.conversation_id !== workspaceEventKey) {
+  if (!target || !detail.target || !isSameSessionTarget(detail.target, target)) {
     return currentCollapsed;
   }
 
@@ -104,9 +104,8 @@ export function resolveWorkspaceCollapseAfterHasFiles({
  *   - files appear mid-session in a temporary workspace (e.g. agent writes a
  *     file while the user is here).
  *
- * Manual toggle is persisted under `workspace-preference-${preferenceKey}` and
- * overrides auto-expand. The caller decides what `preferenceKey` is; normal
- * conversations use `conversation_id`.
+ * Manual toggle is persisted under a schema-versioned entity storage key and
+ * overrides auto-expand.
  *
  * Known limitation: leaving and re-entering a temporary workspace remounts the
  * workspace tree, so files added while away report as initial load. They will
@@ -117,10 +116,9 @@ export function useWorkspaceCollapse({
   workspaceEnabled,
   isMobile,
   conversation_id,
-  preferenceKey,
+  target = conversation_id != null ? conversationTarget(conversation_id) : undefined,
   isTemporaryWorkspace,
   autoExpandOnFiles = true,
-  workspaceEventKey = conversation_id != null ? String(conversation_id) : undefined,
 }: UseWorkspaceCollapseParams): UseWorkspaceCollapseReturn {
   // Workspace panel always starts collapsed; manual toggles and allowed file
   // signals can expand it. See WORKSPACE_HAS_FILES_EVENT handler below.
@@ -129,11 +127,34 @@ export function useWorkspaceCollapse({
   // Mirror ref for collapse state
   const rightCollapsedRef = useRef(rightSiderCollapsed);
 
+  const targetKind = target?.kind;
+  const targetId = target?.id;
+  const stableTarget =
+    targetKind === 'conversation' && targetId
+      ? conversationTarget(targetId)
+      : targetKind === 'terminal' && targetId
+        ? terminalTarget(targetId)
+        : undefined;
+  const preferenceStorageKey = stableTarget ? sessionStorageKey('workspace-collapse', stableTarget) : null;
+
+  useEffect(() => {
+    if (!preferenceStorageKey) {
+      setRightSiderCollapsed(true);
+      return;
+    }
+    try {
+      const stored = localStorage.getItem(preferenceStorageKey);
+      setRightSiderCollapsed(stored === 'expanded' ? false : true);
+    } catch {
+      setRightSiderCollapsed(true);
+    }
+  }, [preferenceStorageKey]);
+
   const persistRightSiderCollapsed = (collapsed: boolean) => {
     setRightSiderCollapsed(collapsed);
-    if (!preferenceKey) return;
+    if (!preferenceStorageKey) return;
     try {
-      localStorage.setItem(`workspace-preference-${preferenceKey}`, collapsed ? 'collapsed' : 'expanded');
+      localStorage.setItem(preferenceStorageKey, collapsed ? 'collapsed' : 'expanded');
     } catch {
       // ignore errors
     }
@@ -149,15 +170,23 @@ export function useWorkspaceCollapse({
     if (typeof window === 'undefined') {
       return undefined;
     }
-    const handleWorkspaceToggle = () => {
-      if (!workspaceEnabled) {
+    const handleWorkspaceToggle = (event: Event) => {
+      const detail = (event as CustomEvent<WorkspaceToggleDetail>).detail;
+      if (
+        !workspaceEnabled ||
+        !targetKind ||
+        !targetId ||
+        !detail?.target ||
+        detail.target.kind !== targetKind ||
+        detail.target.id !== targetId
+      ) {
         return;
       }
       setRightSiderCollapsed((prev) => {
         const newState = !prev;
-        if (preferenceKey) {
+        if (preferenceStorageKey) {
           try {
-            localStorage.setItem(`workspace-preference-${preferenceKey}`, newState ? 'collapsed' : 'expanded');
+            localStorage.setItem(preferenceStorageKey, newState ? 'collapsed' : 'expanded');
           } catch {
             // ignore errors
           }
@@ -169,7 +198,7 @@ export function useWorkspaceCollapse({
     return () => {
       window.removeEventListener(WORKSPACE_TOGGLE_EVENT, handleWorkspaceToggle);
     };
-  }, [workspaceEnabled, preferenceKey]);
+  }, [workspaceEnabled, preferenceStorageKey, targetId, targetKind]);
 
   // Auto expand/collapse workspace panel based on files state (user preference takes priority)
   useEffect(() => {
@@ -181,9 +210,9 @@ export function useWorkspaceCollapse({
 
       // Check if user has manual preference
       let userPreference: WorkspaceCollapsePreference = null;
-      if (preferenceKey) {
+      if (preferenceStorageKey) {
         try {
-          const stored = localStorage.getItem(`workspace-preference-${preferenceKey}`);
+          const stored = localStorage.getItem(preferenceStorageKey);
           if (stored === 'expanded' || stored === 'collapsed') {
             userPreference = stored;
           }
@@ -199,7 +228,7 @@ export function useWorkspaceCollapse({
         autoExpandOnFiles,
         isTemporaryWorkspace,
         userPreference,
-        workspaceEventKey,
+        target: stableTarget,
       });
       if (nextCollapsed !== rightSiderCollapsed) {
         setRightSiderCollapsed(nextCollapsed);
@@ -214,19 +243,20 @@ export function useWorkspaceCollapse({
     workspaceEnabled,
     rightSiderCollapsed,
     isTemporaryWorkspace,
-    preferenceKey,
+    preferenceStorageKey,
     autoExpandOnFiles,
-    workspaceEventKey,
+    targetId,
+    targetKind,
   ]);
 
   // Broadcast workspace state event
   useEffect(() => {
     if (!workspaceEnabled) {
-      dispatchWorkspaceStateEvent(true);
+      if (stableTarget) dispatchWorkspaceStateEvent(stableTarget, true);
       return;
     }
-    dispatchWorkspaceStateEvent(rightSiderCollapsed);
-  }, [rightSiderCollapsed, workspaceEnabled]);
+    if (stableTarget) dispatchWorkspaceStateEvent(stableTarget, rightSiderCollapsed);
+  }, [rightSiderCollapsed, targetId, targetKind, workspaceEnabled]);
 
   // Force collapse when workspace is disabled
   useEffect(() => {

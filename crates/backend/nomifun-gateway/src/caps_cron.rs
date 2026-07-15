@@ -24,7 +24,7 @@ use crate::provider_support;
 struct CronListParams {
     /// Restrict to jobs bound to one conversation (default: all jobs).
     #[serde(default)]
-    conversation_id: Option<i64>,
+    conversation_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -40,7 +40,7 @@ struct CronCreateParams {
     message: String,
     /// Conversation to run the job in (default: the calling conversation).
     #[serde(default)]
-    conversation_id: Option<i64>,
+    conversation_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -58,7 +58,7 @@ struct CronUpdateParams {
     message: String,
     /// Conversation the job is bound to (default: the calling conversation).
     #[serde(default)]
-    conversation_id: Option<i64>,
+    conversation_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -74,34 +74,34 @@ fn is_duplicate_job(existing_name: &str, existing_message: &str, new_name: &str,
 }
 
 async fn list(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronListParams) -> Value {
-    if ctx.user_id.trim().is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({ "error": "missing caller user identity" });
     }
     let query = ListCronJobsQuery {
         conversation_id: p.conversation_id,
     };
-    match deps.cron_service.list_jobs(&ctx.user_id, &query).await {
+    match deps.cron_service.list_jobs(ctx.user_id.as_str(), &query).await {
         Ok(jobs) => ok(jobs.iter().map(cron_job_to_response).collect::<Vec<_>>()),
         Err(e) => json!({ "error": e.to_string() }),
     }
 }
 
 async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> Value {
-    if ctx.user_id.is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({ "error": "missing caller user identity" });
     }
-    let target_conv_id = match p.conversation_id.or_else(|| ctx.conversation_id.parse::<i64>().ok()) {
-        Some(id) => id,
-        None => {
-            return json!({ "error": "missing required field: conversation_id (no calling conversation to bind to)" });
-        }
+    let target_conv_id = p
+        .conversation_id
+        .or_else(|| ctx.conversation_id.clone().map(nomifun_common::ConversationId::into_string));
+    let Some(target_conv_id) = target_conv_id else {
+        return json!({ "error": "missing required field: conversation_id" });
     };
-    let target_conversation = target_conv_id.to_string();
+    let target_conversation = target_conv_id.clone();
 
-    // ── duplicate guard ──────────────────────────────────────────────
+    // -- duplicate guard ----------------------------------------------
     match deps
         .cron_service
-        .list_jobs(&ctx.user_id, &ListCronJobsQuery {
+        .list_jobs(ctx.user_id.as_str(), &ListCronJobsQuery {
             conversation_id: Some(target_conv_id),
         })
         .await
@@ -114,18 +114,18 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
                 return ok(json!({
                     "duplicate": true,
                     "existing_job": cron_job_to_response(existing),
-                    "note": "an ACTIVE cron job with the same name or message already exists in this conversation — nothing was created. Use nomi_cron_update to modify it; only create a second job if the owner explicitly asked for a duplicate this turn."
+                    "note": "an ACTIVE cron job with the same name or message already exists in this conversation —nothing was created. Use nomi_cron_update to modify it; only create a second job if the owner explicitly asked for a duplicate this turn."
                 }));
             }
         }
         Err(e) => return json!({ "error": e.to_string() }),
     }
 
-    // ── model guard (nomi conversations only) ────────────────────────
+    // -- model guard (nomi conversations only) ------------------------
     let mut model_note: Option<String> = None;
-    match deps.conversation_service.get(&ctx.user_id, &target_conversation).await {
+    match deps.conversation_service.get(ctx.user_id.as_str(), &target_conversation).await {
         Ok(conv) => {
-            let model_missing = conv.model.as_ref().is_none_or(|m| m.provider_id.trim().is_empty());
+            let model_missing = conv.model.as_ref().is_none_or(|model| model.validate().is_err());
             if conv.r#type == AgentType::Nomi && model_missing {
                 match provider_support::resolve_nomi_model(&deps, &ctx, None, None).await {
                     Ok((m, source)) => {
@@ -141,13 +141,13 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
                         };
                         if let Err(e) = deps
                             .conversation_service
-                            .update(&ctx.user_id, &target_conversation, req, &deps.runtime_registry)
+                            .update(ctx.user_id.as_str(), &target_conversation, req, &deps.runtime_registry)
                             .await
                         {
                             return json!({ "error": format!("failed to persist auto-selected model onto the bound conversation: {e}") });
                         }
                         model_note = Some(format!(
-                            "the bound conversation had no model configured; auto-selected {}/{} (source: {source}) and saved it onto the conversation — mention this to the owner",
+                            "the bound conversation had no model configured; auto-selected {}/{} (source: {source}) and saved it onto the conversation —mention this to the owner",
                             m.provider_id, m.model
                         ));
                     }
@@ -168,7 +168,7 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
         schedule_description: p.description.unwrap_or_default(),
         message: p.message,
     };
-    let result = ICronService::create_job(deps.cron_service.as_ref(), &ctx.user_id, &target_conversation, &params).await;
+    let result = ICronService::create_job(deps.cron_service.as_ref(), ctx.user_id.as_str(), &target_conversation, &params).await;
     if result.success {
         ok(json!({ "message": result.message, "model_note": model_note }))
     } else {
@@ -177,10 +177,13 @@ async fn create(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronCreateParams) -> 
 }
 
 async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronUpdateParams) -> Value {
-    let target_conversation = p
+    let Some(target_conversation) = p
         .conversation_id
         .map(|id| id.to_string())
-        .unwrap_or_else(|| ctx.conversation_id.clone());
+        .or_else(|| ctx.conversation_id.clone().map(nomifun_common::ConversationId::into_string))
+    else {
+        return json!({ "error": "missing required field: conversation_id" });
+    };
     let params = SvcCronUpdate {
         job_id: p.job_id,
         name: p.name,
@@ -188,11 +191,11 @@ async fn update(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronUpdateParams) -> 
         schedule_description: p.description.unwrap_or_default(),
         message: p.message,
     };
-    command_result(ICronService::update_job(deps.cron_service.as_ref(), &ctx.user_id, &target_conversation, &params).await)
+    command_result(ICronService::update_job(deps.cron_service.as_ref(), ctx.user_id.as_str(), &target_conversation, &params).await)
 }
 
 async fn delete(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronDeleteParams) -> Value {
-    command_result(ICronService::delete_job(deps.cron_service.as_ref(), &ctx.user_id, &p.job_id).await)
+    command_result(ICronService::delete_job(deps.cron_service.as_ref(), ctx.user_id.as_str(), &p.job_id).await)
 }
 
 fn command_result(result: nomifun_conversation::response_middleware::CronCommandResult) -> Value {

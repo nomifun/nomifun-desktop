@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ProviderId } from '@/common/types/ids';
+
 export type IdmmBackupValidationKey = 'idmm.backupRequired' | 'idmm.backupModelIncomplete';
 
 export type IdmmWatchBackupConfig = {
   enabled: boolean;
   tier: string;
   bypass_model: {
-    provider_id?: string | null;
+    provider_id?: ProviderId | null;
     model?: string | null;
   };
 };
@@ -23,7 +25,7 @@ export const getWatchBackupValidationErrorKey = (
 ): IdmmBackupValidationKey | null => {
   if (!watch.enabled || watch.tier !== 'rule_plus_model') return null;
 
-  const hasLocalProvider = hasText(watch.bypass_model.provider_id);
+  const hasLocalProvider = watch.bypass_model.provider_id != null;
   const hasLocalModel = hasText(watch.bypass_model.model);
 
   if (hasLocalProvider !== hasLocalModel) return 'idmm.backupModelIncomplete';

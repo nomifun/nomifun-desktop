@@ -4,16 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 import type { SessionKind, WorkpathNode } from './workpathTree';
 
 export type BatchSelectableScope = {
-  conversationIds: number[];
-  terminalIds: number[];
+  conversationIds: ConversationId[];
+  terminalIds: TerminalId[];
 };
 
 export type BatchSelectionState = {
-  conversationIds: Set<number>;
-  terminalIds: Set<number>;
+  conversationIds: Set<ConversationId>;
+  terminalIds: Set<TerminalId>;
 };
 
 export type BatchSelectionScopeState = {

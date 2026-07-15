@@ -215,7 +215,7 @@ async fn full_system_flow_e2e() {
     assert!(
         providers
             .iter()
-            .any(|provider| provider["id"] == "nomifun-free-model")
+            .any(|provider| provider["platform"] == "nomifun-free-model")
     );
     assert!(
         providers

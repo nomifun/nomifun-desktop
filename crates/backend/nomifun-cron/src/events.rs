@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{CronJobExecutedEvent, CronJobRemovedPayload, CronJobResponse, WebSocketMessage};
 use nomifun_conversation::ConversationService;
+use nomifun_common::{ConversationId, CronJobId, UserId};
 use nomifun_realtime::UserEventSink;
 use serde_json::json;
 use tracing::error;
@@ -25,6 +26,10 @@ impl CronEventEmitter {
     }
 
     pub fn emit_job_removed(&self, owner_id: &str, job_id: &str) {
+        if let Err(error) = CronJobId::try_from(job_id) {
+            error!(job_id, error = %error, "Refusing to emit a cron event with an invalid job id");
+            return;
+        }
         self.emit_to_user(
             owner_id,
             "cron.job-removed",
@@ -35,6 +40,10 @@ impl CronEventEmitter {
     }
 
     pub fn emit_job_executed(&self, owner_id: &str, job_id: &str, status: &str, err: Option<&str>) {
+        if let Err(error) = CronJobId::try_from(job_id) {
+            error!(job_id, error = %error, "Refusing to emit a cron event with an invalid job id");
+            return;
+        }
         self.emit_to_user(
             owner_id,
             "cron.job-executed",
@@ -53,6 +62,10 @@ impl CronEventEmitter {
         content: &str,
         tip_type: &str,
     ) {
+        if let Err(error) = ConversationId::try_from(conversation_id) {
+            error!(conversation_id, error = %error, "Refusing to emit cron tips for an invalid conversation id");
+            return;
+        }
         let payload = json!({
             "conversation_id": conversation_id,
             "msg_id": ConversationService::mint_msg_id(),
@@ -70,6 +83,10 @@ impl CronEventEmitter {
     }
 
     fn emit_to_user<T: serde::Serialize>(&self, owner_id: &str, event_name: &str, payload: &T) {
+        if let Err(error) = UserId::try_from(owner_id) {
+            error!(owner_id, event_name, error = %error, "Refusing to emit a cron event for an invalid user id");
+            return;
+        }
         let value = match serde_json::to_value(payload) {
             Ok(v) => v,
             Err(e) => {
@@ -89,6 +106,12 @@ mod tests {
         CronJobExecutedEvent, CronJobMetadataDto, CronJobRemovedPayload, CronJobResponse,
         CronJobStateDto, CronScheduleDto,
     };
+
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const USER_ID_2: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+    const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const JOB_ID_2: &str = "cron_0190f5fe-7c00-7a00-8000-000000000002";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
 
     struct RecordingUserEvents {
         deliveries: std::sync::Mutex<Vec<(String, WebSocketMessage<serde_json::Value>)>>,
@@ -137,7 +160,7 @@ mod tests {
 
     fn sample_response() -> CronJobResponse {
         CronJobResponse {
-            id: "cron_123".into(),
+            id: JOB_ID.into(),
             name: "Test Job".into(),
             description: Some("Test description".into()),
             enabled: true,
@@ -148,7 +171,7 @@ mod tests {
             message: "hello".into(),
             execution_mode: "existing".into(),
             metadata: CronJobMetadataDto {
-                conversation_id: 1,
+                conversation_id: Some("conv_0190f5fe-7c00-7a00-8abc-012345678901".into()),
                 conversation_title: None,
                 agent_type: "acp".into(),
                 created_by: "user".into(),
@@ -172,14 +195,14 @@ mod tests {
     fn job_created_event_shape() {
         let (emitter, bc) = make_emitter();
         let resp = sample_response();
-        emitter.emit_job_created("owner", &resp);
+        emitter.emit_job_created(USER_ID, &resp);
 
         let events = bc.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "cron.job-created");
 
         let parsed: CronJobResponse = serde_json::from_value(events[0].data.clone()).unwrap();
-        assert_eq!(parsed.id, "cron_123");
+        assert_eq!(parsed.id, JOB_ID);
         assert_eq!(parsed.name, "Test Job");
     }
 
@@ -187,40 +210,40 @@ mod tests {
     fn job_updated_event_shape() {
         let (emitter, bc) = make_emitter();
         let resp = sample_response();
-        emitter.emit_job_updated("owner", &resp);
+        emitter.emit_job_updated(USER_ID, &resp);
 
         let events = bc.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "cron.job-updated");
 
         let parsed: CronJobResponse = serde_json::from_value(events[0].data.clone()).unwrap();
-        assert_eq!(parsed.id, "cron_123");
+        assert_eq!(parsed.id, JOB_ID);
     }
 
     #[test]
     fn job_removed_event_shape() {
         let (emitter, bc) = make_emitter();
-        emitter.emit_job_removed("owner", "cron_456");
+        emitter.emit_job_removed(USER_ID, JOB_ID_2);
 
         let events = bc.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "cron.job-removed");
 
         let parsed: CronJobRemovedPayload = serde_json::from_value(events[0].data.clone()).unwrap();
-        assert_eq!(parsed.job_id, "cron_456");
+        assert_eq!(parsed.job_id, JOB_ID_2);
     }
 
     #[test]
     fn job_executed_success_event() {
         let (emitter, bc) = make_emitter();
-        emitter.emit_job_executed("owner", "cron_789", "ok", None);
+        emitter.emit_job_executed(USER_ID, JOB_ID, "ok", None);
 
         let events = bc.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "cron.job-executed");
 
         let parsed: CronJobExecutedEvent = serde_json::from_value(events[0].data.clone()).unwrap();
-        assert_eq!(parsed.job_id, "cron_789");
+        assert_eq!(parsed.job_id, JOB_ID);
         assert_eq!(parsed.status, "ok");
         assert!(parsed.error.is_none());
     }
@@ -228,7 +251,7 @@ mod tests {
     #[test]
     fn job_executed_error_event() {
         let (emitter, bc) = make_emitter();
-        emitter.emit_job_executed("owner", "cron_789", "error", Some("timeout"));
+        emitter.emit_job_executed(USER_ID, JOB_ID, "error", Some("timeout"));
 
         let events = bc.events();
         assert_eq!(events.len(), 1);
@@ -241,7 +264,7 @@ mod tests {
     #[test]
     fn job_executed_skipped_event() {
         let (emitter, bc) = make_emitter();
-        emitter.emit_job_executed("owner", "cron_789", "skipped", None);
+        emitter.emit_job_executed(USER_ID, JOB_ID, "skipped", None);
 
         let events = bc.events();
         let parsed: CronJobExecutedEvent = serde_json::from_value(events[0].data.clone()).unwrap();
@@ -252,10 +275,10 @@ mod tests {
     fn multiple_events_accumulate() {
         let (emitter, bc) = make_emitter();
         let resp = sample_response();
-        emitter.emit_job_created("owner", &resp);
-        emitter.emit_job_updated("owner", &resp);
-        emitter.emit_job_removed("owner", "cron_123");
-        emitter.emit_job_executed("owner", "cron_123", "ok", None);
+        emitter.emit_job_created(USER_ID, &resp);
+        emitter.emit_job_updated(USER_ID, &resp);
+        emitter.emit_job_removed(USER_ID, JOB_ID);
+        emitter.emit_job_executed(USER_ID, JOB_ID, "ok", None);
 
         let events = bc.events();
         assert_eq!(events.len(), 4);
@@ -270,13 +293,13 @@ mod tests {
         let (emitter, user_events) = make_emitter();
         let resp = sample_response();
 
-        emitter.emit_job_created("owner-a", &resp);
-        emitter.emit_conversation_tips("owner-b", "2", "missed", "warning");
+        emitter.emit_job_created(USER_ID, &resp);
+        emitter.emit_conversation_tips(USER_ID_2, CONVERSATION_ID, "missed", "warning");
 
-        assert_eq!(user_events.owners(), vec!["owner-a", "owner-b"]);
+        assert_eq!(user_events.owners(), vec![USER_ID, USER_ID_2]);
         let events = user_events.events();
         assert_eq!(events[0].name, "cron.job-created");
         assert_eq!(events[1].name, "message.stream");
-        assert_eq!(events[1].data["conversation_id"], "2");
+        assert_eq!(events[1].data["conversation_id"], CONVERSATION_ID);
     }
 }

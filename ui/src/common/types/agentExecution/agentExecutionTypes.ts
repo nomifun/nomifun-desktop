@@ -1,5 +1,15 @@
-import type { ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type { PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
 import type { AgentExecutionEventKind } from '@/common/protocolBindings/AgentExecutionEventKind';
+import type {
+  ConversationId,
+  ExecutionAttemptId,
+  ExecutionEventId,
+  ExecutionId,
+  ExecutionParticipantId,
+  ExecutionStepId,
+  ProviderId,
+  UserId,
+} from '@/common/types/ids';
 
 /** Keep the UI request boundary aligned with the shared Rust domain ceiling. */
 export const MAX_AGENT_EXECUTION_MODELS = 16;
@@ -29,7 +39,7 @@ export type TStepFailurePolicy = 'fail_execution' | 'skip_dependents';
 export type TParticipantAssignmentSource = 'planner' | 'automatic' | 'manual';
 
 export type TExecutionModelRef = {
-  provider_id: string;
+  provider_id: ProviderId;
   model: string;
 };
 
@@ -51,13 +61,13 @@ export type TParticipantConstraints = {
 };
 
 export type TExecutionParticipant = {
-  id: string;
-  execution_id: string;
+  id: ExecutionParticipantId;
+  execution_id: ExecutionId;
   source_agent_id: string;
-  preset_id: string | null;
+  preset_id: PresetReference | null;
   preset_revision: number | null;
   preset_snapshot: ResolvedPresetSnapshot | null;
-  provider_id: string | null;
+  provider_id: ProviderId | null;
   model: string | null;
   role: string | null;
   capability: TParticipantCapability | null;
@@ -73,9 +83,9 @@ export type TExecutionParticipant = {
 };
 
 export type TAgentExecution = {
-  id: string;
+  id: ExecutionId;
   goal: string;
-  lead_conversation_id: number | null;
+  lead_conversation_id: ConversationId | null;
   work_dir: string | null;
   delegation_policy: TDelegationPolicy;
   plan_gate: TPlanGate;
@@ -110,8 +120,8 @@ export type TExecutionStepProfile = {
 };
 
 export type TExecutionStep = {
-  id: string;
-  execution_id: string;
+  id: ExecutionStepId;
+  execution_id: ExecutionId;
   title: string;
   spec: string;
   profile: TExecutionStepProfile | null;
@@ -125,7 +135,7 @@ export type TExecutionStep = {
   control_policy: TStepControlPolicy | null;
   /** Engine-derived recursion guard; never accepted from create/add requests. */
   failure_policy: TStepFailurePolicy;
-  assigned_participant_id: string | null;
+  assigned_participant_id: ExecutionParticipantId | null;
   assignment_source: TParticipantAssignmentSource | null;
   assignment_score: number | null;
   assignment_rationale: string | null;
@@ -142,20 +152,20 @@ export type TExecutionStep = {
 };
 
 export type TExecutionStepDependency = {
-  execution_id: string;
-  blocker_step_id: string;
-  blocked_step_id: string;
+  execution_id: ExecutionId;
+  blocker_step_id: ExecutionStepId;
+  blocked_step_id: ExecutionStepId;
   introduced_in_revision: number;
   superseded_in_revision: number | null;
 };
 
 export type TExecutionAttempt = {
-  id: string;
-  execution_id: string;
-  step_id: string;
+  id: ExecutionAttemptId;
+  execution_id: ExecutionId;
+  step_id: ExecutionStepId;
   attempt_no: number;
-  participant_id: string | null;
-  conversation_id: number | null;
+  participant_id: ExecutionParticipantId | null;
+  conversation_id: ConversationId | null;
   status: TExecutionAttemptStatus;
   trigger_reason: string;
   effective_config: unknown;
@@ -182,17 +192,17 @@ export type TAgentExecutionDetail = {
 };
 
 export type TAgentExecutionEvent = {
-  id: string;
-  execution_id: string;
+  id: ExecutionEventId;
+  execution_id: ExecutionId;
   sequence: number;
   event_type: AgentExecutionEventKind;
-  step_id: string | null;
-  attempt_id: string | null;
+  step_id: ExecutionStepId | null;
+  attempt_id: ExecutionAttemptId | null;
   actor_type: 'system' | 'user' | 'agent';
   actor_id: string | null;
-  actor_conversation_id: number | null;
-  actor_attempt_id: string | null;
-  on_behalf_of_user_id: string;
+  actor_conversation_id: ConversationId | null;
+  actor_attempt_id: ExecutionAttemptId | null;
+  on_behalf_of_user_id: UserId;
   payload: unknown;
   created_at: number;
 };
@@ -222,7 +232,7 @@ export type TCreateAgentExecution = {
   adaptation_policy?: TAdaptationPolicy;
   decision_policy?: TDecisionPolicy;
   max_parallel?: number;
-  lead_conversation_id?: number;
+  lead_conversation_id?: ConversationId;
   lead_model?: TExecutionModelRef;
   steps?: TPlannedExecutionStep[];
 };
@@ -243,7 +253,7 @@ export type TVersionedExecutionStepCommand = {
 export type TRetryExecutionStep = TVersionedExecutionStepCommand;
 export type TAdoptExecutionStepOutput = TVersionedExecutionStepCommand;
 export type TReassignExecutionStep = TVersionedExecutionStepCommand & {
-  participant_id: string;
+  participant_id: ExecutionParticipantId;
   locked?: boolean;
 };
 export type TSteerExecutionStep = TVersionedExecutionStepCommand & {
@@ -270,7 +280,10 @@ export type TAgentExecutionEventsQuery = {
   limit?: number;
 };
 
-export function latestAttemptForStep(attempts: TExecutionAttempt[], stepId: string): TExecutionAttempt | undefined {
+export function latestAttemptForStep(
+  attempts: TExecutionAttempt[],
+  stepId: ExecutionStepId
+): TExecutionAttempt | undefined {
   return attempts
     .filter((attempt) => attempt.step_id === stepId)
     .reduce<TExecutionAttempt | undefined>(

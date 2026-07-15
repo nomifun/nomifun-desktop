@@ -2,8 +2,9 @@ use std::path::Path;
 
 use nomifun_api_types::{ConversationArtifactResponse, ConversationResponse, MessageResponse, MessageSearchItem};
 use nomifun_common::{
-    AgentType, AppError, ConversationSource, ConversationStatus, MessagePosition, MessageStatus, MessageType,
-    ProviderWithModel, now_ms,
+    AgentExecutionTemplateId, AgentType, AppError, ConversationArtifactId, ConversationId,
+    ConversationSource, ConversationStatus, CronJobId, MessageId, MessagePosition, MessageStatus,
+    MessageType, ProviderId, ProviderWithModel, now_ms,
 };
 use nomifun_db::MessageSearchRow;
 use nomifun_db::models::{ConversationArtifactRow, ConversationRow, MessageRow};
@@ -39,13 +40,23 @@ pub fn row_to_response_with_extra(
     mut extra: serde_json::Value,
     data_dir: &Path,
 ) -> Result<ConversationResponse, AppError> {
+    ConversationId::try_from(row.id.as_str()).map_err(|error| {
+        AppError::Internal(format!("Invalid persisted conversation id '{}': {error}", row.id))
+    })?;
+    if let Some(template_id) = row.execution_template_id.as_deref() {
+        AgentExecutionTemplateId::try_from(template_id).map_err(|error| {
+            AppError::Internal(format!(
+                "Invalid persisted execution_template_id '{template_id}': {error}"
+            ))
+        })?;
+    }
     let is_temporary_workspace = {
         let ws = extra.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
         // Companion sessions own a fixed, permanent per-companion work folder.
         // It sits under the data dir but is NOT a throwaway temp workspace —
         // mark it non-temporary so the chat tab keeps the "open workspace folder"
         // affordance and doesn't mislabel a locked, browsable work path.
-        let is_companion = extra.get("companionSession").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_companion = extra.get("companion_session").and_then(|v| v.as_bool()).unwrap_or(false);
         !is_companion && !ws.is_empty() && Path::new(ws).starts_with(data_dir)
     };
     if let Some(obj) = extra.as_object_mut() {
@@ -113,49 +124,43 @@ pub fn row_to_response_with_extra(
 
 /// Parse the model JSON column into `ProviderWithModel`.
 ///
-/// Nomi stores the full provider object (`TProviderWithModel`) which includes
-/// fields like `id`, `platform`, `base_url`, `api_key`, `use_model`, and a `model`
-/// field that can be an array of model objects. The backend only needs
-/// `provider_id`, `model` (the selected model name), and `use_model`.
-/// Accepts both snake_case and legacy camelCase key names for backward compatibility.
+/// Only the canonical persisted shape is accepted. Provider IDs use the
+/// `prov_{uuid-v7}` entity grammar; model strings and optional overrides must
+/// already be trimmed and non-empty.
 pub(crate) fn parse_provider_with_model(s: &str) -> Result<ProviderWithModel, AppError> {
-    let v: serde_json::Value =
-        serde_json::from_str(s).map_err(|e| AppError::Internal(format!("Invalid model JSON: {e}")))?;
-
-    if let Some(provider_id) = v
-        .get("provider_id")
-        .or_else(|| v.get("providerId"))
-        .and_then(|v| v.as_str())
-    {
-        let model = v.get("model").and_then(|v| v.as_str()).unwrap_or_default();
-        let use_model = v
-            .get("use_model")
-            .or_else(|| v.get("useModel"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        return Ok(ProviderWithModel {
-            provider_id: provider_id.to_string(),
-            model: model.to_string(),
-            use_model,
-        });
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredProviderWithModel {
+        provider_id: String,
+        model: String,
+        use_model: Option<String>,
     }
 
-    if let Some(id) = v.get("id").and_then(|v| v.as_str()) {
-        let use_model_str = v
-            .get("use_model")
-            .or_else(|| v.get("useModel"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        return Ok(ProviderWithModel {
-            provider_id: id.to_string(),
-            model: use_model_str.clone().unwrap_or_default(),
-            use_model: use_model_str,
-        });
+    let stored: StoredProviderWithModel = serde_json::from_str(s)
+        .map_err(|e| AppError::Internal(format!("Invalid canonical model JSON: {e}")))?;
+    ProviderId::try_from(stored.provider_id.as_str()).map_err(|error| {
+        AppError::Internal(format!(
+            "Invalid persisted provider_id '{}': {error}",
+            stored.provider_id
+        ))
+    })?;
+    if stored.model.trim().is_empty() || stored.model.trim() != stored.model {
+        return Err(AppError::Internal(
+            "Invalid persisted conversation model name".to_owned(),
+        ));
     }
-
-    Err(AppError::Internal(format!(
-        "Model JSON missing both 'provider_id'/'providerId' and 'id': {s}"
-    )))
+    if stored.use_model.as_deref().is_some_and(|model| {
+        model.trim().is_empty() || model.trim() != model
+    }) {
+        return Err(AppError::Internal(
+            "Invalid persisted conversation model override".to_owned(),
+        ));
+    }
+    Ok(ProviderWithModel {
+        provider_id: stored.provider_id,
+        model: stored.model,
+        use_model: stored.use_model,
+    })
 }
 
 /// Parse a DB string value into a typed enum via serde.
@@ -168,6 +173,20 @@ pub fn string_to_enum<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, AppE
 
 /// Convert a message database row into an API response DTO.
 pub fn row_to_message_response(row: MessageRow) -> Result<MessageResponse, AppError> {
+    MessageId::try_from(row.id.as_str()).map_err(|error| {
+        AppError::Internal(format!("Invalid persisted message id '{}': {error}", row.id))
+    })?;
+    ConversationId::try_from(row.conversation_id.as_str()).map_err(|error| {
+        AppError::Internal(format!(
+            "Invalid persisted message conversation_id '{}': {error}",
+            row.conversation_id
+        ))
+    })?;
+    if let Some(msg_id) = row.msg_id.as_deref() {
+        MessageId::try_from(msg_id).map_err(|error| {
+            AppError::Internal(format!("Invalid persisted message msg_id '{msg_id}': {error}"))
+        })?;
+    }
     let msg_type: MessageType = string_to_enum(&row.r#type)?;
 
     let position: Option<MessagePosition> = row.position.as_deref().map(string_to_enum).transpose()?;
@@ -273,6 +292,25 @@ fn truncate_large_strings(value: &mut serde_json::Value, max_chars: usize, trunc
 
 /// Convert an artifact database row into an API response DTO.
 pub fn row_to_artifact_response(row: ConversationArtifactRow) -> Result<ConversationArtifactResponse, AppError> {
+    ConversationArtifactId::try_from(row.id.as_str()).map_err(|error| {
+        AppError::Internal(format!(
+            "Invalid persisted conversation artifact id '{}': {error}",
+            row.id
+        ))
+    })?;
+    ConversationId::try_from(row.conversation_id.as_str()).map_err(|error| {
+        AppError::Internal(format!(
+            "Invalid persisted artifact conversation_id '{}': {error}",
+            row.conversation_id
+        ))
+    })?;
+    if let Some(cron_job_id) = row.cron_job_id.as_deref() {
+        CronJobId::try_from(cron_job_id).map_err(|error| {
+            AppError::Internal(format!(
+                "Invalid persisted artifact cron_job_id '{cron_job_id}': {error}"
+            ))
+        })?;
+    }
     let kind = string_to_enum(&row.kind)?;
     let status = string_to_enum(&row.status)?;
     let payload: serde_json::Value = serde_json::from_str(&row.payload)
@@ -336,6 +374,12 @@ fn extract_preview_text(raw_content: &str) -> String {
 
 /// Convert a search result row into an API search item DTO.
 pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<MessageSearchItem, AppError> {
+    MessageId::try_from(row.message_id.as_str()).map_err(|error| {
+        AppError::Internal(format!(
+            "Invalid persisted search message_id '{}': {error}",
+            row.message_id
+        ))
+    })?;
     let conversation_row = ConversationRow {
         id: row.conversation_id,
         user_id: String::new(),
@@ -377,8 +421,11 @@ pub fn search_row_to_item(row: MessageSearchRow, data_dir: &Path) -> Result<Mess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{AgentType, ConversationSource, ConversationStatus};
+    use nomifun_common::{AgentType, ConversationId, ConversationSource, ConversationStatus};
     use serde_json::json;
+
+    const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const MESSAGE_ID: &str = "msg_0190f5fe-7c00-7a00-8000-000000000001";
 
     fn make_row(
         agent_type: &str,
@@ -388,7 +435,7 @@ mod tests {
         extra_json: &str,
     ) -> ConversationRow {
         ConversationRow {
-            id: 1,
+            id: ConversationId::new().into_string(),
             user_id: "user_1".into(),
             name: "Test".into(),
             r#type: agent_type.into(),
@@ -414,9 +461,9 @@ mod tests {
 
     fn make_message_row(content: serde_json::Value) -> MessageRow {
         MessageRow {
-            id: "msg_1".into(),
-            conversation_id: 1,
-            msg_id: Some("msg_1".into()),
+            id: MESSAGE_ID.into(),
+            conversation_id: ConversationId::new().into_string(),
+            msg_id: Some(MESSAGE_ID.into()),
             r#type: "text".into(),
             content: content.to_string(),
             position: Some("left".into()),
@@ -428,7 +475,7 @@ mod tests {
 
     #[test]
     fn row_to_response_basic() {
-        let model = json!({"providerId": "p1", "model": "m1"});
+        let model = json!({"provider_id": PROVIDER_ID, "model": "m1"});
         let row = make_row(
             "acp",
             "pending",
@@ -437,7 +484,7 @@ mod tests {
             r#"{"workspace": "/project"}"#,
         );
         let resp = row_to_response(row, Path::new("/tmp/data")).unwrap();
-        assert_eq!(resp.id, 1);
+        assert!(ConversationId::try_from(resp.id.as_str()).is_ok());
         assert_eq!(resp.r#type, AgentType::Acp);
         assert_eq!(resp.status, ConversationStatus::Pending);
         assert_eq!(resp.source, Some(ConversationSource::Nomifun));
@@ -464,7 +511,7 @@ mod tests {
     #[test]
     fn row_to_response_invalid_extra_json() {
         let row = ConversationRow {
-            id: 1,
+            id: ConversationId::new().into_string(),
             user_id: "user_1".into(),
             name: "Test".into(),
             r#type: "acp".into(),
@@ -509,21 +556,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_provider_with_model_backend_format() {
-        let json = r#"{"providerId":"p1","model":"claude-sonnet-4-20250514","useModel":"claude-sonnet"}"#;
-        let result = parse_provider_with_model(json).unwrap();
-        assert_eq!(result.provider_id, "p1");
+    fn parse_provider_with_model_canonical_format() {
+        let json = format!(r#"{{"provider_id":"{PROVIDER_ID}","model":"claude-sonnet-4-20250514","use_model":"claude-sonnet"}}"#);
+        let result = parse_provider_with_model(&json).unwrap();
+        assert_eq!(result.provider_id, PROVIDER_ID);
         assert_eq!(result.model, "claude-sonnet-4-20250514");
         assert_eq!(result.use_model.as_deref(), Some("claude-sonnet"));
     }
 
     #[test]
-    fn parse_provider_with_model_nomifun_format() {
-        let json = r#"{"id":"prov_1","platform":"openai","name":"My Provider","baseUrl":"https://api.openai.com","apiKey":"sk-xxx","model":[{"id":"gpt-4","name":"GPT-4"}],"capabilities":["text","vision"],"useModel":"gpt-4-turbo","enabled":true}"#;
-        let result = parse_provider_with_model(json).unwrap();
-        assert_eq!(result.provider_id, "prov_1");
-        assert_eq!(result.model, "gpt-4-turbo");
-        assert_eq!(result.use_model.as_deref(), Some("gpt-4-turbo"));
+    fn parse_provider_with_model_rejects_legacy_provider_object() {
+        let json = format!(r#"{{"id":"{PROVIDER_ID}","platform":"openai","useModel":"gpt-4-turbo"}}"#);
+        assert!(parse_provider_with_model(&json).is_err());
     }
 
     #[test]
@@ -569,13 +613,13 @@ mod tests {
     fn row_to_response_marks_companion_workspace_as_non_temporary() {
         // A companion's fixed work folder sits under the data dir but is a
         // permanent per-companion workspace, not a throwaway temp one — the
-        // `companionSession` flag must override the under-data-dir heuristic.
+        // `companion_session` flag must override the under-data-dir heuristic.
         let row = make_row(
             "nomi",
             "pending",
             Some("nomifun"),
             None,
-            r#"{"companionSession":true,"workspace":"/srv/nomifun-data/companion/companions/companion_x/workspace"}"#,
+            r#"{"companion_session":true,"workspace":"/srv/nomifun-data/companion/companions/companion_x/workspace"}"#,
         );
         let resp = row_to_response(row, Path::new("/srv/nomifun-data")).unwrap();
         assert_eq!(resp.extra["is_temporary_workspace"], false);
@@ -584,7 +628,7 @@ mod tests {
     #[test]
     fn row_with_pinned_at() {
         let row = ConversationRow {
-            id: 2,
+            id: ConversationId::new().into_string(),
             user_id: "user_1".into(),
             name: "Pinned".into(),
             r#type: "acp".into(),
@@ -682,18 +726,19 @@ mod tests {
 
     #[test]
     fn test_search_row_to_item_builds_nested_conversation() {
+        let conversation_id = ConversationId::new().into_string();
         let row = MessageSearchRow {
-            message_id: "msg_1".into(),
+            message_id: MESSAGE_ID.into(),
             r#type: "text".into(),
             content: r#"{"content":"hello world"}"#.into(),
             created_at: 5000,
-            conversation_id: 1,
+            conversation_id: conversation_id.clone(),
             conversation_name: "Test Conv".into(),
             conversation_type: "acp".into(),
             conversation_extra: r#"{"workspace":"/project"}"#.into(),
             conversation_delegation_policy: "prefer_parallel".into(),
             conversation_execution_model_pool: Some(
-                r#"{"mode":"range","models":[{"provider_id":"provider-1","model":"model-1"}]}"#.into(),
+                format!(r#"{{"mode":"range","models":[{{"provider_id":"{PROVIDER_ID}","model":"model-1"}}]}}"#),
             ),
             conversation_decision_policy: "ask_user".into(),
             conversation_execution_template_id: None,
@@ -709,12 +754,12 @@ mod tests {
 
         let item = search_row_to_item(row, Path::new("/tmp/data")).unwrap();
 
-        assert_eq!(item.message_id, "msg_1");
+        assert_eq!(item.message_id, MESSAGE_ID);
         assert_eq!(item.message_type, "text");
         assert_eq!(item.message_created_at, 5000);
         assert_eq!(item.preview_text, "hello world");
 
-        assert_eq!(item.conversation.id, 1);
+        assert_eq!(item.conversation.id, conversation_id);
         assert_eq!(item.conversation.name, "Test Conv");
         assert_eq!(item.conversation.r#type, AgentType::Acp);
         assert_eq!(item.conversation.source, Some(ConversationSource::Nomifun));
@@ -726,7 +771,7 @@ mod tests {
             item.conversation.execution_model_pool,
             Some(nomifun_api_types::ExecutionModelPool::Range {
                 models: vec![nomifun_api_types::ExecutionModelRef {
-                    provider_id: "provider-1".into(),
+                    provider_id: PROVIDER_ID.into(),
                     model: "model-1".into(),
                 }],
             })
@@ -742,11 +787,11 @@ mod tests {
     #[test]
     fn test_search_row_to_item_invalid_conversation_type() {
         let row = MessageSearchRow {
-            message_id: "msg_1".into(),
+            message_id: MESSAGE_ID.into(),
             r#type: "text".into(),
             content: "plain text".into(),
             created_at: 5000,
-            conversation_id: 1,
+            conversation_id: ConversationId::new().into_string(),
             conversation_name: "Test".into(),
             conversation_type: "invalid_type".into(),
             conversation_extra: "{}".into(),
@@ -771,11 +816,11 @@ mod tests {
     #[test]
     fn test_search_row_to_item_invalid_conversation_extra_json() {
         let row = MessageSearchRow {
-            message_id: "msg_1".into(),
+            message_id: MESSAGE_ID.into(),
             r#type: "text".into(),
             content: r#"{"content":"hello"}"#.into(),
             created_at: 5000,
-            conversation_id: 1,
+            conversation_id: ConversationId::new().into_string(),
             conversation_name: "Test".into(),
             conversation_type: "acp".into(),
             conversation_extra: "not valid json".into(),

@@ -12,8 +12,9 @@ use nomifun_api_types::{
     SendMessageRequest, SendMessageResponse, UpdateConversationArtifactRequest, UpdateConversationRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ConversationArtifactId, ConversationId, MessageId};
 
+use crate::service::strip_clone_instance_state;
 use crate::state::ConversationRouterState;
 
 /// Build the conversation router (CRUD + message flow + confirmation + extended operations).
@@ -69,17 +70,13 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "knowledge_mounts",
             "knowledge_writeback",
             "knowledge_channel_write_enabled",
-            "companionSession",
+            "companion_session",
             "companion",
-            "companionId",
             "companion_id",
-            "channelPlatform",
             "channel_platform",
-            "publicAgentId",
             "public_agent_id",
             "exposure",
             "cron_job_id",
-            "cronJobId",
             "mcp_server_ids",
             "mcp_servers",
             "mcp_statuses",
@@ -136,6 +133,7 @@ async fn clone(
     let Json(mut req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     strip_server_owned_runtime_fields(&mut req.conversation.extra);
     strip_server_owned_preset_fields(&mut req.conversation.extra);
+    strip_clone_instance_state(&mut req.conversation.extra);
     let conversation = state.service.clone_create(&user.id, req).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(conversation))))
 }
@@ -143,16 +141,16 @@ async fn clone(
 async fn get_one(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<ConversationResponse>>, AppError> {
-    let conversation = state.service.get(&user.id, &id).await?;
+    let conversation = state.service.get(&user.id, id.as_str()).await?;
     Ok(Json(ApiResponse::ok(conversation)))
 }
 
 async fn update(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
     body: Result<Json<UpdateConversationRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ConversationResponse>>, AppError> {
     let Json(mut req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -162,52 +160,61 @@ async fn update(
         strip_server_owned_runtime_fields(extra);
         strip_server_owned_preset_fields(extra);
     }
-    let conversation = state.service.update(&user.id, &id, req, &state.runtime_registry).await?;
+    let conversation = state
+        .service
+        .update(&user.id, id.as_str(), req, &state.runtime_registry)
+        .await?;
     Ok(Json(ApiResponse::ok(conversation)))
 }
 
 async fn delete_one(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete(&user.id, &id).await?;
+    state.service.delete(&user.id, id.as_str()).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn reset(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.reset(&user.id, &id).await?;
+    state.service.reset(&user.id, id.as_str()).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn associated(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<Vec<ConversationResponse>>>, AppError> {
-    let items = state.service.list_associated(&user.id, &id).await?;
+    let items = state
+        .service
+        .list_associated(&user.id, id.as_str())
+        .await?;
     Ok(Json(ApiResponse::ok(items)))
 }
 
 async fn list_msg(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<ApiResponse<MessageListResponse>>, AppError> {
-    let result = state.service.list_messages(&user.id, &id, query).await?;
+    let result = state
+        .service
+        .list_messages(&user.id, id.as_str(), query)
+        .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
 #[derive(serde::Deserialize)]
 struct MessagePathParams {
-    id: String,
+    id: ConversationId,
     #[serde(rename = "messageId")]
-    message_id: String,
+    message_id: MessageId,
 }
 
 async fn get_msg(
@@ -217,7 +224,7 @@ async fn get_msg(
 ) -> Result<Json<ApiResponse<MessageResponse>>, AppError> {
     let result = state
         .service
-        .get_message(&user.id, &params.id, &params.message_id)
+        .get_message(&user.id, params.id.as_str(), params.message_id.as_str())
         .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
@@ -231,7 +238,13 @@ async fn edit_resubmit(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .edit_and_resubmit(&user.id, &params.id, &params.message_id, req, &state.runtime_registry)
+        .edit_and_resubmit(
+            &user.id,
+            params.id.as_str(),
+            params.message_id.as_str(),
+            req,
+            &state.runtime_registry,
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -242,13 +255,13 @@ async fn edit_resubmit(
 async fn send_msg(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
     body: Result<Json<SendMessageRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .send_message(&user.id, &id, req, &state.runtime_registry)
+        .send_message(&user.id, id.as_str(), req, &state.runtime_registry)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -259,13 +272,13 @@ async fn send_msg(
 async fn steer(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
     body: Result<Json<SendMessageRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<SendMessageResponse>>), AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     let msg_id = state
         .service
-        .steer_message(&user.id, &id, req, &state.runtime_registry)
+        .steer_message(&user.id, id.as_str(), req, &state.runtime_registry)
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -276,17 +289,20 @@ async fn steer(
 async fn list_artifacts(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<ConversationArtifactListResponse>>, AppError> {
-    let result = state.service.list_artifacts(&user.id, &id).await?;
+    let result = state
+        .service
+        .list_artifacts(&user.id, id.as_str())
+        .await?;
     Ok(Json(ApiResponse::ok(result)))
 }
 
 #[derive(serde::Deserialize)]
 struct ArtifactPathParams {
-    id: String,
+    id: ConversationId,
     #[serde(rename = "artifactId")]
-    artifact_id: String,
+    artifact_id: ConversationArtifactId,
 }
 
 async fn update_artifact(
@@ -296,13 +312,14 @@ async fn update_artifact(
     body: Result<Json<UpdateConversationArtifactRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<ConversationArtifactResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let artifact_id: i64 = params
-        .artifact_id
-        .parse()
-        .map_err(|_| AppError::BadRequest(format!("invalid artifact id: {}", params.artifact_id)))?;
     let artifact = state
         .service
-        .update_artifact(&user.id, &params.id, artifact_id, req)
+        .update_artifact(
+            &user.id,
+            params.id.as_str(),
+            params.artifact_id.as_str(),
+            req,
+        )
         .await?;
     Ok(Json(ApiResponse::ok(artifact)))
 }
@@ -310,18 +327,24 @@ async fn update_artifact(
 async fn cancel(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.cancel(&user.id, &id, &state.runtime_registry).await?;
+    state
+        .service
+        .cancel(&user.id, id.as_str(), &state.runtime_registry)
+        .await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn warmup(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.warmup(&user.id, &id, &state.runtime_registry).await?;
+    state
+        .service
+        .warmup(&user.id, id.as_str(), &state.runtime_registry)
+        .await?;
     Ok(Json(ApiResponse::success()))
 }
 
@@ -339,18 +362,18 @@ async fn search_messages(
 async fn list_confirmations(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
 ) -> Result<Json<ApiResponse<ConfirmationListResponse>>, AppError> {
     let items = state
         .service
-        .list_confirmations(&user.id, &id, &state.runtime_registry)
+        .list_confirmations(&user.id, id.as_str(), &state.runtime_registry)
         .await?;
     Ok(Json(ApiResponse::ok(items)))
 }
 
 #[derive(serde::Deserialize)]
 struct ConfirmPathParams {
-    id: String,
+    id: ConversationId,
     #[serde(rename = "callId")]
     call_id: String,
 }
@@ -364,7 +387,13 @@ async fn confirm(
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     state
         .service
-        .confirm(&user.id, &params.id, &params.call_id, req, &state.runtime_registry)
+        .confirm(
+            &user.id,
+            params.id.as_str(),
+            &params.call_id,
+            req,
+            &state.runtime_registry,
+        )
         .await?;
     Ok(Json(ApiResponse::success()))
 }
@@ -372,7 +401,7 @@ async fn confirm(
 async fn check_approval(
     State(state): State<ConversationRouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<ConversationId>,
     Query(query): Query<ApprovalCheckQuery>,
 ) -> Result<Json<ApiResponse<ApprovalCheckResponse>>, AppError> {
     if query.action.trim().is_empty() {
@@ -383,7 +412,7 @@ async fn check_approval(
         .service
         .check_approval(
             &user.id,
-            &id,
+            id.as_str(),
             &query.action,
             query.command_type.as_deref(),
             &state.runtime_registry,
@@ -408,17 +437,16 @@ mod tests {
 
     #[test]
     fn public_send_body_cannot_forge_engine_delivery_authority() {
-        let request: SendMessageRequest = serde_json::from_value(json!({
+        let result = serde_json::from_value::<SendMessageRequest>(json!({
             "content": "ordinary user turn",
             "durable_operation_id": "forged-operation",
             "execution_id": "forged-execution"
-        }))
-        .unwrap();
+        }));
 
-        assert_eq!(request.content, "ordinary user turn");
         // Durable operation identity is deliberately absent from the public
-        // DTO. Serde discards forged unknown keys and the route always calls
-        // the ordinary guarded send boundary.
+        // DTO. The boundary rejects forged unknown keys instead of silently
+        // normalizing a legacy or ambiguous payload.
+        assert!(result.is_err());
     }
 
     #[test]
@@ -426,13 +454,13 @@ mod tests {
         let mut extra = json!({
             "desktopGateway": true,
             "desktop_gateway": true,
-            "companionSession": true,
+            "companion_session": true,
             "backend": "claude",
         });
         strip_server_owned_runtime_fields(&mut extra);
         assert!(extra.get("desktopGateway").is_none());
         assert!(extra.get("desktop_gateway").is_none());
-        assert!(extra.get("companionSession").is_none());
+        assert!(extra.get("companion_session").is_none());
         // Non-authority agent configuration survives.
         assert_eq!(extra["backend"], json!("claude"));
     }

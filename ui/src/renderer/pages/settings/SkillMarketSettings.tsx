@@ -71,8 +71,8 @@ const SkillMarketSettings: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const audKeys = new Set(tags.audienceTags.map((tag) => tag.key));
-    const scnKeys = new Set(tags.scenarioTags.map((tag) => tag.key));
+    const audKeys = new Set<string>(tags.audienceTags.map((tag) => tag.key));
+    const scnKeys = new Set<string>(tags.scenarioTags.map((tag) => tag.key));
     setTagFilter((prev) => {
       const audience = prev.audience.filter((key) => audKeys.has(key));
       const scenario = prev.scenario.filter((key) => scnKeys.has(key));

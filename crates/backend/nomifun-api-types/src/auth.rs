@@ -1,3 +1,4 @@
+use nomifun_common::UserId;
 use serde::{Deserialize, Serialize};
 
 /// Public user info returned in API responses.
@@ -5,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Contains only the fields safe to expose to clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PublicUser {
-    pub id: String,
+    pub id: UserId,
     pub username: String,
 }
 
@@ -139,11 +140,11 @@ mod tests {
     #[test]
     fn test_public_user_serialization() {
         let user = PublicUser {
-            id: "auth_1712345678_abc".into(),
+            id: UserId::new(),
             username: "admin".into(),
         };
         let json = serde_json::to_value(&user).unwrap();
-        assert_eq!(json["id"], "auth_1712345678_abc");
+        assert_eq!(json["id"], user.id.as_str());
         assert_eq!(json["username"], "admin");
     }
 
@@ -165,7 +166,7 @@ mod tests {
     #[test]
     fn test_login_response_new() {
         let user = PublicUser {
-            id: "user_1".into(),
+            id: UserId::new(),
             username: "admin".into(),
         };
         let resp = LoginResponse::new(user.clone(), "jwt_token".into());
@@ -177,9 +178,10 @@ mod tests {
 
     #[test]
     fn test_login_response_serialization() {
+        let user_id = UserId::new();
         let resp = LoginResponse::new(
             PublicUser {
-                id: "auth_123".into(),
+                id: user_id.clone(),
                 username: "admin".into(),
             },
             "eyJhbGciOi".into(),
@@ -187,7 +189,7 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["message"], "Login successful");
-        assert_eq!(json["user"]["id"], "auth_123");
+        assert_eq!(json["user"]["id"], user_id.as_str());
         assert_eq!(json["user"]["username"], "admin");
         assert_eq!(json["token"], "eyJhbGciOi");
     }
@@ -267,5 +269,11 @@ mod tests {
         let raw = r#"{}"#;
         let result = serde_json::from_str::<RefreshTokenRequest>(raw);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn public_user_rejects_noncanonical_user_id() {
+        let value = json!({"id": "1", "username": "admin"});
+        assert!(serde_json::from_value::<PublicUser>(value).is_err());
     }
 }

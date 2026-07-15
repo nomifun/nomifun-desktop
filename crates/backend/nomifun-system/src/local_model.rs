@@ -30,9 +30,9 @@ use nomifun_api_types::{
     LocalRuntimeStatus, ManagedModelServiceKind, ModelTask,
     ModelTrait,
 };
-use nomifun_common::{encrypt_string, AppError};
+use nomifun_common::{AppError, ProviderId, encrypt_string};
 use nomifun_db::{
-    CreateProviderParams, IProviderRepository, UpdateProviderParams,
+    CreateProviderParams, IProviderRepository, UpdateProviderParams, models::Provider,
 };
 use reqwest::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::managed_model::{LOCAL_MODEL_PROVIDER_ID, MANAGED_MODEL_PROTOCOL_VERSION};
+use crate::managed_model::{LOCAL_MODEL_PLATFORM, MANAGED_MODEL_PROTOCOL_VERSION};
 
 const LOCAL_MODEL_PROVIDER_NAME: &str = "NomiFun Local Model";
 const LOCAL_ROOT_DIR: &str = "local-ai";
@@ -236,6 +236,7 @@ fn restart_backoff(failures: u32) -> Duration {
 /// Local-model control plane shared by REST routes and the loopback facade.
 pub struct LocalModelService {
     root: PathBuf,
+    provider_id: String,
     provider_repo: Arc<dyn IProviderRepository>,
     http_client: reqwest::Client,
     sidecar_client: reqwest::Client,
@@ -267,6 +268,7 @@ impl LocalModelService {
         root: PathBuf,
         provider_repo: Arc<dyn IProviderRepository>,
     ) -> Result<Arc<Self>, AppError> {
+        let provider_id = managed_provider_id_for_platform(provider_repo.as_ref(), LOCAL_MODEL_PLATFORM).await?;
         prepare_managed_directory(&root, &root)
             .and_then(|_| prepare_managed_directory(&root, &root.join("models")))
             .and_then(|_| prepare_managed_directory(&root, &root.join("runtime")))
@@ -349,6 +351,7 @@ impl LocalModelService {
 
         Ok(Arc::new(Self {
             root,
+            provider_id,
             provider_repo,
             http_client: local_download_client(),
             sidecar_client: reqwest::Client::builder()
@@ -401,7 +404,7 @@ impl LocalModelService {
         LocalModelServiceStatus {
             kind: ManagedModelServiceKind::Local,
             protocol_version: MANAGED_MODEL_PROTOCOL_VERSION.to_owned(),
-            provider_id: LOCAL_MODEL_PROVIDER_ID.to_owned(),
+            provider_id: Some(self.provider_id.clone()),
             enabled: active.is_some(),
             ready,
             active_model_id: active,
@@ -2058,7 +2061,7 @@ pub fn inactive_local_model_status() -> LocalModelServiceStatus {
     LocalModelServiceStatus {
         kind: ManagedModelServiceKind::Local,
         protocol_version: MANAGED_MODEL_PROTOCOL_VERSION.to_owned(),
-        provider_id: LOCAL_MODEL_PROVIDER_ID.to_owned(),
+        provider_id: None,
         enabled: false,
         ready: false,
         active_model_id: None,
@@ -2106,7 +2109,7 @@ async fn local_models(State(state): State<LocalFacadeState>, headers: HeaderMap)
                 "id": id,
                 "object": "model",
                 "created": 0,
-                "owned_by": LOCAL_MODEL_PROVIDER_ID,
+                "owned_by": LOCAL_MODEL_PLATFORM,
             })
         })
         .collect::<Vec<_>>();
@@ -2788,6 +2791,7 @@ mod tests {
         )]);
         Arc::new(LocalModelService {
             root,
+            provider_id: ProviderId::new().into_string(),
             provider_repo,
             http_client: reqwest::Client::new(),
             sidecar_client: reqwest::Client::new(),
@@ -2874,7 +2878,7 @@ mod tests {
             .unwrap();
         let installed = service
             .provider_repo
-            .find_by_id(LOCAL_MODEL_PROVIDER_ID)
+            .find_by_id(&service.provider_id)
             .await
             .unwrap()
             .unwrap();
@@ -2894,7 +2898,7 @@ mod tests {
             .unwrap();
         let removed = service
             .provider_repo
-            .find_by_id(LOCAL_MODEL_PROVIDER_ID)
+            .find_by_id(&service.provider_id)
             .await
             .unwrap()
             .unwrap();
@@ -4059,21 +4063,13 @@ impl LocalModelService {
 
     async fn provision_provider(&self) -> Result<(), AppError> {
         let _projection_sync_guard = self.projection_sync_lock.lock().await;
-        let rows = self.provider_repo.list().await?;
-        if let Some(alias) = rows.iter().find(|row| {
-            row.id != LOCAL_MODEL_PROVIDER_ID && row.platform == LOCAL_MODEL_PROVIDER_ID
-        }) {
-            return Err(AppError::Conflict(format!(
-                "Reserved local-model platform is already used by provider '{}'",
-                alias.id
-            )));
-        }
-        let existing = self.provider_repo.find_by_id(LOCAL_MODEL_PROVIDER_ID).await?;
+        let existing = managed_provider_for_platform(self.provider_repo.as_ref(), LOCAL_MODEL_PLATFORM).await?;
         if let Some(row) = &existing
-            && row.platform != LOCAL_MODEL_PROVIDER_ID
+            && row.id != self.provider_id
         {
             return Err(AppError::Conflict(format!(
-                "Reserved provider id '{LOCAL_MODEL_PROVIDER_ID}' is already used by another platform"
+                "Reserved local-model platform changed provider identity from '{}' to '{}'",
+                self.provider_id, row.id
             )));
         }
 
@@ -4143,9 +4139,9 @@ impl LocalModelService {
             Some(_) => {
                 self.provider_repo
                     .update(
-                        LOCAL_MODEL_PROVIDER_ID,
+                        &self.provider_id,
                         UpdateProviderParams {
-                            platform: Some(LOCAL_MODEL_PROVIDER_ID),
+                            platform: Some(LOCAL_MODEL_PLATFORM),
                             name: Some(LOCAL_MODEL_PROVIDER_NAME),
                             base_url: Some(&projection.base_url),
                             api_key_encrypted: Some(&projection.encrypted_token),
@@ -4167,8 +4163,8 @@ impl LocalModelService {
             None => {
                 self.provider_repo
                     .create(CreateProviderParams {
-                        id: Some(LOCAL_MODEL_PROVIDER_ID),
-                        platform: LOCAL_MODEL_PROVIDER_ID,
+                        id: Some(&self.provider_id),
+                        platform: LOCAL_MODEL_PLATFORM,
                         name: LOCAL_MODEL_PROVIDER_NAME,
                         base_url: &projection.base_url,
                         api_key_encrypted: &projection.encrypted_token,
@@ -4229,15 +4225,12 @@ pub async fn start_and_provision_local_model(
 pub async fn disable_local_model_provider(
     provider_repo: Arc<dyn IProviderRepository>,
 ) -> Result<(), AppError> {
-    let Some(existing) = provider_repo.find_by_id(LOCAL_MODEL_PROVIDER_ID).await? else {
+    let Some(existing) = managed_provider_for_platform(provider_repo.as_ref(), LOCAL_MODEL_PLATFORM).await? else {
         return Ok(());
     };
-    if existing.platform != LOCAL_MODEL_PROVIDER_ID {
-        return Ok(());
-    }
     provider_repo
         .update(
-            LOCAL_MODEL_PROVIDER_ID,
+            &existing.id,
             UpdateProviderParams {
                 models: Some("[]"),
                 enabled: Some(false),
@@ -4248,6 +4241,43 @@ pub async fn disable_local_model_provider(
         )
         .await?;
     Ok(())
+}
+
+async fn managed_provider_for_platform(
+    provider_repo: &dyn IProviderRepository,
+    platform: &str,
+) -> Result<Option<Provider>, AppError> {
+    let mut rows = provider_repo
+        .list()
+        .await?
+        .into_iter()
+        .filter(|row| row.platform == platform);
+    let existing = rows.next();
+    if let Some(duplicate) = rows.next() {
+        return Err(AppError::Conflict(format!(
+            "Reserved managed platform '{platform}' has multiple provider rows (including '{}')",
+            duplicate.id
+        )));
+    }
+    if let Some(row) = &existing {
+        ProviderId::parse(&row.id).map_err(|error| {
+            AppError::Conflict(format!(
+                "Managed provider for platform '{platform}' has a non-canonical id '{}': {error}",
+                row.id
+            ))
+        })?;
+    }
+    Ok(existing)
+}
+
+async fn managed_provider_id_for_platform(
+    provider_repo: &dyn IProviderRepository,
+    platform: &str,
+) -> Result<String, AppError> {
+    Ok(match managed_provider_for_platform(provider_repo, platform).await? {
+        Some(row) => row.id,
+        None => ProviderId::new().into_string(),
+    })
 }
 
 #[derive(Clone)]

@@ -6,7 +6,7 @@ use nomi_config::config::{McpServerConfig, TransportType};
 use nomifun_api_types::{GatewayMcpConfig, NomiBuildExtra, SessionMcpServer, SessionMcpTransport};
 use nomifun_common::{
     AppError, DelegationPolicy, ExecutionAuthority, LoopbackCapabilityLease,
-    LoopbackCapabilityLeaseSet,
+    LoopbackCapabilityLeaseSet, ProviderId,
 };
 use nomifun_db::IMcpServerRepository;
 use nomifun_db::ISettingsRepository;
@@ -121,7 +121,7 @@ pub(super) async fn build(
 
     // Companion-companion sessions without a persisted persona prompt (channel
     // Channel Agent sessions) get one built fresh per Agent build, so the
-    // embedded memory snapshot stays current across restarts. `extra.companionId`
+    // embedded memory snapshot stays current across restarts. `extra.companion_id`
     // picks the persona (per-bot binding > legacy platform binding); when no
     // companion is bound (None / dead id) there is no persona — an unbound channel
     // is hosted by no companion (no default-companion fallback).
@@ -289,14 +289,30 @@ pub(super) async fn build(
         );
     }
 
-    let provider_id = &options.model.provider_id;
+    let model_selection = options.model.as_ref().ok_or_else(|| {
+        AppError::BadRequest("Nomi runtime requires a provider and model".to_owned())
+    })?;
+    ProviderId::try_from(model_selection.provider_id.as_str()).map_err(|_| {
+        AppError::BadRequest("Nomi runtime requires a canonical provider_id".to_owned())
+    })?;
+    if model_selection.model.is_empty() || model_selection.model.trim() != model_selection.model {
+        return Err(AppError::BadRequest(
+            "Nomi runtime requires a trimmed, non-empty model".to_owned(),
+        ));
+    }
+    if model_selection.use_model.as_deref().is_some_and(|model| {
+        model.is_empty() || model.trim() != model
+    }) {
+        return Err(AppError::BadRequest(
+            "Nomi runtime model override must be trimmed and non-empty".to_owned(),
+        ));
+    }
+    let provider_id = &model_selection.provider_id;
 
-    let model_id = options
-        .model
+    let model_id = model_selection
         .use_model
         .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&options.model.model)
+        .unwrap_or(&model_selection.model)
         .to_owned();
 
     let fields = super::provider_config::resolve_provider_fields_with_fallback(
@@ -309,12 +325,9 @@ pub(super) async fn build(
 
     let session_directory = deps.data_dir.join("nomi-sessions");
 
-    // Stable identity of THIS conversation instance (row `created_at`). Sessions
-    // live in a global dir keyed only by the reusable integer conversation id,
-    // so after a delete + id reuse (or a DB rebaseline) a brand-new conversation
-    // can land on an old session file. `accept_owned` refuses such a stale
-    // session and starts fresh; matching/legacy(None) sessions are accepted
-    // (legacy ones migrated forward by stamping the token). See Session::owner_token.
+    // Stable identity of this conversation instance (row `created_at`).
+    // `accept_owned` rejects a session file whose owner token does not match,
+    // providing defense in depth against stale or misplaced derived state.
     let owner_token: Option<String> = options.conversation_created_at.map(|c| c.to_string());
     let conv_created_ms = options.conversation_created_at;
     let accept_owned =
@@ -489,28 +502,16 @@ pub(super) async fn build(
 
     // P3-X2: build the browser secret vault descriptor when browser-use is on.
     // User decision (去 per-pet 键化): browser identity is GLOBALLY SHARED — the
-    // shared `nomifun_secret::pet_vault_path` now ignores its key and routes every
-    // caller to the one shared vault `{data_dir}/browser-secrets/shared`. We still
-    // compute the gateway `key_for`-shaped `pet_key` (kept for parity / so the call
-    // sites read identically), but it no longer scopes the vault — the *same* shared
+    // shared path routes every caller to the one vault
+    // `{data_dir}/browser-secrets/shared`; the *same* shared
     // vault backs every companion + session, the gateway-driven browser, and the
     // registration endpoint. The key is the machine-bound `encryption_key`. The
     // native `BrowserTool` loads the store from this shared vault on first use →
     // `secret:NAME` resolves (origin-gated) and the firewall `allow_etld1` is derived
     // from the registered `allowed_origins` (裁决⑤), shared across all companions.
     let browser_secret_vault = if browser_use_enabled {
-        // pet_key is no longer a routing key (the vault is shared); kept for parity
-        // with the gateway `key_for` convention and harmless since pet_vault_path
-        // ignores it.
-        let pet_key = match overrides.companion_id.as_deref() {
-            Some(c) if !c.trim().is_empty() => c.trim().to_string(),
-            _ if !ctx.conversation_id.trim().is_empty() => {
-                format!("conversation:{}", ctx.conversation_id.trim())
-            }
-            _ => "_default".to_string(),
-        };
         Some(crate::types::BrowserSecretVault {
-            vault_path: nomifun_secret::pet_vault_path(&deps.data_dir, &pet_key),
+            vault_path: nomifun_secret::shared_vault_path(&deps.data_dir),
             key: deps.encryption_key,
         })
     } else {
@@ -608,7 +609,7 @@ pub(super) async fn build(
     // set stays empty → no KB access (safe). Full file-mount/TOC resolution for
     // public agents is deferred (P1): the scoped kb_ids + the grounded directive
     // enforce the boundary without the prompt-side base TOC the companion path renders.
-    let knowledge_kb_ids: Vec<String> = match public_runtime_state.as_ref() {
+    let knowledge_kb_ids: Vec<nomifun_common::KnowledgeBaseId> = match public_runtime_state.as_ref() {
         Some(runtime) => runtime.knowledge_base_ids.clone(),
         None => overrides
             .knowledge_mounts
@@ -622,7 +623,7 @@ pub(super) async fn build(
     // resolve to Disabled → sink=None → tool not registered). `(id, name)` lets
     // the tool resolve the base the model names back to the opaque id. The
     // staged/direct decision was made above by the per-surface policy.
-    let knowledge_write_bases: Vec<(String, String)> = overrides
+    let knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)> = overrides
         .knowledge_mounts
         .iter()
         .map(|m| (m.id.clone(), m.name.clone()))
@@ -1143,16 +1144,10 @@ pub(crate) fn resolve_bedrock_config(
 
 async fn load_user_mcp_servers(
     repo: &dyn IMcpServerRepository,
-    selected_ids: Option<&[String]>,
+    selected_ids: Option<&[nomifun_common::McpServerId]>,
     conversation_id: &str,
 ) -> HashMap<String, McpServerConfig> {
-    // MCP server ids are i64 since the primary-key rework. The build-extra
-    // carries them as a JSON string array (written by the conversation
-    // service), so parse to i64 here; unparseable entries can never match a
-    // row and are dropped.
-    let selected_ids: Option<Vec<i64>> =
-        selected_ids.map(|ids| ids.iter().filter_map(|id| id.parse::<i64>().ok()).collect());
-    let rows_result = match selected_ids.as_deref() {
+    let rows_result = match selected_ids {
         Some(ids) => repo.list_by_ids_any(ids).await,
         None => repo.list().await,
     };
@@ -1171,7 +1166,6 @@ async fn load_user_mcp_servers(
     let mut servers = HashMap::new();
     for row in rows {
         let selected = selected_ids
-            .as_deref()
             .map(|ids| ids.iter().any(|id| *id == row.id))
             .unwrap_or(row.enabled);
         if !selected || row.builtin {
@@ -1444,8 +1438,12 @@ fn gateway_mcp_to_config(
     conversation_id: &str,
 ) -> Option<(String, McpServerConfig, LoopbackCapabilityLease)> {
     let session_mode = resolved_session_mode(overrides);
+    let Some(user_id) = overrides.user_id.as_deref() else {
+        warn!(conversation_id, "gateway MCP capability issuance requires a user ID");
+        return None;
+    };
     let child = match cfg.issue_for_conversation(
-        overrides.user_id.as_deref().unwrap_or_default(),
+        user_id,
         conversation_id,
         overrides.companion_id.as_deref(),
         overrides.channel_platform.as_deref(),
@@ -1501,10 +1499,10 @@ mod tests {
         let mut overrides = NomiBuildExtra {
             computer_use: Some(true),
             browser_use: Some(true),
-            mcp_server_ids: Some(vec!["7".into()]),
+            mcp_server_ids: Some(vec![nomifun_common::McpServerId::new()]),
             session_mcp_servers: vec![SessionMcpServer {
-                id: "session-mcp".into(),
-                name: "session-mcp".into(),
+                id: "mcp_0190f5fe-7c00-7a00-8abc-012345678966".into(),
+                name: "mcp_0190f5fe-7c00-7a00-8abc-012345678966".into(),
                 transport: SessionMcpTransport::Stdio {
                     command: "server".into(),
                     args: Vec::new(),
@@ -1512,9 +1510,17 @@ mod tests {
                 },
             }],
             companion: true,
-            companion_id: Some("companion-a".into()),
-            public_agent_id: Some("public-a".into()),
-            knowledge_mounts: vec![Default::default()],
+            companion_id: Some("companion_0190f5fe-7c00-7a00-8abc-012345678967".into()),
+            public_agent_id: Some("pubagent_0190f5fe-7c00-7a00-8abc-012345678968".into()),
+            knowledge_mounts: vec![nomifun_api_types::KnowledgeMountInfo {
+                id: nomifun_common::KnowledgeBaseId::new(),
+                name: "test knowledge".into(),
+                description: "test mount removed by model-only ceiling".into(),
+                rel_path: ".nomi/knowledge/test".into(),
+                toc: Vec::new(),
+                summary: None,
+                live_sources: Vec::new(),
+            }],
             knowledge_writeback: true,
             knowledge_channel_write_enabled: true,
             ..Default::default()
@@ -1700,12 +1706,12 @@ mod tests {
     fn resolve_mcp_servers_adds_gateway_when_process_config_present() {
         let overrides = NomiBuildExtra {
             gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
-            companion_id: Some("companion_9".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
+            companion_id: Some("companion_0190f5fe-7c00-7a00-8abc-012345678965".into()),
             gateway_excluded_tools: vec!["nomi_delegate".into()],
             ..Default::default()
         };
-        let (servers, leases) = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, leases) = resolve_mcp_servers(&overrides, "conv_0190f5fe-7c00-7a00-8abc-012345678963");
         assert_eq!(leases.len(), 1);
         let gw = servers
             .get(GatewayMcpConfig::SERVER_NAME)
@@ -1725,10 +1731,13 @@ mod tests {
         .unwrap();
         assert_eq!(bootstrap.port, 41237);
         let claims = bootstrap.access.claims;
-        assert_eq!(claims.user_id, "u1");
-        assert_eq!(claims.session.session_id, "conv-1");
-        assert_eq!(claims.session.conversation_id.as_deref(), Some("conv-1"));
-        assert_eq!(claims.scope.companion_id.as_deref(), Some("companion_9"));
+        assert_eq!(
+            claims.user_id.as_str(),
+            "user_0190f5fe-7c00-7a00-8abc-012345678961"
+        );
+        assert_eq!(claims.session.session_id, "conv_0190f5fe-7c00-7a00-8abc-012345678963");
+        assert_eq!(claims.session.conversation_id.as_deref(), Some("conv_0190f5fe-7c00-7a00-8abc-012345678963"));
+        assert_eq!(claims.scope.companion_id.as_deref(), Some("companion_0190f5fe-7c00-7a00-8abc-012345678965"));
         assert_eq!(claims.scope.profile, GatewayMcpConfig::PROFILE_WORK);
         assert_eq!(claims.scope.session_mode.as_deref(), Some("yolo"));
         assert_eq!(claims.scope.excluded_tools, vec!["nomi_delegate"]);
@@ -1741,11 +1750,11 @@ mod tests {
     fn gateway_env_omits_companion_id_when_unbound() {
         let overrides = NomiBuildExtra {
             gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
             companion_id: None,
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv_0190f5fe-7c00-7a00-8abc-012345678963");
         let env = servers[GatewayMcpConfig::SERVER_NAME].env.as_ref().unwrap();
         let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
             nomifun_api_types::GatewayCapabilityClaims,
@@ -1758,11 +1767,11 @@ mod tests {
     fn gateway_env_uses_lite_profile_for_channel_sessions() {
         let overrides = NomiBuildExtra {
             gateway_mcp_config: Some(gateway_config(41237, "/usr/bin/nomicore", "owner")),
-            user_id: Some("u1".into()),
+            user_id: Some("user_0190f5fe-7c00-7a00-8abc-012345678961".into()),
             channel_platform: Some("lark".into()),
             ..Default::default()
         };
-        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, _leases) = resolve_mcp_servers(&overrides, "conv_0190f5fe-7c00-7a00-8abc-012345678963");
         let env = servers[GatewayMcpConfig::SERVER_NAME].env.as_ref().unwrap();
         let bootstrap: nomifun_api_types::ScopedMcpChildBootstrap<
             nomifun_api_types::GatewayCapabilityClaims,
@@ -1774,7 +1783,7 @@ mod tests {
     #[test]
     fn resolve_mcp_servers_skips_gateway_without_process_config() {
         let overrides = NomiBuildExtra::default();
-        let (servers, leases) = resolve_mcp_servers(&overrides, "conv-1");
+        let (servers, leases) = resolve_mcp_servers(&overrides, "conv_0190f5fe-7c00-7a00-8abc-012345678963");
         assert!(!servers.contains_key(GatewayMcpConfig::SERVER_NAME));
         assert!(leases.is_empty());
     }
@@ -2320,11 +2329,11 @@ mod tests {
     fn append_knowledge_context_without_mounts_is_passthrough() {
         let config = NomiBuildExtra::default();
         assert_eq!(
-            append_knowledge_context(None, &config, "conv-1", true),
+            append_knowledge_context(None, &config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", true),
             None
         );
         assert_eq!(
-            append_knowledge_context(Some("hello".into()), &config, "conv-1", true),
+            append_knowledge_context(Some("hello".into()), &config, "conv_0190f5fe-7c00-7a00-8abc-012345678963", true),
             Some("hello".into())
         );
     }
@@ -2333,9 +2342,11 @@ mod tests {
     fn append_knowledge_context_renders_mounts_and_writeback() {
         use nomifun_api_types::KnowledgeMountInfo;
 
+        let conversation_id = "conv_0190f5fe-7c00-7a00-8abc-012345678963";
+
         let mut config = NomiBuildExtra {
             knowledge_mounts: vec![KnowledgeMountInfo {
-                id: "kb1".into(),
+                id: nomifun_common::KnowledgeBaseId::new(),
                 name: "领域知识".into(),
                 description: "domain docs".into(),
                 rel_path: ".nomi/knowledge/领域知识".into(),
@@ -2348,7 +2359,7 @@ mod tests {
         };
 
         let readonly =
-            append_knowledge_context(Some("base".into()), &config, "conv-1", true).unwrap();
+            append_knowledge_context(Some("base".into()), &config, conversation_id, true).unwrap();
         assert!(readonly.starts_with("base\n\n"));
         assert!(readonly.contains("## Knowledge bases"));
         assert!(readonly.contains("领域知识"));
@@ -2363,27 +2374,27 @@ mod tests {
         // nomi surface has the native tool → write-back contract points at it,
         // and the staged inbox path stays internal (not advertised to the model).
         config.knowledge_writeback = true;
-        let staged = append_knowledge_context(None, &config, "conv-1", true).unwrap();
+        let staged = append_knowledge_context(None, &config, conversation_id, true).unwrap();
         assert!(staged.contains("STAGED mode"));
         assert!(staged.contains("knowledge_write"));
         assert!(
-            !staged.contains("_inbox/conv-1/"),
+            !staged.contains(&format!("_inbox/{conversation_id}/")),
             "tool contract must not leak the inbox path: {staged}"
         );
         // Flag plumbs through: without the tool, the file-based prose returns.
-        let staged_files = append_knowledge_context(None, &config, "conv-1", false).unwrap();
-        assert!(staged_files.contains("_inbox/conv-1/"));
+        let staged_files = append_knowledge_context(None, &config, conversation_id, false).unwrap();
+        assert!(staged_files.contains(&format!("_inbox/{conversation_id}/")));
         assert!(!staged_files.contains("knowledge_write"));
 
         config.knowledge_writeback_mode = Some("direct".into());
-        let direct = append_knowledge_context(None, &config, "conv-1", true).unwrap();
+        let direct = append_knowledge_context(None, &config, conversation_id, true).unwrap();
         assert!(direct.contains("DIRECT mode"));
         assert!(direct.contains("knowledge_write"));
         assert!(!direct.contains("_inbox/"));
         // Disposition (回写意识) threads from build-extra → contract.
         assert!(direct.contains("Disposition — CONSERVATIVE"));
         config.knowledge_writeback_eagerness = Some("aggressive".into());
-        let eager = append_knowledge_context(None, &config, "conv-1", true).unwrap();
+        let eager = append_knowledge_context(None, &config, conversation_id, true).unwrap();
         assert!(eager.contains("Disposition — AGGRESSIVE"));
     }
 
@@ -2393,7 +2404,7 @@ mod tests {
         // JSON; the nomi build path must surface them in the system prompt.
         let json = serde_json::json!({
             "knowledge_mounts": [{
-                "id": "kb1",
+                "id": "kb_0190f5fe-7c00-7a00-8abc-012345678964",
                 "name": "运维手册",
                 "description": "",
                 "rel_path": ".nomi/knowledge/运维手册",
@@ -2415,7 +2426,13 @@ mod tests {
             Some("aggressive")
         );
 
-        let prompt = append_knowledge_context(None, &overrides, "conv-x", true).unwrap();
+        let prompt = append_knowledge_context(
+            None,
+            &overrides,
+            "conv_0190f5fe-7c00-7a00-8abc-012345678963",
+            true,
+        )
+        .unwrap();
         assert!(prompt.contains("Knowledge bases"));
         assert!(prompt.contains("运维手册"));
         assert!(prompt.contains("knowledge_write"));

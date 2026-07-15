@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { Input, Modal, Select, Switch } from '@arco-design/web-react';
 
 import type { PatchAssetBody, WorkshopAsset } from '../types';
+import type { AssetId } from '@/common/types/ids';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 
 export interface AssetEditModalProps {
@@ -22,7 +23,7 @@ export interface AssetEditModalProps {
   /** Collection names to seed the collection picker. */
   collections: string[];
   onClose: () => void;
-  onSubmit: (id: string, patch: PatchAssetBody) => Promise<WorkshopAsset>;
+  onSubmit: (id: AssetId, patch: PatchAssetBody) => Promise<WorkshopAsset>;
 }
 
 const AssetEditModal: React.FC<AssetEditModalProps> = ({ asset, collections, onClose, onSubmit }) => {

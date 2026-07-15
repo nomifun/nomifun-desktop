@@ -33,6 +33,8 @@ import ParamControls from './ParamControls';
 import InputSummary from './InputSummary';
 import ResultView from './ResultView';
 import { isLocalZImageModel } from './localZImage';
+import { parseCanvasId } from '@/common/types/ids';
+import type { WorkshopNodeId } from '@/common/types/ids';
 
 const MODE_META: Record<GenMode, { icon: React.ReactNode }> = {
   image: { icon: <Pic theme='outline' size={12} strokeWidth={3} /> },
@@ -55,7 +57,7 @@ function statusTone(status: WorkshopGeneratorStatus): { color: string; bg: strin
 }
 
 export interface GeneratorCardProps {
-  id: string;
+  id: WorkshopNodeId;
   data: WorkshopGeneratorNodeData;
 }
 
@@ -63,7 +65,9 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   const { t } = useTranslation();
   const api = useCanvasNode();
   const rf = useReactFlow<WorkshopFlowNode, WorkshopFlowEdge>();
-  const { id: canvasId = '' } = useParams<{ id: string }>();
+  const { id: canvasRouteId } = useParams<{ id: string }>();
+  const canvasId = parseCanvasId(canvasRouteId);
+  const nodeId = id;
 
   const mode: GenMode = data.mode ?? 'image';
   const status: WorkshopGeneratorStatus = data.status ?? 'idle';
@@ -81,11 +85,11 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
   const localZImage = isLocalZImageModel(effectiveModel);
 
   const { run, cancel } = useGenerationRun({
-    nodeId: id,
+    nodeId,
     canvasId,
     data,
     effectiveModel,
-    updateNodeData: api.updateNodeData as (nodeId: string, patch: Partial<WorkshopGeneratorNodeData>) => void,
+    updateNodeData: api.updateNodeData,
   });
 
   // ── Data mutators ────────────────────────────────────────────────────────────
@@ -227,8 +231,8 @@ const GeneratorCard: React.FC<GeneratorCardProps> = ({ id, data }) => {
             onToTextNode={toTextNode}
           />
         )}
-        <PromptField value={prompt} mode={mode} selfId={id} onChange={setPrompt} onAddMention={addMention} />
-        <InputSummary selfId={id} mentions={mentions} onRemoveMention={removeMention} />
+        <PromptField value={prompt} mode={mode} selfId={nodeId} onChange={setPrompt} onAddMention={addMention} />
+        <InputSummary selfId={nodeId} mentions={mentions} onRemoveMention={removeMention} />
         <ParamControls mode={mode} model={effectiveModel} params={params} onChange={setParams} />
       </div>
 

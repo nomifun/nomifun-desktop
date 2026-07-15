@@ -9,6 +9,20 @@
 mod common;
 
 use common::build_app;
+
+const TEST_CONV_1: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678901";
+const TEST_CONV_2: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678902";
+const TEST_OWNER_CALLER: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678903";
+const TEST_SECONDARY_CALLER: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678904";
+const TEST_COMPANION_CALLER: &str = "conv_0190f5fe-7c00-7a00-8abc-012345678905";
+const TEST_USER_GATEWAY: &str = "user_0190f5fe-7c00-7a00-8abc-012345678911";
+const TEST_USER_COMPANION: &str = "user_0190f5fe-7c00-7a00-8abc-012345678912";
+const TEST_USER_A: &str = "user_0190f5fe-7c00-7a00-8abc-012345678913";
+const TEST_USER_B: &str = "user_0190f5fe-7c00-7a00-8abc-012345678914";
+const TEST_USER_SECONDARY: &str = "user_0190f5fe-7c00-7a00-8abc-012345678915";
+const TEST_COMPANION: &str = "companion_0190f5fe-7c00-7a00-8abc-012345678921";
+const TEST_PROVIDER: &str = "prov_0190f5fe-7c00-7a00-8abc-012345678931";
+
 use serde_json::{Value, json};
 
 struct Gateway {
@@ -69,19 +83,17 @@ impl Gateway {
 /// Seed a user + one conversation directly (the gateway scopes everything by
 /// user id; HTTP signup/login is irrelevant to what we exercise here).
 ///
-/// `conv_id` is an integer: after the single-track refactor `conversations.id`
-/// is an `INTEGER` autoincrement column, so the seed must insert a numeric id
-/// (string ids hit `datatype mismatch`).
-async fn seed_user_and_conversation(services: &nomifun_app::AppServices, user_id: &str, conv_id: i64) {
+/// `conv_id` is a canonical conversation ID.
+async fn seed_user_and_conversation(services: &nomifun_app::AppServices, user_id: &str, conv_id: &str) {
     seed_user_and_conversation_with_extra(services, user_id, conv_id, "{}").await;
 }
 
 /// Same as [`seed_user_and_conversation`] but with a caller-provided `extra`
-/// JSON (e.g. a Channel Agent session carrying `companionId`).
+/// JSON (e.g. a Channel Agent session carrying `companion_id`).
 async fn seed_user_and_conversation_with_extra(
     services: &nomifun_app::AppServices,
     user_id: &str,
-    conv_id: i64,
+    conv_id: &str,
     extra: &str,
 ) {
     sqlx::query("INSERT OR IGNORE INTO users (id, username, password_hash, created_at, updated_at) VALUES (?, ?, 'hash', 0, 0)")
@@ -154,8 +166,8 @@ async fn gw_unknown_tool_returns_error() {
     let body = gw
         .call(
             "nomi_explode_desktop",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({}),
         )
         .await;
@@ -169,8 +181,8 @@ async fn gw_secondary_session_cannot_invoke_owner_only_tool_with_valid_session_t
     let body = gw
         .call(
             "nomi_system_get_settings",
-            "secondary-session",
-            "secondary-user",
+            TEST_SECONDARY_CALLER,
+            TEST_USER_SECONDARY,
             json!({}),
         )
         .await;
@@ -182,11 +194,11 @@ async fn gw_secondary_session_cannot_invoke_owner_only_tool_with_valid_session_t
 #[tokio::test]
 async fn gw_list_conversations_returns_rows_with_runtime_state() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_gw", 1).await;
-    seed_user_and_conversation(&services, "user_gw", 2).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_1).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_2).await;
     let gw = Gateway::from_services(&services);
 
-    let body = gw.call("nomi_list_conversations", "1", "user_gw", json!({})).await;
+    let body = gw.call("nomi_list_conversations", TEST_CONV_1, TEST_USER_GATEWAY, json!({})).await;
     let result = result_of(&body);
     assert_eq!(result["total"], json!(2));
     let convs = result["conversations"].as_array().unwrap();
@@ -204,7 +216,7 @@ async fn gw_issuer_rejects_missing_user_identity_before_bridge_spawn() {
     let gw = Gateway::from_services(&services);
     assert_eq!(
         gw.config
-            .issue_for_conversation("", "1", None, None, None, &[])
+            .issue_for_conversation("", TEST_CONV_1, None, None, None, &[])
             .unwrap_err(),
         nomifun_common::LoopbackCapabilityError::InvalidIdentity
     );
@@ -216,16 +228,18 @@ async fn gw_list_conversations_excludes_companion_sessions() {
     // A companion (work-partner) single session…
     seed_user_and_conversation_with_extra(
         &services,
-        "user_companion",
-        1,
-        r#"{"companionSession":true,"companionId":"companion_42"}"#,
+        TEST_USER_COMPANION,
+        TEST_CONV_1,
+        &format!(r#"{{"companion_session":true,"companion_id":"{TEST_COMPANION}"}}"#),
     )
     .await;
     // …and a plain session with no binding.
-    seed_user_and_conversation(&services, "user_companion", 2).await;
+    seed_user_and_conversation(&services, TEST_USER_COMPANION, TEST_CONV_2).await;
     let gw = Gateway::from_services(&services);
 
-    let body = gw.call("nomi_list_conversations", "2", "user_companion", json!({})).await;
+    let body = gw
+        .call("nomi_list_conversations", TEST_CONV_2, TEST_USER_COMPANION, json!({}))
+        .await;
     let result = result_of(&body);
     let convs = result["conversations"].as_array().unwrap().clone();
 
@@ -234,14 +248,14 @@ async fn gw_list_conversations_excludes_companion_sessions() {
     assert_eq!(convs.len(), 1, "companion session excluded, got {convs:?}");
     assert_eq!(result["total"], json!(1));
     assert!(
-        convs.iter().all(|c| c["id"] != json!(1)),
+        convs.iter().all(|c| c["id"] != json!(TEST_CONV_1)),
         "companion-bound conversation must be absent"
     );
 
     // The surviving entry is the plain session, with no companion binding.
-    // `conversations.id` is an INTEGER now → the `id` field is a JSON number.
+    // Conversation IDs cross the gateway boundary as canonical strings.
     let plain = &convs[0];
-    assert_eq!(plain["id"], json!(2));
+    assert_eq!(plain["id"], json!(TEST_CONV_2));
     assert_eq!(plain["companion_id"], json!(null), "no binding → null, got {plain}");
     assert_eq!(plain["is_companion_companion"], json!(false));
 }
@@ -258,8 +272,8 @@ async fn gw_plain_conversation_cannot_create_a_top_level_conversation() {
     let body = gw
         .call(
             "nomi_create_conversation",
-            "111",
-            "system_default_user",
+            TEST_CONV_1,
+            services.authoritative_user_id.as_ref(),
             json!({"name": "must not exist", "agent_type": "acp", "backend": "codex"}),
         )
         .await;
@@ -280,9 +294,9 @@ async fn gw_companion_can_create_a_top_level_conversation() {
     let body = gw
         .call_with_companion(
             "nomi_create_conversation",
-            "companion-session",
-            "system_default_user",
-            Some("companion-1"),
+            TEST_COMPANION_CALLER,
+            services.authoritative_user_id.as_ref(),
+            Some(TEST_COMPANION),
             json!({"name": "伙伴创建的会话", "agent_type": "acp", "backend": "codex"}),
         )
         .await;
@@ -302,14 +316,14 @@ async fn gw_companion_can_create_a_top_level_conversation() {
 #[tokio::test]
 async fn gw_send_to_own_conversation_is_refused() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_gw", 1).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_1).await;
     let gw = Gateway::from_services(&services);
     let body = gw
         .call(
             "nomi_send_to_conversation",
-            "1",
-            "user_gw",
-            json!({"conversation_id": 1, "content": "hi me"}),
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
+            json!({"conversation_id": TEST_CONV_1, "content": "hi me"}),
         )
         .await;
     assert!(error_of(&body).contains("self_injection_forbidden"));
@@ -318,16 +332,16 @@ async fn gw_send_to_own_conversation_is_refused() {
 #[tokio::test]
 async fn gw_delete_own_conversation_is_refused_but_other_succeeds() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_gw", 1).await;
-    seed_user_and_conversation(&services, "user_gw", 2).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_1).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_2).await;
     let gw = Gateway::from_services(&services);
 
     let body = gw
         .call(
             "nomi_delete_conversation",
-            "1",
-            "user_gw",
-            json!({"conversation_id": 1, "confirm": true}),
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
+            json!({"conversation_id": TEST_CONV_1, "confirm": true}),
         )
         .await;
     assert!(error_of(&body).contains("self_deletion_forbidden"));
@@ -335,33 +349,33 @@ async fn gw_delete_own_conversation_is_refused_but_other_succeeds() {
     let body = gw
         .call(
             "nomi_delete_conversation",
-            "1",
-            "user_gw",
-            json!({"conversation_id": 2, "confirm": true}),
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
+            json!({"conversation_id": TEST_CONV_2, "confirm": true}),
         )
         .await;
-    // `delete` echoes the stringified i64 id it parsed.
-    assert_eq!(result_of(&body)["deleted"], json!("2"));
+    // `delete` echoes the canonical conversation ID.
+    assert_eq!(result_of(&body)["deleted"], json!(TEST_CONV_2));
 
-    let body = gw.call("nomi_list_conversations", "1", "user_gw", json!({})).await;
+    let body = gw.call("nomi_list_conversations", TEST_CONV_1, TEST_USER_GATEWAY, json!({})).await;
     assert_eq!(result_of(&body)["total"], json!(1));
 }
 
 #[tokio::test]
 async fn gw_conversation_status_reports_idle_and_messages() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_gw", 1).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_1).await;
     let gw = Gateway::from_services(&services);
     let body = gw
         .call(
             "nomi_conversation_status",
-            "1",
-            "user_gw",
-            json!({"conversation_id": 1}),
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
+            json!({"conversation_id": TEST_CONV_1}),
         )
         .await;
     let result = result_of(&body);
-    assert_eq!(result["id"], json!(1));
+    assert_eq!(result["id"], json!(TEST_CONV_1));
     assert_eq!(result["runtime"]["state"], json!("idle"));
     assert!(result.get("recent_messages").is_some());
 }
@@ -369,26 +383,26 @@ async fn gw_conversation_status_reports_idle_and_messages() {
 #[tokio::test]
 async fn gw_user_isolation_hides_other_users_conversations() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_a", 1).await;
-    seed_user_and_conversation(&services, "user_b", 2).await;
+    seed_user_and_conversation(&services, TEST_USER_A, TEST_CONV_1).await;
+    seed_user_and_conversation(&services, TEST_USER_B, TEST_CONV_2).await;
     let gw = Gateway::from_services(&services);
 
     // user_b cannot read or delete user_a's conversation.
     let body = gw
         .call(
             "nomi_conversation_status",
-            "2",
-            "user_b",
-            json!({"conversation_id": 1}),
+            TEST_CONV_2,
+            TEST_USER_B,
+            json!({"conversation_id": TEST_CONV_1}),
         )
         .await;
     assert!(error_of(&body).contains("not found"), "got {body}");
     let body = gw
         .call(
             "nomi_delete_conversation",
-            "2",
-            "user_b",
-            json!({"conversation_id": 1, "confirm": true}),
+            TEST_CONV_2,
+            TEST_USER_B,
+            json!({"conversation_id": TEST_CONV_1, "confirm": true}),
         )
         .await;
     assert!(error_of(&body).contains("not found"), "got {body}");
@@ -399,18 +413,18 @@ async fn gw_user_isolation_hides_other_users_conversations() {
 #[tokio::test]
 async fn gw_cron_create_list_update_delete_roundtrip() {
     let (_app, services) = build_app().await;
-    seed_user_and_conversation(&services, "user_gw", 1).await;
+    seed_user_and_conversation(&services, TEST_USER_GATEWAY, TEST_CONV_1).await;
     // The conversation is seeded without a model: cron creation must resolve
     // one via the fallback chain (companion profile → first enabled provider), so a
     // provider has to exist — a model-less desktop is refused with guidance.
-    seed_provider(&services, "prov_e2e", "test-model").await;
+    seed_provider(&services, TEST_PROVIDER, "test-model").await;
     let gw = Gateway::from_services(&services);
 
     let body = gw
         .call(
             "nomi_cron_create",
-            "1",
-            "user_gw",
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
             json!({"name": "晨报", "cron": "0 9 * * *", "description": "每天 9 点", "message": "写晨报"}),
         )
         .await;
@@ -422,9 +436,9 @@ async fn gw_cron_create_list_update_delete_roundtrip() {
     // The seeded conversation had no model — the fallback chain must have
     // auto-selected the only enabled provider and said so.
     let model_note = created["model_note"].as_str().unwrap_or_default();
-    assert!(model_note.contains("prov_e2e") || model_note.contains("test-model"), "got model_note {model_note}");
+    assert!(model_note.contains(TEST_PROVIDER) || model_note.contains("test-model"), "got model_note {model_note}");
 
-    let body = gw.call("nomi_cron_list", "1", "user_gw", json!({})).await;
+    let body = gw.call("nomi_cron_list", TEST_CONV_1, TEST_USER_GATEWAY, json!({})).await;
     let jobs = result_of(&body).as_array().unwrap();
     assert_eq!(jobs.len(), 1);
     let job_id = jobs[0]["id"].as_str().unwrap().to_owned();
@@ -433,19 +447,19 @@ async fn gw_cron_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_cron_update",
-            "1",
-            "user_gw",
+            TEST_CONV_1,
+            TEST_USER_GATEWAY,
             json!({"job_id": job_id, "name": "晚报", "cron": "0 21 * * *", "message": "写晚报"}),
         )
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("晚报"));
 
     let body = gw
-        .call("nomi_cron_delete", "1", "user_gw", json!({"job_id": job_id, "confirm": true}))
+        .call("nomi_cron_delete", TEST_CONV_1, TEST_USER_GATEWAY, json!({"job_id": job_id, "confirm": true}))
         .await;
     assert!(result_of(&body).as_str().unwrap().contains("Deleted"));
 
-    let body = gw.call("nomi_cron_list", "1", "user_gw", json!({})).await;
+    let body = gw.call("nomi_cron_list", TEST_CONV_1, TEST_USER_GATEWAY, json!({})).await;
     assert!(result_of(&body).as_array().unwrap().is_empty());
 }
 
@@ -459,8 +473,8 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_save",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"content": "主人喜欢深色主题", "kind": "preference", "tags": ["ui"]}),
         )
         .await;
@@ -469,8 +483,8 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_list",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"query": "深色主题"}),
         )
         .await;
@@ -481,8 +495,8 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_update",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"id": memory_id, "pinned": true}),
         )
         .await;
@@ -491,8 +505,8 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_delete",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"id": memory_id, "confirm": true}),
         )
         .await;
@@ -501,8 +515,8 @@ async fn gw_memory_save_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_memory_list",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"query": "深色主题"}),
         )
         .await;
@@ -516,8 +530,8 @@ async fn gw_memory_update_with_no_fields_is_rejected() {
     let body = gw
         .call(
             "nomi_memory_update",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"id": "mem_x"}),
         )
         .await;
@@ -534,19 +548,19 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_requirement_create",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"title": "修复登录页样式", "content": "按钮溢出", "tag": "前端"}),
         )
         .await;
-    let req_id = result_of(&body)["id"].as_i64().unwrap();
+    let req_id = result_of(&body)["id"].as_str().unwrap().to_owned();
     assert_eq!(result_of(&body)["created_by"], json!("agent"));
 
     let body = gw
         .call(
             "nomi_requirement_list",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"tag": "前端"}),
         )
         .await;
@@ -556,8 +570,8 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_requirement_update",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"id": req_id, "title": "修复登录页按钮溢出"}),
         )
         .await;
@@ -566,8 +580,8 @@ async fn gw_requirement_create_list_update_delete_roundtrip() {
     let body = gw
         .call(
             "nomi_requirement_delete",
-            "owner-session",
-            "system_default_user",
+            TEST_OWNER_CALLER,
+            services.authoritative_user_id.as_ref(),
             json!({"id": req_id, "confirm": true}),
         )
         .await;

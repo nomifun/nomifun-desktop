@@ -1,4 +1,10 @@
-import type { PresetOverrides, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type { PresetOverrides, PresetReference, ResolvedPresetSnapshot } from '@/common/types/agent/presetTypes';
+import type {
+  ExecutionTemplateId,
+  ExecutionTemplateParticipantId,
+  ConversationId,
+  ProviderId,
+} from '@/common/types/ids';
 import type {
   TAdaptationPolicy,
   TAgentExecution,
@@ -12,7 +18,7 @@ import type {
 } from './agentExecutionTypes';
 
 export type TAgentExecutionTemplate = {
-  id: string;
+  id: ExecutionTemplateId;
   name: string;
   description: string | null;
   max_parallel: number | null;
@@ -24,12 +30,12 @@ export type TAgentExecutionTemplate = {
 };
 
 export type TAgentExecutionTemplateParticipant = {
-  id: string;
+  id: ExecutionTemplateParticipantId;
   source_agent_id: string;
-  preset_id: string | null;
+  preset_id: PresetReference | null;
   preset_revision: number | null;
   preset_snapshot: ResolvedPresetSnapshot | null;
-  provider_id: string | null;
+  provider_id: ProviderId | null;
   model: string | null;
   role: string | null;
   capability: TParticipantCapability | null;
@@ -49,10 +55,10 @@ export type TAgentExecutionTemplateDetail = TAgentExecutionTemplate & {
 
 export type TAgentExecutionTemplateParticipantInput = {
   source_agent_id?: string;
-  preset_id?: string;
+  preset_id?: PresetReference;
   preset_snapshot?: ResolvedPresetSnapshot;
   preset_overrides?: PresetOverrides;
-  provider_id?: string;
+  provider_id?: ProviderId;
   model?: string;
   role?: string;
   capability?: TParticipantCapability;
@@ -91,7 +97,7 @@ export type TCreateExecutionFromTemplate = {
   plan_gate?: TPlanGate;
   adaptation_policy?: TAdaptationPolicy;
   decision_policy?: TDecisionPolicy;
-  lead_conversation_id?: number;
+  lead_conversation_id?: ConversationId;
   lead_model?: TExecutionModelRef;
   steps?: TPlannedExecutionStep[];
 };

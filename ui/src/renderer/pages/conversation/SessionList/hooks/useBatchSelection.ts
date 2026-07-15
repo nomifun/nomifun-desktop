@@ -5,10 +5,11 @@
  */
 
 import type { TChatConversation } from '@/common/config/storage';
+import type { ConversationId } from '@/common/types/ids';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 export const useBatchSelection = (batchMode: boolean, conversations: TChatConversation[]) => {
-  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<number>>(new Set());
+  const [selectedConversationIds, setSelectedConversationIds] = useState<Set<ConversationId>>(new Set());
 
   // Reset selection when batch mode is turned off
   useEffect(() => {
@@ -22,7 +23,7 @@ export const useBatchSelection = (batchMode: boolean, conversations: TChatConver
     if (!batchMode || selectedConversationIds.size === 0) return;
     const existingIds = new Set(conversations.map((conversation) => conversation.id));
     setSelectedConversationIds((prev) => {
-      const next = new Set<number>();
+      const next = new Set<ConversationId>();
       prev.forEach((conversation_id) => {
         if (existingIds.has(conversation_id)) {
           next.add(conversation_id);

@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId, CronJobId } from '@/common/types/ids';
 
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
@@ -19,9 +20,9 @@ import { useConversationResponseMessages } from '@renderer/pages/conversation/Me
 import NanobotSendBox from './NanobotSendBox';
 
 const NanobotChat: React.FC<{
-  conversation_id: number;
+  conversation_id: ConversationId;
   workspace: string;
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
   emptySlot?: React.ReactNode;

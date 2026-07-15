@@ -10,6 +10,7 @@ import { Button, Dropdown, Empty, Input, Menu, Message, Modal, Pagination, Radio
 import { More, Pin } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { ICompanionMemory } from '@/common/adapter/ipcBridge';
+import type { CompanionId } from '@/common/types/ids';
 
 const KINDS = ['profile', 'preference', 'knowledge', 'episode', 'task', 'affective'] as const;
 
@@ -25,13 +26,13 @@ const KIND_COLORS: Record<string, string> = {
 type ScopeKind = 'user' | 'companion';
 
 interface CompanionRef {
-  id: string;
+  id: CompanionId;
   name: string;
 }
 
 interface MemoriesTabProps {
   /** The companion currently selected on the nomi page; scopes the default view. */
-  companionId?: string | null;
+  companionId?: CompanionId | null;
   /** Roster, for the scope selector + per-row owner badges. */
   companions?: CompanionRef[];
 }
@@ -54,16 +55,16 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
   const [addKind, setAddKind] = useState<string>('knowledge');
   const [addContent, setAddContent] = useState('');
   const [addScopeKind, setAddScopeKind] = useState<ScopeKind>(companionId ? 'companion' : 'user');
-  const [addScopeCompanionId, setAddScopeCompanionId] = useState<string>(companionId ?? '');
+  const [addScopeCompanionId, setAddScopeCompanionId] = useState<CompanionId | null>(companionId);
 
   const [editTarget, setEditTarget] = useState<ICompanionMemory | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editScopeKind, setEditScopeKind] = useState<ScopeKind>('user');
-  const [editScopeCompanionId, setEditScopeCompanionId] = useState<string>('');
+  const [editScopeCompanionId, setEditScopeCompanionId] = useState<CompanionId | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ICompanionMemory | null>(null);
 
   const companionName = useCallback(
-    (id: string) => companions.find((c) => c.id === id)?.name || id,
+    (id: CompanionId) => companions.find((c) => c.id === id)?.name || id,
     [companions]
   );
 
@@ -160,7 +161,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
     setAddKind('knowledge');
     setAddContent('');
     setAddScopeKind(companionId ? 'companion' : 'user');
-    setAddScopeCompanionId(companionId ?? '');
+    setAddScopeCompanionId(companionId);
     setAddVisible(true);
   }, [companionId]);
 
@@ -170,8 +171,8 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
       await ipcBridge.companion.addMemory.invoke({
         kind: addKind,
         content: addContent.trim(),
-        // '' (or omitted) = shared; a companion id = private to it.
-        scope_companion_id: addScopeKind === 'companion' ? addScopeCompanionId : '',
+        // Omitted = shared; a canonical companion id = private to it.
+        scope_companion_id: addScopeKind === 'companion' ? (addScopeCompanionId ?? undefined) : undefined,
       });
       setAddVisible(false);
       setAddContent('');
@@ -186,7 +187,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
     setEditTarget(m);
     setEditContent(m.content);
     setEditScopeKind(m.scope_kind === 'companion' ? 'companion' : 'user');
-    setEditScopeCompanionId(m.scope_companion_id || '');
+    setEditScopeCompanionId(m.scope_companion_id);
   }, []);
 
   const saveEdit = useCallback(async () => {
@@ -196,7 +197,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
         id: editTarget.id,
         content: editContent.trim(),
         scope_kind: editScopeKind,
-        scope_companion_id: editScopeKind === 'companion' ? editScopeCompanionId : '',
+        scope_companion_id: editScopeKind === 'companion' ? (editScopeCompanionId ?? undefined) : undefined,
       });
       setEditTarget(null);
       void refresh();
@@ -212,9 +213,9 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
 
   const scopeSelector = (
     scopeKind: ScopeKind,
-    scopeCompanionId: string,
+    scopeCompanionId: CompanionId | null,
     setScopeKind: (k: ScopeKind) => void,
-    setScopeCompanionId: (id: string) => void
+    setScopeCompanionId: (id: CompanionId | null) => void
   ) => (
     <div className='flex items-center gap-8px flex-wrap'>
       <Radio.Group
@@ -250,7 +251,7 @@ const MemoriesTab: React.FC<MemoriesTabProps> = ({ companionId = null, companion
   const scopeBadge = (m: ICompanionMemory) =>
     m.scope_kind === 'companion' ? (
       <Tag color='arcoblue' bordered>
-        {t('nomi.memories.scopePrivateOf', { name: companionName(m.scope_companion_id) })}
+        {t('nomi.memories.scopePrivateOf', { name: companionName(m.scope_companion_id!) })}
       </Tag>
     ) : (
       <Tag bordered>{t('nomi.memories.scopeShared')}</Tag>

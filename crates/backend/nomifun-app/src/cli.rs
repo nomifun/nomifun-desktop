@@ -83,7 +83,8 @@ pub struct Cli {
     #[arg(long, default_value_t = env!("CARGO_PKG_VERSION").to_string())]
     pub app_version: String,
 
-    /// Run in local embedded mode (skip authentication, use system_default_user).
+    /// Run in local embedded mode (skip authentication and use the
+    /// database-resolved installation owner).
     #[arg(long)]
     pub local: bool,
 
@@ -162,14 +163,43 @@ pub enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Create a complete offline backup bundle from the current data/work directories.
+    ///
+    /// The command acquires the same exclusive server lock used by the backend,
+    /// so it refuses to race a running instance. It includes the database,
+    /// persistent encryption key, companion files, and only backend-managed
+    /// `<work-dir>/conversations` workspaces. Custom external workspaces, logs,
+    /// and caches are excluded. The output must be outside both source roots.
+    /// The bundle contains credentials and must be protected as sensitive data.
+    Backup {
+        /// Destination directory for the new backup bundle (must not exist).
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Restore a complete offline backup bundle into a new data directory.
+    ///
+    /// The destination must be absent or empty; existing data is never
+    /// overwritten. Entity IDs, encryption key, companion files, and managed
+    /// conversation workspaces are restored below the new data directory while
+    /// storage-generation is rotated. Custom external workspaces are not in the
+    /// bundle and must be restored separately by their owner.
+    Restore {
+        /// Source backup bundle directory.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Destination data directory (must be absent or empty).
+        #[arg(long = "destination-data-dir")]
+        destination_data_dir: PathBuf,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use clap::error::ErrorKind;
+    use std::path::PathBuf;
 
-    use super::Cli;
+    use super::{Cli, Command};
 
     #[test]
     fn default_data_dir_is_per_user_nomifun_nomi() {
@@ -239,5 +269,84 @@ mod tests {
             "version output should contain package version {}, got: {rendered:?}",
             env!("CARGO_PKG_VERSION")
         );
+    }
+
+    #[test]
+    fn backup_subcommand_parses_output_and_data_dir() {
+        let cli = Cli::try_parse_from([
+            "nomicore",
+            "--data-dir",
+            "/source-data",
+            "backup",
+            "--output",
+            "/backups/backup-1",
+        ])
+        .unwrap();
+        assert_eq!(cli.data_dir, PathBuf::from("/source-data"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Backup { output }) if output == PathBuf::from("/backups/backup-1")
+        ));
+    }
+
+    #[test]
+    fn restore_subcommand_parses_bundle_and_destination() {
+        let cli = Cli::try_parse_from([
+            "nomicore",
+            "restore",
+            "--bundle",
+            "/backups/backup-1",
+            "--destination-data-dir",
+            "/restored-data",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Restore {
+                bundle,
+                destination_data_dir,
+            }) if bundle == PathBuf::from("/backups/backup-1")
+                && destination_data_dir == PathBuf::from("/restored-data")
+        ));
+    }
+
+    #[test]
+    fn backup_and_restore_require_their_paths() {
+        let backup = match Cli::try_parse_from(["nomicore", "backup"]) {
+            Ok(_) => panic!("backup without --output must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(backup.kind(), ErrorKind::MissingRequiredArgument);
+
+        let restore =
+            match Cli::try_parse_from(["nomicore", "restore", "--bundle", "/bundle"]) {
+                Ok(_) => panic!("restore without --destination-data-dir must fail"),
+                Err(error) => error,
+            };
+        assert_eq!(restore.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn backup_and_restore_long_help_state_portable_scope() {
+        let command = Cli::command();
+        let backup = command
+            .find_subcommand("backup")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(backup.contains("Custom external workspaces"));
+        assert!(backup.contains("logs"));
+        assert!(backup.contains("caches"));
+        assert!(backup.contains("sensitive data"));
+
+        let restore = command
+            .find_subcommand("restore")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(restore.contains("Custom external workspaces"));
+        assert!(restore.contains("storage-generation"));
     }
 }

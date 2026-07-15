@@ -1,6 +1,12 @@
 # 终端三项改进 实现计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
+> **ID-contract v2 note:** 本文是历史功能计划，不是当前可执行说明。所有实体 ID
+> 示例均受 [`../../architecture/id-system.md`](../../architecture/id-system.md)
+> 取代：Terminal 实体必须使用 canonical `TerminalId` JSON string，禁止数值 ID
+> 与兼容强转。
+
+> **Archived plan:** The steps below record the original implementation history
+> and must not be executed against the ID-v2 codebase.
 
 **Goal:** 终端会话自动标题、claude/codex 卡死后可靠回退 shell、App 退出时清理全部会话。
 
@@ -81,7 +87,7 @@
 **Files:** Modify `crates/backend/nomifun-terminal/src/service.rs`
 
 **Interfaces:**
-- Produces: `pub async fn relaunch_as_shell(&self, id: i64) -> Result<TerminalSessionResponse, TerminalError>`。
+- Produces: `pub async fn relaunch_as_shell(&self, id: &str) -> Result<TerminalSessionResponse, TerminalError>`；入口在调用前必须已校验为 `TerminalId`。
 
 - [ ] **Step 1**：克隆 `relaunch` 逻辑，但：① 先 `repo.update_meta` 之外——改为先把行的 command/args/backend 改写为 shell：新增 repo 无关的做法是直接传 `SHELL_SENTINEL` 给 `spawn_pty`；② 持久化 shell 身份，使重启/重连后仍是 shell 且标题变 `Shell`。实现：
   - 读 row；`self.live.remove(&id)` 后 `kill()`；`self.pending_spawn.remove(&id)`；

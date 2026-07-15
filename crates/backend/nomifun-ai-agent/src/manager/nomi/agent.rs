@@ -102,7 +102,10 @@ pub struct NomiAgentManager {
     knowledge_prelude: std::sync::Mutex<Option<String>>,
     /// When set, each user message is augmented with auto-retrieved KB hits
     /// (proactive RAG) keyed on the message text. `(retrieval sink, bound kb_ids)`.
-    knowledge_auto_rag: Option<(Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink>, Vec<String>)>,
+    knowledge_auto_rag: Option<(
+        Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink>,
+        Vec<nomifun_common::KnowledgeBaseId>,
+    )>,
 }
 
 impl Drop for NomiAgentManager {
@@ -112,7 +115,10 @@ impl Drop for NomiAgentManager {
 }
 
 /// Whether the knowledge_search tool should be registered for this session.
-pub(crate) fn should_register_knowledge_search(has_sink: bool, kb_ids: &[String]) -> bool {
+pub(crate) fn should_register_knowledge_search(
+    has_sink: bool,
+    kb_ids: &[nomifun_common::KnowledgeBaseId],
+) -> bool {
     has_sink && !kb_ids.is_empty()
 }
 
@@ -120,7 +126,10 @@ pub(crate) fn should_register_knowledge_search(has_sink: bool, kb_ids: &[String]
 /// write-back sink was wired AND the session actually has bound bases to write
 /// to. The factory only passes a sink when write-back is enabled on the
 /// binding, so this also gates on the user's opt-in.
-pub(crate) fn should_register_knowledge_write(has_sink: bool, bases: &[(String, String)]) -> bool {
+pub(crate) fn should_register_knowledge_write(
+    has_sink: bool,
+    bases: &[(nomifun_common::KnowledgeBaseId, String)],
+) -> bool {
     has_sink && !bases.is_empty()
 }
 
@@ -213,10 +222,10 @@ impl NomiAgentManager {
         requirement_sink: Option<Arc<dyn RequirementSink>>,
         companion_sink: Option<Arc<dyn CompanionMemorySink>>,
         knowledge_retrieval_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeRetrievalSink>>,
-        knowledge_kb_ids: Vec<String>,
+        knowledge_kb_ids: Vec<nomifun_common::KnowledgeBaseId>,
         knowledge_prelude: Option<String>,
         knowledge_writeback_sink: Option<Arc<dyn nomi_agent::knowledge_tools::KnowledgeWritebackSink>>,
-        knowledge_write_bases: Vec<(String, String)>,
+        knowledge_write_bases: Vec<(nomifun_common::KnowledgeBaseId, String)>,
         knowledge_writeback_staged: bool,
         companion_skill_sink: Option<Arc<dyn CompanionSkillSink>>,
     ) -> Result<Self, AppError> {
@@ -517,7 +526,7 @@ impl NomiAgentManager {
                 } else {
                     nomi_agent::knowledge_tools::WriteMode::Direct
                 };
-                let bound_kb_ids: Vec<String> =
+                let bound_kb_ids: Vec<nomifun_common::KnowledgeBaseId> =
                     knowledge_write_bases.iter().map(|(id, _)| id.clone()).collect();
                 engine
                     .registry_mut()
@@ -2082,20 +2091,25 @@ mod tests {
 #[cfg(test)]
 mod knowledge_search_gate_tests {
     use super::should_register_knowledge_search;
+    use nomifun_common::KnowledgeBaseId;
+
     #[test]
     fn registers_only_with_sink_and_bound_bases() {
-        assert!(should_register_knowledge_search(true, &["kb1".into()]));
+        let kb_id = KnowledgeBaseId::new();
+        assert!(should_register_knowledge_search(true, std::slice::from_ref(&kb_id)));
         assert!(!should_register_knowledge_search(true, &[]));
-        assert!(!should_register_knowledge_search(false, &["kb1".into()]));
+        assert!(!should_register_knowledge_search(false, &[kb_id]));
     }
 }
 
 #[cfg(test)]
 mod knowledge_write_gate_tests {
     use super::should_register_knowledge_write;
+    use nomifun_common::KnowledgeBaseId;
+
     #[test]
     fn registers_only_with_sink_and_bound_bases() {
-        let bases = vec![("kb1".to_owned(), "Finance".to_owned())];
+        let bases = vec![(KnowledgeBaseId::new(), "Finance".to_owned())];
         assert!(should_register_knowledge_write(true, &bases));
         // No bound bases → nothing to write to, even with a sink.
         assert!(!should_register_knowledge_write(true, &[]));
@@ -2114,7 +2128,7 @@ mod knowledge_prelude_tests {
         assert_eq!(prepend_knowledge_context(&[], "hi".to_string()), "hi");
 
         let hits = vec![KnowledgeHit {
-            kb_id: "k".into(),
+            kb_id: nomifun_common::KnowledgeBaseId::new(),
             handle: "h".into(),
             kb_name: "Docs".into(),
             rel_path: "a/b.md".into(),

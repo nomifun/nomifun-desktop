@@ -1,5 +1,6 @@
 import type { ModelProfile, ModelTask, ModelTrait } from '@/common/config/storage';
 import type { ModelProfileUpsertRequest } from '@/common/types/provider/providerApi';
+import type { ProviderId } from '@/common/types/ids';
 
 /** Display order of modality/task options in model profile editors. */
 export const MODEL_TASK_ORDER: ModelTask[] = [
@@ -27,7 +28,7 @@ export const visibleModelTaskBadges = (profile?: ModelProfile): ModelTask[] =>
   editableModelTasks(profile).filter((task) => task !== 'chat');
 
 export const buildModelProfileUpsertRequest = (
-  providerId: string,
+  providerId: ProviderId,
   model: string,
   tasks: ModelTask[],
   traits: ModelTrait[]

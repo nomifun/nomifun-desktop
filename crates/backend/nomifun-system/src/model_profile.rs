@@ -5,7 +5,7 @@ use nomifun_api_types::{
     LocalModelCatalogEntry, ModelProfile, ModelProfileUpsertRequest, ModelTask, ModelTrait,
     ProfileSource,
 };
-use nomifun_common::AppError;
+use nomifun_common::{AppError, ProviderId};
 use nomifun_db::{IModelProfileRepository, ModelProfileRow, UpsertModelProfileParams};
 
 /// Business logic for authoritative per-model capability profiles (the
@@ -24,16 +24,16 @@ impl ModelProfileService {
     /// All stored profiles across all providers.
     pub async fn list(&self) -> Result<Vec<ModelProfile>, AppError> {
         let rows = self.repo.list().await?;
-        Ok(rows.into_iter().map(row_to_profile).collect())
+        rows.into_iter().map(row_to_profile).collect()
     }
 
     /// Insert or replace one profile. `source` defaults to `User` (this is the
     /// user-edit endpoint), making the stored profile authoritative over the
     /// name heuristic.
     pub async fn upsert(&self, req: ModelProfileUpsertRequest) -> Result<ModelProfile, AppError> {
-        if req.provider_id.trim().is_empty() {
-            return Err(AppError::BadRequest("provider_id is required".into()));
-        }
+        let provider_id = ProviderId::parse(req.provider_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?
+            .into_string();
         if req.model.trim().is_empty() {
             return Err(AppError::BadRequest("model is required".into()));
         }
@@ -50,7 +50,7 @@ impl ModelProfileService {
         let row = self
             .repo
             .upsert(&UpsertModelProfileParams {
-                provider_id: req.provider_id.trim(),
+                provider_id: &provider_id,
                 model: req.model.trim(),
                 tasks: &tasks_json,
                 traits: &traits_json,
@@ -58,11 +58,13 @@ impl ModelProfileService {
                 source: source_str,
             })
             .await?;
-        Ok(row_to_profile(row))
+        row_to_profile(row)
     }
 
     /// Delete one profile; returns whether a row was removed.
     pub async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, AppError> {
+        ProviderId::parse(provider_id)
+            .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
         Ok(self.repo.delete(provider_id, model).await?)
     }
 
@@ -97,10 +99,8 @@ pub async fn seed_missing_inferred_profiles<S>(
 where
     S: AsRef<str> + Sync,
 {
-    let provider_id = provider_id.trim();
-    if provider_id.is_empty() {
-        return Err(AppError::BadRequest("provider_id is required".into()));
-    }
+    let provider_id = ProviderId::parse(provider_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
 
     let platform = platform.trim();
     let mut seen = HashSet::new();
@@ -117,7 +117,7 @@ where
             .map_err(|error| AppError::Internal(format!("serialize inferred traits: {error}")))?;
         if repo
             .insert_if_absent(&UpsertModelProfileParams {
-                provider_id,
+                provider_id: provider_id.as_str(),
                 model,
                 tasks: &tasks_json,
                 traits: &traits_json,
@@ -142,10 +142,8 @@ pub async fn reconcile_local_catalog_profiles(
     provider_id: &str,
     catalog: &[LocalModelCatalogEntry],
 ) -> Result<usize, AppError> {
-    let provider_id = provider_id.trim();
-    if provider_id.is_empty() {
-        return Err(AppError::BadRequest("provider_id is required".into()));
-    }
+    let provider_id = ProviderId::parse(provider_id)
+        .map_err(|error| AppError::BadRequest(format!("invalid provider_id: {error}")))?;
     let mut changed = 0;
     for entry in catalog {
         let tasks = serde_json::to_string(&entry.tasks)
@@ -160,7 +158,7 @@ pub async fn reconcile_local_catalog_profiles(
         .map_err(|error| AppError::Internal(format!("serialize catalog params: {error}")))?;
         if repo
             .upsert_unless_user(&UpsertModelProfileParams {
-                provider_id,
+                provider_id: provider_id.as_str(),
                 model: &entry.id,
                 tasks: &tasks,
                 traits: &traits,
@@ -194,12 +192,17 @@ fn source_from_str(s: &str) -> ProfileSource {
 /// Map a DB row (JSON-string columns) to the api-types [`ModelProfile`].
 /// Malformed JSON degrades gracefully to empty tasks/traits/params rather than
 /// erroring, so one bad row never breaks the whole listing.
-pub fn row_to_profile(row: ModelProfileRow) -> ModelProfile {
-    let tasks: Vec<ModelTask> = serde_json::from_str(&row.tasks).unwrap_or_default();
-    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits).unwrap_or_default();
-    let params: serde_json::Value =
-        serde_json::from_str(&row.params).unwrap_or_else(|_| serde_json::json!({}));
-    ModelProfile {
+pub fn row_to_profile(row: ModelProfileRow) -> Result<ModelProfile, AppError> {
+    ProviderId::parse(&row.provider_id).map_err(|error| {
+        AppError::Internal(format!("invalid canonical provider ID in model profile: {error}"))
+    })?;
+    let tasks: Vec<ModelTask> = serde_json::from_str(&row.tasks)
+        .map_err(|error| AppError::Internal(format!("invalid model profile tasks JSON: {error}")))?;
+    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits)
+        .map_err(|error| AppError::Internal(format!("invalid model profile traits JSON: {error}")))?;
+    let params: serde_json::Value = serde_json::from_str(&row.params)
+        .map_err(|error| AppError::Internal(format!("invalid model profile params JSON: {error}")))?;
+    Ok(ModelProfile {
         provider_id: row.provider_id,
         model: row.model,
         tasks,
@@ -207,7 +210,7 @@ pub fn row_to_profile(row: ModelProfileRow) -> ModelProfile {
         params,
         source: source_from_str(&row.source),
         updated_at: row.updated_at,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -222,9 +225,10 @@ mod tests {
     async fn inferred_seed_is_idempotent_and_preserves_user_profile() {
         let db = init_database_memory().await.unwrap();
         let provider_repo = SqliteProviderRepository::new(db.pool().clone());
+        let provider_id = ProviderId::new().into_string();
         provider_repo
             .create(CreateProviderParams {
-                id: Some("managed"),
+                id: Some(&provider_id),
                 platform: "nomifun-free-model",
                 name: "Managed",
                 base_url: "http://127.0.0.1:1/v1",
@@ -247,7 +251,7 @@ mod tests {
         let profile_repo = SqliteModelProfileRepository::new(db.pool().clone());
         profile_repo
             .upsert(&UpsertModelProfileParams {
-                provider_id: "managed",
+                provider_id: &provider_id,
                 model: "big-pickle",
                 tasks: r#"["chat"]"#,
                 traits: r#"["vision_input"]"#,
@@ -266,7 +270,7 @@ mod tests {
         assert_eq!(
             seed_missing_inferred_profiles(
                 &profile_repo,
-                "managed",
+                &provider_id,
                 "nomifun-free-model",
                 &models,
             )
@@ -277,7 +281,7 @@ mod tests {
         assert_eq!(
             seed_missing_inferred_profiles(
                 &profile_repo,
-                "managed",
+                &provider_id,
                 "nomifun-free-model",
                 &models,
             )
@@ -287,14 +291,14 @@ mod tests {
         );
 
         let user = profile_repo
-            .get("managed", "big-pickle")
+            .get(&provider_id, "big-pickle")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(user.source, "user");
         assert_eq!(user.params, r#"{"owner":"user"}"#);
         let inferred = profile_repo
-            .get("managed", "deepseek-v4-flash-free")
+            .get(&provider_id, "deepseek-v4-flash-free")
             .await
             .unwrap()
             .unwrap();
@@ -305,9 +309,10 @@ mod tests {
     async fn local_catalog_profile_does_not_overwrite_user_authority() {
         let db = init_database_memory().await.unwrap();
         let provider_repo = SqliteProviderRepository::new(db.pool().clone());
+        let provider_id = ProviderId::new().into_string();
         provider_repo
             .create(CreateProviderParams {
-                id: Some("nomifun-local-model"),
+                id: Some(&provider_id),
                 platform: "nomifun-local-model",
                 name: "Local",
                 base_url: "http://127.0.0.1:1/v1",
@@ -330,7 +335,7 @@ mod tests {
         let profile_repo = SqliteModelProfileRepository::new(db.pool().clone());
         profile_repo
             .upsert(&UpsertModelProfileParams {
-                provider_id: "nomifun-local-model",
+                provider_id: &provider_id,
                 model: "local-test",
                 tasks: r#"["chat"]"#,
                 traits: r#"["function_calling"]"#,
@@ -357,7 +362,7 @@ mod tests {
         assert_eq!(
             reconcile_local_catalog_profiles(
                 &profile_repo,
-                "nomifun-local-model",
+                &provider_id,
                 &catalog,
             )
             .await
@@ -365,7 +370,7 @@ mod tests {
             0
         );
         let row = profile_repo
-            .get("nomifun-local-model", "local-test")
+            .get(&provider_id, "local-test")
             .await
             .unwrap()
             .unwrap();

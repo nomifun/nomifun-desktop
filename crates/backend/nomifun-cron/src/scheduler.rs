@@ -7,7 +7,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 
-use nomifun_common::{TimestampMs, now_ms};
+use nomifun_common::{CronJobId, TimestampMs, UserId, now_ms};
 
 use crate::error::CronError;
 use crate::types::{CronJob, CronSchedule};
@@ -135,6 +135,12 @@ impl CronScheduler {
     }
 
     pub fn schedule_job(&self, job: &CronJob) {
+        if CronJobId::try_from(job.id.as_str()).is_err()
+            || UserId::try_from(job.user_id.as_str()).is_err()
+        {
+            tracing::error!(job_id = %job.id, user_id = %job.user_id, "Refusing to schedule a cron job with invalid durable ids");
+            return;
+        }
         self.cancel_job(&job.id);
 
         if !job.enabled {
@@ -180,6 +186,9 @@ impl CronScheduler {
     }
 
     pub fn cancel_job(&self, job_id: &str) {
+        if CronJobId::try_from(job_id).is_err() {
+            return;
+        }
         if let Some((_, scheduled)) = self.handles.remove(job_id) {
             scheduled.task.abort();
         }
@@ -189,6 +198,9 @@ impl CronScheduler {
     /// deleted job must never abort a newer same-id timer belonging to someone
     /// else merely because its database verification failed.
     pub fn cancel_job_for_owner(&self, job_id: &str, user_id: &str) {
+        if CronJobId::try_from(job_id).is_err() || UserId::try_from(user_id).is_err() {
+            return;
+        }
         if let Entry::Occupied(entry) = self.handles.entry(job_id.to_owned())
             && entry.get().user_id == user_id
         {
@@ -212,7 +224,7 @@ impl CronScheduler {
     }
 
     pub fn is_scheduled(&self, job_id: &str) -> bool {
-        self.handles.contains_key(job_id)
+        CronJobId::try_from(job_id).is_ok() && self.handles.contains_key(job_id)
     }
 }
 
@@ -307,6 +319,15 @@ fn delay_until(target_ms: TimestampMs) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const JOB_1: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const JOB_2: &str = "cron_0190f5fe-7c00-7a00-8000-000000000002";
+    const JOB_3: &str = "cron_0190f5fe-7c00-7a00-8000-000000000003";
+    const JOB_AT: &str = "cron_0190f5fe-7c00-7a00-8000-000000000004";
+    const JOB_EVERY: &str = "cron_0190f5fe-7c00-7a00-8000-000000000005";
+    const USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000001";
+    const FOREIGN_USER_ID: &str = "user_0190f5fe-7c00-7a00-8000-000000000002";
+    const CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
 
     // -- compute_next_run ----------------------------------------------------
 
@@ -575,45 +596,45 @@ mod tests {
             called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         }));
 
-        let job = make_test_job("cron_1", true, Some(now_ms() + 100_000));
+        let job = make_test_job(JOB_1, true, Some(now_ms() + 100_000));
         scheduler.schedule_job(&job);
-        assert!(scheduler.is_scheduled("cron_1"));
+        assert!(scheduler.is_scheduled(JOB_1));
         assert_eq!(scheduler.active_count(), 1);
 
-        scheduler.cancel_job_for_owner("cron_1", "foreign-user");
+        scheduler.cancel_job_for_owner(JOB_1, FOREIGN_USER_ID);
         assert!(
-            scheduler.is_scheduled("cron_1"),
+            scheduler.is_scheduled(JOB_1),
             "a stale callback cannot cancel another owner's current timer"
         );
 
-        scheduler.cancel_job_for_owner("cron_1", "user_1");
-        assert!(!scheduler.is_scheduled("cron_1"));
+        scheduler.cancel_job_for_owner(JOB_1, USER_ID);
+        assert!(!scheduler.is_scheduled(JOB_1));
         assert_eq!(scheduler.active_count(), 0);
     }
 
     #[tokio::test]
     async fn scheduler_disabled_job_not_scheduled() {
         let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
-        let job = make_test_job("cron_1", false, Some(now_ms() + 100_000));
+        let job = make_test_job(JOB_1, false, Some(now_ms() + 100_000));
         scheduler.schedule_job(&job);
-        assert!(!scheduler.is_scheduled("cron_1"));
+        assert!(!scheduler.is_scheduled(JOB_1));
     }
 
     #[tokio::test]
     async fn scheduler_no_next_run_not_scheduled() {
         let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
-        let job = make_test_job("cron_1", true, None);
+        let job = make_test_job(JOB_1, true, None);
         scheduler.schedule_job(&job);
-        assert!(!scheduler.is_scheduled("cron_1"));
+        assert!(!scheduler.is_scheduled(JOB_1));
     }
 
     #[tokio::test]
     async fn scheduler_cancel_all() {
         let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
         let future = now_ms() + 100_000;
-        scheduler.schedule_job(&make_test_job("cron_1", true, Some(future)));
-        scheduler.schedule_job(&make_test_job("cron_2", true, Some(future)));
-        scheduler.schedule_job(&make_test_job("cron_3", true, Some(future)));
+        scheduler.schedule_job(&make_test_job(JOB_1, true, Some(future)));
+        scheduler.schedule_job(&make_test_job(JOB_2, true, Some(future)));
+        scheduler.schedule_job(&make_test_job(JOB_3, true, Some(future)));
         assert_eq!(scheduler.active_count(), 3);
 
         scheduler.cancel_all();
@@ -623,16 +644,16 @@ mod tests {
     #[tokio::test]
     async fn scheduler_reschedule_replaces_timer() {
         let scheduler = CronScheduler::new(Arc::new(|_, _| {}));
-        let job = make_test_job("cron_1", true, Some(now_ms() + 100_000));
+        let job = make_test_job(JOB_1, true, Some(now_ms() + 100_000));
         scheduler.schedule_job(&job);
-        assert!(scheduler.is_scheduled("cron_1"));
+        assert!(scheduler.is_scheduled(JOB_1));
 
         let updated = CronJob {
             next_run_at: Some(now_ms() + 200_000),
             ..job
         };
         scheduler.reschedule_job(&updated);
-        assert!(scheduler.is_scheduled("cron_1"));
+        assert!(scheduler.is_scheduled(JOB_1));
         assert_eq!(scheduler.active_count(), 1);
     }
 
@@ -658,7 +679,7 @@ mod tests {
                 description: None,
             },
             next_run_at: Some(now_ms() + 50),
-            ..make_test_job("cron_at", true, Some(now_ms() + 50))
+            ..make_test_job(JOB_AT, true, Some(now_ms() + 50))
         };
         scheduler.schedule_job(&job);
 
@@ -666,7 +687,7 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap().unwrap(),
-            ("cron_at".to_owned(), "user_1".to_owned())
+            (JOB_AT.to_owned(), USER_ID.to_owned())
         );
     }
 
@@ -684,12 +705,12 @@ mod tests {
                 description: None,
             },
             next_run_at: Some(now_ms() + 50),
-            ..make_test_job("cron_every", true, Some(now_ms() + 50))
+            ..make_test_job(JOB_EVERY, true, Some(now_ms() + 50))
         };
         scheduler.schedule_job(&job);
 
         tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-        scheduler.cancel_job("cron_every");
+        scheduler.cancel_job(JOB_EVERY);
 
         let count = counter.load(std::sync::atomic::Ordering::SeqCst);
         assert!(count >= 2, "expected at least 2 ticks, got {count}");
@@ -701,7 +722,7 @@ mod tests {
         use crate::types::{CreatedBy, ExecutionMode};
         CronJob {
             id: id.to_owned(),
-            user_id: "user_1".into(),
+            user_id: USER_ID.into(),
             name: "Test".into(),
             enabled,
             schedule: CronSchedule::Every {
@@ -711,7 +732,7 @@ mod tests {
             message: "test message".into(),
             execution_mode: ExecutionMode::Existing,
             agent_config: None,
-            conversation_id: "conv_1".into(),
+            conversation_id: Some(CONVERSATION_ID.into()),
             conversation_title: None,
             agent_type: "acp".into(),
             created_by: CreatedBy::User,

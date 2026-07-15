@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
@@ -56,13 +56,13 @@ pub(crate) trait ConversationEffects: Send + Sync {
     async fn cancel_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Result<(), AppError>;
 
     async fn steer_attempt(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         text: &str,
     ) -> Result<(), AppError>;
@@ -70,7 +70,7 @@ pub(crate) trait ConversationEffects: Send + Sync {
     async fn stop_attempt_turn(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
     ) -> Result<(), AppError>;
 
@@ -286,7 +286,7 @@ impl ExecutionScheduler {
                 self.inner
                     .deps
                     .conversation_effects
-                    .cancel_attempt(&cleanup.user_id, cleanup.conversation_id),
+                    .cancel_attempt(&cleanup.user_id, &cleanup.conversation_id),
             )
             .await;
             match cancelled {
@@ -546,7 +546,7 @@ impl ExecutionScheduler {
     pub async fn steer_conversation(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
         text: &str,
     ) -> Result<(), AppError> {
@@ -560,7 +560,7 @@ impl ExecutionScheduler {
     pub async fn stop_attempt_turn(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
         operation_id: &str,
     ) -> Result<(), AppError> {
         self.inner
@@ -573,7 +573,7 @@ impl ExecutionScheduler {
     pub async fn read_attempt_output(
         &self,
         owner_id: &str,
-        conversation_id: i64,
+        conversation_id: &str,
     ) -> Option<String> {
         self.inner
             .deps
@@ -980,7 +980,7 @@ impl ExecutionScheduler {
                 self.inner
                     .deps
                     .conversation_effects
-                    .stop_attempt_turn(owner_id, conversation_id, &operation_id)
+                    .stop_attempt_turn(owner_id, &conversation_id, &operation_id)
                     .await
                     .map_err(|error| {
                         AppError::BadGateway(format!(
@@ -1029,7 +1029,7 @@ impl ExecutionScheduler {
                     .attempt_runner
                     .continue_with_input(
                         owner_id,
-                        conversation_id,
+                        &conversation_id,
                         &operation_id,
                         &content,
                         self.inner.deps.attempt_timeout,
@@ -1062,7 +1062,7 @@ impl ExecutionScheduler {
                 self.inner
                     .deps
                     .conversation_effects
-                    .steer_attempt(owner_id, conversation_id, &operation_id, &content)
+                    .steer_attempt(owner_id, &conversation_id, &operation_id, &content)
                     .await
                     .map_err(|error| {
                         AppError::BadGateway(format!(
@@ -1366,7 +1366,7 @@ impl ExecutionScheduler {
             .as_ref()
             .ok_or_else(|| AppError::Internal("create_attempt returned no attempt".to_owned()))?;
         let attempt_id = created_attempt.attempt.id.clone();
-        let conversation_slot = Arc::new(AtomicI64::new(0));
+        let conversation_slot = Arc::new(Mutex::new(None::<String>));
         let slot = conversation_slot.clone();
         let settlement_step_version = Arc::new(AtomicI64::new(created.step.version));
         let settlement_attempt_version =
@@ -1382,8 +1382,10 @@ impl ExecutionScheduler {
         let expected_step_version = created.step.version;
         let expected_attempt_version = created_attempt.attempt.version;
         let callback_lease = lease.clone();
-        let on_started = Box::new(move |conversation_id| {
-            slot.store(conversation_id, Ordering::SeqCst);
+        let on_started = Box::new(move |conversation_id: String| {
+            if let Ok(mut stored) = slot.lock() {
+                *stored = Some(conversation_id.clone());
+            }
             Box::pin(async move {
                 let started = repository
                     .start_attempt(
@@ -1393,7 +1395,7 @@ impl ExecutionScheduler {
                         expected_step_version,
                         &callback_attempt_id,
                         expected_attempt_version,
-                        conversation_id,
+                        &conversation_id,
                         Some(&callback_lease),
                         &system_event(
                             AgentExecutionEventKind::AttemptChanged,
@@ -1437,9 +1439,12 @@ impl ExecutionScheduler {
                 on_started,
             )
             .await;
-        let conversation_id = conversation_slot.load(Ordering::SeqCst);
+        let conversation_id = conversation_slot
+            .lock()
+            .ok()
+            .and_then(|stored| stored.clone());
         if let Err(error) = &outcome
-            && conversation_id == 0
+            && conversation_id.is_none()
         {
             tracing::warn!(%execution_id, step_id = %step.id, %error, "Agent attempt failed before starting");
         }
@@ -1510,19 +1515,19 @@ impl ExecutionScheduler {
                     .inner
                     .deps
                     .attempt_runner
-                    .last_error_retryable(owner_id, outcome.conversation_id)
+                    .last_error_retryable(owner_id, &outcome.conversation_id)
                     .await;
                 let has_marker = self
                     .inner
                     .deps
                     .attempt_runner
-                    .last_error_present(owner_id, outcome.conversation_id)
+                    .last_error_present(owner_id, &outcome.conversation_id)
                     .await;
                 let reason = self
                     .inner
                     .deps
                     .attempt_runner
-                    .last_error_summary(owner_id, outcome.conversation_id)
+                    .last_error_summary(owner_id, &outcome.conversation_id)
                     .await
                     .unwrap_or_else(|| if has_marker { "Agent attempt failed" } else { "Agent attempt timed out" }.to_owned());
                 let can_retry = detail.execution.adaptation_policy == AdaptationPolicy::Adaptive
@@ -2196,6 +2201,7 @@ pub(crate) fn terminal_transition_payload(
         "status": status,
         "lead_report_operation_id": execution
             .lead_conversation_id
+            .as_ref()
             .map(|_| lead_report_operation_id(&execution.id, execution.event_sequence + 1)),
     });
     if let Some(reason) = reason {

@@ -5,7 +5,7 @@
 //! Each handler follows the established pattern: typed `*Params` (single source
 //! of schema + deserialization), `(Arc<GatewayDeps>, CallerCtx, P) -> Value` or
 //! `(Arc<GatewayDeps>, P) -> Value`, `crate::server::ok` for success, structured
-//! `json!({"error":…})` on failure.
+//! `json!({"error":…)` on failure.
 
 use std::sync::Arc;
 
@@ -19,10 +19,7 @@ use crate::caps_idmm::{parse_kind as parse_idmm_kind, verify_target as verify_id
 use crate::registry::{Capability, CapabilityMeta, DangerTier, Surface};
 use crate::server::ok;
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // CRON DOMAIN (extensions)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[derive(Deserialize, JsonSchema)]
 struct CronGetJobParams {
     /// The id of the cron job to retrieve (from nomi_cron_list).
@@ -36,14 +33,14 @@ struct CronRunNowParams {
 }
 
 async fn cron_get_job(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronGetJobParams) -> Value {
-    match deps.cron_service.get_job(&ctx.user_id, &p.job_id).await {
+    match deps.cron_service.get_job(ctx.user_id.as_str(), &p.job_id).await {
         Ok(job) => ok(cron_job_to_response(&job)),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
 async fn cron_run_now(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronRunNowParams) -> Value {
-    match deps.cron_service.run_now(&ctx.user_id, &p.job_id).await {
+    match deps.cron_service.run_now(ctx.user_id.as_str(), &p.job_id).await {
         Ok(resp) => ok(json!({
             "triggered": true,
             "conversation_id": resp.conversation_id,
@@ -52,14 +49,11 @@ async fn cron_run_now(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: CronRunNowParam
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // REQUIREMENT DOMAIN (extensions)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[derive(Deserialize, JsonSchema)]
 struct RequirementGetParams {
     /// The id of the requirement to fetch.
-    id: i64,
+    id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -84,11 +78,11 @@ struct RequirementResumeTagParams {
     requeue_failed: bool,
     /// Re-queue these specific failed requirement ids back to pending.
     #[serde(default)]
-    requeue_ids: Vec<i64>,
+    requeue_ids: Vec<String>,
 }
 
 async fn requirement_get(deps: Arc<GatewayDeps>, p: RequirementGetParams) -> Value {
-    match deps.requirement_service.get(p.id).await {
+    match deps.requirement_service.get(&p.id).await {
         Ok(req) => ok(req),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -137,10 +131,7 @@ async fn requirement_resume_tag(deps: Arc<GatewayDeps>, p: RequirementResumeTagP
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // IDMM DOMAIN (extensions)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[derive(Deserialize, JsonSchema)]
 struct IdmmGetLogParams {
     /// Target kind: "conversation" or "terminal".
@@ -193,9 +184,9 @@ struct IdmmClearLogParams {
     target_id: String,
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// --- Helpers ---------------------------------------------------------------
 
-// ─── Handlers ───────────────────────────────────────────────────────────────
+// --- Handlers --------------------------------------------------------------
 
 async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParams) -> Value {
     let kind = match parse_idmm_kind(&p.kind) {
@@ -206,18 +197,18 @@ async fn idmm_get_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetLogParam
         return err;
     }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.log(&ctx.user_id, kind, &p.target_id, limit).await {
+    match deps.idmm_service.log(ctx.user_id.as_str(), kind, &p.target_id, limit).await {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
 async fn idmm_get_activity(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmGetActivityParams) -> Value {
-    if ctx.user_id.trim().is_empty() {
+    if nomifun_common::UserId::parse(ctx.user_id.as_str()).is_err() {
         return json!({"error": "missing caller user identity"});
     }
     let limit = p.limit.unwrap_or(50).clamp(1, 500);
-    match deps.idmm_service.recent_activity(&ctx.user_id, limit).await {
+    match deps.idmm_service.recent_activity(ctx.user_id.as_str(), limit).await {
         Ok(records) => ok(records),
         Err(e) => json!({"error": e.to_string()}),
     }
@@ -233,14 +224,14 @@ async fn idmm_intervene(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmIntervene
     }
     match deps
         .idmm_service
-        .intervene_now(&ctx.user_id, kind, &p.target_id)
+        .intervene_now(ctx.user_id.as_str(), kind, &p.target_id)
         .await
     {
         Ok(()) => {
             // Return the updated state (same as the REST route).
             match deps
                 .idmm_service
-                .build_state(&ctx.user_id, kind, &p.target_id)
+                .build_state(ctx.user_id.as_str(), kind, &p.target_id)
                 .await
             {
                 Ok(state) => ok(json!({
@@ -292,19 +283,16 @@ async fn idmm_clear_log(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: IdmmClearLogP
     if let Some(err) = verify_idmm_target(&deps, &ctx, kind, &p.target_id).await {
         return err;
     }
-    match deps.idmm_service.clear_log(&ctx.user_id, kind, &p.target_id).await {
+    match deps.idmm_service.clear_log(ctx.user_id.as_str(), kind, &p.target_id).await {
         Ok(count) => json!({"result": format!("cleared {count} intervention records")}),
         Err(e) => json!({"error": e.to_string()}),
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // REGISTRATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
 /// Register the scheduling/autonomy extension capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
-    // ── Cron extensions ─────────────────────────────────────────────────────
+    // -- Cron extensions --------------------------------------------------
     out.push(Capability::new::<CronGetJobParams, _, _>(
         CapabilityMeta::new(
             "nomi_cron_get_job",
@@ -324,7 +312,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         cron_run_now,
     ));
 
-    // ── Requirement extensions ──────────────────────────────────────────────
+    // -- Requirement extensions -------------------------------------------
     out.push(Capability::new::<RequirementGetParams, _, _>(
         CapabilityMeta::new(
             "nomi_requirement_get",
@@ -366,7 +354,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         |deps, _ctx, p| requirement_resume_tag(deps, p),
     ));
 
-    // ── IDMM extensions ─────────────────────────────────────────────────────
+    // -- IDMM extensions --------------------------------------------------
     out.push(Capability::new::<IdmmGetLogParams, _, _>(
         CapabilityMeta::new(
             "nomi_idmm_get_log",

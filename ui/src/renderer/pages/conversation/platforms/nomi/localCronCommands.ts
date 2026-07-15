@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 /**
  * @license
  * Copyright 2025-2026 NomiFun (nomifun.com)
@@ -34,7 +35,7 @@ function stripCronCommands(text: string): string {
  * Actual cron job creation/update/delete is handled by the backend middleware (StreamRelay).
  */
 export async function processLocalCronResponse(
-  _conversationId: number,
+  _conversationId: ConversationId,
   rawContent: string
 ): Promise<LocalCronProcessingResult> {
   if (!rawContent.trim()) {

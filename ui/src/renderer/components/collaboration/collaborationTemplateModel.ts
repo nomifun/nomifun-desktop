@@ -1,5 +1,6 @@
 import type { TAgentExecutionTemplateDetail } from '@/common/types/agentExecution/agentExecutionTemplateTypes';
 import type { TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
+import type { ExecutionTemplateId } from '@/common/types/ids';
 
 const MODEL_SEPARATOR = '\u0000';
 
@@ -7,7 +8,7 @@ const modelKey = (model: TExecutionModelRef): string =>
   `${model.provider_id}${MODEL_SEPARATOR}${model.model}`;
 
 export type AppliedCollaborationTemplate = {
-  id: string;
+  id: ExecutionTemplateId;
   name: string;
   participantCount: number;
   models: TExecutionModelRef[];

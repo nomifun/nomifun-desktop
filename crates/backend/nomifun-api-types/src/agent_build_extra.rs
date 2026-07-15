@@ -1,12 +1,49 @@
 use std::collections::HashMap;
 
-use nomifun_common::DelegationPolicy;
-use serde::{Deserialize, Deserializer, Serialize};
+use nomifun_common::{
+    CompanionId, CronJobId, DelegationPolicy, McpServerId, PresetId, PublicAgentId,
+    RemoteAgentId, UserId,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     BrowserMcpConfig, ComputerMcpConfig, GatewayMcpConfig, KnowledgeMcpConfig,
     KnowledgeMountInfo, OpenMcpConfig, RequirementMcpConfig,
 };
+
+macro_rules! optional_id_deserializer {
+    ($name:ident, $id:ty) => {
+        fn $name<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let value = Option::<String>::deserialize(deserializer)?;
+            value
+                .map(|value| {
+                    <$id>::parse(value.clone())
+                        .map(|_| value)
+                        .map_err(serde::de::Error::custom)
+                })
+                .transpose()
+        }
+    };
+}
+
+optional_id_deserializer!(deserialize_companion_id, CompanionId);
+optional_id_deserializer!(deserialize_cron_job_id, CronJobId);
+optional_id_deserializer!(deserialize_preset_id, PresetId);
+optional_id_deserializer!(deserialize_public_agent_id, PublicAgentId);
+optional_id_deserializer!(deserialize_user_id, UserId);
+
+fn deserialize_mcp_server_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    McpServerId::parse(value.clone())
+        .map(|_| value)
+        .map_err(serde::de::Error::custom)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -37,32 +74,12 @@ pub enum SessionMcpTransport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMcpServer {
-    #[serde(deserialize_with = "deserialize_session_mcp_server_id")]
+    #[serde(deserialize_with = "deserialize_mcp_server_id")]
     pub id: String,
     pub name: String,
     pub transport: SessionMcpTransport,
 }
 
-/// Session MCP snapshots use string identifiers because they can represent
-/// both catalog-backed rows and client-only servers. Accept integer JSON IDs
-/// from pre-normalization desktop clients during a rolling upgrade, but reject
-/// every other JSON type so the transport/configuration contract stays strict.
-fn deserialize_session_mcp_server_id<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum SessionMcpServerId {
-        String(String),
-        Integer(i64),
-    }
-
-    match SessionMcpServerId::deserialize(deserializer)? {
-        SessionMcpServerId::String(id) => Ok(id),
-        SessionMcpServerId::Integer(id) => Ok(id.to_string()),
-    }
-}
 
 /// ACP-specific fields extracted from `extra` in build runtime options.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -81,13 +98,13 @@ pub struct AcpBuildExtra {
     pub preset_context: Option<String>,
     #[serde(default)]
     pub skills: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_preset_id")]
     pub preset_id: Option<String>,
     #[serde(default)]
     pub session_mode: Option<String>,
     #[serde(default)]
     pub current_model_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_cron_job_id")]
     pub cron_job_id: Option<String>,
     /// Requirement MCP stdio bridge config. When `Some`, the ACP assembler
     /// injects `nomicore mcp-requirement-stdio` so the agent gets the
@@ -140,21 +157,20 @@ pub struct AcpBuildExtra {
     /// The companion this session is bound to (multi-companion upgrade). Set by the
     /// channel layer on Channel Agent sessions (platform binding > default
     /// companion); the backend binds it into the signed Gateway child capability
-    /// so desktop tools can attribute the caller. Accepts both camelCase
-    /// (`companionId`, the extra-JSON spelling) and snake_case.
-    #[serde(default, alias = "companionId")]
+    /// so desktop tools can attribute the caller.
+    #[serde(default, deserialize_with = "deserialize_companion_id")]
     pub companion_id: Option<String>,
     /// IM platform this session serves (e.g. "lark") when it is a channel
     /// Channel Agent. Set by the channel layer and bound into the signed Gateway
     /// child capability so the gateway resolves the write surface (channel →
     /// write-disabled unless re-enabled). Mirrors `NomiBuildExtra`.
-    #[serde(default, alias = "channelPlatform")]
+    #[serde(default)]
     pub channel_platform: Option<String>,
     #[serde(default)]
-    pub mcp_server_ids: Option<Vec<String>>,
+    pub mcp_server_ids: Option<Vec<McpServerId>>,
     #[serde(default)]
     pub session_mcp_servers: Vec<SessionMcpServer>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_user_id")]
     pub user_id: Option<String>,
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The ACP assembler renders
@@ -204,9 +220,9 @@ pub struct OpenClawBuildExtra {
     pub gateway: OpenClawGatewayConfig,
     #[serde(default)]
     pub skills: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_preset_id")]
     pub preset_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_cron_job_id")]
     pub cron_job_id: Option<String>,
     #[serde(default, rename = "sessionKey")]
     pub session_key: Option<String>,
@@ -215,9 +231,8 @@ pub struct OpenClawBuildExtra {
 /// Remote agent-specific fields extracted from `extra` in build runtime options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteBuildExtra {
-    /// Primary key of the `remote_agents` row (i64 since the primary-key
-    /// rework). The frontend carries it as a JSON number.
-    pub remote_agent_id: i64,
+    /// Canonical global ID of the configured remote-agent entity.
+    pub remote_agent_id: RemoteAgentId,
     /// Remote gateway session key persisted after a successful turn.
     #[serde(default, rename = "sessionKey", alias = "session_key")]
     pub session_key: Option<String>,
@@ -252,25 +267,24 @@ pub struct NomiBuildExtra {
     #[serde(default)]
     pub session_mode: Option<String>,
     #[serde(default)]
-    pub mcp_server_ids: Option<Vec<String>>,
+    pub mcp_server_ids: Option<Vec<McpServerId>>,
     #[serde(default)]
     pub session_mcp_servers: Vec<SessionMcpServer>,
     #[serde(default)]
     pub backend: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_user_id")]
     pub user_id: Option<String>,
     /// Marks a companion conversation: the factory registers its memory tools
     /// (recall/save memory, recent events) and skips unrelated Guide capabilities.
-    /// Accepts both camelCase (frontend extra) and snake_case.
-    #[serde(default, alias = "companionSession")]
+    #[serde(default, rename = "companion_session")]
     pub companion: bool,
     /// Opt-in to the Computer tool (screen/mouse/keyboard control) for this
     /// session. Falls back to host config / NOMIFUN_COMPUTER_USE when None.
-    #[serde(default, alias = "computerUse")]
+    #[serde(default)]
     pub computer_use: Option<bool>,
     /// Opt-in to the Browser tool (CDP automation) for this session.
     /// Falls back to host config / NOMIFUN_BROWSER_USE when None.
-    #[serde(default, alias = "browserUse")]
+    #[serde(default)]
     pub browser_use: Option<bool>,
     /// Platform Gateway MCP stdio bridge config, injected only from
     /// process-owned factory dependencies after authority resolution.
@@ -283,15 +297,14 @@ pub struct NomiBuildExtra {
     /// IM platform this conversation serves (e.g. "telegram", "lark"), set by
     /// the channel layer on Channel Agent sessions. Consumed by the companion
     /// prompt provider so the persona can acknowledge the remote context.
-    #[serde(default, alias = "channelPlatform")]
+    #[serde(default)]
     pub channel_platform: Option<String>,
     /// The companion this session is bound to (multi-companion upgrade). Set by the
     /// channel layer on Channel Agent sessions (platform binding > default
     /// companion) and consumed by the companion prompt provider to pick the
     /// persona; it is also bound into the signed Gateway child capability.
-    /// `None` resolves to the host's default companion. Accepts both camelCase
-    /// (`companionId`, the extra-JSON spelling) and snake_case.
-    #[serde(default, alias = "companionId")]
+    /// `None` means there is no companion binding.
+    #[serde(default, deserialize_with = "deserialize_companion_id")]
     pub companion_id: Option<String>,
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The Nomi factory renders
@@ -342,8 +355,8 @@ pub struct NomiBuildExtra {
     /// nomi 工厂据此把 `exposure` 升到 `PublicService`（硬钳，安全边界），并从
     /// `PublicAgentConfig` LIVE 解析人格 / 服务守则 / grounded / 知识库范围。后端
     /// 设定 only —— HTTP 会话路由从 client extra 中剥离，
-    /// 防止自授权。接受驼峰 (`publicAgentId`) 与蛇形。缺省 `None` = 非对外会话。
-    #[serde(default, alias = "publicAgentId")]
+    /// 防止自授权。缺省 `None` = 非对外会话。
+    #[serde(default, deserialize_with = "deserialize_public_agent_id")]
     pub public_agent_id: Option<String>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
@@ -429,5 +442,32 @@ mod tests {
         let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(extra.delegation_policy, DelegationPolicy::Automatic);
         assert_eq!(NomiBuildExtra::default().delegation_policy, DelegationPolicy::Automatic);
+    }
+
+    #[test]
+    fn session_mcp_server_id_rejects_json_number() {
+        let value = serde_json::json!({
+            "id": 42,
+            "name": "temporary",
+            "transport": { "type": "stdio", "command": "server" }
+        });
+        assert!(serde_json::from_value::<SessionMcpServer>(value).is_err());
+    }
+
+    #[test]
+    fn catalog_mcp_ids_require_canonical_mcp_strings() {
+        let id = McpServerId::new();
+        let parsed: NomiBuildExtra =
+            serde_json::from_value(serde_json::json!({ "mcp_server_ids": [id] })).unwrap();
+        assert_eq!(parsed.mcp_server_ids, Some(vec![id]));
+
+        for invalid in [serde_json::json!([42]), serde_json::json!(["42"])] {
+            assert!(
+                serde_json::from_value::<NomiBuildExtra>(
+                    serde_json::json!({ "mcp_server_ids": invalid })
+                )
+                .is_err()
+            );
+        }
     }
 }

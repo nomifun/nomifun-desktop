@@ -129,17 +129,35 @@ async fn status(
     Ok(Json(ApiResponse::ok(state.service.status().await?)))
 }
 
-/// Build an optional [`MemoryScope`] from wire parts.
-/// - `scope_kind = Some("companion")` with a non-empty id → private to it.
-/// - `scope_kind = Some(_other)` → Shared.
-/// - `scope_kind = None` → `None` (leave unchanged on update / default on add).
-fn scope_from_parts(scope_kind: Option<&str>, scope_companion_id: Option<&str>) -> Option<MemoryScope> {
-    let kind = scope_kind?;
-    let cid = scope_companion_id.unwrap_or("").trim();
-    if kind == "companion" && !cid.is_empty() {
-        Some(MemoryScope::Companion(cid.to_owned()))
-    } else {
-        Some(MemoryScope::Shared)
+/// Build an optional [`MemoryScope`] from wire parts without accepting empty-ID
+/// sentinels. Both fields absent means "leave unchanged"; shared is exactly
+/// `scope_kind = "user"` with no owner, and private requires a canonical owner.
+fn scope_from_parts(
+    scope_kind: Option<&str>,
+    scope_companion_id: Option<&str>,
+) -> Result<Option<MemoryScope>, AppError> {
+    match (scope_kind, scope_companion_id) {
+        (None, None) => Ok(None),
+        (Some("user"), None) => Ok(Some(MemoryScope::Shared)),
+        (Some("companion"), Some(companion_id)) => {
+            nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+            })?;
+            Ok(Some(MemoryScope::Companion(companion_id.to_owned())))
+        }
+        (Some(kind), _) if kind != "user" && kind != "companion" => {
+            Err(AppError::BadRequest(format!("invalid memory scope_kind {kind:?}")))
+        }
+        (Some("user"), Some(_)) => Err(AppError::BadRequest(
+            "shared memory scope must not include scope_companion_id".into(),
+        )),
+        (Some("companion"), None) => Err(AppError::BadRequest(
+            "private memory scope requires scope_companion_id".into(),
+        )),
+        (None, Some(_)) => Err(AppError::BadRequest(
+            "scope_companion_id requires an explicit scope_kind".into(),
+        )),
+        _ => unreachable!(),
     }
 }
 
@@ -149,7 +167,7 @@ struct ListMemoriesQuery {
     q: Option<String>,
     status: Option<String>,
     /// When set, scope the list to memories visible to this companion (shared +
-    /// its own private). Empty/absent = cross-companion "all" view.
+    /// its own private). Absent = cross-companion "all" view.
     scope_companion_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -160,11 +178,16 @@ async fn list_memories(
     Extension(_user): Extension<CurrentUser>,
     Query(query): Query<ListMemoriesQuery>,
 ) -> Result<Json<ApiResponse<MemoryPage>>, AppError> {
+    if let Some(companion_id) = query.scope_companion_id.as_deref() {
+        nomifun_common::CompanionId::try_from(companion_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid scope_companion_id: {error}"))
+        })?;
+    }
     let filter = MemoryFilter {
         kind: query.kind.filter(|k| !k.is_empty()),
         q: query.q.filter(|q| !q.is_empty()),
         status: Some(query.status.filter(|s| !s.is_empty()).unwrap_or_else(|| "active".into())),
-        scope_companion_id: query.scope_companion_id.filter(|s| !s.is_empty()),
+        scope_companion_id: query.scope_companion_id,
         limit: query.limit.unwrap_or(100),
         offset: query.offset.unwrap_or(0),
     };
@@ -177,7 +200,7 @@ struct AddMemoryRequest {
     content: String,
     #[serde(default)]
     tags: Vec<String>,
-    /// Owning companion for a private memory; empty/absent = shared.
+    /// Owning canonical companion for a private memory; absent = shared.
     #[serde(default)]
     scope_companion_id: Option<String>,
 }
@@ -188,7 +211,11 @@ async fn add_memory(
     body: Result<Json<AddMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<CompanionMemory>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = scope_from_parts(Some("companion"), req.scope_companion_id.as_deref()).unwrap_or(MemoryScope::Shared);
+    let scope = match req.scope_companion_id.as_deref() {
+        Some(companion_id) => scope_from_parts(Some("companion"), Some(companion_id))?
+            .expect("explicit scope"),
+        None => MemoryScope::Shared,
+    };
     Ok(Json(ApiResponse::ok(
         state.service.add_memory(&req.kind, &req.content, &req.tags, scope).await?,
     )))
@@ -212,7 +239,7 @@ async fn update_memory(
     body: Result<Json<UpdateMemoryRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let scope = scope_from_parts(req.scope_kind.as_deref(), req.scope_companion_id.as_deref());
+    let scope = scope_from_parts(req.scope_kind.as_deref(), req.scope_companion_id.as_deref())?;
     state
         .service
         .update_memory(&id, req.content.as_deref(), req.pinned, req.status.as_deref(), scope)

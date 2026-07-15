@@ -1,3 +1,4 @@
+import type { McpServerId } from '@/common/types/ids';
 import { useCallback } from 'react';
 import { Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
@@ -137,7 +138,7 @@ export const useMcpServerCRUD = (
   );
 
   const handleDeleteMcpServer = useCallback(
-    async (serverId: number) => {
+    async (serverId: McpServerId) => {
       await mcpService.deleteServer.invoke({ id: serverId });
       await saveMcpServers((prevServers) => prevServers.filter((server) => server.id !== serverId));
       Message.success(t('settings.mcpDeleted'));

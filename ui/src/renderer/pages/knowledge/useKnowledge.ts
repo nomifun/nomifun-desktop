@@ -18,6 +18,7 @@ import type {
   IKnowledgeTreeEntry,
 } from '@/common/adapter/ipcBridge';
 import type { I18nKey } from '@/renderer/services/i18n';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 
 export function useKnowledgeBases() {
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
@@ -54,7 +55,7 @@ export function useKnowledgeBases() {
   return { bases, loading, error, refresh };
 }
 
-export function useKnowledgeBase(id: string | undefined) {
+export function useKnowledgeBase(id: KnowledgeBaseId | undefined) {
   const [base, setBase] = useState<IKnowledgeBase | null>(null);
   const [files, setFiles] = useState<IKnowledgeFileEntry[]>([]);
   const [tree, setTree] = useState<IKnowledgeTreeEntry[]>([]);
@@ -104,7 +105,7 @@ export function useKnowledgeBase(id: string | undefined) {
  * on `knowledge.base-updated` (a merge re-emits it) and exposes `refresh` for
  * the optimistic refetch after a merge/discard action.
  */
-export function useKnowledgeInbox(id: string | undefined) {
+export function useKnowledgeInbox(id: KnowledgeBaseId | undefined) {
   const [items, setItems] = useState<IKnowledgeInboxEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -140,7 +141,7 @@ export function useKnowledgeInbox(id: string | undefined) {
 }
 
 /** Bindings (workspaces/conversations/…) currently mounting a base. */
-export function useKnowledgeConsumers(id: string | undefined) {
+export function useKnowledgeConsumers(id: KnowledgeBaseId | undefined) {
   const [consumers, setConsumers] = useState<IKnowledgeConsumer[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

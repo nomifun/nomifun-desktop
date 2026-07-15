@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
@@ -13,7 +14,7 @@ interface WorkspaceBindButtonProps {
    * Conversation whose `extra.workspace` will be redirected to the picked
    * directory. Required to issue the PATCH; when absent the button hides.
    */
-  conversation_id?: number;
+  conversation_id?: ConversationId;
 }
 
 /**

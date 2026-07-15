@@ -21,7 +21,7 @@ use nomifun_api_types::{
     TestRemoteAgentConnectionRequest, UpdateRemoteAgentRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, RemoteAgentId};
 
 use super::state::RemoteAgentRouterState;
 
@@ -48,7 +48,7 @@ async fn list(
 async fn get_one(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<RemoteAgentId>,
 ) -> Result<Json<ApiResponse<RemoteAgentResponse>>, AppError> {
     let agent = state.service.get(&id).await?;
     Ok(Json(ApiResponse::ok(agent)))
@@ -67,7 +67,7 @@ async fn create(
 async fn update(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<RemoteAgentId>,
     body: Result<Json<UpdateRemoteAgentRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<RemoteAgentResponse>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -78,7 +78,7 @@ async fn update(
 async fn delete_one(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<RemoteAgentId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     state.service.delete(&id).await?;
     Ok(Json(ApiResponse::success()))
@@ -97,7 +97,7 @@ async fn test_connection(
 async fn handshake(
     State(state): State<RemoteAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<RemoteAgentId>,
 ) -> Result<Json<ApiResponse<HandshakeResponse>>, AppError> {
     let resp = state.service.handshake(&id).await?;
     Ok(Json(ApiResponse::ok(resp)))

@@ -298,9 +298,16 @@ export async function migrateProviders(configFile: ConfigFile): Promise<void> {
   }
 
   const existing = await ipcBridge.mode.listProviders.invoke();
-  const existingIds = new Set((existing ?? []).map((p: { id: string }) => p.id));
+  const existingKeys = new Set(
+    (existing ?? []).map((p) => `${p.platform}\u0000${p.name}`)
+  );
 
-  const newProviders = legacyProviders.filter((p) => !existingIds.has(p.id));
+  // Legacy provider identifiers are deliberately not imported: ID v2 requires
+  // the backend to mint a fresh canonical `prov_<uuid-v7>`. Natural provider
+  // identity is used only to make this one-time config import idempotent.
+  const newProviders = legacyProviders.filter(
+    (p) => !existingKeys.has(`${p.platform}\u0000${p.name}`)
+  );
   if (newProviders.length === 0) {
     console.info(
       '[Migration] providers migration skipped — all %d legacy providers already exist in backend',
@@ -320,7 +327,6 @@ export async function migrateProviders(configFile: ConfigFile): Promise<void> {
   const requests = newProviders.map((legacy) => ({
     legacy,
     req: {
-      id: legacy.id,
       platform: legacy.platform,
       name: legacy.name,
       base_url: legacy.baseUrl,

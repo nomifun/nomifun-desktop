@@ -264,8 +264,7 @@ pub async fn create_router(services: &AppServices) -> Router {
                 .list()
                 .await
                 .into_iter()
-                .map(|a| a.id)
-                .filter(|id| !id.is_empty())
+                .map(|a| a.id.into_string())
                 .collect();
             // Safety valve: never mass-unbind on an ambiguous "no owners at all"
             // signal (e.g. a roster that failed to load). If the user genuinely

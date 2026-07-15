@@ -24,7 +24,7 @@ impl IAttachmentRepository for SqliteAttachmentRepository {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&row.id)
-        .bind(row.requirement_id)
+        .bind(&row.requirement_id)
         .bind(&row.file_name)
         .bind(&row.rel_path)
         .bind(&row.mime)
@@ -44,7 +44,7 @@ impl IAttachmentRepository for SqliteAttachmentRepository {
         Ok(row)
     }
 
-    async fn list_for_requirement(&self, requirement_id: i64) -> Result<Vec<AttachmentRow>, DbError> {
+    async fn list_for_requirement(&self, requirement_id: &str) -> Result<Vec<AttachmentRow>, DbError> {
         let rows = sqlx::query_as::<_, AttachmentRow>(
             "SELECT * FROM attachments WHERE requirement_id = ? ORDER BY created_at ASC, id ASC",
         )

@@ -8,7 +8,12 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use common::{body_json, build_app, build_app_with_mock_agents, get_request, get_with_token, setup_and_login};
+use nomifun_common::MessageId;
 use nomifun_db::{ConversationRowUpdate, IConversationRepository};
+
+const MISSING_CONVERSATION_ID: &str = "conv_0190f5fe-7c00-7a00-8abc-012345679990";
+const MISSING_MESSAGE_ID: &str = "msg_0190f5fe-7c00-7a00-8abc-012345679989";
+const TEST_CRON_JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8abc-012345679988";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -20,24 +25,24 @@ fn create_conv_body(name: &str) -> serde_json::Value {
     })
 }
 
-async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> i64 {
+async fn create_conversation(app: &mut axum::Router, token: &str, csrf: &str, name: &str) -> String {
     let req = common::json_with_token("POST", "/api/conversations", create_conv_body(name), token, csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = common::body_json(resp).await;
-    json["data"]["id"].as_i64().unwrap()
+    json["data"]["id"].as_str().unwrap().to_owned()
 }
 
 async fn insert_message(
     services: &nomifun_app::AppServices,
-    conv_id: i64,
-    msg_id: &str,
+    conv_id: &str,
     content: &str,
     created_at: i64,
-) {
+) -> String {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
+    let message_id = MessageId::new().into_string();
     let msg = nomifun_db::models::MessageRow {
-        id: msg_id.into(),
-        conversation_id: conv_id,
+        id: message_id.clone(),
+        conversation_id: conv_id.to_owned(),
         msg_id: None,
         r#type: "text".into(),
         content: serde_json::json!({"content": content}).to_string(),
@@ -49,9 +54,10 @@ async fn insert_message(
     nomifun_db::IConversationRepository::insert_message(&repo, &msg)
         .await
         .unwrap();
+    message_id
 }
 
-async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv_id: i64, workspace: &str) {
+async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv_id: &str, workspace: &str) {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
     IConversationRepository::update(
         &repo,
@@ -67,22 +73,23 @@ async fn update_conversation_workspace(services: &nomifun_app::AppServices, conv
 
 async fn insert_acp_tool_message(
     services: &nomifun_app::AppServices,
-    conv_id: i64,
-    msg_id: &str,
+    conv_id: &str,
+    tool_call_id: &str,
     output: &str,
     created_at: i64,
-) {
+) -> String {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
+    let message_id = MessageId::new().into_string();
     let msg = nomifun_db::models::MessageRow {
-        id: msg_id.into(),
-        conversation_id: conv_id,
-        msg_id: Some(msg_id.into()),
+        id: message_id.clone(),
+        conversation_id: conv_id.to_owned(),
+        msg_id: Some(message_id.clone()),
         r#type: "acp_tool_call".into(),
         content: serde_json::json!({
             "session_id": "session-1",
             "update": {
                 "session_update": "tool_call",
-                "tool_call_id": msg_id,
+                "tool_call_id": tool_call_id,
                 "status": "completed",
                 "title": "rg",
                 "kind": "search",
@@ -102,9 +109,10 @@ async fn insert_acp_tool_message(
     nomifun_db::IConversationRepository::insert_message(&repo, &msg)
         .await
         .unwrap();
+    message_id
 }
 
-async fn upsert_artifact(services: &nomifun_app::AppServices, artifact: nomifun_db::ConversationArtifactRow) -> i64 {
+async fn upsert_artifact(services: &nomifun_app::AppServices, artifact: nomifun_db::ConversationArtifactRow) -> String {
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
     nomifun_db::IConversationRepository::upsert_artifact(&repo, &artifact)
         .await
@@ -118,9 +126,10 @@ async fn seed_cron_job(services: &nomifun_app::AppServices, id: &str) {
     sqlx::query(
         "INSERT INTO cron_jobs \
             (id, user_id, name, schedule_kind, schedule_value, payload_message, agent_type, created_by, created_at, updated_at) \
-         VALUES (?, 'system_default_user', 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
+         VALUES (?, ?, 'Job', 'every', '60000', 'msg', 'acp', 'user', 0, 0)",
     )
     .bind(id)
+    .bind(services.authoritative_user_id.as_ref())
     .execute(services.database.pool())
     .await
     .unwrap();
@@ -157,8 +166,7 @@ async fn t8_2_messages_pagination() {
     for i in 0..10 {
         insert_message(
             &services,
-            conv_id,
-            &format!("msg-{i}"),
+            &conv_id,
             &format!("Message {i}"),
             1000 + i * 100,
         )
@@ -199,7 +207,7 @@ async fn t8_2b_messages_compact_mode_truncates_large_tool_payload() {
     let conv_id = create_conversation(&mut app, &token, &csrf, "Compact Tool Conv").await;
     let large_output = "match line\n".repeat(10_000);
 
-    insert_acp_tool_message(&services, conv_id, "tool-big", &large_output, 1000).await;
+    insert_acp_tool_message(&services, &conv_id, "tool-big", &large_output, 1000).await;
 
     let resp = app
         .clone()
@@ -226,12 +234,12 @@ async fn t8_2c_get_message_returns_full_tool_payload() {
     let conv_id = create_conversation(&mut app, &token, &csrf, "Tool Detail Conv").await;
     let large_output = "wide rg output\n".repeat(10_000);
 
-    insert_acp_tool_message(&services, conv_id, "tool-detail", &large_output, 1000).await;
+    let message_id = insert_acp_tool_message(&services, &conv_id, "tool-detail", &large_output, 1000).await;
 
     let resp = app
         .clone()
         .oneshot(get_with_token(
-            &format!("/api/conversations/{conv_id}/messages/tool-detail"),
+            &format!("/api/conversations/{conv_id}/messages/{message_id}"),
             &token,
         ))
         .await
@@ -271,7 +279,7 @@ async fn t8_2e_get_message_not_found_returns_specific_error() {
 
     let resp = app
         .oneshot(get_with_token(
-            &format!("/api/conversations/{conv_id}/messages/missing-message"),
+            &format!("/api/conversations/{conv_id}/messages/{MISSING_MESSAGE_ID}"),
             &token,
         ))
         .await
@@ -284,7 +292,7 @@ async fn t8_2e_get_message_not_found_returns_specific_error() {
         json["error"]
             .as_str()
             .unwrap()
-            .contains("Message missing-message not found")
+            .contains(&format!("Message {MISSING_MESSAGE_ID} not found"))
     );
 }
 
@@ -293,13 +301,14 @@ async fn t8_2f_get_message_does_not_leak_cross_user_conversation() {
     let (mut app, services) = build_app().await;
     let (owner_token, owner_csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let owner_conv_id = create_conversation(&mut app, &owner_token, &owner_csrf, "Owner Tool Conv").await;
-    insert_acp_tool_message(&services, owner_conv_id, "owner-tool", "private output", 1000).await;
+    let owner_message_id =
+        insert_acp_tool_message(&services, &owner_conv_id, "owner-tool", "private output", 1000).await;
 
     let (other_token, _other_csrf) = setup_and_login(&mut app, &services, "other-user", "StrongP@ss2").await;
 
     let resp = app
         .oneshot(get_with_token(
-            &format!("/api/conversations/{owner_conv_id}/messages/owner-tool"),
+            &format!("/api/conversations/{owner_conv_id}/messages/{owner_message_id}"),
             &other_token,
         ))
         .await
@@ -314,7 +323,7 @@ async fn t8_2f_get_message_does_not_leak_cross_user_conversation() {
             .unwrap()
             .contains(&format!("Conversation {owner_conv_id} not found"))
     );
-    assert!(!json["error"].as_str().unwrap().contains("owner-tool"));
+    assert!(!json["error"].as_str().unwrap().contains(&owner_message_id));
     assert!(!json["error"].as_str().unwrap().contains("private output"));
 }
 
@@ -324,9 +333,9 @@ async fn t8_3_messages_order_asc_default() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Order Test").await;
 
-    insert_message(&services, conv_id, "msg-old", "Old", 1000).await;
-    insert_message(&services, conv_id, "msg-mid", "Mid", 2000).await;
-    insert_message(&services, conv_id, "msg-new", "New", 3000).await;
+    insert_message(&services, &conv_id, "Old", 1000).await;
+    insert_message(&services, &conv_id, "Mid", 2000).await;
+    insert_message(&services, &conv_id, "New", 3000).await;
 
     let resp = app
         .oneshot(get_with_token(
@@ -348,9 +357,9 @@ async fn t8_4_messages_order_asc() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "ASC Test").await;
 
-    insert_message(&services, conv_id, "msg-old", "Old", 1000).await;
-    insert_message(&services, conv_id, "msg-mid", "Mid", 2000).await;
-    insert_message(&services, conv_id, "msg-new", "New", 3000).await;
+    insert_message(&services, &conv_id, "Old", 1000).await;
+    insert_message(&services, &conv_id, "Mid", 2000).await;
+    insert_message(&services, &conv_id, "New", 3000).await;
 
     let resp = app
         .oneshot(get_with_token(
@@ -372,7 +381,10 @@ async fn t8_5_messages_conversation_not_found() {
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let resp = app
-        .oneshot(get_with_token("/api/conversations/non-existent/messages", &token))
+        .oneshot(get_with_token(
+            &format!("/api/conversations/{MISSING_CONVERSATION_ID}/messages"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -394,24 +406,22 @@ async fn t8_7_messages_exclude_legacy_cron_rows() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Filter").await;
 
-    insert_message(&services, conv_id, "msg-text", "Visible", 1000).await;
+    insert_message(&services, &conv_id, "Visible", 1000).await;
 
     let repo = nomifun_db::SqliteConversationRepository::new(services.database.pool().clone());
-    for (id, ty, content) in [
+    for (ty, content) in [
         (
-            "legacy-cron",
             "cron_trigger",
             json!({
-                "cron_job_id": "cron_1",
+                "cron_job_id": TEST_CRON_JOB_ID,
                 "cron_job_name": "Daily",
                 "triggered_at": 2000
             }),
         ),
         (
-            "legacy-skill",
             "skill_suggest",
             json!({
-                "cron_job_id": "cron_1",
+                "cron_job_id": TEST_CRON_JOB_ID,
                 "name": "daily-report",
                 "description": "Daily report",
                 "skillContent": "---\nname: daily-report\n---\nUse it."
@@ -419,7 +429,7 @@ async fn t8_7_messages_exclude_legacy_cron_rows() {
         ),
     ] {
         let msg = nomifun_db::models::MessageRow {
-            id: id.into(),
+            id: MessageId::new().into_string(),
             conversation_id: conv_id.clone(),
             msg_id: None,
             r#type: ty.into(),
@@ -456,18 +466,18 @@ async fn t8_8_artifacts_list_and_patch_status() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Artifacts").await;
-    seed_cron_job(&services, "cron_1").await;
+    seed_cron_job(&services, TEST_CRON_JOB_ID).await;
 
     let artifact_id = upsert_artifact(
         &services,
         nomifun_db::ConversationArtifactRow {
-            id: 0,
+            id: nomifun_common::ConversationArtifactId::new().into_string(),
             conversation_id: conv_id.clone(),
-            cron_job_id: Some("cron_1".into()),
+            cron_job_id: Some(TEST_CRON_JOB_ID.into()),
             kind: "skill_suggest".into(),
             status: "active".into(),
             payload: json!({
-                "cron_job_id": "cron_1",
+                "cron_job_id": TEST_CRON_JOB_ID,
                 "name": "daily-report",
                 "description": "Daily report",
                 "skillContent": "---\nname: daily-report\n---\nUse it."
@@ -516,8 +526,8 @@ async fn t9_1_search_keyword_match() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let conv_id = create_conversation(&mut app, &token, &csrf, "Search Conv").await;
-    insert_message(&services, conv_id, "msg-1", "Rust is great", 1000).await;
-    insert_message(&services, conv_id, "msg-2", "Python is also nice", 2000).await;
+    insert_message(&services, &conv_id, "Rust is great", 1000).await;
+    insert_message(&services, &conv_id, "Python is also nice", 2000).await;
 
     let resp = app
         .oneshot(get_with_token("/api/messages/search?keyword=Rust", &token))
@@ -536,7 +546,7 @@ async fn t9_2_search_no_match() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let conv_id = create_conversation(&mut app, &token, &csrf, "No Match Conv").await;
-    insert_message(&services, conv_id, "msg-1", "Hello world", 1000).await;
+    insert_message(&services, &conv_id, "Hello world", 1000).await;
 
     let resp = app
         .oneshot(get_with_token("/api/messages/search?keyword=xxxxnotexist", &token))
@@ -556,8 +566,7 @@ async fn t9_3_search_pagination() {
     for i in 0..5 {
         insert_message(
             &services,
-            conv_id,
-            &format!("msg-{i}"),
+            &conv_id,
             &format!("Matching keyword {i}"),
             1000 + i * 100,
         )
@@ -628,7 +637,7 @@ async fn message_response_has_correct_fields() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let conv_id = create_conversation(&mut app, &token, &csrf, "Field Check").await;
-    insert_message(&services, conv_id, "msg-fc", "Content check", 5000).await;
+    insert_message(&services, &conv_id, "Content check", 5000).await;
 
     let resp = app
         .oneshot(get_with_token(
@@ -662,8 +671,8 @@ async fn delete_conversation_cascades_messages() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let conv_id = create_conversation(&mut app, &token, &csrf, "Cascade Test").await;
-    insert_message(&services, conv_id, "msg-cas-1", "msg 1", 1000).await;
-    insert_message(&services, conv_id, "msg-cas-2", "msg 2", 2000).await;
+    insert_message(&services, &conv_id, "msg 1", 1000).await;
+    insert_message(&services, &conv_id, "msg 2", 2000).await;
 
     // Delete the conversation
     let resp = app
@@ -696,9 +705,9 @@ async fn search_across_multiple_conversations() {
     let conv1 = create_conversation(&mut app, &token, &csrf, "Conv Alpha").await;
     let conv2 = create_conversation(&mut app, &token, &csrf, "Conv Beta").await;
 
-    insert_message(&services, conv1, "msg-a1", "Rust review needed", 1000).await;
-    insert_message(&services, conv2, "msg-b1", "Rust performance tips", 2000).await;
-    insert_message(&services, conv2, "msg-b2", "Python patterns", 3000).await;
+    insert_message(&services, &conv1, "Rust review needed", 1000).await;
+    insert_message(&services, &conv2, "Rust performance tips", 2000).await;
+    insert_message(&services, &conv2, "Python patterns", 3000).await;
 
     let resp = app
         .oneshot(get_with_token("/api/messages/search?keyword=Rust", &token))
@@ -772,7 +781,13 @@ async fn t2_1_send_message_conversation_not_found() {
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
     let body = json!({ "content": "Hello" });
-    let req = common::json_with_token("POST", "/api/conversations/non-existent/messages", body, &token, &csrf);
+    let req = common::json_with_token(
+        "POST",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/messages"),
+        body,
+        &token,
+        &csrf,
+    );
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -782,7 +797,7 @@ async fn t2_1b_send_message_pathological_workspace_returns_runtime_whitespace_co
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Workspace").await;
-    update_conversation_workspace(&services, conv_id, "/tmp/my project ").await;
+    update_conversation_workspace(&services, &conv_id, "/tmp/my project ").await;
 
     let body = json!({ "content": "Hello" });
     let req = common::json_with_token(
@@ -813,7 +828,7 @@ async fn t2_1c_send_message_accepts_interior_whitespace_workspace() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("Application Support").join("Nomi").join("conversations").join("nomi-temp-1");
     std::fs::create_dir_all(&workspace).unwrap();
-    update_conversation_workspace(&services, conv_id, &workspace.to_string_lossy()).await;
+    update_conversation_workspace(&services, &conv_id, &workspace.to_string_lossy()).await;
 
     let body = json!({ "content": "Hello" });
     let req = common::json_with_token(
@@ -855,7 +870,7 @@ async fn t2_2_stop_stream_conversation_not_found() {
 
     let req = common::json_with_token(
         "POST",
-        "/api/conversations/non-existent/cancel",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/cancel"),
         json!({}),
         &token,
         &csrf,
@@ -887,7 +902,7 @@ async fn t2_3_warmup_conversation_not_found() {
 
     let req = common::json_with_token(
         "POST",
-        "/api/conversations/non-existent/warmup",
+        &format!("/api/conversations/{MISSING_CONVERSATION_ID}/warmup"),
         json!({}),
         &token,
         &csrf,
@@ -901,7 +916,7 @@ async fn t2_3b_warmup_pathological_workspace_returns_runtime_whitespace_code() {
     let (mut app, services) = build_app_with_mock_agents().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv_id = create_conversation(&mut app, &token, &csrf, "Legacy Warmup").await;
-    update_conversation_workspace(&services, conv_id, "/tmp/my project ").await;
+    update_conversation_workspace(&services, &conv_id, "/tmp/my project ").await;
 
     let req = common::json_with_token(
         "POST",

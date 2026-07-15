@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { IPublicAgent, IPublicAgentPatch } from '@/common/adapter/ipcBridge';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
+import type { PublicAgentId } from '@/common/types/ids';
 
 /**
  * 对外伙伴（Public Companion）花名册 —— 面向陌生人的企业级客服 agent 列表 + 创建。
@@ -69,7 +70,7 @@ export const usePublicAgents = () => {
 /**
  * 单个对外伙伴的档案 + 乐观 PATCH 通道。乐观更新本地状态，失败则回读权威值。
  */
-export const usePublicAgent = (id: string | null) => {
+export const usePublicAgent = (id: PublicAgentId | null) => {
   const [agent, setAgent] = useState<IPublicAgent | null>(null);
   const [loading, setLoading] = useState(true);
 

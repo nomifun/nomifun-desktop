@@ -26,6 +26,7 @@ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 
 import type { AssetSortKey, PatchAssetBody, WorkshopAsset } from '../workshop/types';
+import type { AssetId } from '@/common/types/ids';
 import { deleteAsset as apiDeleteAsset, patchAsset as apiPatchAsset, renameCollection as apiRenameCollection } from '../workshop/api';
 import { revokeWorkshopMedia } from '../workshop/lib/media';
 import {
@@ -248,7 +249,7 @@ const AssetLibraryPage: React.FC = () => {
   const [editAsset, setEditAsset] = useState<WorkshopAsset | null>(null);
   const [creatingText, setCreatingText] = useState(false);
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<AssetId>>(new Set());
   const selectionActive = selected.size > 0;
 
   // Bulk-op modals.
@@ -303,7 +304,7 @@ const AssetLibraryPage: React.FC = () => {
       if (prev.size === 0) return prev;
       const present = new Set(lib.items.map((a) => a.id));
       let changed = false;
-      const next = new Set<string>();
+      const next = new Set<AssetId>();
       for (const id of prev) {
         if (present.has(id)) next.add(id);
         else changed = true;

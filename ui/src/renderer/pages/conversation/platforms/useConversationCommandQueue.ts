@@ -1,3 +1,6 @@
+import type { ConversationId } from '@/common/types/ids';
+import { conversationTarget } from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuid } from '@/common/utils';
 import { useAddEventListener } from '@/renderer/utils/emitter';
 import { Message } from '@arco-design/web-react';
@@ -49,7 +52,7 @@ const summarizeQueuedCommand = (item: ConversationCommandQueueItem): Record<stri
   preview: item.input.replace(/\s+/g, ' ').trim().slice(0, 120),
 });
 
-const logCommandQueue = (conversation_id: string, event: string, payload: Record<string, unknown> = {}): void => {
+const logCommandQueue = (conversation_id: ConversationId, event: string, payload: Record<string, unknown> = {}): void => {
   console.info(COMMAND_QUEUE_LOG_PREFIX, {
     conversation_id,
     event,
@@ -62,9 +65,10 @@ const createDefaultQueueState = (): ConversationCommandQueueState => ({
   isPaused: false,
 });
 
-const queueStore = new Map<string, ConversationCommandQueueState>();
+const queueStore = new Map<ConversationId, ConversationCommandQueueState>();
 
-const getStorageKey = (conversation_id: string): string => `conversation-command-queue/${conversation_id}`;
+const getStorageKey = (conversation_id: ConversationId): string =>
+  sessionStorageKey('command-queue', conversationTarget(conversation_id));
 const measureQueueStateBytes = (state: ConversationCommandQueueState): number =>
   new TextEncoder().encode(JSON.stringify(state)).length;
 
@@ -191,7 +195,7 @@ const isQueueValidationFailure = (
   validation: QueueValidationSuccess | QueueValidationFailure
 ): validation is QueueValidationFailure => !validation.ok;
 
-const readPersistedQueueState = (conversation_id: string): ConversationCommandQueueState => {
+const readPersistedQueueState = (conversation_id: ConversationId): ConversationCommandQueueState => {
   if (queueStore.has(conversation_id)) {
     return queueStore.get(conversation_id) ?? createDefaultQueueState();
   }
@@ -220,7 +224,7 @@ const readPersistedQueueState = (conversation_id: string): ConversationCommandQu
   }
 };
 
-const removePersistedQueueState = (conversation_id: string): void => {
+const removePersistedQueueState = (conversation_id: ConversationId): void => {
   queueStore.delete(conversation_id);
   if (typeof window !== 'undefined') {
     try {
@@ -231,7 +235,7 @@ const removePersistedQueueState = (conversation_id: string): void => {
   }
 };
 
-const persistQueueState = (conversation_id: string, state: ConversationCommandQueueState): void => {
+const persistQueueState = (conversation_id: ConversationId, state: ConversationCommandQueueState): void => {
   const normalized = normalizeQueueState(state);
 
   if (normalized.items.length === 0 && !normalized.isPaused) {
@@ -303,7 +307,7 @@ export const shouldEnqueueConversationCommand = ({
 }): boolean => enabled && (isBusy || hasPendingCommands);
 
 type UseConversationCommandQueueOptions = {
-  conversation_id: number;
+  conversation_id: ConversationId;
   enabled?: boolean;
   isBusy: boolean;
   isHydrated?: boolean;
@@ -347,10 +351,9 @@ export const useConversationCommandQueue = ({
   onExecute,
 }: UseConversationCommandQueueOptions) => {
   const { t } = useTranslation();
-  // Internal persistence/logging layer is keyed by a stable string (SWR key,
-  // sessionStorage key, queueStore Map key). conversation_id is the numeric
-  // entity id (numeric-id spec) — stringify once at this local cache boundary.
-  const conversationKey = String(conversation_id);
+  // Internal persistence/logging is keyed by the canonical conversation ID
+  // (SWR key, sessionStorage key, and queueStore Map key).
+  const conversationKey = conversation_id;
   const { data = createDefaultQueueState(), mutate } = useSWR(
     [`/conversation-command-queue/${conversationKey}`, conversationKey, enabled],
     ([, id, is_enabled]) => (is_enabled ? readPersistedQueueState(id) : createDefaultQueueState())

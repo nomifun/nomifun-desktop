@@ -6,7 +6,7 @@ use nomifun_db::{ConversationRowUpdate, SaveRuntimeStateParams};
 use tracing::{info, warn};
 
 use crate::convert::string_to_enum;
-use crate::service::{ConversationService, parse_conv_id};
+use crate::service::ConversationService;
 use crate::stream_relay::RelayOutcome;
 use nomifun_ai_agent::AgentRuntimeRegistry;
 
@@ -20,9 +20,7 @@ impl ConversationService {
             return;
         }
 
-        let Ok(conv_id) = parse_conv_id(conversation_id) else {
-            return;
-        };
+        let conv_id = conversation_id;
 
         let row = match self.conversation_repo().get(conv_id).await {
             Ok(Some(row)) => row,
@@ -137,9 +135,7 @@ impl ConversationService {
             return;
         }
 
-        let Ok(conv_id) = parse_conv_id(conversation_id) else {
-            return;
-        };
+        let conv_id = conversation_id;
 
         let previous_model_id = match self.acp_session_repo().load_runtime_state(conv_id).await {
             Ok(Some(state)) => state.current_model_id,

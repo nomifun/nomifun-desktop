@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
@@ -41,7 +42,7 @@ export interface AgentModeSelectorProps {
   /** Whether the logo is an emoji / logo 是否为 emoji */
   agentLogoIsEmoji?: boolean;
   /** Conversation ID for mode switching / 用于切换模式的会话 ID */
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   /** Compact mode: only show mode label + dropdown, no logo/name / 紧凑模式：仅显示模式标签和下拉 */
   compact?: boolean;
   /** Show agent logo in compact mode / 紧凑模式是否显示代理图标 */

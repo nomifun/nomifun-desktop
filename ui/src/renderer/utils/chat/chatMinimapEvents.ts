@@ -1,9 +1,10 @@
+import type { ConversationId, MessageId } from '@/common/types/ids';
 export const CHAT_MESSAGE_JUMP_EVENT = 'nomifun-chat-message-jump';
 
 export interface ChatMessageJumpDetail {
-  conversation_id: number;
+  conversation_id: ConversationId;
   messageId?: string;
-  msgId?: string;
+  msgId?: MessageId;
   align?: 'start' | 'center' | 'end';
   behavior?: 'auto' | 'smooth';
 }

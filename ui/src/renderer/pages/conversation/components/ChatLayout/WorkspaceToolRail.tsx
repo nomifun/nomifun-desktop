@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SessionTarget } from '@/common/types/ids';
 import type { WorkspaceExtraTab, WorkspaceTab } from '@/renderer/pages/conversation/Workspace/types';
 import { Tooltip } from '@arco-design/web-react';
 import { Branch, Change, ChartHistogram, FolderOpen } from '@icon-park/react';
@@ -16,18 +17,27 @@ export const WORKSPACE_PANEL_META_EVENT = 'nomifun-workspace-panel-meta';
 
 export interface WorkspacePanelTabDetail {
   tab: WorkspaceTab;
-  sourceKey?: string;
+  target: SessionTarget;
 }
 
 export interface WorkspacePanelMetaDetail {
-  sourceKey: string;
+  target: SessionTarget;
   changeCount: number;
 }
 
-export function dispatchWorkspacePanelTabEvent(tab: WorkspaceTab, sourceKey?: string) {
+export function dispatchWorkspacePanelTabEvent(tab: WorkspaceTab, target: SessionTarget) {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
-    new CustomEvent<WorkspacePanelTabDetail>(WORKSPACE_PANEL_TAB_EVENT, { detail: { tab, sourceKey } })
+    new CustomEvent<WorkspacePanelTabDetail>(WORKSPACE_PANEL_TAB_EVENT, { detail: { tab, target } })
+  );
+}
+
+export function isWorkspacePanelEventForTarget(
+  eventTarget: SessionTarget | undefined,
+  target: SessionTarget | undefined
+): boolean {
+  return Boolean(
+    eventTarget && target && eventTarget.kind === target.kind && eventTarget.id === target.id
   );
 }
 

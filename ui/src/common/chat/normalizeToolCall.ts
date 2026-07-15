@@ -1,4 +1,5 @@
 import type { IMessageAcpToolCall, IMessageToolCall, IMessageToolGroup } from './chatLib';
+import type { ConversationId } from '../types/ids';
 import { toDisplayText } from './displayText';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
@@ -16,7 +17,7 @@ export interface NormalizedToolCall {
   output?: string;
   truncated?: boolean;
   messageId?: string;
-  conversationId?: number;
+  conversationId?: ConversationId;
 }
 
 const formatValue = (value: unknown): string => toDisplayText(value);

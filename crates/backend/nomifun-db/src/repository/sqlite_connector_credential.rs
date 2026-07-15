@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 use crate::error::DbError;
 use crate::models::ConnectorCredentialRow;
 use crate::repository::IConnectorCredentialRepository;
+use nomifun_common::ConnectorCredentialId;
 
 /// SQLite-backed [`IConnectorCredentialRepository`].
 #[derive(Clone, Debug)]
@@ -27,22 +28,22 @@ impl IConnectorCredentialRepository for SqliteConnectorCredentialRepository {
         Ok(rows)
     }
 
-    async fn get(&self, id: &str) -> Result<Option<ConnectorCredentialRow>, DbError> {
+    async fn get(&self, id: &ConnectorCredentialId) -> Result<Option<ConnectorCredentialRow>, DbError> {
         let row = sqlx::query_as::<_, ConnectorCredentialRow>("SELECT * FROM connector_credentials WHERE id = ?")
-            .bind(id)
+            .bind(id.as_str())
             .fetch_optional(&self.pool)
             .await?;
         Ok(row)
     }
 
     async fn create(&self, kind: &str, name: &str, payload_encrypted: &str) -> Result<ConnectorCredentialRow, DbError> {
-        let id = nomifun_common::generate_prefixed_id("conn");
+        let id = ConnectorCredentialId::new();
         let now = nomifun_common::now_ms();
         sqlx::query(
             "INSERT INTO connector_credentials (id, kind, name, payload_encrypted, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(&id)
+        .bind(id.as_str())
         .bind(kind)
         .bind(name)
         .bind(payload_encrypted)
@@ -60,13 +61,13 @@ impl IConnectorCredentialRepository for SqliteConnectorCredentialRepository {
         })
     }
 
-    async fn delete(&self, id: &str) -> Result<(), DbError> {
+    async fn delete(&self, id: &ConnectorCredentialId) -> Result<(), DbError> {
         let res = sqlx::query("DELETE FROM connector_credentials WHERE id = ?")
-            .bind(id)
+            .bind(id.as_str())
             .execute(&self.pool)
             .await?;
         if res.rows_affected() == 0 {
-            return Err(DbError::NotFound(id.to_owned()));
+            return Err(DbError::NotFound(id.to_string()));
         }
         Ok(())
     }
@@ -83,7 +84,7 @@ mod tests {
         let repo = SqliteConnectorCredentialRepository::new(db.pool().clone());
 
         let row = repo.create("feishu", "我的飞书", "ENC(payload)").await.unwrap();
-        assert!(row.id.starts_with("conn"), "id prefixed: {}", row.id);
+        assert!(row.id.as_str().starts_with("conn_"), "id prefixed: {}", row.id);
 
         let got = repo.get(&row.id).await.unwrap().unwrap();
         assert_eq!(got.kind, "feishu");
@@ -97,5 +98,21 @@ mod tests {
         repo.delete(&row.id).await.unwrap();
         assert!(repo.get(&row.id).await.unwrap().is_none());
         assert!(matches!(repo.delete(&row.id).await, Err(DbError::NotFound(_))), "second delete errors");
+    }
+
+    #[tokio::test]
+    async fn malformed_stored_connector_credential_id_is_rejected_on_read() {
+        let db = init_database_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO connector_credentials \
+             (id, kind, name, payload_encrypted, created_at, updated_at) \
+             VALUES ('conn_1', 'feishu', 'bad', 'ENC(payload)', 1, 1)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let repo = SqliteConnectorCredentialRepository::new(db.pool().clone());
+        assert!(repo.list().await.is_err());
     }
 }

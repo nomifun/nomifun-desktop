@@ -161,7 +161,7 @@ const MemoryPanelPage: React.FC = () => {
   }, [finishClose]);
 
   if (!snapshot) return null;
-  const activate = (suggestionId: string) => {
+  const activate = (suggestionId: MemoryPanelSnapshotPayload['suggestions'][number]['id']) => {
     if (activationPendingRef.current) return;
     activationPendingRef.current = true;
     const payload: MemoryPanelActivatePayload = { requestId: snapshot.requestId, ownerWindowLabel: snapshot.ownerWindowLabel, suggestionId };

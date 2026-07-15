@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use nomifun_common::{AppError, generate_prefixed_id, now_ms};
+use nomifun_common::{AppError, FigureId, now_ms};
 use serde::{Deserialize, Serialize};
 
 use crate::profile::HeadBox;
@@ -61,12 +61,7 @@ fn image_name(id: &str) -> String {
 /// don't look like our minted ids. `read`/`delete` take the id from a URL path
 /// param, so this is the trust boundary.
 fn is_safe_id(id: &str) -> bool {
-    id.starts_with("figure_")
-        && id.len() <= 80
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    FigureId::parse(id).is_ok()
 }
 
 fn sanitize_name(raw: &str) -> String {
@@ -83,7 +78,20 @@ fn normalize_tier(tier: &str) -> String {
 }
 
 fn load_index(figures_dir: &Path) -> FigureIndex {
-    crate::fsio::load_json_or_default(&figures_dir.join(INDEX_FILE))
+    let mut index: FigureIndex =
+        crate::fsio::load_json_or_default(&figures_dir.join(INDEX_FILE));
+    let original_len = index.figures.len();
+    index
+        .figures
+        .retain(|figure| FigureId::parse(&figure.id).is_ok());
+    if index.figures.len() != original_len {
+        tracing::warn!(
+            figures_dir = %figures_dir.display(),
+            rejected = original_len - index.figures.len(),
+            "figure index contained noncanonical durable ids; rejected invalid entries"
+        );
+    }
+    index
 }
 
 fn save_index(figures_dir: &Path, index: &FigureIndex) -> Result<(), AppError> {
@@ -108,7 +116,7 @@ pub fn create(
     size_tier: &str,
 ) -> Result<FigureMeta, AppError> {
     let bytes = crate::figure::validate_figure_source(source_path)?;
-    let id = generate_prefixed_id("figure");
+    let id = FigureId::new().into_string();
     crate::fsio::save_bytes_atomic(figures_dir, &image_name(&id), &bytes)
         .map_err(|e| AppError::Internal(format!("save library figure: {e}")))?;
 
@@ -227,7 +235,7 @@ mod tests {
         let a = create(dir, &make_source(&upload, "a.webp"), "阿狸", 0.7, hb.clone(), "l").unwrap();
         let b = create(dir, &make_source(&upload, "b.webp"), "", 1.0, hb.clone(), "bogus").unwrap();
 
-        assert!(a.id.starts_with("figure_"));
+        assert!(FigureId::parse(&a.id).is_ok());
         assert_eq!(a.name, "阿狸");
         assert_eq!(a.size_tier, "l");
         assert_eq!(b.name, "自定义形象"); // empty → default
@@ -279,6 +287,10 @@ mod tests {
         assert!(read_image(figs.path(), "../escape").is_none());
         assert!(read_image(figs.path(), "figure_../x").is_none());
         assert!(read_image(figs.path(), "notaprefix").is_none());
+        assert!(
+            read_image(figs.path(), "figure_550e8400-e29b-41d4-a716-446655440000").is_none(),
+            "parseable non-v7 UUIDs are not canonical figure IDs"
+        );
         assert!(rename(figs.path(), "../x", "n").is_err());
         assert!(update(figs.path(), "../x", FigureUpdate { name: Some("n".into()), head_box: None, size_tier: None }).is_err());
         assert!(remove(figs.path(), "figure_a/b").is_err());

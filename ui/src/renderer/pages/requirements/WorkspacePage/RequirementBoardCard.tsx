@@ -23,12 +23,13 @@ import { Tag as ArcoTag } from '@arco-design/web-react';
 import { Tag, User } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import type { RequirementId } from '@/common/types/ids';
 
 interface RequirementBoardCardProps {
   item: IRequirement;
-  onOpenDetail: (id: number) => void;
+  onOpenDetail: (id: RequirementId) => void;
   /** Parent tracks the dragged id (mirrored onto dataTransfer for robustness). */
-  onDragStart: (id: number) => void;
+  onDragStart: (id: RequirementId) => void;
 }
 
 const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpenDetail, onDragStart }) => {
@@ -51,7 +52,7 @@ const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpe
       onDragStart={(e) => {
         // Seed parent state AND dataTransfer so the column can read either one.
         e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', String(item.id));
+        e.dataTransfer.setData('text/plain', item.id);
         onDragStart(item.id);
       }}
       className={[
@@ -89,7 +90,7 @@ const RequirementBoardCard: React.FC<RequirementBoardCardProps> = ({ item, onOpe
             <span className='truncate'>{item.tag}</span>
           </span>
         ) : null}
-        {item.owner_session_id != null ? (
+        {item.owner_conversation_id != null || item.owner_terminal_id != null ? (
           <span className='inline-flex items-center gap-3px rounded-[10px] px-7px py-1px text-11px leading-16px bg-primary-1 text-primary-6'>
             <User theme='outline' size={11} strokeWidth={3} className='flex-shrink-0' />
             <span>{t('requirements.columns.session')}</span>

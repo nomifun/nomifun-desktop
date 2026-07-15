@@ -71,7 +71,6 @@ mod tests {
 
     #[test]
     fn single_line_is_raw_plus_cr_for_any_target() {
-        // 单行：shell 与 agent 都必须是 raw + CR，一次写，绝不 bracketed-paste。
         for agent in [false, true] {
             assert_eq!(
                 encode_submit_chunks("git status", agent),
@@ -83,7 +82,6 @@ mod tests {
 
     #[test]
     fn trailing_crlf_is_stripped_before_routing() {
-        // 结尾换行不得把单行误判成多行 paste 路径。
         assert_eq!(
             encode_submit_chunks("ls\r\n", false),
             SubmitChunks::Single(b"ls\r".to_vec())

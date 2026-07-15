@@ -1,3 +1,4 @@
+import { parseConversationId, type ConversationId } from '@/common/types/ids';
 import { useEffect } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 import { useLocation } from 'react-router-dom';
@@ -9,10 +10,10 @@ type UseConversationShortcutsParams = {
 };
 
 const getCycledConversationId = (
-  visibleConversationIds: number[],
-  activeConversationId: number | null,
+  visibleConversationIds: ConversationId[],
+  activeConversationId: ConversationId | null,
   direction: 1 | -1
-): number | null => {
+): ConversationId | null => {
   if (visibleConversationIds.length < 2 || activeConversationId == null) {
     return null;
   }
@@ -51,9 +52,8 @@ export const useConversationShortcuts = ({ navigate }: UseConversationShortcutsP
       if (isConversationTabShortcut(event)) {
         event.preventDefault();
         const matchedId = location.pathname.match(/^\/conversation\/([^/]+)/)?.[1];
-        // Route param is a string; coerce to the numeric conversation id used by
-        // the visible-ids list before cycling.
-        const currentConversationId = matchedId != null ? Number(matchedId) : null;
+        // Route params are canonical conversation IDs.
+        const currentConversationId = matchedId != null ? parseConversationId(matchedId) : null;
         const targetConversationId = getCycledConversationId(
           visibleConversationIds,
           currentConversationId,

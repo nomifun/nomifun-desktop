@@ -416,11 +416,8 @@ impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
 /// (Sentry ELECTRON-1BD).
 #[async_trait]
 impl OnConversationDelete for InMemoryAgentRuntimeRegistry {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
-        // The registry keys live runtimes by the String conversation id;
-        // bridge the i64 hook key back to that form for termination.
-        let conversation_id = conversation_id.to_string();
-        if let Err(e) = self.terminate(&conversation_id, Some(AgentKillReason::ConversationDeleted)) {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
+        if let Err(e) = self.terminate(conversation_id, Some(AgentKillReason::ConversationDeleted)) {
             warn!(
                 conversation_id,
                 error = %ErrorChain(&e),
@@ -431,14 +428,12 @@ impl OnConversationDelete for InMemoryAgentRuntimeRegistry {
 }
 
 /// Conversation-delete hook that removes a conversation's on-disk nomi state:
-/// the global `nomi-sessions/*_{id}.json` file (+ index entry) and any legacy
-/// id-named temp workspace under `work_dir/conversations`.
+/// the global `nomi-sessions/*_{id}.json` file (+ index entry) and any
+/// ID-named temp workspace under `work_dir/conversations`.
 ///
-/// Without this, those files outlive the conversation. The session dir is keyed
-/// only by the reusable integer conversation id, so an orphan could later be
-/// resumed by a brand-new conversation that reuses the id (e.g. after a DB
-/// rebaseline) — the cross-conversation "memory bleed" this guards against,
-/// complementing the per-session `owner_token` check in the nomi factory.
+/// Without this, derived files outlive their authoritative entity. Cleanup
+/// complements the per-session owner token and prevents stale state from being
+/// observed through an incorrectly retained cache or filesystem reference.
 /// Best-effort: every failure is logged, never fatal.
 pub struct NomiSessionFilesCascade {
     pub data_dir: PathBuf,
@@ -447,7 +442,7 @@ pub struct NomiSessionFilesCascade {
 
 #[async_trait]
 impl OnConversationDelete for NomiSessionFilesCascade {
-    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: i64) {
+    async fn on_conversation_deleted(&self, _user_id: &str, conversation_id: &str) {
         let id = conversation_id.to_string();
 
         // 1) nomi session transcript file + index entry.
@@ -482,7 +477,7 @@ mod tests {
     use crate::protocol::events::AgentStreamEvent;
     use crate::types::SendMessageData;
     use futures_util::FutureExt;
-    use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, ProviderWithModel};
+    use nomifun_common::{AgentKillReason, AgentType, ConversationStatus};
     use std::sync::atomic::{AtomicI64, Ordering};
     use tokio::sync::{Semaphore, broadcast};
 
@@ -588,14 +583,10 @@ mod tests {
 
     fn make_runtime_options(conversation_id: &str) -> AgentRuntimeBuildOptions {
         AgentRuntimeBuildOptions {
-            user_id: "test-user".into(),
+            user_id: "user_0190f5fe-7c00-7a00-8000-000000000001".into(),
             agent_type: AgentType::Acp,
             workspace: "/tmp/test".into(),
-            model: ProviderWithModel {
-                provider_id: "p1".into(),
-                model: "test".into(),
-                use_model: None,
-            },
+            model: None,
             conversation_id: conversation_id.into(),
             delegation_policy: Default::default(),
             extra: serde_json::Value::Null,

@@ -5,7 +5,8 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { IDirOrFile } from '@/common/adapter/ipcBridge';
+import { conversationTarget } from '@/common/types/ids';
+import type { IDirOrFile, IResponseMessage } from '@/common/adapter/ipcBridge';
 import { addEventListener, emitter } from '@/renderer/utils/emitter';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { useAbortUploadsOnConversationChange } from '@/renderer/hooks/file/useAbortUploadsOnConversationChange';
@@ -48,12 +49,13 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
   // Bind workspace uploads to the conversation lifecycle: switching the
   // workspace conversation or unmounting the panel cancels in-flight uploads.
   // The upload subsystem keys aborts by string conversation id, so serialize.
-  useAbortUploadsOnConversationChange(String(conversation_id), 'workspace');
+  useAbortUploadsOnConversationChange(conversation_id, 'workspace');
 
   // --- Tree data provider (conversation getWorkspace endpoint) ---------------
   const tree = useMemo(
     () => ({
-      key: String(conversation_id),
+      key: conversation_id,
+      target: conversationTarget(conversation_id),
       listRoot: (search?: string) =>
         ipcBridge.conversation.getWorkspace.invoke({
           conversation_id,
@@ -115,7 +117,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
         }, 2000);
       };
 
-      const handleResponse = (data: { type: string; data?: unknown; conversation_id?: number }) => {
+      const handleResponse = (data: IResponseMessage) => {
         if (data.conversation_id && data.conversation_id !== conversation_id) return;
 
         if (data.type === 'acp_tool_call') {
@@ -212,7 +214,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
       subscribeRefresh,
       subscribeSelectionSync,
       subscribeFileTreeReplace,
-      upload: { trackingKey: String(conversation_id) },
+      upload: { trackingKey: conversation_id },
       extraTabs,
     }),
     [

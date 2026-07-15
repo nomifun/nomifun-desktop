@@ -75,7 +75,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
 
   const handleAutoEnable = async () => {
     const config = { credentials: { token: token.trim(), twitch_channel: twitchChannel.trim() } };
-    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'twitch', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_id: 'twitch', config });
+    const result = await channel.enablePlugin.invoke(channelTarget ? { plugin_id: channelTarget.channelId, plugin_type: 'twitch', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config } : { plugin_type: 'twitch', config });
     if (!result.success) {
       throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
     }
@@ -94,7 +94,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
     }
     setTestLoading(true);
     try {
-      const result = await channel.testPlugin.invoke({ plugin_id: 'twitch', token: token.trim() });
+      const result = await channel.testPlugin.invoke({ plugin_type: 'twitch', token: token.trim() });
       if (result.success) {
         Message.success(t('settings.twitch.connectionSuccess', { defaultValue: 'Connected as {{username}}', username: result.bot_username || 'unknown' }));
         await handleAutoEnable();
@@ -126,7 +126,7 @@ const TwitchConfigForm: React.FC<TwitchConfigFormProps> = ({ pluginStatus, chann
       Message.error(error instanceof Error ? error.message : String(error));
     }
   };
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       await loadAuthorizedUsers();

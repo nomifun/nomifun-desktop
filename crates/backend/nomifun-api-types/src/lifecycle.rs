@@ -6,6 +6,10 @@ pub struct SystemInfoResponse {
     pub cache_dir: String,
     pub work_dir: String,
     pub log_dir: String,
+    /// Opaque identity of the current on-disk dataset. Browser caches must
+    /// include it in their namespace so a reset/restore cannot attach stale
+    /// UI state to a different entity graph.
+    pub storage_generation: String,
     /// Operating system: `darwin`, `win32`, or `linux`.
     pub platform: String,
     /// CPU architecture: `x64` or `arm64`.
@@ -80,6 +84,7 @@ mod tests {
             cache_dir: "/home/user/.cache/nomifun".into(),
             work_dir: "/home/user/.local/share/nomifun".into(),
             log_dir: "/home/user/.local/state/nomifun/logs".into(),
+            storage_generation: "01900000-0000-7000-8000-000000000000".into(),
             platform: "linux".into(),
             arch: "x64".into(),
         };
@@ -87,6 +92,10 @@ mod tests {
         assert_eq!(json["cache_dir"], "/home/user/.cache/nomifun");
         assert_eq!(json["work_dir"], "/home/user/.local/share/nomifun");
         assert_eq!(json["log_dir"], "/home/user/.local/state/nomifun/logs");
+        assert_eq!(
+            json["storage_generation"],
+            "01900000-0000-7000-8000-000000000000"
+        );
         assert_eq!(json["platform"], "linux");
         assert_eq!(json["arch"], "x64");
         // Verify snake_case
@@ -99,6 +108,7 @@ mod tests {
             cache_dir: "/tmp/cache".into(),
             work_dir: "/tmp/work".into(),
             log_dir: "/tmp/logs".into(),
+            storage_generation: "01900000-0000-7000-8000-000000000001".into(),
             platform: "darwin".into(),
             arch: "arm64".into(),
         };

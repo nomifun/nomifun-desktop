@@ -5,6 +5,7 @@ import { useContainerWidth } from '@renderer/hooks/ui/useContainerWidth';
 import { ipcBridge } from '@/common';
 import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IWebhook } from '@/common/adapter/ipcBridge';
+import type { WebhookId } from '@/common/types/ids';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import ChannelFormModal from './ChannelFormModal';
 
@@ -48,7 +49,7 @@ const ChannelList: React.FC = () => {
     void loadChannels();
   }, [loadChannels]);
 
-  const handleTest = async (id: number) => {
+  const handleTest = async (id: WebhookId) => {
     try {
       await ipcBridge.webhook.test.invoke({ id });
       message.success(t('webhook.messages.testOk'));
@@ -58,7 +59,7 @@ const ChannelList: React.FC = () => {
     }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: WebhookId) => {
     try {
       await ipcBridge.webhook.remove.invoke({ id });
       message.success(t('webhook.messages.deleteOk'));

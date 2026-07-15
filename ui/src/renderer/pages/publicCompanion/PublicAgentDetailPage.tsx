@@ -26,6 +26,7 @@ import KnowledgeSection from './sections/KnowledgeSection';
 import PolicySection from './sections/PolicySection';
 import AuditSection from './sections/AuditSection';
 import ChannelsSection from './sections/ChannelsSection';
+import { parsePublicAgentId } from '@/common/types/ids';
 
 // Order = discoverability of the two setup essentials first: 概览 (which now hosts
 // the 对话模型 config — the hard prerequisite for every reply) then 渠道部署 (where
@@ -58,11 +59,19 @@ const iconOf = (key: SectionKey, size = 15): React.ReactNode => {
 const PublicAgentDetailPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { id = null } = useParams();
+  const { id } = useParams();
+  const publicAgentId = useMemo(() => {
+    if (!id) return null;
+    try {
+      return parsePublicAgentId(id);
+    } catch {
+      return null;
+    }
+  }, [id]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [message, holder] = useArcoMessage();
 
-  const { agent, loading, patch, reload } = usePublicAgent(id);
+  const { agent, loading, patch, reload } = usePublicAgent(publicAgentId);
 
   const sectionParam = searchParams.get('section');
   const active: SectionKey = useMemo(

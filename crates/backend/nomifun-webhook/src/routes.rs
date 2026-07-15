@@ -12,7 +12,7 @@ use nomifun_api_types::{
     ApiResponse, CreateWebhookRequest, TagSetting, UpdateWebhookRequest, UpsertTagSettingRequest, Webhook,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, WebhookId};
 
 use crate::state::WebhookRouterState;
 
@@ -28,13 +28,6 @@ pub fn webhook_routes(state: WebhookRouterState) -> Router {
         .with_state(state)
 }
 
-/// Parse the `{id}` path segment (always a string on the wire) into the i64
-/// webhook primary key, surfacing a clean 400 on malformed input.
-fn parse_id(id: &str) -> Result<i64, AppError> {
-    id.parse::<i64>()
-        .map_err(|_| AppError::BadRequest(format!("invalid webhook id: {id}")))
-}
-
 async fn list_webhooks(
     State(state): State<WebhookRouterState>,
     Extension(_user): Extension<CurrentUser>,
@@ -45,9 +38,9 @@ async fn list_webhooks(
 async fn get_webhook(
     State(state): State<WebhookRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<WebhookId>,
 ) -> Result<Json<ApiResponse<Webhook>>, AppError> {
-    Ok(Json(ApiResponse::ok(state.service.get(parse_id(&id)?).await?)))
+    Ok(Json(ApiResponse::ok(state.service.get(&id).await?)))
 }
 
 async fn create_webhook(
@@ -63,28 +56,28 @@ async fn create_webhook(
 async fn update_webhook(
     State(state): State<WebhookRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<WebhookId>,
     body: Result<Json<UpdateWebhookRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<Webhook>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(state.service.update(parse_id(&id)?, req).await?)))
+    Ok(Json(ApiResponse::ok(state.service.update(&id, req).await?)))
 }
 
 async fn delete_webhook(
     State(state): State<WebhookRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<WebhookId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.delete(parse_id(&id)?).await?;
+    state.service.delete(&id).await?;
     Ok(Json(ApiResponse::success()))
 }
 
 async fn test_webhook(
     State(state): State<WebhookRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<WebhookId>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
-    state.service.test(parse_id(&id)?).await?;
+    state.service.test(&id).await?;
     Ok(Json(ApiResponse::success()))
 }
 

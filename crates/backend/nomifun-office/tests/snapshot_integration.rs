@@ -1,5 +1,5 @@
 use nomifun_api_types::{PreviewHistoryTargetDto, PreviewSnapshotInfoDto};
-use nomifun_common::PreviewContentType;
+use nomifun_common::{ConversationId, PreviewContentType};
 use nomifun_office::SnapshotService;
 
 fn make_target(content_type: PreviewContentType, file_path: Option<&str>) -> PreviewHistoryTargetDto {
@@ -18,7 +18,7 @@ fn make_target_full(
     content_type: PreviewContentType,
     file_path: Option<&str>,
     workspace: Option<&str>,
-    conversation_id: Option<i64>,
+    conversation_id: Option<ConversationId>,
 ) -> PreviewHistoryTargetDto {
     PreviewHistoryTargetDto {
         content_type,
@@ -191,7 +191,15 @@ async fn sh7_target_field_combination_different_hash() {
     let svc = SnapshotService::new(tmp.path());
 
     let t1 = make_target(PreviewContentType::Markdown, Some("/a.md"));
-    let t2 = make_target_full(PreviewContentType::Markdown, Some("/a.md"), Some("/ws"), Some(1));
+    let t2 = make_target_full(
+        PreviewContentType::Markdown,
+        Some("/a.md"),
+        Some("/ws"),
+        Some(
+            ConversationId::try_from("conv_0190f5fe-7c00-7a00-8abc-012345678901")
+                .unwrap(),
+        ),
+    );
 
     svc.save(&t1, "content-1").await.unwrap();
     svc.save(&t2, "content-2").await.unwrap();

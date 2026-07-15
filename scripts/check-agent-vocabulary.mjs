@@ -37,24 +37,10 @@ const RETIRED_TERM =
 const RETIRED_EXACT_IDENTITY =
   /DelegationExecutionMode|PersistentDelegateTool|AgentExecutionEnvelope|shared[_-]?tasks|taskboard|local[_-]?immediate|persistent[_-]?execution|shared[_-]?kernel|process[-_ ]kernel|(?<![A-Za-z0-9])agentRuntime(?:Section)?(?![A-Za-z0-9])|multi[-_ ]agent team/i;
 
-// Historical schema migrations are immutable evidence for the one-release
-// hard cut. Only these exact files may contain retired collaboration names;
-// every current and future migration remains under the ordinary vocabulary
-// scan, so a later migration cannot quietly recreate an old identity.
-const LEGACY_MIGRATION_ALLOWLIST = new Set([
-  'crates/backend/nomifun-db/migrations/018_orchestrator.sql',
-  'crates/backend/nomifun-db/migrations/019_drop_team.sql',
-  'crates/backend/nomifun-db/migrations/020_orch_run_work_dir.sql',
-  'crates/backend/nomifun-db/migrations/022_task_role.sql',
-  'crates/backend/nomifun-db/migrations/023_task_kind.sql',
-  'crates/backend/nomifun-db/migrations/024_task_retry.sql',
-  'crates/backend/nomifun-db/migrations/026_task_overrides.sql',
-  'crates/backend/nomifun-db/migrations/027_task_last_error.sql',
-  'crates/backend/nomifun-db/migrations/029_task_on_fail.sql',
-  'crates/backend/nomifun-db/migrations/031_cluster_approval.sql',
-  'crates/backend/nomifun-db/migrations/034_presets.sql',
-  'crates/backend/nomifun-db/migrations/037_unified_agent_execution.sql',
-]);
+// The pre-release ID redesign ships one clean baseline. Retired migration
+// files are quarantined outside the active migration directory and are not
+// part of the vocabulary contract.
+const LEGACY_MIGRATION_ALLOWLIST = new Set();
 
 // Exact one-release migration/rejection fences are intentionally narrow. A
 // whole file is never exempted, so a new active use in the same file still
@@ -204,8 +190,8 @@ function sorted(values) {
 // checks intentionally read the canonical definition sites instead of relying
 // on a long Rust test run, so concept/schema drift fails the ordinary fast
 // `check` command immediately.
-const migration037 = readFileSync(
-  resolve(ROOT, 'crates/backend/nomifun-db/migrations/037_unified_agent_execution.sql'),
+const canonicalMigration = readFileSync(
+  resolve(ROOT, 'crates/backend/nomifun-db/migrations/001_id_contract_v2.sql'),
   'utf8',
 );
 
@@ -213,8 +199,8 @@ const migrationDirectory = resolve(
   ROOT,
   'crates/backend/nomifun-db/migrations',
 );
-const postUnifiedExecutionCreates = readdirSync(migrationDirectory)
-  .filter((name) => name.endsWith('.sql') && name > '037_unified_agent_execution.sql')
+const nonBaselineExecutionCreates = readdirSync(migrationDirectory)
+  .filter((name) => name.endsWith('.sql') && name !== '001_id_contract_v2.sql')
   .flatMap((name) => {
     const source = readFileSync(resolve(migrationDirectory, name), 'utf8');
     return [...source.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([a-z_]+)/gi)]
@@ -227,11 +213,11 @@ const postUnifiedExecutionCreates = readdirSync(migrationDirectory)
       .map((table) => `${name}:${table}`);
   });
 invariant(
-  postUnifiedExecutionCreates.length === 0,
-  `migrations after 037 must not add or recreate an AgentExecution table without revisiting the 7+2 hard boundary; found ${postUnifiedExecutionCreates.join(', ')}`,
+  nonBaselineExecutionCreates.length === 0,
+  `the clean migration directory must contain only the ID-contract baseline; found ${nonBaselineExecutionCreates.join(', ')}`,
 );
 const executionTables = sorted(
-  [...migration037.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([a-z_]+)/gi)]
+  [...canonicalMigration.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([a-z_]+)/gi)]
     .map((match) => match[1])
     .filter(
       (name) =>
@@ -252,7 +238,7 @@ const expectedExecutionTables = sorted([
 ]);
 invariant(
   JSON.stringify(executionTables) === JSON.stringify(expectedExecutionTables),
-  `unified persistence must remain exactly 7 runtime + 2 template tables; found ${executionTables.join(', ')}`,
+  `the clean baseline must contain exactly the 7 runtime + 2 template AgentExecution tables; found ${executionTables.join(', ')}`,
 );
 
 const gatewayExecution = readFileSync(
@@ -286,7 +272,7 @@ const eventFacts = sorted(
     (match) => match[1],
   ),
 );
-const eventSqlCheck = migration037.match(
+const eventSqlCheck = canonicalMigration.match(
   /event_type\s+TEXT NOT NULL CHECK \(event_type IN \(([\s\S]*?)\)\),/,
 )?.[1];
 const sqlEventFacts = sorted(

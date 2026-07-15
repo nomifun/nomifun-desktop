@@ -13,7 +13,7 @@ use nomifun_api_types::{
     UpdateAgentExecutionTemplateRequest,
 };
 use nomifun_auth::CurrentUser;
-use nomifun_common::{AgentExecutionActor, AppError};
+use nomifun_common::{AgentExecutionActor, AgentExecutionTemplateId, AppError};
 use serde::Deserialize;
 
 use crate::AgentExecutionEngine;
@@ -63,10 +63,10 @@ async fn list_templates(
 async fn get_template(
     State(engine): State<Arc<AgentExecutionEngine>>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<AgentExecutionTemplateId>,
 ) -> Result<Json<ApiResponse<AgentExecutionTemplateDetail>>, AppError> {
     Ok(Json(ApiResponse::ok(
-        engine.get_template(&user.id, &id).await?,
+        engine.get_template(&user.id, id.as_str()).await?,
     )))
 }
 
@@ -83,23 +83,25 @@ async fn create_template(
 async fn update_template(
     State(engine): State<Arc<AgentExecutionEngine>>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<AgentExecutionTemplateId>,
     body: Result<Json<UpdateAgentExecutionTemplateRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AgentExecutionTemplateDetail>>, AppError> {
     let Json(request) = json_body(body)?;
     Ok(Json(ApiResponse::ok(
-        engine.update_template(&user.id, &id, request).await?,
+        engine
+            .update_template(&user.id, id.as_str(), request)
+            .await?,
     )))
 }
 
 async fn delete_template(
     State(engine): State<Arc<AgentExecutionEngine>>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<AgentExecutionTemplateId>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<ApiResponse<()>>, AppError> {
     engine
-        .delete_template(&user.id, &id, query.expected_version)
+        .delete_template(&user.id, id.as_str(), query.expected_version)
         .await?;
     Ok(Json(ApiResponse::success()))
 }
@@ -107,13 +109,13 @@ async fn delete_template(
 async fn create_execution_from_template(
     State(engine): State<Arc<AgentExecutionEngine>>,
     Extension(user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<AgentExecutionTemplateId>,
     body: Result<Json<CreateExecutionFromTemplateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ApiResponse<AgentExecution>>), AppError> {
     let Json(request) = json_body(body)?;
     let actor = AgentExecutionActor::user(user.id.clone());
     let execution = engine
-        .create_from_template(&user.id, &actor, &id, request)
+        .create_from_template(&user.id, &actor, id.as_str(), request)
         .await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(execution))))
 }

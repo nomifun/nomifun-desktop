@@ -12,6 +12,7 @@ import type { CreatePresetRequest } from '@/common/types/agent/presetTypes';
 import type { TAgentExecutionDetail } from '@/common/types/agentExecution/agentExecutionTypes';
 import { latestAttemptForStep } from '@/common/types/agentExecution/agentExecutionTypes';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
+import type { ProviderId } from '@/common/types/ids';
 
 /** A reusable role candidate distilled from one completed execution. */
 interface RoleCandidate {
@@ -22,7 +23,7 @@ interface RoleCandidate {
   /** Distinct models used by participants in this role. */
   models: string[];
   modelPreferences: Array<{
-    provider_id?: string;
+    provider_id?: ProviderId;
     model: string;
     required: false;
   }>;
@@ -109,7 +110,7 @@ const ParticipantProfilePanel: React.FC<{ detail: TAgentExecutionDetail }> = ({ 
       titles: string[];
       memberDescription?: string;
       models: Set<string>;
-      modelPreferences: Map<string, { provider_id?: string; model: string; required: false }>;
+      modelPreferences: Map<string, { provider_id?: ProviderId; model: string; required: false }>;
       agentIds: Set<string>;
       enabledSkills: Set<string>;
       disabledBuiltinSkills: Set<string>;
@@ -139,7 +140,7 @@ const ParticipantProfilePanel: React.FC<{ detail: TAgentExecutionDetail }> = ({ 
         const model = participant.model?.trim();
         if (model) {
           acc.models.add(model);
-          const providerId = participant.provider_id?.trim() || undefined;
+          const providerId = participant.provider_id ?? undefined;
           acc.modelPreferences.set(`${providerId ?? ''}::${model}`, {
             provider_id: providerId,
             model,

@@ -16,7 +16,7 @@ use nomifun_common::AppError;
 use nomifun_file::list_workspace_level;
 use nomifun_db::models::ConversationRow;
 
-use crate::service::{ConversationService, parse_conv_id};
+use crate::service::ConversationService;
 
 impl ConversationService {
     async fn require_owned_conversation(
@@ -24,11 +24,8 @@ impl ConversationService {
         user_id: &str,
         conversation_id: &str,
     ) -> Result<ConversationRow, AppError> {
-        let key = parse_conv_id(conversation_id).map_err(|_| {
-            AppError::NotFound(format!("Conversation '{conversation_id}' not found"))
-        })?;
         self.conversation_repo()
-            .get(key)
+            .get(conversation_id)
             .await?
             .filter(|row| row.user_id == user_id)
             .ok_or_else(|| {

@@ -17,13 +17,39 @@
 use std::sync::Arc;
 
 use nomifun_api_types::{AgentErrorCode, HealthStatus, ModelFailoverConfig};
-use nomifun_common::{AppError, ErrorChain, ProviderWithModel};
+use nomifun_common::{AppError, ErrorChain, ProviderId, ProviderWithModel};
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_db::models::Provider;
 use tracing::warn;
 
 /// `client_preferences` 键,存放全局模型故障转移配置(整体 JSON)。
 pub const MODEL_FAILOVER_PREF_KEY: &str = "agent.model_failover";
+
+fn validate_model_reference(model: &ProviderWithModel) -> Result<(), AppError> {
+    ProviderId::try_from(model.provider_id.as_str()).map_err(|_| {
+        AppError::BadRequest("model failover requires canonical provider_id values".to_owned())
+    })?;
+    if model.model.is_empty() || model.model.trim() != model.model {
+        return Err(AppError::BadRequest(
+            "model failover requires trimmed, non-empty model values".to_owned(),
+        ));
+    }
+    if model.use_model.as_deref().is_some_and(|value| {
+        value.is_empty() || value.trim() != value
+    }) {
+        return Err(AppError::BadRequest(
+            "model failover overrides must be trimmed and non-empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_failover_config(config: &ModelFailoverConfig) -> Result<(), AppError> {
+    for model in &config.queue {
+        validate_model_reference(model)?;
+    }
+    Ok(())
+}
 
 /// 判定一个 `AgentErrorCode` 是否为「provider 故障」——即换个备用模型可能绕过的
 /// 单厂商失败(限流 / 5xx / 网络 / 配置)。
@@ -69,7 +95,11 @@ pub async fn get_global_failover_config(
     rows.into_iter()
         .find(|r| r.key == MODEL_FAILOVER_PREF_KEY)
         .and_then(|r| match serde_json::from_str::<ModelFailoverConfig>(&r.value) {
-            Ok(cfg) => Some(cfg),
+            Ok(cfg) if validate_failover_config(&cfg).is_ok() => Some(cfg),
+            Ok(_) => {
+                warn!("Invalid provider/model reference in model failover pref; defaulting to disabled");
+                None
+            }
             Err(e) => {
                 warn!(error = %ErrorChain(&e), "Malformed model failover pref; defaulting to disabled");
                 None
@@ -84,6 +114,7 @@ pub async fn set_global_failover_config(
     client_prefs: &Arc<dyn IClientPreferenceRepository>,
     config: &ModelFailoverConfig,
 ) -> Result<(), AppError> {
+    validate_failover_config(config)?;
     let value =
         serde_json::to_string(config).map_err(|e| AppError::Internal(format!("serialize failover config: {e}")))?;
     client_prefs
@@ -98,7 +129,9 @@ pub async fn set_global_failover_config(
 pub fn read_conversation_failover_override(extra_json: &str) -> Option<ModelFailoverConfig> {
     let value: serde_json::Value = serde_json::from_str(extra_json).ok()?;
     let raw = value.get("model_failover")?;
-    serde_json::from_value::<ModelFailoverConfig>(raw.clone()).ok()
+    serde_json::from_value::<ModelFailoverConfig>(raw.clone())
+        .ok()
+        .filter(|config| validate_failover_config(config).is_ok())
 }
 
 /// 解析的可用性视图(从 [`Provider`] 的 TEXT JSON 字段抽出,fail-open)。
@@ -167,6 +200,9 @@ pub fn next_failover_model(
 ) -> Option<ProviderWithModel> {
     let same = |a: &ProviderWithModel, b: &ProviderWithModel| a.provider_id == b.provider_id && a.model == b.model;
     queue.iter().find_map(|candidate| {
+        if validate_model_reference(candidate).is_err() {
+            return None;
+        }
         // 跳过刚失败的同一 (provider_id, model)。
         if same(candidate, failed) {
             return None;
@@ -175,7 +211,9 @@ pub fn next_failover_model(
         if tried.iter().any(|t| same(candidate, t)) {
             return None;
         }
-        let provider = providers.iter().find(|p| p.id == candidate.provider_id)?;
+        let provider = providers.iter().find(|p| {
+            ProviderId::try_from(p.id.as_str()).is_ok() && p.id == candidate.provider_id
+        })?;
         let availability = ProviderAvailability::from_provider(provider);
         if availability.model_is_candidate(&candidate.model) {
             Some(candidate.clone())
@@ -189,6 +227,11 @@ pub fn next_failover_model(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    const P1: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const P2: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const P3: &str = "prov_0190f5fe-7c00-7a00-8000-000000000003";
+    const GHOST: &str = "prov_0190f5fe-7c00-7a00-8000-000000000099";
 
     fn pwm(provider_id: &str, model: &str) -> ProviderWithModel {
         ProviderWithModel {
@@ -254,11 +297,11 @@ mod tests {
 
     #[test]
     fn picks_next_available_skipping_failed() {
-        let queue = vec![pwm("p1", "m1"), pwm("p2", "m2")];
-        let failed = pwm("p1", "m1");
-        let providers = vec![provider("p1", true, &[], &[]), provider("p2", true, &[], &[])];
+        let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
+        let failed = pwm(P1, "m1");
+        let providers = vec![provider(P1, true, &[], &[]), provider(P2, true, &[], &[])];
         let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should pick p2/m2");
-        assert_eq!(pick.provider_id, "p2");
+        assert_eq!(pick.provider_id, P2);
         assert_eq!(pick.model, "m2");
     }
 
@@ -267,56 +310,56 @@ mod tests {
         // review #2 (monotonicity): a candidate already switched to this turn is
         // skipped even though it is still healthy/enabled — so multiple failover
         // hops advance through the queue instead of bouncing back to p2/m2.
-        let queue = vec![pwm("p1", "m1"), pwm("p2", "m2"), pwm("p3", "m3")];
-        let failed = pwm("p1", "m1");
-        let tried = vec![pwm("p2", "m2")];
+        let queue = vec![pwm(P1, "m1"), pwm(P2, "m2"), pwm(P3, "m3")];
+        let failed = pwm(P1, "m1");
+        let tried = vec![pwm(P2, "m2")];
         let providers = vec![
-            provider("p1", true, &[], &[]),
-            provider("p2", true, &[], &[]),
-            provider("p3", true, &[], &[]),
+            provider(P1, true, &[], &[]),
+            provider(P2, true, &[], &[]),
+            provider(P3, true, &[], &[]),
         ];
         let pick = next_failover_model(&queue, &failed, &tried, &providers).expect("should skip tried p2/m2");
-        assert_eq!(pick.provider_id, "p3");
+        assert_eq!(pick.provider_id, P3);
         assert_eq!(pick.model, "m3");
     }
 
     #[test]
     fn exhausts_when_only_remaining_candidate_already_tried() {
         // Queue has p1 (failed) and p2 (already tried) → nothing left → None.
-        let queue = vec![pwm("p1", "m1"), pwm("p2", "m2")];
-        let failed = pwm("p1", "m1");
-        let tried = vec![pwm("p2", "m2")];
-        let providers = vec![provider("p1", true, &[], &[]), provider("p2", true, &[], &[])];
+        let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
+        let failed = pwm(P1, "m1");
+        let tried = vec![pwm(P2, "m2")];
+        let providers = vec![provider(P1, true, &[], &[]), provider(P2, true, &[], &[])];
         assert!(next_failover_model(&queue, &failed, &tried, &providers).is_none());
     }
 
     #[test]
     fn skips_disabled_provider() {
-        let queue = vec![pwm("p1", "m1"), pwm("p2", "m2")];
-        let failed = pwm("orig", "orig");
+        let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
+        let failed = pwm(GHOST, "orig");
         // p1 是禁用 provider → 跳过,落到 p2。
-        let providers = vec![provider("p1", false, &[], &[]), provider("p2", true, &[], &[])];
+        let providers = vec![provider(P1, false, &[], &[]), provider(P2, true, &[], &[])];
         let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should skip disabled p1");
-        assert_eq!(pick.provider_id, "p2");
+        assert_eq!(pick.provider_id, P2);
     }
 
     #[test]
     fn skips_model_disabled() {
-        let queue = vec![pwm("p1", "m1"), pwm("p1", "m2")];
-        let failed = pwm("orig", "orig");
+        let queue = vec![pwm(P1, "m1"), pwm(P1, "m2")];
+        let failed = pwm(GHOST, "orig");
         // p1 的 m1 被显式禁用 → 跳过,落到 m2。
-        let providers = vec![provider("p1", true, &[("m1", false), ("m2", true)], &[])];
+        let providers = vec![provider(P1, true, &[("m1", false), ("m2", true)], &[])];
         let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should skip disabled m1");
         assert_eq!(pick.model, "m2");
     }
 
     #[test]
     fn skips_unhealthy_model() {
-        let queue = vec![pwm("p1", "m1"), pwm("p1", "m2")];
-        let failed = pwm("orig", "orig");
+        let queue = vec![pwm(P1, "m1"), pwm(P1, "m2")];
+        let failed = pwm(GHOST, "orig");
         // m1 标 Unhealthy → 跳过;m2 Healthy → 选中。
         let providers = vec![provider(
-            "p1",
+            P1,
             true,
             &[],
             &[("m1", HealthStatus::Unhealthy), ("m2", HealthStatus::Healthy)],
@@ -328,29 +371,29 @@ mod tests {
     #[test]
     fn unknown_health_is_still_a_candidate() {
         // Unknown / 无健康记录 不应被跳过(只有 Unhealthy 才排除)。
-        let queue = vec![pwm("p1", "m1")];
-        let failed = pwm("orig", "orig");
-        let providers = vec![provider("p1", true, &[], &[("m1", HealthStatus::Unknown)])];
+        let queue = vec![pwm(P1, "m1")];
+        let failed = pwm(GHOST, "orig");
+        let providers = vec![provider(P1, true, &[], &[("m1", HealthStatus::Unknown)])];
         assert!(next_failover_model(&queue, &failed, &[], &providers).is_some());
     }
 
     #[test]
     fn returns_none_when_exhausted() {
         // 队列里唯一候选就是刚失败的那个 → 耗尽 → None。
-        let queue = vec![pwm("p1", "m1")];
-        let failed = pwm("p1", "m1");
-        let providers = vec![provider("p1", true, &[], &[])];
+        let queue = vec![pwm(P1, "m1")];
+        let failed = pwm(P1, "m1");
+        let providers = vec![provider(P1, true, &[], &[])];
         assert!(next_failover_model(&queue, &failed, &[], &providers).is_none());
     }
 
     #[test]
     fn returns_none_when_all_unavailable() {
-        let queue = vec![pwm("p1", "m1"), pwm("p2", "m2")];
-        let failed = pwm("orig", "orig");
+        let queue = vec![pwm(P1, "m1"), pwm(P2, "m2")];
+        let failed = pwm(GHOST, "orig");
         // p1 禁用 + p2 的 m2 Unhealthy → 全不可用 → None。
         let providers = vec![
-            provider("p1", false, &[], &[]),
-            provider("p2", true, &[], &[("m2", HealthStatus::Unhealthy)]),
+            provider(P1, false, &[], &[]),
+            provider(P2, true, &[], &[("m2", HealthStatus::Unhealthy)]),
         ];
         assert!(next_failover_model(&queue, &failed, &[], &providers).is_none());
     }
@@ -358,26 +401,26 @@ mod tests {
     #[test]
     fn missing_provider_row_is_not_a_candidate() {
         // 候选引用的 provider 不在表中 → 找不到即不可用,跳到下一个。
-        let queue = vec![pwm("ghost", "m1"), pwm("p2", "m2")];
-        let failed = pwm("orig", "orig");
-        let providers = vec![provider("p2", true, &[], &[])];
+        let queue = vec![pwm(GHOST, "m1"), pwm(P2, "m2")];
+        let failed = pwm(GHOST, "orig");
+        let providers = vec![provider(P2, true, &[], &[])];
         let pick = next_failover_model(&queue, &failed, &[], &providers).expect("should fall to p2");
-        assert_eq!(pick.provider_id, "p2");
+        assert_eq!(pick.provider_id, P2);
     }
 
     #[test]
     fn empty_queue_returns_none() {
-        let providers = vec![provider("p1", true, &[], &[])];
-        assert!(next_failover_model(&[], &pwm("p1", "m1"), &[], &providers).is_none());
+        let providers = vec![provider(P1, true, &[], &[])];
+        assert!(next_failover_model(&[], &pwm(P1, "m1"), &[], &providers).is_none());
     }
 
     #[test]
     fn malformed_model_health_json_fails_open() {
         // model_health 是垃圾字符串 → 按未知健康处理,候选仍可用。
-        let mut p = provider("p1", true, &[], &[]);
+        let mut p = provider(P1, true, &[], &[]);
         p.model_health = Some("{not json".into());
-        let queue = vec![pwm("p1", "m1")];
-        assert!(next_failover_model(&queue, &pwm("orig", "orig"), &[], &[p]).is_some());
+        let queue = vec![pwm(P1, "m1")];
+        assert!(next_failover_model(&queue, &pwm(GHOST, "orig"), &[], &[p]).is_some());
     }
 
     // ── 配置读写 ──

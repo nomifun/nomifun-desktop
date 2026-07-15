@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Row in the `requirements` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct RequirementRow {
-    pub id: i64,
+    pub id: String,
     pub title: String,
     pub content: String,
     pub tag: String,
@@ -16,9 +16,9 @@ pub struct RequirementRow {
     /// Executing session: a conversation id OR a terminal id, discriminated by
     /// `owner_kind`. No FK (dual-domain). Replaces the former `conversation_id`
     /// + redundant `claimed_by` columns.
-    pub owner_session_id: Option<i64>,
+    pub owner_conversation_id: Option<String>,
     /// `'conversation'` | `'terminal'` | NULL (when unowned).
-    pub owner_kind: Option<String>,
+    pub owner_terminal_id: Option<String>,
     pub active_turn_started_at: Option<TimestampMs>,
     pub lease_expires_at: Option<TimestampMs>,
     pub started_at: Option<TimestampMs>,
@@ -45,8 +45,8 @@ pub struct RequirementRowUpdate {
     pub status: Option<String>,
     pub priority: Option<i64>,
     pub completion_note: Option<Option<String>>,
-    pub owner_session_id: Option<Option<i64>>,
-    pub owner_kind: Option<Option<String>>,
+    pub owner_conversation_id: Option<Option<String>>,
+    pub owner_terminal_id: Option<Option<String>>,
     pub active_turn_started_at: Option<Option<TimestampMs>>,
     pub lease_expires_at: Option<Option<TimestampMs>>,
     pub started_at: Option<Option<TimestampMs>>,
@@ -63,7 +63,7 @@ pub struct RequirementTagRow {
     /// 0 = active, 1 = paused (SQLite has no bool; stored as INTEGER).
     pub paused: i64,
     pub paused_reason: Option<String>,
-    pub paused_req_id: Option<i64>,
+    pub paused_req_id: Option<String>,
     pub paused_at: Option<TimestampMs>,
 }
 

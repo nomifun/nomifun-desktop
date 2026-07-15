@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import type { TChatConversation } from '@/common/config/storage';
+import { parseConversationId, type ConversationId } from '@/common/types/ids';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { emitter } from '@/renderer/utils/emitter';
 import { blockMobileInputFocus, blurActiveElement } from '@/renderer/utils/ui/focus';
@@ -20,10 +21,10 @@ type UseConversationActionsParams = {
   batchMode: boolean;
   onSessionClick?: () => void;
   onBatchModeChange?: (value: boolean) => void;
-  selectedConversationIds: Set<number>;
-  setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<number>>>;
+  selectedConversationIds: Set<ConversationId>;
+  setSelectedConversationIds: React.Dispatch<React.SetStateAction<Set<ConversationId>>>;
   toggleSelectedConversation: (conversation: TChatConversation) => void;
-  markAsRead: (conversation_id: number) => void;
+  markAsRead: (conversation_id: ConversationId) => void;
 };
 
 export const useConversationActions = ({
@@ -37,13 +38,11 @@ export const useConversationActions = ({
 }: UseConversationActionsParams) => {
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [renameModalName, setRenameModalName] = useState<string>('');
-  const [renameModalId, setRenameModalId] = useState<number | null>(null);
+  const [renameModalId, setRenameModalId] = useState<ConversationId | null>(null);
   const [renameLoading, setRenameLoading] = useState(false);
-  const [dropdownVisibleId, setDropdownVisibleId] = useState<number | null>(null);
-  // useParams() route strings are always string → coerce to the numeric
-  // conversation id for `===` comparison against the canonical number id.
+  const [dropdownVisibleId, setDropdownVisibleId] = useState<ConversationId | null>(null);
   const { id: routeIdParam } = useParams();
-  const activeConversationId = routeIdParam != null ? Number(routeIdParam) : null;
+  const activeConversationId = routeIdParam != null ? parseConversationId(routeIdParam) : null;
   const { t } = useTranslation();
   const navigate = useNavigate();
 
@@ -75,15 +74,13 @@ export const useConversationActions = ({
   );
 
   const removeConversation = useCallback(
-    async (conversation_id: number) => {
+    async (conversation_id: ConversationId) => {
       const success = await ipcBridge.conversation.remove.invoke({ id: conversation_id });
       if (!success) {
         return false;
       }
 
-      // conversation.deleted is a string-keyed event-bus channel (consumers key
-      // their per-conversation queue storage by string id), so serialize here.
-      emitter.emit('conversation.deleted', String(conversation_id));
+      emitter.emit('conversation.deleted', conversation_id);
       if (activeConversationId === conversation_id) {
         void navigate('/guid');
       }
@@ -93,7 +90,7 @@ export const useConversationActions = ({
   );
 
   const handleDeleteClick = useCallback(
-    (conversation_id: number) => {
+    (conversation_id: ConversationId) => {
       Modal.confirm({
         title: t('conversation.history.deleteTitle'),
         content: t('conversation.history.deleteConfirm'),
@@ -232,7 +229,7 @@ export const useConversationActions = ({
     [t]
   );
 
-  const handleMenuVisibleChange = useCallback((conversation_id: number, visible: boolean) => {
+  const handleMenuVisibleChange = useCallback((conversation_id: ConversationId, visible: boolean) => {
     setDropdownVisibleId(visible ? conversation_id : null);
   }, []);
 

@@ -232,8 +232,7 @@ impl ActionExecutor {
 
         Ok(MessageResult::Dispatched {
             session_id: session.id,
-            // Session FK is now i64; MessageResult keeps a String id (Option A).
-            conversation_id: session.conversation_id.map(|id| id.to_string()),
+            conversation_id: session.conversation_id,
         })
     }
 
@@ -558,7 +557,7 @@ impl ActionExecutor {
                 let session = self.resolve_action_session(action, internal_user_id, channel_id).await?;
                 Ok(MessageResult::DispatchedText {
                     session_id: session.id,
-                    conversation_id: session.conversation_id.map(|id| id.to_string()),
+                    conversation_id: session.conversation_id,
                     text: CONTINUE_PROMPT.into(),
                 })
             }
@@ -569,7 +568,7 @@ impl ActionExecutor {
                 let session = self.resolve_action_session(action, internal_user_id, channel_id).await?;
                 Ok(MessageResult::RegenerateRequested {
                     session_id: session.id,
-                    conversation_id: session.conversation_id.map(|id| id.to_string()),
+                    conversation_id: session.conversation_id,
                 })
             }
             "chat.send" => {
@@ -937,10 +936,10 @@ mod action_tests {
         async fn update_session_activity(&self, _id: &str, _last_activity: TimestampMs) -> Result<(), DbError> {
             Ok(())
         }
-        async fn update_session_conversation(&self, id: &str, conversation_id: i64) -> Result<(), DbError> {
+        async fn update_session_conversation(&self, id: &str, conversation_id: &str) -> Result<(), DbError> {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(s) = sessions.iter_mut().find(|s| s.id == id) {
-                s.conversation_id = Some(conversation_id);
+                s.conversation_id = Some(conversation_id.to_owned());
                 Ok(())
             } else {
                 Err(DbError::NotFound(id.into()))
@@ -1225,7 +1224,7 @@ mod action_tests {
         // intact. (channel_public_agent_id returns None for a row with no
         // public_agent_id, and here there's no row at all.)
         let (executor, _repo) =
-            setup_with_prefs(&[("channels.telegram.companionId", "\"companion_1\"")]);
+            setup_with_prefs(&[("channels.telegram.companion_id", "\"companion_1\"")]);
 
         let msg = make_text_message("tg_stranger", "chat_1", "hi", PluginType::Telegram);
         let result = executor.handle_incoming_message(&msg, "tg-1").await.unwrap();
@@ -1571,6 +1570,7 @@ mod action_tests {
     async fn chat_continue_carries_existing_conversation_binding() {
         let (executor, repo) = setup();
         repo.add_authorized_user("tg_42", "telegram");
+        let bound_conversation_id = nomifun_common::ConversationId::new();
 
         // Create the session via a normal text message, then bind a
         // conversation to it like the message loop would.
@@ -1579,7 +1579,9 @@ mod action_tests {
             MessageResult::Dispatched { session_id, .. } => session_id,
             other => panic!("Expected Dispatched, got {other:?}"),
         };
-        repo.update_session_conversation(&sid, 9).await.unwrap();
+        repo.update_session_conversation(&sid, bound_conversation_id.as_ref())
+            .await
+            .unwrap();
 
         let msg = make_action_message(
             "tg_42",
@@ -1596,7 +1598,10 @@ mod action_tests {
                 ..
             } => {
                 assert_eq!(session_id, sid);
-                assert_eq!(conversation_id.as_deref(), Some("9"));
+                assert_eq!(
+                    conversation_id.as_deref(),
+                    Some(bound_conversation_id.as_ref())
+                );
             }
             other => panic!("Expected DispatchedText, got {other:?}"),
         }
@@ -1606,13 +1611,16 @@ mod action_tests {
     async fn chat_regenerate_requests_message_loop_lookup() {
         let (executor, repo) = setup();
         repo.add_authorized_user("tg_42", "telegram");
+        let bound_conversation_id = nomifun_common::ConversationId::new();
 
         let text_msg = make_text_message("tg_42", "chat_1", "Hello", PluginType::Telegram);
         let sid = match executor.handle_incoming_message(&text_msg, "tg-1").await.unwrap() {
             MessageResult::Dispatched { session_id, .. } => session_id,
             other => panic!("Expected Dispatched, got {other:?}"),
         };
-        repo.update_session_conversation(&sid, 7).await.unwrap();
+        repo.update_session_conversation(&sid, bound_conversation_id.as_ref())
+            .await
+            .unwrap();
 
         let msg = make_action_message(
             "tg_42",
@@ -1628,7 +1636,10 @@ mod action_tests {
                 conversation_id,
             } => {
                 assert_eq!(session_id, sid);
-                assert_eq!(conversation_id.as_deref(), Some("7"));
+                assert_eq!(
+                    conversation_id.as_deref(),
+                    Some(bound_conversation_id.as_ref())
+                );
             }
             other => panic!("Expected RegenerateRequested, got {other:?}"),
         }

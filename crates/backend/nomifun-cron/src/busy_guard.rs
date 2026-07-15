@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 
-use nomifun_common::{TimestampMs, now_ms};
+use nomifun_common::{ConversationId, TimestampMs, now_ms};
 
 const IDLE_CLEANUP_THRESHOLD_MS: i64 = 3_600_000; // 1 hour
 
@@ -20,6 +20,9 @@ impl CronBusyGuard {
     }
 
     pub fn is_busy(&self, conversation_id: &str) -> bool {
+        if ConversationId::try_from(conversation_id).is_err() {
+            return false;
+        }
         self.states
             .get(conversation_id)
             .map(|s| s.is_processing)
@@ -27,6 +30,9 @@ impl CronBusyGuard {
     }
 
     pub fn set_processing(&self, conversation_id: &str, processing: bool) {
+        if ConversationId::try_from(conversation_id).is_err() {
+            return;
+        }
         let now = now_ms();
         self.states
             .entry(conversation_id.to_owned())
@@ -61,44 +67,50 @@ impl Default for CronBusyGuard {
 mod tests {
     use super::*;
 
+    const CONVERSATION_1: &str = "conv_0190f5fe-7c00-7a00-8000-000000000001";
+    const CONVERSATION_2: &str = "conv_0190f5fe-7c00-7a00-8000-000000000002";
+    const CONVERSATION_OLD: &str = "conv_0190f5fe-7c00-7a00-8000-000000000003";
+    const CONVERSATION_RECENT: &str = "conv_0190f5fe-7c00-7a00-8000-000000000004";
+    const CONVERSATION_BUSY: &str = "conv_0190f5fe-7c00-7a00-8000-000000000005";
+
     #[test]
     fn new_conversation_is_not_busy() {
         let guard = CronBusyGuard::new();
-        assert!(!guard.is_busy("conv_1"));
+        assert!(!guard.is_busy(CONVERSATION_1));
     }
 
     #[test]
     fn set_processing_true_marks_busy() {
         let guard = CronBusyGuard::new();
-        guard.set_processing("conv_1", true);
-        assert!(guard.is_busy("conv_1"));
+        guard.set_processing(CONVERSATION_1, true);
+        assert!(guard.is_busy(CONVERSATION_1));
     }
 
     #[test]
     fn set_processing_false_marks_not_busy() {
         let guard = CronBusyGuard::new();
-        guard.set_processing("conv_1", true);
-        guard.set_processing("conv_1", false);
-        assert!(!guard.is_busy("conv_1"));
+        guard.set_processing(CONVERSATION_1, true);
+        guard.set_processing(CONVERSATION_1, false);
+        assert!(!guard.is_busy(CONVERSATION_1));
     }
 
     #[test]
     fn multiple_conversations_independent() {
         let guard = CronBusyGuard::new();
-        guard.set_processing("conv_1", true);
-        guard.set_processing("conv_2", false);
-        assert!(guard.is_busy("conv_1"));
-        assert!(!guard.is_busy("conv_2"));
+        guard.set_processing(CONVERSATION_1, true);
+        guard.set_processing(CONVERSATION_2, false);
+        assert!(guard.is_busy(CONVERSATION_1));
+        assert!(!guard.is_busy(CONVERSATION_2));
     }
 
     #[test]
     fn active_count_reflects_processing() {
         let guard = CronBusyGuard::new();
         assert_eq!(guard.active_count(), 0);
-        guard.set_processing("conv_1", true);
-        guard.set_processing("conv_2", true);
+        guard.set_processing(CONVERSATION_1, true);
+        guard.set_processing(CONVERSATION_2, true);
         assert_eq!(guard.active_count(), 2);
-        guard.set_processing("conv_1", false);
+        guard.set_processing(CONVERSATION_1, false);
         assert_eq!(guard.active_count(), 1);
     }
 
@@ -107,26 +119,26 @@ mod tests {
         let guard = CronBusyGuard::new();
         // Insert a state with old timestamp
         guard.states.insert(
-            "conv_old".to_owned(),
+            CONVERSATION_OLD.to_owned(),
             ConversationState {
                 is_processing: false,
                 last_active_at: now_ms() - IDLE_CLEANUP_THRESHOLD_MS - 1000,
             },
         );
         // Insert a recent idle state
-        guard.set_processing("conv_recent", false);
+        guard.set_processing(CONVERSATION_RECENT, false);
 
         guard.cleanup();
 
-        assert!(guard.states.get("conv_old").is_none());
-        assert!(guard.states.get("conv_recent").is_some());
+        assert!(guard.states.get(CONVERSATION_OLD).is_none());
+        assert!(guard.states.get(CONVERSATION_RECENT).is_some());
     }
 
     #[test]
     fn cleanup_keeps_processing_entries_even_if_old() {
         let guard = CronBusyGuard::new();
         guard.states.insert(
-            "conv_busy".to_owned(),
+            CONVERSATION_BUSY.to_owned(),
             ConversationState {
                 is_processing: true,
                 last_active_at: now_ms() - IDLE_CLEANUP_THRESHOLD_MS - 1000,
@@ -135,7 +147,7 @@ mod tests {
 
         guard.cleanup();
 
-        assert!(guard.states.get("conv_busy").is_some());
+        assert!(guard.states.get(CONVERSATION_BUSY).is_some());
     }
 
     #[test]

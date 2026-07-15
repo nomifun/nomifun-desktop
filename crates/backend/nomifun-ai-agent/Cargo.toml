@@ -58,7 +58,7 @@ nomi-browser-engine = { workspace = true, optional = true }
 # impl (Confirmation + ToolApprovalManager) lives in this crate and is threaded into
 # the native BrowserTool via `AgentBootstrap::approval_gate`. Optional (browser-use only).
 nomi-browser = { workspace = true, optional = true }
-# P3-X2: shared per-pet secret vault path resolver (`pet_vault_path`) so the agent
+# P3-X2: shared secret vault path resolver (`shared_vault_path`) so the agent
 # factory builds the same vault location the registration endpoint writes to. Pure
 # (no web feature) — only the path helper is used here.
 nomifun-secret.workspace = true

@@ -23,11 +23,12 @@ import { Tag } from '@arco-design/web-react';
 import React, { useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import RequirementBoardCard from './RequirementBoardCard';
+import type { RequirementId } from '@/common/types/ids';
 
 interface RequirementBoardViewProps {
   items: IRequirement[];
-  onOpenDetail: (id: number) => void;
-  onStatusChange: (id: number, next: RequirementStatus) => void;
+  onOpenDetail: (id: RequirementId) => void;
+  onStatusChange: (id: RequirementId, next: RequirementStatus) => void;
 }
 
 /** The six statuses, in display order — always rendered as columns. */
@@ -47,7 +48,7 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
   const { t } = useTranslation();
 
   // The id currently being dragged. Seeded by a card's onDragStart, read on drop.
-  const draggedIdRef = useRef<number | null>(null);
+  const draggedIdRef = useRef<RequirementId | null>(null);
   // Column the pointer is hovering over — drives a soft drop-affordance highlight.
   const [dropTarget, setDropTarget] = useState<RequirementStatus | null>(null);
 
@@ -69,11 +70,10 @@ const RequirementBoardView: React.FC<RequirementBoardViewProps> = ({ items, onOp
   }, [items]);
 
   /** Resolve the dragged id from internal state, falling back to dataTransfer. */
-  const resolveDraggedId = (e: React.DragEvent<HTMLDivElement>): number | null => {
+  const resolveDraggedId = (e: React.DragEvent<HTMLDivElement>): RequirementId | null => {
     if (draggedIdRef.current != null) return draggedIdRef.current;
     const raw = e.dataTransfer.getData('text/plain');
-    const parsed = Number(raw);
-    return raw !== '' && Number.isFinite(parsed) ? parsed : null;
+    return raw !== '' && raw.startsWith('req_') ? (raw as RequirementId) : null;
   };
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>, columnStatus: RequirementStatus) => {

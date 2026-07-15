@@ -18,13 +18,10 @@ pub enum ConversationMcpStatusKind {
 /// A single MCP item shown in the conversation-scoped MCP list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationMcpStatus {
-    /// Stringified MCP identifier. Deliberately `String` (not `i64` like
-    /// [`crate::McpServerResponse::id`]): this id is polymorphic — for
-    /// repo-backed servers it is the host-local INTEGER key stringified, but
-    /// for session-attached servers it is the arbitrary client-supplied
-    /// `SessionMcpServer.id`, which is not a DB primary key. The snapshot also
-    /// round-trips through `conversation.extra`, so a single string carrier
-    /// keeps both sources representable without a tagged union.
+    /// MCP identifier snapshot. Persisted catalog servers carry canonical
+    /// `mcp_<uuid-v7>` IDs; session-attached entries may carry a
+    /// client-supplied string locator, so the snapshot remains a string rather
+    /// than a catalog-only typed ID.
     pub id: String,
     pub name: String,
     pub status: ConversationMcpStatusKind,
@@ -36,6 +33,7 @@ pub struct ConversationMcpStatus {
 
 /// Body for `POST /api/conversations`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateConversationRequest {
     pub r#type: AgentType,
     pub name: Option<String>,
@@ -54,7 +52,10 @@ pub struct CreateConversationRequest {
     pub execution_model_pool: Option<crate::ExecutionModelPool>,
     #[serde(default)]
     pub decision_policy: DecisionPolicy,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_template_id"
+    )]
     pub execution_template_id: Option<String>,
     pub extra: serde_json::Value,
 }
@@ -64,6 +65,7 @@ pub struct CreateConversationRequest {
 /// All fields optional — only supplied fields are applied.
 /// `extra` uses merge semantics (patch, not replace).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateConversationRequest {
     pub name: Option<String>,
     pub pinned: Option<bool>,
@@ -72,7 +74,10 @@ pub struct UpdateConversationRequest {
     #[serde(default, deserialize_with = "double_option")]
     pub execution_model_pool: Option<Option<crate::ExecutionModelPool>>,
     pub decision_policy: Option<DecisionPolicy>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_execution_template_patch"
+    )]
     pub execution_template_id: Option<Option<String>>,
     pub extra: Option<serde_json::Value>,
 }
@@ -83,6 +88,7 @@ pub struct UpdateConversationRequest {
 /// existing conversation — it's kept as a distinct route because multiple
 /// call sites pass a pre-built `CreateConversationRequest` payload shape.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CloneConversationRequest {
     pub conversation: CreateConversationRequest,
 }
@@ -91,6 +97,7 @@ pub struct CloneConversationRequest {
 ///
 /// `msg_id` is server-generated — clients must not provide one.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub content: String,
     #[serde(default)]
@@ -108,7 +115,7 @@ pub struct SendMessageRequest {
     pub origin: Option<String>,
     /// Per-turn IM channel platform marker (`"telegram"`/`"lark"`/…) for a turn
     /// that originated from a channel. `None` for owner/desktop turns. Takes
-    /// precedence over the conversation's static `extra.channelPlatform`, so a
+    /// precedence over the conversation's static `extra.channel_platform`, so a
     /// companion's single session (now shared by the desktop bubble, the chat
     /// tab, AND every IM channel) can still tag each individual IM turn for the
     /// floating window's remote-turn rendering without baking the platform into
@@ -120,6 +127,7 @@ pub struct SendMessageRequest {
 /// Response for `POST /api/conversations/:id/messages`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_message_id")]
     pub msg_id: String,
 }
 
@@ -154,16 +162,26 @@ pub struct ConversationRuntimeSummary {
 
 /// Query parameters for `GET /api/conversations`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListConversationsQuery {
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_conversation_id"
+    )]
     pub cursor: Option<String>,
     pub limit: Option<u32>,
     pub source: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_cron_job_id"
+    )]
     pub cron_job_id: Option<String>,
     pub pinned: Option<bool>,
 }
 
 /// Query parameters for `GET /api/conversations/:id/messages`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListMessagesQuery {
     pub page: Option<u32>,
     pub page_size: Option<u32>,
@@ -174,17 +192,20 @@ pub struct ListMessagesQuery {
     /// `page`/`page_size` offset pagination is ignored. Used by the chat UI to
     /// incrementally load an ever-growing companion session without fetching the
     /// whole transcript. The first ("load latest") page omits it.
+    #[serde(default, deserialize_with = "deserialize_optional_message_cursor")]
     pub cursor: Option<String>,
 }
 
 /// Body for `PATCH /api/conversations/:id/artifacts/:artifact_id`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateConversationArtifactRequest {
     pub status: ConversationArtifactStatus,
 }
 
 /// Query parameters for `GET /api/messages/search`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchMessagesQuery {
     pub keyword: String,
     pub page: Option<u32>,
@@ -207,7 +228,8 @@ pub struct SearchMessagesQuery {
 /// tolerates (`'model' in r` guard handles missing keys).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationResponse {
-    pub id: i64,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
+    pub id: String,
     pub name: String,
     pub r#type: AgentType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -232,15 +254,31 @@ pub struct ConversationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_model_pool: Option<crate::ExecutionModelPool>,
     pub decision_policy: DecisionPolicy,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_template_id"
+    )]
     pub execution_template_id: Option<String>,
     /// Current Agent collaboration projected from `conversation_execution_links`.
     /// These fields are read-only and are never stored on the conversation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_id"
+    )]
     pub linked_execution_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_step_id"
+    )]
     pub execution_step_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_util::deserialize_optional_execution_attempt_id"
+    )]
     pub execution_attempt_id: Option<String>,
     pub created_at: TimestampMs,
     pub modified_at: TimestampMs,
@@ -253,8 +291,14 @@ pub type ConversationListResponse = PaginatedResult<ConversationResponse>;
 /// Single message object returned in API responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageResponse {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_message_id")]
     pub id: String,
-    pub conversation_id: i64,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
+    pub conversation_id: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_message_id"
+    )]
     pub msg_id: Option<String>,
     pub r#type: MessageType,
     pub content: serde_json::Value,
@@ -294,10 +338,15 @@ pub enum ConversationArtifactStatus {
 /// Artifact object returned by conversation artifact APIs and websocket events.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConversationArtifactResponse {
-    /// Auto-assigned `conversation_artifacts.id` (local-only INTEGER PK).
-    /// Synthesized legacy cron-trigger cards carry a negative sentinel id.
-    pub id: i64,
-    pub conversation_id: i64,
+    /// Globally unique `artifact_…` entity ID.
+    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_artifact_id")]
+    pub id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_conversation_id")]
+    pub conversation_id: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_util::deserialize_optional_cron_job_id"
+    )]
     pub cron_job_id: Option<String>,
     pub kind: ConversationArtifactKind,
     pub status: ConversationArtifactStatus,
@@ -312,6 +361,7 @@ pub type ConversationArtifactListResponse = Vec<ConversationArtifactResponse>;
 /// A single item from cross-conversation message search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageSearchItem {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_message_id")]
     pub message_id: String,
     pub message_type: String,
     pub message_created_at: TimestampMs,
@@ -322,10 +372,60 @@ pub struct MessageSearchItem {
 /// Paginated search results for messages.
 pub type MessageSearchResponse = PaginatedResult<MessageSearchItem>;
 
+fn deserialize_optional_execution_template_patch<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<Option<String>> = double_option(deserializer)?;
+    value
+        .map(|value| {
+            value
+                .map(|value| {
+                    nomifun_common::AgentExecutionTemplateId::parse(value.clone())
+                        .map(|_| value)
+                        .map_err(serde::de::Error::custom)
+                })
+                .transpose()
+        })
+        .transpose()
+}
+
+fn deserialize_optional_message_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|cursor| {
+            if cursor.is_empty() {
+                return Ok(cursor);
+            }
+            let (created_at, message_id) = cursor.split_once(':').ok_or_else(|| {
+                serde::de::Error::custom("message cursor must use '<created_at>:<message_id>'")
+            })?;
+            let _: i64 = created_at.parse().map_err(|_| {
+                serde::de::Error::custom("message cursor created_at must be an integer")
+            })?;
+            nomifun_common::MessageId::try_from(message_id).map_err(serde::de::Error::custom)?;
+            Ok(cursor)
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const PROVIDER_ID_1: &str = "prov_0190f5fe-7c00-7a00-8000-000000000001";
+    const PROVIDER_ID_2: &str = "prov_0190f5fe-7c00-7a00-8000-000000000002";
+    const CRON_JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+    const EXECUTION_ID: &str = "exec_0190f5fe-7c00-7a00-8000-000000000001";
+    const MESSAGE_ID_1: &str = "msg_0190f5fe-7c00-7a00-8000-000000000001";
+    const MESSAGE_ID_2: &str = "msg_0190f5fe-7c00-7a00-8000-000000000002";
+    const TEMPLATE_ID: &str = "aext_0190f5fe-7c00-7a00-8000-000000000001";
 
     // ── CreateConversationRequest ───────────────────────────────────
 
@@ -334,7 +434,7 @@ mod tests {
         let raw = json!({
             "type": "acp",
             "name": "Code Review",
-            "model": { "provider_id": "p1", "model": "claude-sonnet-4-20250514" },
+            "model": { "provider_id": PROVIDER_ID_1, "model": "claude-sonnet-4-20250514" },
             "source": "nomifun",
             "channel_chat_id": "user:123",
             "extra": { "workspace": "/project" }
@@ -352,7 +452,7 @@ mod tests {
     fn deserialize_create_request_minimal() {
         let raw = json!({
             "type": "acp",
-            "model": { "provider_id": "p1", "model": "m1" },
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "extra": {}
         });
         let req: CreateConversationRequest = serde_json::from_value(raw).unwrap();
@@ -360,6 +460,69 @@ mod tests {
         assert!(req.name.is_none());
         assert!(req.source.is_none());
         assert!(req.channel_chat_id.is_none());
+    }
+
+    #[test]
+    fn conversation_request_references_require_canonical_entity_ids() {
+        let valid = json!({
+            "type": "nomi",
+            "execution_template_id": TEMPLATE_ID,
+            "extra": {}
+        });
+        assert!(serde_json::from_value::<CreateConversationRequest>(valid).is_ok());
+
+        for invalid in [json!("template-1"), json!(1)] {
+            let value = json!({
+                "type": "nomi",
+                "execution_template_id": invalid,
+                "extra": {}
+            });
+            assert!(serde_json::from_value::<CreateConversationRequest>(value).is_err());
+        }
+
+        assert!(
+            serde_json::from_value::<UpdateConversationRequest>(json!({
+                "execution_template_id": null
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<UpdateConversationRequest>(json!({
+                "execution_template_id": "1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ListConversationsQuery>(json!({
+                "cron_job_id": "cron-1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ListConversationsQuery>(json!({
+                "cursor": "42"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn conversation_requests_reject_unknown_legacy_fields() {
+        assert!(
+            serde_json::from_value::<CreateConversationRequest>(json!({
+                "type": "nomi",
+                "executionTemplateId": TEMPLATE_ID,
+                "extra": {}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SendMessageRequest>(json!({
+                "content": "hello",
+                "msgId": MESSAGE_ID_1
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -379,7 +542,7 @@ mod tests {
             "type": "nomi",
             "execution_model_pool": {
                 "mode": "range",
-                "models": [{ "provider_id": "provider-1", "model": "model-1" }]
+                "models": [{ "provider_id": PROVIDER_ID_1, "model": "model-1" }]
             },
             "extra": {}
         });
@@ -388,7 +551,7 @@ mod tests {
             req.execution_model_pool,
             Some(crate::ExecutionModelPool::Range {
                 models: vec![crate::ExecutionModelRef {
-                    provider_id: "provider-1".into(),
+                    provider_id: PROVIDER_ID_1.into(),
                     model: "model-1".into(),
                 }],
             })
@@ -400,7 +563,7 @@ mod tests {
         let raw = json!({
             "type": "nomi",
             "execution_model_pool": [
-                { "provider_id": "provider-1", "model": "model-1" }
+                { "provider_id": PROVIDER_ID_1, "model": "model-1" }
             ],
             "extra": {}
         });
@@ -410,7 +573,7 @@ mod tests {
     #[test]
     fn deserialize_create_request_missing_type() {
         let raw = json!({
-            "model": { "provider_id": "p1", "model": "m1" },
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "extra": {}
         });
         assert!(serde_json::from_value::<CreateConversationRequest>(raw).is_err());
@@ -420,7 +583,7 @@ mod tests {
     fn deserialize_create_request_missing_extra() {
         let raw = json!({
             "type": "acp",
-            "model": { "provider_id": "p1", "model": "m1" }
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" }
         });
         assert!(serde_json::from_value::<CreateConversationRequest>(raw).is_err());
     }
@@ -429,7 +592,7 @@ mod tests {
     fn deserialize_create_request_invalid_type() {
         let raw = json!({
             "type": "invalid_type",
-            "model": { "provider_id": "p1", "model": "m1" },
+            "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
             "extra": {}
         });
         assert!(serde_json::from_value::<CreateConversationRequest>(raw).is_err());
@@ -452,7 +615,7 @@ mod tests {
         let raw = json!({
             "name": "Updated",
             "pinned": true,
-            "model": { "provider_id": "p2", "model": "new-model" },
+            "model": { "provider_id": PROVIDER_ID_2, "model": "new-model" },
             "extra": { "workspace": "/new" }
         });
         let req: UpdateConversationRequest = serde_json::from_value(raw).unwrap();
@@ -502,7 +665,7 @@ mod tests {
         let raw = json!({
             "conversation": {
                 "type": "acp",
-                "model": { "provider_id": "p1", "model": "m1" },
+                "model": { "provider_id": PROVIDER_ID_1, "model": "m1" },
                 "extra": {}
             }
         });
@@ -515,17 +678,20 @@ mod tests {
     #[test]
     fn deserialize_list_query_full() {
         let raw = json!({
-            "cursor": "conv_last",
+            "cursor": "conv_0190f5fe-7c00-7a00-8000-000000000099",
             "limit": 10,
             "source": "telegram",
-            "cron_job_id": "cron_1",
+            "cron_job_id": CRON_JOB_ID,
             "pinned": true
         });
         let q: ListConversationsQuery = serde_json::from_value(raw).unwrap();
-        assert_eq!(q.cursor.as_deref(), Some("conv_last"));
+        assert_eq!(
+            q.cursor.as_deref(),
+            Some("conv_0190f5fe-7c00-7a00-8000-000000000099")
+        );
         assert_eq!(q.limit, Some(10));
         assert_eq!(q.source.as_deref(), Some("telegram"));
-        assert_eq!(q.cron_job_id.as_deref(), Some("cron_1"));
+        assert_eq!(q.cron_job_id.as_deref(), Some(CRON_JOB_ID));
         assert_eq!(q.pinned, Some(true));
     }
 
@@ -554,12 +720,32 @@ mod tests {
 
     #[test]
     fn deserialize_messages_query_with_values() {
-        let raw = json!({ "page": 2, "page_size": 30, "order": "ASC", "content_mode": "compact" });
+        let expected_cursor = format!("1000:{MESSAGE_ID_1}");
+        let raw = json!({
+            "page": 2,
+            "page_size": 30,
+            "order": "ASC",
+            "content_mode": "compact",
+            "cursor": expected_cursor
+        });
         let q: ListMessagesQuery = serde_json::from_value(raw).unwrap();
         assert_eq!(q.page, Some(2));
         assert_eq!(q.page_size, Some(30));
         assert_eq!(q.order.as_deref(), Some("ASC"));
         assert_eq!(q.content_mode.as_deref(), Some("compact"));
+        assert_eq!(q.cursor.as_deref(), Some(expected_cursor.as_str()));
+    }
+
+    #[test]
+    fn deserialize_messages_query_rejects_noncanonical_cursor_message_id() {
+        for cursor in ["1000:1", "1000:msg-1", "not-a-cursor"] {
+            assert!(
+                serde_json::from_value::<ListMessagesQuery>(json!({ "cursor": cursor })).is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<ListMessagesQuery>(json!({ "cursor": "" })).is_ok()
+        );
     }
 
     // ── SearchMessagesQuery ─────────────────────────────────────────
@@ -584,11 +770,11 @@ mod tests {
     #[test]
     fn serialize_conversation_response_snake_case() {
         let resp = ConversationResponse {
-            id: 1,
+            id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
             name: "Test".into(),
             r#type: AgentType::Acp,
             model: Some(ProviderWithModel {
-                provider_id: "p1".into(),
+                provider_id: PROVIDER_ID_1.into(),
                 model: "m1".into(),
                 use_model: None,
             }),
@@ -607,20 +793,20 @@ mod tests {
             execution_model_pool: None,
             decision_policy: Default::default(),
             execution_template_id: None,
-            linked_execution_id: Some("exec_1".into()),
+            linked_execution_id: Some(EXECUTION_ID.into()),
             execution_step_id: None,
             execution_attempt_id: None,
             extra: json!({ "workspace": "/project" }),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], 1);
+        assert_eq!(json["id"], "conv_0190f5fe-7c00-7a00-8abc-012345678901");
         assert_eq!(json["type"], "acp");
         assert_eq!(json["status"], "pending");
         assert_eq!(json["source"], "nomifun");
         assert_eq!(json["created_at"], 1712345678000_i64);
         assert_eq!(json["modified_at"], 1712345678000_i64);
         assert_eq!(json["extra"]["workspace"], "/project");
-        assert_eq!(json["linked_execution_id"], "exec_1");
+        assert_eq!(json["linked_execution_id"], EXECUTION_ID);
         assert!(
             json.get("active_execution_id").is_none(),
             "the hard-cut wire contract must not retain the misleading legacy field"
@@ -640,7 +826,7 @@ mod tests {
     #[test]
     fn serialize_conversation_response_omits_none_keys() {
         let resp = ConversationResponse {
-            id: 2,
+            id: "conv_0190f5fe-7c00-7a00-8abc-012345678902".into(),
             name: "Test".into(),
             r#type: AgentType::Acp,
             model: None,
@@ -673,7 +859,7 @@ mod tests {
             "channel_chat_id None should be omitted"
         );
         // Non-optional fields still present.
-        assert_eq!(json["id"], 2);
+        assert_eq!(json["id"], "conv_0190f5fe-7c00-7a00-8abc-012345678902");
         assert_eq!(json["type"], "acp");
         assert_eq!(json["pinned"], false);
     }
@@ -681,7 +867,7 @@ mod tests {
     #[test]
     fn conversation_response_roundtrip() {
         let resp = ConversationResponse {
-            id: 3,
+            id: "conv_0190f5fe-7c00-7a00-8abc-012345678903".into(),
             name: "Round".into(),
             r#type: AgentType::Acp,
             model: None,
@@ -718,9 +904,9 @@ mod tests {
     #[test]
     fn serialize_message_response_snake_case() {
         let resp = MessageResponse {
-            id: "msg_1".into(),
-            conversation_id: 1,
-            msg_id: Some("client_1".into()),
+            id: MESSAGE_ID_1.into(),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
+            msg_id: Some(MESSAGE_ID_2.into()),
             r#type: MessageType::Text,
             content: json!({ "content": "Hello" }),
             position: Some(MessagePosition::Right),
@@ -729,9 +915,9 @@ mod tests {
             created_at: 1712345678000,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["id"], "msg_1");
-        assert_eq!(json["conversation_id"], 1);
-        assert_eq!(json["msg_id"], "client_1");
+        assert_eq!(json["id"], MESSAGE_ID_1);
+        assert_eq!(json["conversation_id"], "conv_0190f5fe-7c00-7a00-8abc-012345678901");
+        assert_eq!(json["msg_id"], MESSAGE_ID_2);
         assert_eq!(json["type"], "text");
         assert_eq!(json["position"], "right");
         assert_eq!(json["status"], "finish");
@@ -746,8 +932,8 @@ mod tests {
     #[test]
     fn message_response_roundtrip() {
         let resp = MessageResponse {
-            id: "msg_2".into(),
-            conversation_id: 2,
+            id: MESSAGE_ID_2.into(),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678902".into(),
             msg_id: None,
             r#type: MessageType::ToolCall,
             content: json!({ "callId": "c1", "name": "bash" }),
@@ -769,12 +955,12 @@ mod tests {
     #[test]
     fn serialize_search_item_snake_case() {
         let item = MessageSearchItem {
-            message_id: "msg_1".into(),
+            message_id: MESSAGE_ID_1.into(),
             message_type: "text".into(),
             message_created_at: 1712345678000,
             preview_text: "matched snippet".into(),
             conversation: ConversationResponse {
-                id: 1,
+                id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
                 name: "Code Review".into(),
                 r#type: AgentType::Acp,
                 model: None,
@@ -800,11 +986,11 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&item).unwrap();
-        assert_eq!(json["message_id"], "msg_1");
+        assert_eq!(json["message_id"], MESSAGE_ID_1);
         assert_eq!(json["message_type"], "text");
         assert_eq!(json["message_created_at"], 1712345678000_i64);
         assert_eq!(json["preview_text"], "matched snippet");
-        assert_eq!(json["conversation"]["id"], 1);
+        assert_eq!(json["conversation"]["id"], "conv_0190f5fe-7c00-7a00-8abc-012345678901");
         assert_eq!(json["conversation"]["name"], "Code Review");
         // Verify no camelCase leaks
         assert!(json.get("messageId").is_none());
@@ -815,12 +1001,12 @@ mod tests {
     #[test]
     fn search_item_roundtrip() {
         let item = MessageSearchItem {
-            message_id: "msg_x".into(),
+            message_id: MESSAGE_ID_2.into(),
             message_type: "tips".into(),
             message_created_at: 9000,
             preview_text: "some content preview".into(),
             conversation: ConversationResponse {
-                id: 4,
+                id: "conv_0190f5fe-7c00-7a00-8abc-012345678903".into(),
                 name: "Search Test".into(),
                 r#type: AgentType::Acp,
                 model: None,
@@ -847,7 +1033,7 @@ mod tests {
         };
         let serialized = serde_json::to_string(&item).unwrap();
         let deserialized: MessageSearchItem = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(deserialized.message_id, "msg_x");
+        assert_eq!(deserialized.message_id, MESSAGE_ID_2);
         assert_eq!(deserialized.message_type, "tips");
         assert_eq!(deserialized.preview_text, "some content preview");
         assert_eq!(deserialized.conversation.name, "Search Test");
@@ -887,11 +1073,11 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_send_message_ignores_client_msg_id() {
-        // Clients may still send msg_id from stale builds — it must be ignored.
+    fn deserialize_send_message_rejects_client_msg_id() {
+        // Message identity is server-owned; stale/forged client fields fail
+        // closed instead of being silently normalized.
         let raw = json!({ "content": "Hi", "msg_id": "client-supplied" });
-        let req: SendMessageRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.content, "Hi");
+        assert!(serde_json::from_value::<SendMessageRequest>(raw).is_err());
     }
 
     // ── Paginated type aliases ──────────────────────────────────────
@@ -900,7 +1086,7 @@ mod tests {
     fn conversation_list_response_serialization() {
         let list: ConversationListResponse = PaginatedResult {
             items: vec![ConversationResponse {
-                id: 1,
+                id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
                 name: "Test".into(),
                 r#type: AgentType::Acp,
                 model: None,
@@ -949,12 +1135,12 @@ mod tests {
     fn message_search_response_serialization() {
         let resp: MessageSearchResponse = PaginatedResult {
             items: vec![MessageSearchItem {
-                message_id: "m1".into(),
+                message_id: MESSAGE_ID_1.into(),
                 message_type: "text".into(),
                 message_created_at: 5000,
                 preview_text: "matched".into(),
                 conversation: ConversationResponse {
-                    id: 5,
+                    id: "conv_0190f5fe-7c00-7a00-8abc-012345678903".into(),
                     name: "Conv".into(),
                     r#type: AgentType::Acp,
                     model: None,
@@ -983,8 +1169,11 @@ mod tests {
             has_more: false,
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["items"][0]["message_id"], "m1");
-        assert_eq!(json["items"][0]["conversation"]["id"], 5);
+        assert_eq!(json["items"][0]["message_id"], MESSAGE_ID_1);
+        assert_eq!(
+            json["items"][0]["conversation"]["id"],
+            "conv_0190f5fe-7c00-7a00-8abc-012345678903"
+        );
         assert_eq!(json["items"][0]["preview_text"], "matched");
         assert_eq!(json["total"], 1);
     }
@@ -992,13 +1181,13 @@ mod tests {
     #[test]
     fn serialize_conversation_artifact_response() {
         let artifact = ConversationArtifactResponse {
-            id: 1,
-            conversation_id: 1,
-            cron_job_id: Some("cron_1".into()),
+            id: "artifact_0190f5fe-7c00-7a00-8abc-012345678901".into(),
+            conversation_id: "conv_0190f5fe-7c00-7a00-8abc-012345678901".into(),
+            cron_job_id: Some(CRON_JOB_ID.into()),
             kind: ConversationArtifactKind::SkillSuggest,
             status: ConversationArtifactStatus::Active,
             payload: json!({
-                "cron_job_id": "cron_1",
+                "cron_job_id": CRON_JOB_ID,
                 "name": "daily-report",
                 "description": "Daily report",
                 "skillContent": "---\nname: daily-report\n---\nUse it.",

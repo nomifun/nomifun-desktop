@@ -10,7 +10,7 @@ use axum::routing::get;
 
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, PublicAgentId};
 use serde::Deserialize;
 
 use crate::audit::{AuditPage, AuditQuery};
@@ -57,7 +57,7 @@ async fn create_agent(
 async fn get_agent(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
 ) -> Result<Json<ApiResponse<PublicAgentConfig>>, AppError> {
     Ok(Json(ApiResponse::ok(state.service.get(&id).await?)))
 }
@@ -67,7 +67,7 @@ async fn get_agent(
 async fn patch_agent(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PublicAgentConfig>>, AppError> {
     let Json(patch) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -86,7 +86,7 @@ struct ApplyPresetRequest {
 async fn apply_preset(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
     body: Result<Json<ApplyPresetRequest>, JsonRejection>,
 ) -> Result<Json<ApiResponse<PublicAgentConfig>>, AppError> {
     let Json(req) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -110,7 +110,7 @@ async fn apply_preset(
 async fn delete_agent(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
 ) -> Result<StatusCode, AppError> {
     state.service.delete(&id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -128,7 +128,7 @@ struct AuditQueryParams {
 async fn get_audit(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<ApiResponse<AuditPage>>, AppError> {
     let query = AuditQuery {
@@ -154,7 +154,7 @@ struct DeleteAuditResult {
 async fn delete_audit(
     State(state): State<PublicAgentRouterState>,
     Extension(_user): Extension<CurrentUser>,
-    Path(id): Path<String>,
+    Path(id): Path<PublicAgentId>,
     Query(params): Query<DeleteAuditParams>,
 ) -> Result<Json<ApiResponse<DeleteAuditResult>>, AppError> {
     let deleted = state

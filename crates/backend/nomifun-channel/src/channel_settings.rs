@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use nomifun_common::ProviderWithModel;
+use nomifun_common::{CompanionId, ProviderId, ProviderWithModel};
 use nomifun_db::IClientPreferenceRepository;
 use tracing::debug;
 
@@ -123,14 +123,27 @@ impl ChannelSettingsService {
             return Ok(None);
         };
 
-        let parsed: serde_json::Value = serde_json::from_str(&pref.value).unwrap_or_default();
-
-        let provider_id = parsed["id"].as_str().unwrap_or_default().to_owned();
+        let parsed: serde_json::Value = serde_json::from_str(&pref.value).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "invalid model preference for {platform}: {error}"
+            ))
+        })?;
         let use_model = parsed["use_model"].as_str().map(|s| s.to_owned());
-
-        if provider_id.is_empty() && use_model.is_none() {
-            return Ok(None);
-        }
+        let Some(provider_id) = parsed["id"].as_str() else {
+            if use_model.is_none() {
+                return Ok(None);
+            }
+            return Err(ChannelError::InvalidConfig(format!(
+                "model preference for {platform} has a model but no provider ID"
+            )));
+        };
+        let provider_id = ProviderId::try_from(provider_id)
+            .map_err(|error| {
+                ChannelError::InvalidConfig(format!(
+                    "invalid provider ID in model preference for {platform}: {error}"
+                ))
+            })?
+            .into_string();
 
         debug!(platform = %platform, provider_id = %provider_id, use_model = ?use_model, "resolved channel model config");
 
@@ -141,11 +154,10 @@ impl ChannelSettingsService {
         }))
     }
     /// Reads the companion bound to a channel platform from
-    /// `client_preferences` (key `channels.{platform}.companionId`).
+    /// `client_preferences` (key `channels.{platform}.companion_id`).
     ///
-    /// Returns `None` when the key is absent or stores an empty string —
-    /// the platform has no companion binding. Tolerates both a JSON
-    /// string (`"companion_x"`) and a raw unquoted value.
+    /// Returns `None` when the key is absent or stores JSON `null`. A binding
+    /// must otherwise be a JSON string containing a canonical Companion ID.
     pub async fn get_channel_companion_id(&self, platform: PluginType) -> Result<Option<String>, ChannelError> {
         let key = channel_companion_key(platform);
         let prefs = self.pref_repo.get_by_keys(&[&key]).await?;
@@ -155,21 +167,31 @@ impl ChannelSettingsService {
         };
 
         let raw = match serde_json::from_str::<serde_json::Value>(&pref.value) {
-            Ok(serde_json::Value::String(s)) => s,
-            Ok(serde_json::Value::Null) => String::new(),
-            Ok(_) => pref.value,
-            Err(_) => pref.value,
+            Ok(serde_json::Value::String(value)) => value,
+            Ok(serde_json::Value::Null) => return Ok(None),
+            Ok(_) | Err(_) => {
+                return Err(ChannelError::InvalidConfig(format!(
+                    "companion preference for {platform} must be a canonical ID string or null"
+                )));
+            }
         };
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Ok(None);
+            return Err(ChannelError::InvalidConfig(format!(
+                "companion preference for {platform} must not contain an empty ID"
+            )));
         }
-        Ok(Some(trimmed.to_owned()))
+        let companion_id = CompanionId::try_from(trimmed).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "invalid companion ID in preference for {platform}: {error}"
+            ))
+        })?;
+        Ok(Some(companion_id.into_string()))
     }
 
     /// Writes (or clears) the companion bound to a channel platform
-    /// (key `channels.{platform}.companionId`). `None` / empty string deletes the
-    /// key and leaves the platform unbound.
+    /// (key `channels.{platform}.companion_id`). `None` deletes the key and
+    /// leaves the platform unbound; an empty or malformed ID is rejected.
     ///
     /// Persistence only: the channel routes layer pairs this with a session reset
     /// so the next inbound message resolves the new binding.
@@ -179,9 +201,14 @@ impl ChannelSettingsService {
         companion_id: Option<&str>,
     ) -> Result<(), ChannelError> {
         let key = channel_companion_key(platform);
-        match companion_id.map(str::trim).filter(|s| !s.is_empty()) {
+        match companion_id {
             Some(id) => {
-                let value = serde_json::Value::String(id.to_owned()).to_string();
+                let id = CompanionId::try_from(id).map_err(|error| {
+                    ChannelError::InvalidConfig(format!(
+                        "invalid companion ID for {platform}: {error}"
+                    ))
+                })?;
+                let value = serde_json::Value::String(id.into_string()).to_string();
                 self.pref_repo.upsert_batch(&[(&key, &value)]).await?;
             }
             None => {
@@ -197,7 +224,7 @@ fn agent_key(platform: PluginType) -> String {
 }
 
 fn channel_companion_key(platform: PluginType) -> String {
-    format!("channels.{platform}.companionId")
+    format!("channels.{platform}.companion_id")
 }
 
 fn model_key(platform: PluginType) -> String {
@@ -236,21 +263,15 @@ fn backend_to_agent_type(backend: &str) -> String {
     }
 }
 
-/// Builds a `ProviderWithModel` from the resolved config, or returns
-/// the empty default when no model is configured.
-pub fn resolved_model_to_provider(model: Option<&ResolvedModelConfig>) -> ProviderWithModel {
-    match model {
-        Some(m) => ProviderWithModel {
+/// Builds a `ProviderWithModel` only when a validated model configuration is
+/// present. Absence stays `None`; it is never encoded as an object with an
+/// empty provider ID.
+pub fn resolved_model_to_provider(model: Option<&ResolvedModelConfig>) -> Option<ProviderWithModel> {
+    model.map(|m| ProviderWithModel {
             provider_id: m.provider_id.clone(),
             model: m.model.clone(),
             use_model: m.use_model.clone(),
-        },
-        None => ProviderWithModel {
-            provider_id: String::new(),
-            model: String::new(),
-            use_model: None,
-        },
-    }
+        })
 }
 
 #[cfg(test)]
@@ -453,27 +474,30 @@ mod tests {
 
     #[tokio::test]
     async fn model_config_reads_from_preferences() {
+        const PROVIDER_ID: &str = "prov_0190f5fe-7c00-7a00-8abc-012345678901";
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
             "channels.weixin.defaultModel",
-            r#"{"id":"490fdb4e","use_model":"global.anthropic.claude-opus-4-6-v1"}"#,
+            r#"{"id":"prov_0190f5fe-7c00-7a00-8abc-012345678901","use_model":"global.anthropic.claude-opus-4-6-v1"}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
         let config = svc.get_model_config(PluginType::Weixin).await.unwrap().unwrap();
-        assert_eq!(config.provider_id, "490fdb4e");
+        assert_eq!(config.provider_id, PROVIDER_ID);
         assert_eq!(config.use_model.as_deref(), Some("global.anthropic.claude-opus-4-6-v1"));
     }
 
     #[tokio::test]
-    async fn model_config_returns_none_for_empty_values() {
+    async fn model_config_rejects_empty_provider_id() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
             "channels.telegram.defaultModel",
             r#"{"id":"","use_model":null}"#,
         )]));
         let svc = ChannelSettingsService::new(repo);
 
-        let config = svc.get_model_config(PluginType::Telegram).await.unwrap();
-        assert!(config.is_none());
+        assert!(matches!(
+            svc.get_model_config(PluginType::Telegram).await,
+            Err(ChannelError::InvalidConfig(_))
+        ));
     }
 
     // ── get/set_channel_companion_id ────────────────────────────────────────
@@ -487,51 +511,64 @@ mod tests {
 
     #[tokio::test]
     async fn companion_id_reads_json_string_value() {
+        const COMPANION_ID: &str =
+            "companion_0190f5fe-7c00-7a00-8abc-012345678901";
         let repo = Arc::new(MockPrefRepo::with_data(vec![(
-            "channels.telegram.companionId",
-            "\"companion_abc\"",
+            "channels.telegram.companion_id",
+            "\"companion_0190f5fe-7c00-7a00-8abc-012345678901\"",
         )]));
         let svc = ChannelSettingsService::new(repo);
         assert_eq!(
             svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().as_deref(),
-            Some("companion_abc")
+            Some(COMPANION_ID)
         );
     }
 
     #[tokio::test]
-    async fn companion_id_reads_raw_unquoted_value() {
-        let repo = Arc::new(MockPrefRepo::with_data(vec![("channels.lark.companionId", "companion_raw")]));
+    async fn companion_id_rejects_raw_unquoted_value() {
+        let repo = Arc::new(MockPrefRepo::with_data(vec![(
+            "channels.lark.companion_id",
+            "companion_raw",
+        )]));
         let svc = ChannelSettingsService::new(repo);
-        assert_eq!(
-            svc.get_channel_companion_id(PluginType::Lark).await.unwrap().as_deref(),
-            Some("companion_raw")
-        );
+        assert!(matches!(
+            svc.get_channel_companion_id(PluginType::Lark).await,
+            Err(ChannelError::InvalidConfig(_))
+        ));
     }
 
     #[tokio::test]
-    async fn companion_id_empty_string_treated_as_unset() {
+    async fn companion_id_accepts_null_but_rejects_empty_strings() {
         let repo = Arc::new(MockPrefRepo::with_data(vec![
-            ("channels.telegram.companionId", "\"\""),
-            ("channels.lark.companionId", "\"  \""),
-            ("channels.weixin.companionId", "null"),
+            ("channels.telegram.companion_id", "\"\""),
+            ("channels.lark.companion_id", "\"  \""),
+            ("channels.weixin.companion_id", "null"),
         ]));
         let svc = ChannelSettingsService::new(repo);
-        assert!(svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().is_none());
-        assert!(svc.get_channel_companion_id(PluginType::Lark).await.unwrap().is_none());
+        assert!(matches!(
+            svc.get_channel_companion_id(PluginType::Telegram).await,
+            Err(ChannelError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            svc.get_channel_companion_id(PluginType::Lark).await,
+            Err(ChannelError::InvalidConfig(_))
+        ));
         assert!(svc.get_channel_companion_id(PluginType::Weixin).await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn companion_id_set_then_get_roundtrip_and_clear() {
+        const COMPANION_ID: &str =
+            "companion_0190f5fe-7c00-7a00-8abc-012345678901";
         let repo = Arc::new(MockPrefRepo::new());
         let svc = ChannelSettingsService::new(repo);
 
-        svc.set_channel_companion_id(PluginType::Dingtalk, Some("companion_77"))
+        svc.set_channel_companion_id(PluginType::Dingtalk, Some(COMPANION_ID))
             .await
             .unwrap();
         assert_eq!(
             svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().as_deref(),
-            Some("companion_77")
+            Some(COMPANION_ID)
         );
         // Other platforms unaffected.
         assert!(svc.get_channel_companion_id(PluginType::Telegram).await.unwrap().is_none());
@@ -540,14 +577,21 @@ mod tests {
         svc.set_channel_companion_id(PluginType::Dingtalk, None).await.unwrap();
         assert!(svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
 
-        // Empty string also clears.
-        svc.set_channel_companion_id(PluginType::Dingtalk, Some("companion_88"))
+        // Empty input is invalid rather than another spelling of "unbound".
+        svc.set_channel_companion_id(PluginType::Dingtalk, Some(COMPANION_ID))
             .await
             .unwrap();
-        svc.set_channel_companion_id(PluginType::Dingtalk, Some("  "))
-            .await
-            .unwrap();
-        assert!(svc.get_channel_companion_id(PluginType::Dingtalk).await.unwrap().is_none());
+        assert!(matches!(
+            svc.set_channel_companion_id(PluginType::Dingtalk, Some("  ")).await,
+            Err(ChannelError::InvalidConfig(_))
+        ));
+        assert_eq!(
+            svc.get_channel_companion_id(PluginType::Dingtalk)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(COMPANION_ID)
+        );
     }
 
     // ── resolved_model_to_provider ────────────────────────────────────
@@ -555,21 +599,21 @@ mod tests {
     #[test]
     fn resolved_model_converts_to_provider() {
         let model = ResolvedModelConfig {
-            provider_id: "abc".into(),
+            provider_id: "prov_0190f5fe-7c00-7a00-8abc-012345678901".into(),
             model: "gpt-5".into(),
             use_model: Some("gpt-5".into()),
         };
-        let p = resolved_model_to_provider(Some(&model));
-        assert_eq!(p.provider_id, "abc");
+        let p = resolved_model_to_provider(Some(&model)).unwrap();
+        assert_eq!(
+            p.provider_id,
+            "prov_0190f5fe-7c00-7a00-8abc-012345678901"
+        );
         assert_eq!(p.model, "gpt-5");
         assert_eq!(p.use_model.as_deref(), Some("gpt-5"));
     }
 
     #[test]
-    fn none_model_produces_empty_provider() {
-        let p = resolved_model_to_provider(None);
-        assert!(p.provider_id.is_empty());
-        assert!(p.model.is_empty());
-        assert!(p.use_model.is_none());
+    fn none_model_stays_absent() {
+        assert!(resolved_model_to_provider(None).is_none());
     }
 }

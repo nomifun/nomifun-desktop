@@ -1,3 +1,4 @@
+import type { ConversationId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import type { TMessage } from '@/common/chat/chatLib';
 import type { TChatConversation } from '@/common/config/storage';
@@ -29,7 +30,7 @@ type ExportFlowStep = 'closed' | 'menu' | 'filename';
 type MessageApi = Partial<Pick<ArcoMessageInstance, 'success' | 'error'>>;
 
 type UseConversationExportOptions = {
-  conversation_id?: number;
+  conversation_id?: ConversationId;
   workspace?: string;
   t: (key: string, options?: Record<string, unknown>) => string;
   messageApi: MessageApi;
@@ -163,7 +164,7 @@ export function useConversationExport(options: UseConversationExportOptions): Us
       });
       messagesRef.current = messagesResult.items;
       setFilename(
-        buildDefaultExportFileName(String(conversation.id), getDefaultExportFileNameSource(conversation, messagesResult.items))
+        buildDefaultExportFileName(conversation.id, getDefaultExportFileNameSource(conversation, messagesResult.items))
       );
       setActiveIndex(0);
       setStep('menu');

@@ -52,7 +52,7 @@ describe('Custom figure card action polish', () => {
     expect(library.includes('onUpdate={update}')).toBe(true);
     expect(library.includes('FigureInlineConfirmButton')).toBe(false);
     expect(library.includes('w-22px h-22px rd-full')).toBe(false);
-    expect(figuresHook.includes('update: (id: string, patch: FigureUpdatePatch) => Promise<IFigureMeta>')).toBe(true);
+    expect(figuresHook.includes('update: (id: FigureId, patch: FigureUpdatePatch) => Promise<IFigureMeta>')).toBe(true);
     expect(ipcBridge.includes('updateFigure')).toBe(true);
   });
 

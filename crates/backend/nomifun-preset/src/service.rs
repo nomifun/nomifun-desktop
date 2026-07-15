@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use nomifun_api_types::*;
-use nomifun_common::{AppError, generate_prefixed_id};
+use nomifun_common::{AgentId, AppError, KnowledgeBaseId, PresetId, PresetTagId, ProviderId};
 use nomifun_db::{
     CreatePresetTagParams, IAgentMetadataRepository, IPresetRepository, IPresetStateRepository,
     IPresetTagRepository, IProviderRepository, PresetRecord, PresetWriteParams,
@@ -105,6 +105,9 @@ impl PresetService {
                 Ok(extension_to_response(&item))
             }
             PresetSource::User => {
+                PresetId::parse(id).map_err(|error| {
+                    AppError::BadRequest(format!("invalid user preset id: {error}"))
+                })?;
                 let record = self.repo.get(id).await?
                     .ok_or_else(|| AppError::NotFound(format!("preset '{id}' not found")))?;
                 let mut response = record_to_response(&record)?;
@@ -158,9 +161,19 @@ impl PresetService {
     }
 
     pub async fn create(&self, request: CreatePresetRequest) -> Result<PresetResponse, AppError> {
-        validate_request(&request.name, &request.model_preferences, &request.knowledge_policy)?;
-        let id = request.id.clone().filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| generate_prefixed_id("preset"));
+        validate_request(
+            &request.name,
+            &request.agent_preferences,
+            &request.model_preferences,
+            &request.knowledge_policy,
+            &request.knowledge_bases,
+        )?;
+        let id = match request.id.clone() {
+            Some(value) => PresetId::parse(value)
+                .map_err(|error| AppError::BadRequest(format!("invalid user preset id: {error}")))?
+                .into_string(),
+            None => PresetId::new().into_string(),
+        };
         if self.builtin.has(&id) || self.extension_registry.has_preset(&id).await {
             return Err(AppError::Conflict(format!("preset id '{id}' already exists")));
         }
@@ -179,9 +192,17 @@ impl PresetService {
         if self.classify_source(id).await != PresetSource::User {
             return Err(AppError::Forbidden("Copy bundled presets before editing them".into()));
         }
+        PresetId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid user preset id: {error}")))?;
         let existing = self.get(id).await?;
         let merged = merge_update(existing, request);
-        validate_request(&merged.name, &merged.model_preferences, &merged.knowledge_policy)?;
+        validate_request(
+            &merged.name,
+            &merged.agent_preferences,
+            &merged.model_preferences,
+            &merged.knowledge_policy,
+            &merged.knowledge_bases,
+        )?;
         let params = write_from_response(merged);
         let record = self.repo.update(id, &params).await?
             .ok_or_else(|| AppError::NotFound(format!("preset '{id}' not found")))?;
@@ -192,6 +213,8 @@ impl PresetService {
         if self.classify_source(id).await != PresetSource::User {
             return Err(AppError::Forbidden("Bundled presets cannot be deleted".into()));
         }
+        PresetId::parse(id)
+            .map_err(|error| AppError::BadRequest(format!("invalid user preset id: {error}")))?;
         if !self.repo.delete(id).await? { return Err(AppError::NotFound(format!("preset '{id}' not found"))); }
         let _ = self.state_repo.delete(id).await;
         for dir in ["preset-instructions", "preset-avatars"] {
@@ -207,8 +230,10 @@ impl PresetService {
         }
         let existing = self.state_repo.get(id).await?;
         let preferred_agent_id = match request.preferred_agent_id {
-            Some(value) if value.trim().is_empty() => None,
-            Some(value) => Some(value),
+            Some(value) => {
+                validate_agent_reference(&value)?;
+                Some(value)
+            }
             None => existing.as_ref().and_then(|state| state.preferred_agent_id.clone()),
         };
         self.state_repo.upsert(&UpsertPresetStateParams {
@@ -232,6 +257,14 @@ impl PresetService {
         locale: Option<&str>,
         overrides: PresetOverrides,
     ) -> Result<ResolvedPresetSnapshot, AppError> {
+        if let Some(provider_id) = overrides.provider_id.as_deref() {
+            ProviderId::parse(provider_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid provider_id override: {error}"))
+            })?;
+        }
+        if let Some(agent_id) = overrides.agent_id.as_deref() {
+            validate_agent_reference(agent_id)?;
+        }
         let preset = self.get(id).await?;
         if !preset.enabled { return Err(AppError::BadRequest(format!("preset '{id}' is disabled"))); }
         if !preset.targets.is_empty() && !preset.targets.contains(&target) {
@@ -300,9 +333,14 @@ impl PresetService {
         dedupe(&mut skills);
 
         let knowledge_policy = overrides.knowledge_policy.unwrap_or(preset.knowledge_policy);
-        let knowledge_base_ids = overrides.knowledge_base_ids.unwrap_or_else(|| {
-            preset.knowledge_bases.into_iter().map(|k| k.knowledge_base_id).collect()
-        });
+        let knowledge_base_ids = match overrides.knowledge_base_ids {
+            Some(ids) => ids,
+            None => preset
+                .knowledge_bases
+                .into_iter()
+                .map(|binding| binding.knowledge_base_id)
+                .collect(),
+        };
         Ok(ResolvedPresetSnapshot {
             preset_id: preset.id, preset_revision: preset.revision, preset_name: preset.name,
             target, routing_description: preset.routing_description, instructions,
@@ -314,11 +352,22 @@ impl PresetService {
     }
 
     async fn resolve_agent(&self, value: &str, required: bool, warnings: &mut Vec<String>) -> Result<String, AppError> {
+        validate_agent_reference(value)?;
         if let Some(row) = self.agent_repo.get(value).await? {
-            if row.enabled { return Ok(row.id); }
+            if row.enabled {
+                validate_agent_reference(&row.id).map_err(|error| {
+                    AppError::Internal(format!("stored agent identity is invalid: {error}"))
+                })?;
+                return Ok(row.id);
+            }
         }
         if let Some(row) = self.agent_repo.find_builtin_by_backend(value).await? {
-            if row.enabled { return Ok(row.id); }
+            if row.enabled {
+                validate_agent_reference(&row.id).map_err(|error| {
+                    AppError::Internal(format!("stored agent identity is invalid: {error}"))
+                })?;
+                return Ok(row.id);
+            }
         }
         if !required { warnings.push(format!("Agent preference '{value}' is unavailable")); }
         Err(AppError::BadRequest(format!("agent preference '{value}' is unavailable")))
@@ -329,6 +378,11 @@ impl PresetService {
         preference: &ModelPreference,
         warnings: &mut Vec<String>,
     ) -> Result<ModelPreference, AppError> {
+        if let Some(provider_id) = preference.provider_id.as_deref() {
+            ProviderId::parse(provider_id).map_err(|error| {
+                AppError::BadRequest(format!("invalid model preference provider_id: {error}"))
+            })?;
+        }
         let providers = self.provider_repo.list().await?;
         let candidates: Vec<_> = providers.into_iter().filter(|p| p.enabled && preference.provider_id.as_ref().is_none_or(|id| id == &p.id)).collect();
         for provider in candidates {
@@ -336,7 +390,7 @@ impl PresetService {
             if models.iter().any(|m| m == &preference.model) {
                 if preference.provider_id.is_none() {
                     warnings.push(format!(
-                        "Model '{}' was migrated without a provider; resolved it to '{}'",
+                        "Unqualified model '{}' resolved to provider '{}'",
                         preference.model, provider.id
                     ));
                 }
@@ -378,7 +432,7 @@ impl PresetService {
     pub async fn create_tag(&self, request: CreatePresetTagRequest) -> Result<PresetTagResponse, AppError> {
         let label = request.label.trim();
         if label.is_empty() { return Err(AppError::BadRequest("tag label is required".into())); }
-        let key = generate_prefixed_id("preset_tag");
+        let key = PresetTagId::new().into_string();
         let dimension = dimension_str(request.dimension);
         let row = self.tag_repo.create(&CreatePresetTagParams { key: &key, dimension, label, sort_order: 0 }).await?;
         Ok(PresetTagResponse { key: row.key, dimension: request.dimension, label: row.label, label_i18n: HashMap::new(), sort_order: row.sort_order, builtin: false })
@@ -386,6 +440,8 @@ impl PresetService {
 
     pub async fn update_tag(&self, key: &str, request: UpdatePresetTagRequest) -> Result<PresetTagResponse, AppError> {
         if self.builtin.tags().iter().any(|t| t.key == key) { return Err(AppError::Forbidden("Built-in tags cannot be edited".into())); }
+        PresetTagId::parse(key)
+            .map_err(|error| AppError::BadRequest(format!("invalid user preset tag id: {error}")))?;
         let row = self.tag_repo.update(key, &UpdatePresetTagParams { label: request.label.as_deref(), sort_order: request.sort_order }).await?
             .ok_or_else(|| AppError::NotFound(format!("preset tag '{key}' not found")))?;
         Ok(PresetTagResponse { key: row.key, dimension: parse_dimension(&row.dimension), label: row.label, label_i18n: HashMap::new(), sort_order: row.sort_order, builtin: false })
@@ -393,6 +449,8 @@ impl PresetService {
 
     pub async fn delete_tag(&self, key: &str) -> Result<(), AppError> {
         if self.builtin.tags().iter().any(|t| t.key == key) { return Err(AppError::Forbidden("Built-in tags cannot be deleted".into())); }
+        PresetTagId::parse(key)
+            .map_err(|error| AppError::BadRequest(format!("invalid user preset tag id: {error}")))?;
         if !self.tag_repo.delete(key).await? { return Err(AppError::NotFound(format!("preset tag '{key}' not found"))); }
         Ok(())
     }
@@ -429,9 +487,23 @@ impl PresetService {
     }
 }
 
-fn validate_request(name: &str, models: &[ModelPreference], policy: &PresetKnowledgePolicy) -> Result<(), AppError> {
+fn validate_request(
+    name: &str,
+    agents: &[AgentPreference],
+    models: &[ModelPreference],
+    policy: &PresetKnowledgePolicy,
+    _knowledge_bases: &[KnowledgeBaseBinding],
+) -> Result<(), AppError> {
     if name.trim().is_empty() { return Err(AppError::BadRequest("name is required".into())); }
+    for agent in agents {
+        validate_agent_reference(&agent.agent_id)?;
+    }
     if models.iter().any(|m| m.model.trim().is_empty()) { return Err(AppError::BadRequest("model preference requires model".into())); }
+    for provider_id in models.iter().filter_map(|model| model.provider_id.as_deref()) {
+        ProviderId::parse(provider_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid model preference provider_id: {error}"))
+        })?;
+    }
     if !matches!(policy.mode.as_str(), "inherit" | "staged" | "direct") {
         return Err(AppError::BadRequest("knowledge policy mode must be inherit, staged, or direct".into()));
     }
@@ -441,8 +513,72 @@ fn validate_request(name: &str, models: &[ModelPreference], policy: &PresetKnowl
     Ok(())
 }
 
+fn validate_agent_reference(value: &str) -> Result<(), AppError> {
+    let stable_catalog_key = !value.is_empty()
+        && value.len() <= 255
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'_' | b'-' | b'.' | b':')
+        })
+        && (!value.starts_with("agent_") || value.starts_with("agent_builtin_"));
+    if AgentId::parse(value).is_ok() || stable_catalog_key {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "agent reference must be a canonical custom-agent ID or stable builtin/extension key"
+                .into(),
+        ))
+    }
+}
+
 fn record_to_response(record: &PresetRecord) -> Result<PresetResponse, AppError> {
     let p = record.preset.as_ref().ok_or_else(|| AppError::Internal("preset aggregate missing root".into()))?;
+    if p.source_kind == "user" {
+        PresetId::parse(&p.id).map_err(|error| {
+            AppError::Internal(format!("stored user preset id '{}' is not canonical: {error}", p.id))
+        })?;
+    }
+    for preference in &record.model_preferences {
+        if let Some(provider_id) = preference.provider_id.as_deref() {
+            ProviderId::parse(provider_id).map_err(|error| {
+                AppError::Internal(format!(
+                    "stored preset model provider_id '{provider_id}' is not canonical: {error}"
+                ))
+            })?;
+        }
+    }
+    let knowledge_bases = record
+        .knowledge_bases
+        .iter()
+        .map(|binding| {
+            KnowledgeBaseId::parse(&binding.knowledge_base_id)
+                .map(|knowledge_base_id| KnowledgeBaseBinding {
+                    knowledge_base_id,
+                    required: binding.required,
+                })
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored preset knowledge_base_id '{}' is not canonical: {error}",
+                        binding.knowledge_base_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for preference in &record.agent_preferences {
+        validate_agent_reference(&preference.agent_id).map_err(|error| {
+            AppError::Internal(format!("stored preset agent identity is invalid: {error}"))
+        })?;
+    }
+    if let Some(state) = record.user_state.as_ref()
+        && let Some(agent_id) = state.preferred_agent_id.as_deref()
+    {
+        validate_agent_reference(agent_id).map_err(|error| {
+            AppError::Internal(format!(
+                "stored preset preferred_agent_id is invalid: {error}"
+            ))
+        })?;
+    }
     let mut name_i18n = HashMap::new(); let mut description_i18n = HashMap::new(); let mut instructions_i18n = HashMap::new();
     for l in &record.localizations {
         if let Some(v) = &l.name { name_i18n.insert(l.locale.clone(), v.clone()); }
@@ -459,7 +595,7 @@ fn record_to_response(record: &PresetRecord) -> Result<PresetResponse, AppError>
         model_preferences: record.model_preferences.iter().map(|v| ModelPreference { provider_id: v.provider_id.clone(), model: v.model.clone(), required: v.required }).collect(),
         included_skills: record.skill_bindings.iter().filter(|v| v.binding == "include").map(|v| SkillBinding { skill_name: v.skill_name.clone(), required: v.required }).collect(),
         excluded_auto_skills: record.skill_bindings.iter().filter(|v| v.binding == "exclude_auto").map(|v| v.skill_name.clone()).collect(),
-        knowledge_policy: policy, knowledge_bases: record.knowledge_bases.iter().map(|v| KnowledgeBaseBinding { knowledge_base_id: v.knowledge_base_id.clone(), required: v.required }).collect(),
+        knowledge_policy: policy, knowledge_bases,
         examples: record.examples.iter().filter(|v| v.locale.is_empty()).map(|v| v.prompt.clone()).collect(),
         examples_i18n: collect_examples_i18n(&record.examples),
         audience_tags: record.tag_bindings.iter().filter(|v| v.dimension == "audience").map(|v| v.tag_key.clone()).collect(),
@@ -493,7 +629,7 @@ fn write_from_create(id: String, r: CreatePresetRequest) -> PresetWriteParams {
         localizations, targets: target_strings(&r.targets), agent_preferences: r.agent_preferences.into_iter().map(|v| (v.agent_id, v.required)).collect(), model_preferences: r.model_preferences.into_iter().map(|v| (v.provider_id, v.model, v.required)).collect(),
         skill_bindings: r.included_skills.into_iter().map(|v| (v.skill_name,"include".into(),v.required)).chain(r.excluded_auto_skills.into_iter().map(|v| (v,"exclude_auto".into(),false))).collect(),
         knowledge_policy: (r.knowledge_policy.enabled,r.knowledge_policy.mode,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),
-        knowledge_bases: r.knowledge_bases.into_iter().map(|v| (v.knowledge_base_id,v.required)).collect(), examples,
+        knowledge_bases: r.knowledge_bases.into_iter().map(|v| (v.knowledge_base_id.to_string(),v.required)).collect(), examples,
         tag_bindings: r.audience_tags.into_iter().map(|v| (v,"audience".into())).chain(r.scenario_tags.into_iter().map(|v| (v,"scenario".into()))).collect() }
 }
 
@@ -503,7 +639,7 @@ fn write_from_response(r: PresetResponse) -> PresetWriteParams {
     PresetWriteParams { id:r.id.clone(),source_kind:"user".into(),source_key:Some(r.id),name:r.name,description:r.description,routing_description:r.routing_description,instructions:r.instructions,avatar:r.avatar,fallback_allowed:r.fallback_allowed,
         localizations,targets:target_strings(&r.targets),agent_preferences:r.agent_preferences.into_iter().map(|v|(v.agent_id,v.required)).collect(),model_preferences:r.model_preferences.into_iter().map(|v|(v.provider_id,v.model,v.required)).collect(),
         skill_bindings:r.included_skills.into_iter().map(|v|(v.skill_name,"include".into(),v.required)).chain(r.excluded_auto_skills.into_iter().map(|v|(v,"exclude_auto".into(),false))).collect(),
-        knowledge_policy:(r.knowledge_policy.enabled,r.knowledge_policy.mode,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),knowledge_bases:r.knowledge_bases.into_iter().map(|v|(v.knowledge_base_id,v.required)).collect(),examples,
+        knowledge_policy:(r.knowledge_policy.enabled,r.knowledge_policy.mode,r.knowledge_policy.writeback,r.knowledge_policy.eagerness,r.knowledge_policy.grounded),knowledge_bases:r.knowledge_bases.into_iter().map(|v|(v.knowledge_base_id.to_string(),v.required)).collect(),examples,
         tag_bindings:r.audience_tags.into_iter().map(|v|(v,"audience".into())).chain(r.scenario_tags.into_iter().map(|v|(v,"scenario".into()))).collect() }
 }
 

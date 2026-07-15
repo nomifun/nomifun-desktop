@@ -26,9 +26,9 @@ pub use image_model::{
     ImageModelService, image_model_catalog, inactive_image_model_status,
 };
 pub use managed_model::{
-    DEFAULT_FREE_REFRESH_INTERVAL, FREE_MODEL_PROVIDER_ID, LOCAL_MODEL_PROVIDER_ID,
+    DEFAULT_FREE_REFRESH_INTERVAL, FREE_MODEL_PLATFORM, LOCAL_MODEL_PLATFORM,
     ManagedModelRefreshPolicy, ManagedModelRefreshTask, ManagedModelServer,
-    ManagedModelService, is_managed_provider_identity, start_and_provision_free_model,
+    ManagedModelService, is_managed_provider_platform, start_and_provision_free_model,
     start_and_provision_free_model_with_preferences,
 };
 pub use local_model::{

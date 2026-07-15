@@ -5,6 +5,13 @@
  * Based on AionUi (https://github.com/iOfficeAI/AionUi)
  */
 
+import {
+  conversationTarget,
+  type ConversationId,
+  type ExecutionTemplateId,
+  type McpServerId,
+} from '@/common/types/ids';
+import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import type { IMcpServer, TProviderWithModel } from '@/common/config/storage';
 import { buildAgentConversationParams } from '@/common/utils/buildAgentConversationParams';
@@ -56,13 +63,13 @@ export type GuidSendDeps = {
   guidDisabledBuiltinSkills: string[] | undefined;
   guidEnabledSkills: string[] | undefined;
   availableMcpServers: IMcpServer[];
-  selectedMcpServerIds: number[] | undefined;
+  selectedMcpServerIds: McpServerId[] | undefined;
   currentEffectiveAgentInfo: EffectiveAgentInfo;
   isGoogleAuth: boolean;
 
   /** Applies the Guid page's advanced drafts (knowledge/AutoWork/IDMM) onto the
    * freshly created conversation, before navigation. Never throws. */
-  applyAdvancedConfig?: (conversationId: number) => Promise<void>;
+  applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
 
   /** Current AutoWork draft. When enabled with a tag, the entry starts an
    * AutoWork session (no initial message) instead of a normal chat send —
@@ -75,7 +82,7 @@ export type GuidSendDeps = {
   decisionPolicy: TDecisionPolicy;
   /** Optional reusable collaboration input selected in the composer. It is an
    * entry default only; the created Execution copies it and keeps no live FK. */
-  executionTemplateId?: string;
+  executionTemplateId?: ExecutionTemplateId;
 
   // Mention state reset
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -229,7 +236,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           files: files.length > 0 ? files : undefined,
         };
         if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(`openclaw_initial_message_${conversation.id}`, JSON.stringify(initialMessage));
+          sessionStorage.setItem(
+            sessionStorageKey('initial-message-openclaw', conversationTarget(conversation.id)),
+            JSON.stringify(initialMessage)
+          );
         }
 
         seedConversationCache(conversation);
@@ -281,7 +291,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           files: files.length > 0 ? files : undefined,
         };
         if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(`nanobot_initial_message_${conversation.id}`, JSON.stringify(initialMessage));
+          sessionStorage.setItem(
+            sessionStorageKey('initial-message-nanobot', conversationTarget(conversation.id)),
+            JSON.stringify(initialMessage)
+          );
         }
 
         seedConversationCache(conversation);
@@ -341,7 +354,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           files: files.length > 0 ? files : undefined,
         };
         if (entryPlan.sendInitialMessage) {
-          sessionStorage.setItem(`nomi_initial_message_${conversation.id}`, JSON.stringify(initialMessage));
+          sessionStorage.setItem(
+            sessionStorageKey('initial-message-nomi', conversationTarget(conversation.id)),
+            JSON.stringify(initialMessage)
+          );
         }
 
         seedConversationCache(conversation);
@@ -387,6 +403,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model: current_model!,
         cli_path: acpAgentInfo?.cli_path,
         custom_agent_id: acpAgentInfo?.custom_agent_id,
+        remote_agent_id: acpAgentInfo?.remote_agent_id,
         custom_workspace: isCustomWorkspace,
         is_preset,
         session_mode: selectedMode,
@@ -417,10 +434,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           files: files.length > 0 ? files : undefined,
         };
         if (entryPlan.sendInitialMessage) {
-          const initialMessageKey =
-            agentConversationParams.type === 'remote'
-              ? `remote_initial_message_${conversation.id}`
-              : `acp_initial_message_${conversation.id}`;
+          const target = conversationTarget(conversation.id);
+          const initialMessageKey = sessionStorageKey(
+            agentConversationParams.type === 'remote' ? 'initial-message-remote' : 'initial-message-acp',
+            target
+          );
           sessionStorage.setItem(initialMessageKey, JSON.stringify(initialMessage));
         }
 

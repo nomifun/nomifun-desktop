@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use nomifun_app::DesktopServer;
+use nomifun_common::CompanionId;
 use tauri::{Manager, PhysicalPosition, PhysicalSize};
 
 use crate::{run_on_main_thread_task, webui_init_script};
@@ -49,9 +50,11 @@ pub struct MemoryPanelWindowState(Arc<Mutex<MemoryPanelSession>>);
 
 impl MemoryPanelWindowState {
     pub fn place(&self, request_id: &str, owner_companion_id: &str, rect: PhysicalRect) -> Result<(), String> {
-        if request_id.trim().is_empty() || owner_companion_id.trim().is_empty() {
-            return Err("memory panel request and owner are required".to_string());
+        if request_id.trim().is_empty() {
+            return Err("memory panel request is required".to_string());
         }
+        CompanionId::parse(owner_companion_id)
+            .map_err(|error| format!("invalid memory panel owner: {error}"))?;
         let rect = rect.validate()?;
         let mut state = self.0.lock().map_err(|_| "memory panel state poisoned".to_string())?;
         state.request_id = Some(request_id.to_string());
@@ -211,8 +214,8 @@ mod tests {
     #[test]
     fn stale_request_cannot_hide_new_owner() {
         let state = MemoryPanelWindowState::default();
-        state.place("r1", "a", PhysicalRect::new(10, 20, 340, 300)).unwrap();
-        state.place("r2", "b", PhysicalRect::new(30, 40, 340, 300)).unwrap();
+        state.place("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901", PhysicalRect::new(10, 20, 340, 300)).unwrap();
+        state.place("r2", "companion_0190f5fe-7c00-7a00-8abc-012345678902", PhysicalRect::new(30, 40, 340, 300)).unwrap();
         assert!(!state.finish_hide("r1"));
         assert_eq!(state.snapshot().request_id.as_deref(), Some("r2"));
     }
@@ -227,8 +230,10 @@ mod tests {
     #[test]
     fn invalidates_owner_when_companion_is_disabled() {
         let state = MemoryPanelWindowState::default();
-        state.place("r1", "a", PhysicalRect::new(10, 20, 340, 300)).unwrap();
-        assert!(state.invalidate_owner_unless(&HashSet::from(["b".to_string()])));
+        state.place("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901", PhysicalRect::new(10, 20, 340, 300)).unwrap();
+        assert!(state.invalidate_owner_unless(&HashSet::from([
+            "companion_0190f5fe-7c00-7a00-8abc-012345678902".to_string(),
+        ])));
         assert!(state.snapshot().request_id.is_none());
     }
 
@@ -238,20 +243,20 @@ mod tests {
         let native_task_state = state.clone();
         assert!(native_task_state.is_empty());
 
-        state.place("r1", "a", PhysicalRect::new(10, 20, 340, 300)).unwrap();
-        assert!(native_task_state.can_show("r1", "a"));
+        state.place("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901", PhysicalRect::new(10, 20, 340, 300)).unwrap();
+        assert!(native_task_state.can_show("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901"));
         assert!(!native_task_state.is_empty());
 
         assert!(state.finish_hide("r1"));
         assert!(native_task_state.is_empty());
-        state.place("r2", "b", PhysicalRect::new(30, 40, 340, 300)).unwrap();
+        state.place("r2", "companion_0190f5fe-7c00-7a00-8abc-012345678902", PhysicalRect::new(30, 40, 340, 300)).unwrap();
         assert!(!native_task_state.is_empty());
-        assert!(!native_task_state.can_show("r1", "a"));
-        assert!(native_task_state.can_show("r2", "b"));
+        assert!(!native_task_state.can_show("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901"));
+        assert!(native_task_state.can_show("r2", "companion_0190f5fe-7c00-7a00-8abc-012345678902"));
 
         let mut stale_task_ran = false;
         assert!(!native_task_state
-            .run_if_current("r1", "a", || {
+            .run_if_current("r1", "companion_0190f5fe-7c00-7a00-8abc-012345678901", || {
                 stale_task_ran = true;
                 Ok(())
             })

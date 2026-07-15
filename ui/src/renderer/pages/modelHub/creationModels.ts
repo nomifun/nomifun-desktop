@@ -22,6 +22,7 @@
  */
 
 import type { IProvider, ModelProfile, ModelTask } from '@/common/config/storage';
+import type { ProviderId } from '@/common/types/ids';
 import { hasSpecificModelCapability } from '@/common/utils/modelCapabilities';
 
 /** The two Creative-Workshop generation capabilities. */
@@ -31,7 +32,7 @@ export const CREATION_CAPABILITIES: CreationCapability[] = ['image_generation', 
 
 /** One generation-capable model resolved against a provider. */
 export interface CreationModelEntry {
-  providerId: string;
+  providerId: ProviderId;
   providerName: string;
   platform: string;
   model: string;
@@ -41,7 +42,7 @@ export interface CreationModelEntry {
 
 /** Generation-capable models grouped under their provider. */
 export interface CreationProviderGroup {
-  providerId: string;
+  providerId: ProviderId;
   providerName: string;
   platform: string;
   models: CreationModelEntry[];
@@ -90,7 +91,7 @@ const profileCreationCapabilities = (profile: ModelProfile): CreationCapability[
 type ProfileCapabilityIndex = Map<string, CreationCapability[]>;
 
 /** Composite key for the per-model profile lookup (collision-free via JSON). */
-const profileKey = (providerId: string, model: string): string => JSON.stringify([providerId, model]);
+const profileKey = (providerId: ProviderId, model: string): string => JSON.stringify([providerId, model]);
 
 /**
  * Index authoritative per-model profiles by `(providerId, model)`. User edits

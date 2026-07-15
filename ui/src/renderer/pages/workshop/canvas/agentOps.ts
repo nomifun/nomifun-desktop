@@ -23,6 +23,8 @@
 import { useEffect, useRef } from 'react';
 
 import { httpRequest } from '@/common/adapter/httpBridge';
+import { parseWorkshopNodeId } from '@/common/types/ids';
+import type { CanvasId, WorkshopNodeId } from '@/common/types/ids';
 
 /** Node kinds an agent may create (contract §4 interactive kinds). */
 export type AgentNodeKind = 'image' | 'text' | 'video' | 'generator';
@@ -43,21 +45,21 @@ export interface AgentAddNodeOp {
 /** Connect two existing nodes (directed, from → to). */
 export interface AgentConnectOp {
   type: 'connect';
-  from_node_id: string;
-  to_node_id: string;
+  from_node_id: WorkshopNodeId;
+  to_node_id: WorkshopNodeId;
 }
 
 /** Shallow-merge a patch into a node's data. */
 export interface AgentUpdateNodeDataOp {
   type: 'update_node_data';
-  node_id: string;
+  node_id: WorkshopNodeId;
   patch: Record<string, unknown>;
 }
 
 /** Delete a node (and its incident edges). */
 export interface AgentDeleteNodeOp {
   type: 'delete_node';
-  node_id: string;
+  node_id: WorkshopNodeId;
 }
 
 export type AgentOp = AgentAddNodeOp | AgentConnectOp | AgentUpdateNodeDataOp | AgentDeleteNodeOp;
@@ -72,8 +74,8 @@ export interface PendingAgentOp {
 export interface AgentOpHandlers {
   addNode: (op: AgentAddNodeOp) => void;
   connect: (op: AgentConnectOp) => void;
-  updateNodeData: (nodeId: string, patch: Record<string, unknown>) => void;
-  deleteNode: (nodeId: string) => void;
+  updateNodeData: (nodeId: WorkshopNodeId, patch: Record<string, unknown>) => void;
+  deleteNode: (nodeId: WorkshopNodeId) => void;
   /** Called after a batch of ops applies (count = ops applied this tick). */
   onApplied?: (count: number) => void;
 }
@@ -83,15 +85,35 @@ const POLL_OK_MS = 2500;
 /** Backoff after a failed poll (silent). */
 const POLL_BACKOFF_MS = 5000;
 
-async function fetchPendingOps(canvasId: string): Promise<PendingAgentOp[]> {
+function normalizePendingOp(pending: PendingAgentOp): PendingAgentOp {
+  const op = pending.op;
+  switch (op.type) {
+    case 'connect':
+      return {
+        ...pending,
+        op: {
+          ...op,
+          from_node_id: parseWorkshopNodeId(op.from_node_id),
+          to_node_id: parseWorkshopNodeId(op.to_node_id),
+        },
+      };
+    case 'update_node_data':
+    case 'delete_node':
+      return { ...pending, op: { ...op, node_id: parseWorkshopNodeId(op.node_id) } };
+    default:
+      return pending;
+  }
+}
+
+async function fetchPendingOps(canvasId: CanvasId): Promise<PendingAgentOp[]> {
   const res = await httpRequest<{ ops: PendingAgentOp[] }>(
     'GET',
     `/api/workshop/canvases/${encodeURIComponent(canvasId)}/pending-ops`
   );
-  return res?.ops ?? [];
+  return (res?.ops ?? []).map(normalizePendingOp);
 }
 
-async function ackOps(canvasId: string, opIds: string[]): Promise<void> {
+async function ackOps(canvasId: CanvasId, opIds: string[]): Promise<void> {
   if (opIds.length === 0) return;
   await httpRequest('POST', `/api/workshop/canvases/${encodeURIComponent(canvasId)}/pending-ops/ack`, {
     op_ids: opIds,
@@ -102,7 +124,7 @@ async function ackOps(canvasId: string, opIds: string[]): Promise<void> {
  * Poll + apply queued agent ops for the open canvas. Handlers are read through a
  * ref, so the polling effect only re-subscribes when `canvasId` changes.
  */
-export function useAgentOps(canvasId: string, handlers: AgentOpHandlers): void {
+export function useAgentOps(canvasId: CanvasId, handlers: AgentOpHandlers): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
 

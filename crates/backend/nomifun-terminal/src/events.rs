@@ -3,6 +3,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     TerminalExitEvent, TerminalOutputEvent, TerminalRemovedPayload, TerminalSessionResponse, WebSocketMessage,
 };
+use nomifun_common::TerminalId;
 use nomifun_realtime::UserEventSink;
 use tracing::error;
 
@@ -18,13 +19,13 @@ impl TerminalEventEmitter {
     }
 
     /// A chunk of PTY output (base64-encoded bytes).
-    pub fn emit_output(&self, owner_id: &str, id: i64, data_b64: String) {
-        self.send(owner_id, "terminal.output", &TerminalOutputEvent { id, data_b64 });
+    pub fn emit_output(&self, owner_id: &str, id: &TerminalId, data_b64: String) {
+        self.send(owner_id, "terminal.output", &TerminalOutputEvent { id: id.clone(), data_b64 });
     }
 
     /// The child process exited.
-    pub fn emit_exit(&self, owner_id: &str, id: i64, exit_code: Option<i32>) {
-        self.send(owner_id, "terminal.exit", &TerminalExitEvent { id, exit_code });
+    pub fn emit_exit(&self, owner_id: &str, id: &TerminalId, exit_code: Option<i32>) {
+        self.send(owner_id, "terminal.exit", &TerminalExitEvent { id: id.clone(), exit_code });
     }
 
     pub fn emit_created(&self, owner_id: &str, session: &TerminalSessionResponse) {
@@ -35,8 +36,8 @@ impl TerminalEventEmitter {
         self.send(owner_id, "terminal.updated", session);
     }
 
-    pub fn emit_removed(&self, owner_id: &str, id: i64) {
-        self.send(owner_id, "terminal.removed", &TerminalRemovedPayload { id });
+    pub fn emit_removed(&self, owner_id: &str, id: &TerminalId) {
+        self.send(owner_id, "terminal.removed", &TerminalRemovedPayload { id: id.clone() });
     }
 
     fn send<T: serde::Serialize>(&self, owner_id: &str, event_name: &str, payload: &T) {

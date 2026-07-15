@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, InputNumber, Message, Select, Spin, Switch, Table, Tag } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { ICompanionLearnRun } from '@/common/adapter/ipcBridge';
+import type { ProviderId } from '@/common/types/ids';
 import { useModelProviderList } from '@renderer/hooks/agent/useModelProviderList';
 import type { useCompanionShared } from '../useNomi';
 
@@ -31,10 +32,15 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
   const { providers, getAvailableModels } = useModelProviderList();
   const [runs, setRuns] = useState<ICompanionLearnRun[]>([]);
   const [running, setRunning] = useState(false);
+  const [draftProviderId, setDraftProviderId] = useState<ProviderId | null>(null);
+
+  useEffect(() => {
+    setDraftProviderId(sharedConfig?.learn.model?.provider_id ?? null);
+  }, [sharedConfig?.learn.model?.provider_id]);
 
   const currentProvider = useMemo(
-    () => providers.find((p) => p.id === sharedConfig?.learn.model.provider_id),
-    [providers, sharedConfig?.learn.model.provider_id]
+    () => providers.find((p) => p.id === draftProviderId),
+    [draftProviderId, providers]
   );
 
   const refreshRuns = useCallback(() => {
@@ -114,10 +120,8 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
           <Select
             style={{ width: 220 }}
             placeholder={t('nomi.settings.providerPlaceholder')}
-            value={sharedConfig.learn.model.provider_id || undefined}
-            onChange={(provider_id: string) =>
-              void patchSharedConfig({ learn: { model: { provider_id, model: '' } } })
-            }
+            value={draftProviderId ?? undefined}
+            onChange={(provider_id: ProviderId) => setDraftProviderId(provider_id)}
           >
             {providers.map((p) => (
               <Select.Option key={p.id} value={p.id}>
@@ -128,13 +132,17 @@ const LearnTab: React.FC<Props> = ({ shared }) => {
           <Select
             style={{ width: 260 }}
             placeholder={t('nomi.settings.modelPlaceholder')}
-            value={sharedConfig.learn.model.model || undefined}
-            disabled={!currentProvider}
-            onChange={(model: string) =>
-              void patchSharedConfig({
-                learn: { model: { provider_id: sharedConfig.learn.model.provider_id, model } },
-              })
+            value={
+              sharedConfig.learn.model?.provider_id === draftProviderId
+                ? sharedConfig.learn.model.model
+                : undefined
             }
+            disabled={!currentProvider}
+            onChange={(model: string) => {
+              if (draftProviderId) {
+                void patchSharedConfig({ learn: { model: { provider_id: draftProviderId, model } } });
+              }
+            }}
           >
             {(currentProvider ? getAvailableModels(currentProvider) : []).map((m) => (
               <Select.Option key={m} value={m}>

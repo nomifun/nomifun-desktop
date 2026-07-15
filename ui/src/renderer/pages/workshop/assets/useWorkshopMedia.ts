@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import type { AssetId } from '@/common/types/ids';
 
 import { loadWorkshopMedia } from '../lib/media';
 
@@ -29,7 +30,7 @@ export interface WorkshopMediaState {
  * dedupes concurrent and repeat requests.
  */
 export function useWorkshopObjectUrl(
-  assetId: string | null | undefined,
+  assetId: AssetId | null | undefined,
   opts: { thumb?: boolean; enabled?: boolean } = {}
 ): WorkshopMediaState {
   const { thumb = false, enabled = true } = opts;

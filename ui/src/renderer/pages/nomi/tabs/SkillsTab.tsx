@@ -10,6 +10,7 @@ import { Button, Empty, Input, Message, Modal, Pagination, Popconfirm, Select, S
 import { ipcBridge } from '@/common';
 import type { ICompanionSkill } from '@/common/adapter/ipcBridge';
 import type { useCompanion } from '../useNomi';
+import { parseConversationId, type CompanionId } from '@/common/types/ids';
 
 interface Props {
   companion: ReturnType<typeof useCompanion>;
@@ -24,7 +25,7 @@ const STATUS_COLORS: Record<string, string> = { draft: 'orange', active: 'green'
  */
 const SkillsTab: React.FC<Props> = ({ companion }) => {
   const { t } = useTranslation();
-  const companionId = companion.profile?.id ?? '';
+  const companionId = companion.profile?.id;
   const [skills, setSkills] = useState<ICompanionSkill[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('');
@@ -44,8 +45,8 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   const [teachOpen, setTeachOpen] = useState(false);
   const [teachConv, setTeachConv] = useState('');
   const [giftFor, setGiftFor] = useState<string | null>(null);
-  const [giftTarget, setGiftTarget] = useState('');
-  const [others, setOthers] = useState<{ id: string; name: string }[]>([]);
+  const [giftTarget, setGiftTarget] = useState<CompanionId | null>(null);
+  const [others, setOthers] = useState<{ id: CompanionId; name: string }[]>([]);
 
   const refreshSeq = useRef(0);
 
@@ -112,6 +113,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
 
   const decide = useCallback(
     async (s: ICompanionSkill, accept: boolean) => {
+      if (!companionId) return;
       try {
         await ipcBridge.companion.decideSkill.invoke({ companion_id: companionId, name: s.skill_name, accept });
         void refresh();
@@ -125,6 +127,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
 
   const openEditor = useCallback(
     async (s: ICompanionSkill) => {
+      if (!companionId) return;
       setEditName(s.skill_name);
       setEditMode(false);
       setEditLoading(true);
@@ -144,7 +147,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   );
 
   const save = useCallback(async () => {
-    if (!editName) return;
+    if (!companionId || !editName) return;
     setSaving(true);
     try {
       await ipcBridge.companion.writeSkillContent.invoke({ companion_id: companionId, name: editName, content: editDraft });
@@ -166,11 +169,11 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   };
 
   const teach = useCallback(async () => {
-    if (!teachConv.trim()) return;
+    if (!companionId || !teachConv.trim()) return;
     try {
       const name = await ipcBridge.companion.draftFromSession.invoke({
         companion_id: companionId,
-        conversation_id: teachConv.trim(),
+        conversation_id: parseConversationId(teachConv.trim()),
       });
       setTeachOpen(false);
       setTeachConv('');
@@ -188,7 +191,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   const openGift = useCallback(
     async (name: string) => {
       setGiftFor(name);
-      setGiftTarget('');
+      setGiftTarget(null);
       try {
         const roster = await ipcBridge.companion.listCompanions.invoke();
         setOthers(roster.filter((c) => c.id !== companionId).map((c) => ({ id: c.id, name: c.name })));
@@ -200,7 +203,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
   );
 
   const gift = useCallback(async () => {
-    if (!giftFor || !giftTarget) return;
+    if (!companionId || !giftFor || !giftTarget) return;
     try {
       await ipcBridge.companion.giftSkill.invoke({ companion_id: companionId, name: giftFor, to_companion_id: giftTarget });
       setGiftFor(null);
@@ -252,7 +255,7 @@ const SkillsTab: React.FC<Props> = ({ companion }) => {
         <div className='flex flex-col gap-8px transition-opacity duration-150' style={{ opacity: loading ? 0.6 : 1 }}>
           {skills.map((s) => (
             <div
-              key={`${s.scope_companion_id}/${s.skill_name}`}
+              key={`${s.scope_kind}/${s.scope_companion_id ?? 'shared'}/${s.skill_name}`}
               className='flex items-start gap-10px bg-fill-2 rd-10px px-12px py-10px'
             >
               <Tag color={STATUS_COLORS[s.status] ?? 'gray'}>{statusLabel(s.status)}</Tag>

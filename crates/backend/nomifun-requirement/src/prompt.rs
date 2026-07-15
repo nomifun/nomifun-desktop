@@ -212,17 +212,19 @@ mod tests {
     use super::*;
     use nomifun_api_types::RequirementStatus;
 
+    const ATTACHMENT_REQ_ID: &str = "req_0190f5fe-7c00-7a00-8000-000000000001";
+
     fn req() -> Requirement {
         Requirement {
-            id: 7777,
+            id: nomifun_common::RequirementId::new().into_string(),
             title: "Do X".into(),
             content: "Detailed body".into(),
             tag: "t".into(),
             order_key: "1.2".into(),
             status: RequirementStatus::InProgress,
             completion_note: None,
-            owner_session_id: None,
-            owner_kind: None,
+            owner_conversation_id: None,
+            owner_terminal_id: None,
             started_at: None,
             completed_at: None,
             attempt_count: 1,
@@ -237,7 +239,9 @@ mod tests {
         vec![
             crate::attachments::PromptAttachment {
                 file_name: "设计稿.png".into(),
-                path: "./.nomi/requirement-attachments/req_1/设计稿.png".into(),
+                path: format!(
+                    "./.nomi/requirement-attachments/{ATTACHMENT_REQ_ID}/设计稿.png"
+                ),
                 missing: false,
             },
             crate::attachments::PromptAttachment {
@@ -253,7 +257,9 @@ mod tests {
         for at in [AgentType::Nomi, AgentType::Acp] {
             let p = build_requirement_prompt("t", &req(), at, false, &atts());
             assert!(p.contains("Requirement attachments"));
-            assert!(p.contains("./.nomi/requirement-attachments/req_1/设计稿.png"));
+            assert!(p.contains(&format!(
+                "./.nomi/requirement-attachments/{ATTACHMENT_REQ_ID}/设计稿.png"
+            )));
             assert!(p.contains("设计稿.png"));
             assert!(p.contains("missing"), "vanished originals are flagged, not silently dropped");
             assert!(p.contains("view each attached image"), "must instruct the model to read the images");
@@ -274,7 +280,7 @@ mod tests {
     #[test]
     fn nomi_prompt_contains_id_and_native_tool_instructions() {
         let p = build_requirement_prompt("t", &req(), AgentType::Nomi, false, &[]);
-        assert!(p.contains("7777"));
+        assert!(p.contains("req_"));
         assert!(p.contains("Detailed body"));
         assert!(
             p.contains("requirement_complete"),
@@ -299,7 +305,7 @@ mod tests {
             AgentType::Gemini,
         ] {
             let p = build_requirement_prompt("t", &req(), at, false, &[]);
-            assert!(p.contains("7777"), "{at:?}: must still carry the requirement id");
+            assert!(p.contains("req_"), "{at:?}: must still carry the requirement id");
             assert!(p.contains("Detailed body"), "{at:?}: must still carry the body");
             assert!(
                 !p.contains("requirement_complete"),
@@ -328,7 +334,7 @@ mod tests {
         // declaration tools, so it must be told to call them (same contract as
         // Nomi). This is the soft-failure fix for ACP backends.
         let p = build_requirement_prompt("t", &req(), AgentType::Acp, true, &[]);
-        assert!(p.contains("7777"));
+        assert!(p.contains("req_"));
         assert!(
             p.contains("requirement_complete"),
             "ACP + requirement MCP MUST instruct calling requirement_complete"
@@ -387,7 +393,7 @@ mod tests {
     #[test]
     fn terminal_prompt_instructs_requirement_complete_and_has_no_knowledge_hint() {
         let p = build_terminal_requirement_prompt("t", &req(), &[]);
-        assert!(p.contains("7777"));
+        assert!(p.contains("req_"));
         assert!(p.contains("Detailed body"));
         // Must instruct the agent to call the requirement completion tools
         // (they are injected via the requirement MCP server — Task 2).

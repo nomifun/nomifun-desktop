@@ -60,7 +60,7 @@ pub struct ChannelSessionRow {
     pub id: String,
     pub user_id: String,
     pub agent_type: String,
-    pub conversation_id: Option<i64>,
+    pub conversation_id: Option<String>,
     pub workspace: Option<String>,
     pub chat_id: Option<String>,
     /// The `channel_plugins` row this session arrived through. Two bots

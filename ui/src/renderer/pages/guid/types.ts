@@ -6,6 +6,8 @@
 
 import type { AcpModelInfo } from '@/common/types/platform/acpTypes';
 import type { AgentSource } from '@/renderer/utils/model/agentTypes';
+import type { PresetReference } from '@/common/types/agent/presetTypes';
+import type { RemoteAgentId } from '@/common/types/ids';
 
 /**
  * Available agent entry returned by the backend.
@@ -32,8 +34,10 @@ export type AvailableAgent = {
    * a follow-up PR. Always equals `id` when populated.
    */
   custom_agent_id?: string;
+  /** Canonical remote-agent entity identity; never routed through the custom-agent catalog key. */
+  remote_agent_id?: RemoteAgentId;
   is_preset?: boolean;
-  preset_id?: string;
+  preset_id?: PresetReference;
   context?: string;
   avatar?: string;
   isExtension?: boolean;

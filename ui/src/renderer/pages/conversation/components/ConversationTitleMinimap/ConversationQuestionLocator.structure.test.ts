@@ -15,7 +15,7 @@ describe('conversation question locator structure', () => {
     const messageListSource = readSource(new URL('../../Messages/MessageList.tsx', import.meta.url));
 
     expect(locatorSource.includes("data-testid='conversation-question-locator'")).toBe(true);
-    expect(locatorSource.includes('conversation_id?: number')).toBe(true);
+    expect(locatorSource.includes('conversation_id?: ConversationId')).toBe(true);
     expect(locatorSource.includes('if (!conversation_id || !activeItem) return null')).toBe(true);
     expect(messageListSource.includes('ConversationQuestionLocator')).toBe(true);
     expect(messageListSource.includes('conversationContext?.conversation_id')).toBe(true);

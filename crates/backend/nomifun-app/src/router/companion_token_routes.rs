@@ -16,7 +16,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::require_local_trust_middleware;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, CompanionId};
 use nomifun_db::ICompanionTokenRepository;
 
 #[derive(Clone)]
@@ -32,7 +32,7 @@ struct AccessTokenMintResponse {
     /// Plaintext token — shown exactly once, never persisted nor re-emitted.
     token: String,
     /// The companion this token is bound to.
-    companion_id: String,
+    companion_id: CompanionId,
     /// Advisory warning when the companion has no resolvable model (the token
     /// still mints; model-dependent capabilities like nomi_delegate will fail
     /// until a model/provider is configured).
@@ -52,7 +52,7 @@ async fn companion_model_resolvable(
     state: &CompanionTokenRouterState,
     profile: &nomifun_companion::CompanionProfileConfig,
 ) -> bool {
-    if profile.model.is_configured() {
+    if profile.model.is_some() {
         return true;
     }
     match state.provider_repo.list().await {
@@ -63,10 +63,10 @@ async fn companion_model_resolvable(
 
 async fn mint(
     State(state): State<CompanionTokenRouterState>,
-    Path(companion_id): Path<String>,
+    Path(companion_id): Path<CompanionId>,
 ) -> Result<Json<ApiResponse<AccessTokenMintResponse>>, AppError> {
     // 404 if the companion does not exist.
-    let profile = state.companion_service.get_companion(&companion_id).await?;
+    let profile = state.companion_service.get_companion(companion_id.as_str()).await?;
 
     let token = nomifun_auth::generate_random_hex_secret();
     let hash = nomifun_auth::token_sha256_hex(&token);
@@ -87,7 +87,7 @@ async fn mint(
 
 async fn revoke(
     State(state): State<CompanionTokenRouterState>,
-    Path(companion_id): Path<String>,
+    Path(companion_id): Path<CompanionId>,
 ) -> Result<Json<ApiResponse<AccessTokenStatusResponse>>, AppError> {
     state.token_repo.delete_for_companion(&companion_id).await?;
     state.token_validator.remove_token(&companion_id);
@@ -96,7 +96,7 @@ async fn revoke(
 
 async fn status(
     State(state): State<CompanionTokenRouterState>,
-    Path(companion_id): Path<String>,
+    Path(companion_id): Path<CompanionId>,
 ) -> Result<Json<ApiResponse<AccessTokenStatusResponse>>, AppError> {
     Ok(Json(ApiResponse::ok(AccessTokenStatusResponse {
         configured: state.token_validator.is_configured_for(&companion_id),

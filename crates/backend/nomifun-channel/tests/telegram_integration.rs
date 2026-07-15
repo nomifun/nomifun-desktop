@@ -58,7 +58,7 @@ mod telegram_tests {
         let manager = ChannelManager::new(
             repo.clone(),
             broadcaster.clone(),
-            "owner-a",
+            "user_018f1234-5678-7abc-8def-012345678970",
             make_encryption_key(),
             message_tx,
             confirm_tx,
@@ -99,6 +99,15 @@ mod telegram_tests {
             "credentials": creds,
             "config": { "mode": "polling" }
         })
+    }
+
+    fn platform_spec(plugin_type: &str) -> EnableChannelSpec {
+        EnableChannelSpec {
+            plugin_id: None,
+            plugin_type: Some(plugin_type.to_owned()),
+            companion_id: None,
+            public_agent_id: None,
+        }
     }
 
     // -- Plugin construction ------------------------------------------------
@@ -195,7 +204,7 @@ mod telegram_tests {
         let factory = telegram_factory();
 
         let config = make_config_value(Some("bot:123"));
-        let result = manager.enable_plugin(&EnableChannelSpec::legacy("nonexistent"), &config, &factory).await;
+        let result = manager.enable_plugin(&platform_spec("nonexistent"), &config, &factory).await;
         assert!(result.is_err());
     }
 
@@ -207,7 +216,7 @@ mod telegram_tests {
         let factory = telegram_factory();
 
         let config = make_config_value(Some("bad-token"));
-        let result = manager.enable_plugin(&EnableChannelSpec::legacy("telegram"), &config, &factory).await;
+        let result = manager.enable_plugin(&platform_spec("telegram"), &config, &factory).await;
         assert!(result.is_err());
     }
 
@@ -217,7 +226,8 @@ mod telegram_tests {
     async fn disable_without_db_row_returns_error() {
         let (manager, _repo, _bc) = setup().await;
         // Plugin was never enabled (no DB row), so update_plugin_status fails
-        let result = manager.disable_plugin("telegram").await;
+        let missing_channel = nomifun_common::ChannelId::new();
+        let result = manager.disable_plugin(missing_channel.as_str()).await;
         assert!(result.is_err());
     }
 
@@ -246,6 +256,6 @@ mod telegram_tests {
     #[tokio::test]
     async fn is_plugin_running_false_when_not_enabled() {
         let (manager, _repo, _bc) = setup().await;
-        assert!(!manager.is_plugin_running("telegram"));
+        assert!(!manager.is_plugin_running(nomifun_common::ChannelId::new().as_str()));
     }
 }

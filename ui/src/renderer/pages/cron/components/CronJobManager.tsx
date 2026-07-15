@@ -7,6 +7,7 @@
 import { iconColors } from '@/renderer/styles/colors';
 import { ipcBridge } from '@/common';
 import type { ICronJob } from '@/common/adapter/ipcBridge';
+import type { ConversationId, CronJobId } from '@/common/types/ids';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { Button, Popover, Tooltip } from '@arco-design/web-react';
 import { AlarmClock } from '@icon-park/react';
@@ -17,9 +18,9 @@ import { useCronJobs } from '../useCronJobs';
 import { getJobStatusFlags } from '../cronUtils';
 
 interface CronJobManagerProps {
-  conversation_id: number;
+  conversation_id: ConversationId;
   /** When provided (e.g. from conversation.extra.cron_job_id), fetch the job directly */
-  cron_job_id?: string;
+  cron_job_id?: CronJobId;
   /** Whether the cron skill is loaded for this conversation. When false and no jobs exist, the component is hidden. */
   hasCronSkill?: boolean;
 }
@@ -97,7 +98,7 @@ const CronJobManager: React.FC<CronJobManagerProps> = ({ conversation_id, cron_j
   if (layout?.isMobile) return null;
 
   const handleCreateClick = () => {
-    navigate(`/scheduled?create=conversation&conversation_id=${encodeURIComponent(String(conversation_id))}`);
+    navigate(`/scheduled?create=conversation&conversation_id=${encodeURIComponent(conversation_id)}`);
   };
 
   if (!found && !loading) {

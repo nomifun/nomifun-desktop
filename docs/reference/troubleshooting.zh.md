@@ -65,8 +65,8 @@ host 参数必须能被解析为 IP 地址（`127.0.0.1`、`0.0.0.0`、某个具
 ### 修改密码时密码明明对，却报 `Current password is incorrect`
 
 该端点会用恒定时间的 bcrypt 比对存储的哈希。如果你怀疑数据损坏：
-停止服务、备份数据目录，然后查看 `system_default_user.password_hash`
-列。可以做精细的修复（在本地模式下使用
+停止服务、备份数据目录，通过 `installation_identity.owner_user_id` 找到
+安装所有者，然后查看该用户的 `password_hash` 列。可以做精细的修复（在本地模式下使用
 `/api/auth/internal/users/{id}/password`），但最简单的路径是从备份
 恢复或重新初始化。
 

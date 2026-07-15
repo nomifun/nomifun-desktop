@@ -8,6 +8,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Input, InputNumber, Popover, Select, Switch, Tooltip } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import type { ConversationId, TerminalId } from '@/common/types/ids';
 import type {
   IdmmRunState,
   IdmmTargetKind,
@@ -34,16 +35,15 @@ import { useProvidersQuery } from '@renderer/hooks/agent/useModelProviderList';
 import IdmmInterventionRow from './IdmmInterventionRow';
 import { isLiveEventForTarget } from './liveEventMatch';
 import { capabilityHeaderButtonClass, capabilityHeaderButtonStyle } from './CapabilityHeaderButton';
+import type { ProviderId } from '@/common/types/ids';
 import {
   getWatchBackupValidationErrorKey,
   type IdmmBackupValidationKey,
 } from './IdmmControl.validation';
 
-export type IdmmTarget = {
-  kind: IdmmTargetKind;
-  /** conversation/terminal session id — backend INTEGER (numeric-id spec §1). */
-  id: number;
-};
+export type IdmmTarget =
+  | { kind: Extract<IdmmTargetKind, 'conversation'>; id: ConversationId }
+  | { kind: Extract<IdmmTargetKind, 'terminal'>; id: TerminalId };
 
 /** Draft (pre-creation) IDMM config: held by the parent and applied once the
  * conversation exists (e.g. Guid page applies it right after create). */
@@ -160,7 +160,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
     updateCfg((c) => ({ ...c, decision_watch: updater(c.decision_watch) }));
 
   const providerOptions = useMemo(() => (providers ?? []).map((p) => ({ label: p.name, value: p.id })), [providers]);
-  const modelsForProvider = (providerId?: string | null) => {
+  const modelsForProvider = (providerId?: ProviderId | null) => {
     const p = (providers ?? []).find((x) => x.id === providerId);
     return (p?.models ?? []).map((m) => ({ label: m, value: m }));
   };
@@ -254,7 +254,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
   useEffect(() => {
     if (isDraft || !kind || !id || !logOpen) return;
     const unsub = ipcBridge.idmm.onIntervention.on((rec) => {
-      if (rec.target_kind === kind && rec.target_id === String(id)) {
+      if (rec.target_kind === kind && rec.target_id === id) {
         setLog((prev) => [rec, ...prev].slice(0, 30));
       }
     });
@@ -479,7 +479,7 @@ const IdmmControl: React.FC<IdmmControlProps> = ({ target, draft, disabledReason
                 disabled={locked}
                 allowClear
                 options={providerOptions}
-                onChange={(v: string | undefined) =>
+                onChange={(v: ProviderId | undefined) =>
                   commitUpdate((w) => ({ ...w, bypass_model: { provider_id: v || null, model: null } }))
                 }
               />

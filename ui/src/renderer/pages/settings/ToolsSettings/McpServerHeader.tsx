@@ -1,3 +1,4 @@
+import type { McpServerId } from '@/common/types/ids';
 import type { IMcpServer } from '@/common/config/storage';
 import { Button, Dropdown, Menu, Popover, Tooltip } from '@arco-design/web-react';
 import { Check, CloseSmall, Info, LoadingOne, Refresh, Write, DeleteFour, SettingOne, Login } from '@icon-park/react';
@@ -16,7 +17,7 @@ interface McpServerHeaderProps {
   isReadOnly?: boolean;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
-  onDeleteServer: (serverId: number) => void;
+  onDeleteServer: (serverId: McpServerId) => void;
   onOAuthLogin?: (server: IMcpServer) => void;
 }
 

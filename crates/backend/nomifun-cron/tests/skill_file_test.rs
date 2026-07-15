@@ -5,6 +5,9 @@ use nomifun_cron::skill_file::{
     read_skill_content, validate_skill_content, write_raw_skill_file, write_skill_file,
 };
 
+const JOB_ID: &str = "cron_0190f5fe-7c00-7a00-8000-000000000001";
+const JOB_ID_2: &str = "cron_0190f5fe-7c00-7a00-8000-000000000002";
+
 fn unique_temp_dir(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,7 +82,7 @@ async fn write_read_and_resolve_skill_file_paths() {
 
     let file_path = write_skill_file(
         &base,
-        "job-123",
+        JOB_ID,
         "Daily Report",
         "Generate daily report",
         "Run report",
@@ -89,12 +92,12 @@ async fn write_read_and_resolve_skill_file_paths() {
     .unwrap();
 
     assert_eq!(
-        cron_skill_dir(&base, "job-123").unwrap(),
-        base.join("cron").join("skills").join("cron-job-123")
+        cron_skill_dir(&base, JOB_ID).unwrap(),
+        base.join("cron").join("skills").join(format!("cron-{JOB_ID}"))
     );
-    assert_eq!(file_path, cron_skill_file_path(&base, "job-123").unwrap());
+    assert_eq!(file_path, cron_skill_file_path(&base, JOB_ID).unwrap());
 
-    let raw = read_skill_content(&base, "job-123").await.unwrap().unwrap();
+    let raw = read_skill_content(&base, JOB_ID).await.unwrap().unwrap();
     let parsed = parse_skill_content(&raw).unwrap();
     assert_eq!(parsed.name, "Daily Report");
     assert_eq!(parsed.description, "Generate daily report");
@@ -108,9 +111,16 @@ async fn write_raw_skill_file_validates_before_writing() {
     let base = unique_temp_dir("write-raw");
     std::fs::create_dir_all(&base).unwrap();
 
-    let err = write_raw_skill_file(&base, "job-456", "not valid").await.unwrap_err();
+    let err = write_raw_skill_file(&base, JOB_ID_2, "not valid").await.unwrap_err();
     assert!(err.to_string().contains("skill file must start with YAML frontmatter"));
-    assert!(read_skill_content(&base, "job-456").await.unwrap().is_none());
+    assert!(read_skill_content(&base, JOB_ID_2).await.unwrap().is_none());
 
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn cron_skill_paths_reject_noncanonical_job_ids() {
+    let base = unique_temp_dir("invalid-id");
+    assert!(cron_skill_dir(&base, "cron_7").is_err());
+    assert!(cron_skill_file_path(&base, "7").is_err());
 }

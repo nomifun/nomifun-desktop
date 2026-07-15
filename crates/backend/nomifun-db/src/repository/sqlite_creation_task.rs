@@ -196,19 +196,32 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use nomifun_common::{CreationTaskId, ProviderId, WorkshopCanvasId};
 
-    async fn repo() -> (SqliteCreationTaskRepository, crate::Database) {
+    async fn repo() -> (SqliteCreationTaskRepository, crate::Database, String) {
         let db = init_database_memory().await.unwrap();
+        let provider_id = ProviderId::new().into_string();
+        sqlx::query(
+            "INSERT INTO providers \
+                (id, platform, name, base_url, api_key_encrypted, models, enabled, \
+                 capabilities, created_at, updated_at) \
+             VALUES (?, 'openai', 'Creation Test Provider', \
+                 'https://example.invalid', 'encrypted', '[]', 1, '[]', 0, 0)",
+        )
+        .bind(&provider_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
         let repo = SqliteCreationTaskRepository::new(db.pool().clone());
-        (repo, db)
+        (repo, db, provider_id)
     }
 
-    fn create_params<'a>(id: &'a str, canvas: Option<&'a str>) -> CreateCreationTaskParams<'a> {
+    fn create_params<'a>(id: &'a str, canvas: Option<&'a str>, provider_id: &'a str) -> CreateCreationTaskParams<'a> {
         CreateCreationTaskParams {
             id,
             canvas_id: canvas,
             node_id: None,
-            provider_id: "prov_x",
+            provider_id,
             model: "m",
             capability: "t2i",
             params: r#"{"prompt":"cat"}"#,
@@ -219,8 +232,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_get_and_update_flow() {
-        let (repo, _db) = repo().await;
-        let t = repo.create_task(create_params("wst_1", Some("wsc_1"))).await.unwrap();
+        let (repo, _db, provider_id) = repo().await;
+        let task_id = CreationTaskId::new().into_string();
+        let t = repo.create_task(create_params(&task_id, None, &provider_id)).await.unwrap();
         assert_eq!(t.status, "queued");
         assert_eq!(t.result_asset_ids, "[]");
         assert_eq!(t.attempt, 0);
@@ -228,7 +242,7 @@ mod tests {
         // M0 shape: immediately fail with adapter_unavailable.
         let failed = repo
             .update_task(
-                "wst_1",
+                &task_id,
                 UpdateCreationTaskParams {
                     status: Some("failed"),
                     error: Some(Some(r#"{"kind":"adapter_unavailable","message":"no adapter"}"#)),
@@ -253,20 +267,37 @@ mod tests {
 
     #[tokio::test]
     async fn list_filters_and_live() {
-        let (repo, _db) = repo().await;
-        repo.create_task(create_params("wst_a", Some("wsc_1"))).await.unwrap();
-        repo.create_task(create_params("wst_b", Some("wsc_2"))).await.unwrap();
-        repo.update_task("wst_b", UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
+        let (repo, db, provider_id) = repo().await;
+        let canvas_ids = [
+            WorkshopCanvasId::new().into_string(),
+            WorkshopCanvasId::new().into_string(),
+        ];
+        for id in &canvas_ids {
+            sqlx::query(
+                "INSERT INTO workshop_canvases \
+                    (id, title, node_count, created_at, updated_at) \
+                 VALUES (?, ?, 0, 0, 0)",
+            )
+            .bind(id)
+            .bind(id)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let task_ids = [CreationTaskId::new().into_string(), CreationTaskId::new().into_string()];
+        repo.create_task(create_params(&task_ids[0], Some(&canvas_ids[0]), &provider_id)).await.unwrap();
+        repo.create_task(create_params(&task_ids[1], Some(&canvas_ids[1]), &provider_id)).await.unwrap();
+        repo.update_task(&task_ids[1], UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
             .await
             .unwrap();
 
         // canvas filter
         let list = repo
-            .list_tasks(ListCreationTasksParams { canvas_id: Some("wsc_1"), limit: 50, ..Default::default() })
+            .list_tasks(ListCreationTasksParams { canvas_id: Some(&canvas_ids[0]), limit: 50, ..Default::default() })
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "wst_a");
+        assert_eq!(list[0].id, task_ids[0]);
 
         // status filter
         let list = repo
@@ -274,7 +305,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "wst_b");
+        assert_eq!(list[0].id, task_ids[1]);
 
         // both queued+running are "live"
         let live = repo.list_live_tasks().await.unwrap();
@@ -283,15 +314,16 @@ mod tests {
 
     #[tokio::test]
     async fn update_task_if_live_refuses_terminal_overwrite() {
-        let (repo, _db) = repo().await;
-        repo.create_task(create_params("wst_c", None)).await.unwrap();
+        let (repo, _db, provider_id) = repo().await;
+        let canceled_id = CreationTaskId::new().into_string();
+        repo.create_task(create_params(&canceled_id, None, &provider_id)).await.unwrap();
         // queued → running (still live)
-        repo.update_task("wst_c", UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
+        repo.update_task(&canceled_id, UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
             .await
             .unwrap();
         // A cancel writes the terminal status (cancel path is unconditional).
         repo.update_task(
-            "wst_c",
+            &canceled_id,
             UpdateCreationTaskParams { status: Some("canceled"), finished_at: Some(Some(1)), ..Default::default() },
         )
         .await
@@ -299,22 +331,23 @@ mod tests {
         // finalize's terminal write must NOT overwrite the canceled row.
         let applied = repo
             .update_task_if_live(
-                "wst_c",
+                &canceled_id,
                 UpdateCreationTaskParams { status: Some("succeeded"), finished_at: Some(Some(2)), ..Default::default() },
             )
             .await
             .unwrap();
         assert!(!applied, "terminal (canceled) row must not be overwritten");
-        assert_eq!(repo.get_task("wst_c").await.unwrap().unwrap().status, "canceled");
+        assert_eq!(repo.get_task(&canceled_id).await.unwrap().unwrap().status, "canceled");
 
         // A still-live task IS updated by the conditional write.
-        repo.create_task(create_params("wst_d", None)).await.unwrap();
+        let succeeded_id = CreationTaskId::new().into_string();
+        repo.create_task(create_params(&succeeded_id, None, &provider_id)).await.unwrap();
         let applied2 = repo
-            .update_task_if_live("wst_d", UpdateCreationTaskParams { status: Some("succeeded"), ..Default::default() })
+            .update_task_if_live(&succeeded_id, UpdateCreationTaskParams { status: Some("succeeded"), ..Default::default() })
             .await
             .unwrap();
         assert!(applied2);
-        assert_eq!(repo.get_task("wst_d").await.unwrap().unwrap().status, "succeeded");
+        assert_eq!(repo.get_task(&succeeded_id).await.unwrap().unwrap().status, "succeeded");
 
         // Unknown id → Ok(false), no error.
         let applied3 = repo

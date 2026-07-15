@@ -146,7 +146,7 @@ const AutoWorkPanel: React.FC = () => {
     if (binding.kind === 'conversation' || binding.kind === 'terminal') {
       return `#${binding.target_id}`;
     }
-    return shortSessionId(String(binding.target_id));
+    return shortSessionId(binding.target_id);
   };
 
   const columns = [

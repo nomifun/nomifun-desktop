@@ -231,8 +231,8 @@ pub fn delete_with_token(uri: &str, token: &str, csrf: &str) -> Request<Body> {
 
 /// Set up a user and login, returning (session_token, csrf_token).
 ///
-/// The seeded `system_default_user` row already uses `username = "admin"`; if
-/// the test asks for that username, overwrite the seed row's empty credentials
+/// The canonical installation owner already uses `username = "admin"`; if
+/// the test asks for that username, overwrite the owner row's empty credentials
 /// in place instead of trying to INSERT a duplicate.
 pub async fn setup_and_login(
     app: &mut axum::Router,

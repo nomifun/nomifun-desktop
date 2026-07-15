@@ -44,7 +44,21 @@ pub use error::{AppError, ErrorChain, workspace_path_has_edge_whitespace_segment
 pub use execution_authority::ExecutionAuthority;
 pub use fsname::sanitize_dir_segment;
 pub use hooks::{OnConversationDelete, OnTerminalDelete, RequirementCreator};
-pub use id::{generate_id, generate_prefixed_id};
+pub use id::{
+    AgentExecutionAttemptId, AgentExecutionEventId, AgentExecutionId,
+    AgentExecutionParticipantId, AgentExecutionStepId, AgentExecutionTemplateId,
+    AgentExecutionTemplateParticipantId, AgentId, AttachmentId, ChannelId, ChannelSessionId,
+    ChannelUserId, CompanionId, CompanionLearnRunId, CompanionMemoryId, CompanionSessionWindowId,
+    CompanionSuggestionId, CompanionEvolutionFeedbackId, ConnectorCredentialId, ConversationArtifactId,
+    ConversationExecutionLinkId, ConversationId, CreationTaskId, CronJobId, CronJobRunId,
+    EntityId, FigureId, IdPrefixError, IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId,
+    MAX_ID_PREFIX_LEN, McpServerId, MessageId, PrefixedIdError, PresetId, PresetTagId, ProviderId,
+    PublicAgentAuditEntryId, PublicAgentId, RemoteAgentId, RequirementId, TerminalId,
+    UUID_STRING_LEN, UuidV7Error, UserId, WebhookId, WorkshopAssetId, WorkshopCanvasId,
+    WorkshopEdgeId, WorkshopNodeId, generate_id, generate_prefixed_id, validate_id_prefix,
+    validate_uuidv7,
+    validate_prefixed_id,
+};
 pub use scoped_auth::{
     LOOPBACK_CAPABILITY_RENEW_PATH, LOOPBACK_CAPABILITY_RENEWAL_MARGIN_SECS,
     LOOPBACK_CAPABILITY_REVOKE_PATH, LOOPBACK_CAPABILITY_TTL_SECS,

@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
@@ -14,13 +15,13 @@ import { DETECTED_AGENTS_SWR_KEY, fetchDetectedAgents, type AgentMetadata } from
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import useSWR, { mutate as mutateGlobal } from 'swr';
 
-type AcpModelInfoKey = readonly ['acp-model-info', number];
+type AcpModelInfoKey = readonly ['acp-model-info', ConversationId];
 type AcpModelInfoFetchResult = {
   model_info: AcpModelInfo | null;
   missing_active_session: boolean;
 };
 
-const getAcpModelInfoKey = (conversation_id: number): AcpModelInfoKey => ['acp-model-info', conversation_id] as const;
+const getAcpModelInfoKey = (conversation_id: ConversationId): AcpModelInfoKey => ['acp-model-info', conversation_id] as const;
 
 const summarizeModelInfo = (info: AcpModelInfo | null | undefined) => {
   if (!info) return null;
@@ -106,7 +107,7 @@ export const useAcpModelInfo = ({
   onSelectModelSuccess,
   onSelectModelFailed,
 }: {
-  conversation_id: number;
+  conversation_id: ConversationId;
   backend?: string;
   initialModelId?: string;
   prepareRuntime?: () => Promise<void>;

@@ -10,6 +10,8 @@ use tower::ServiceExt;
 
 use common::{body_json, build_app, delete_with_token, get_with_token, json_with_token, setup_and_login};
 
+const MISSING_MCP_SERVER_ID: &str = "mcp_0190f5fe-7c00-7a00-8abc-012345679997";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -63,7 +65,7 @@ async fn create_stdio_server() {
     let json = body_json(resp).await;
     assert!(json["success"].as_bool().unwrap());
     let data = &json["data"];
-    assert!(data["id"].as_i64().unwrap() > 0);
+    assert!(data["id"].as_str().is_some_and(|id| id.starts_with("mcp_")));
     assert_eq!(data["name"], "test-mcp");
     assert_eq!(data["description"], "test stdio server");
     assert!(!data["enabled"].as_bool().unwrap());
@@ -120,7 +122,7 @@ async fn create_same_name_upserts() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let first = body_json(resp).await;
-    let first_id = first["data"]["id"].as_i64().unwrap().to_string();
+    let first_id = first["data"]["id"].as_str().unwrap().to_owned();
 
     // Create again with same name — should update, not duplicate
     let req = json_with_token(
@@ -133,7 +135,7 @@ async fn create_same_name_upserts() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let second = body_json(resp).await;
-    assert_eq!(second["data"]["id"].as_i64().unwrap().to_string(), first_id);
+    assert_eq!(second["data"]["id"].as_str().unwrap().to_owned(), first_id);
     assert_eq!(second["data"]["transport"]["type"], "http");
 }
 
@@ -252,7 +254,7 @@ async fn get_existing_server() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Get by ID
     let resp = app
@@ -272,7 +274,10 @@ async fn get_nonexistent_server_returns_404() {
 
     let resp = app
         .clone()
-        .oneshot(get_with_token("/api/mcp/servers/nonexistent", &token))
+        .oneshot(get_with_token(
+            &format!("/api/mcp/servers/{MISSING_MCP_SERVER_ID}"),
+            &token,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -327,7 +332,7 @@ async fn update_server_name_is_rejected() {
     let req = json_with_token("POST", "/api/mcp/servers", stdio_server_json("old-name"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Renaming an MCP is not allowed because historical conversations reference its name.
     let req = json_with_token(
@@ -358,7 +363,7 @@ async fn update_server_transport() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Update to http
     let req = json_with_token(
@@ -389,7 +394,7 @@ async fn update_server_description() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     let req = json_with_token(
         "PUT",
@@ -411,7 +416,7 @@ async fn update_nonexistent_server_returns_404() {
 
     let req = json_with_token(
         "PUT",
-        "/api/mcp/servers/nonexistent",
+        &format!("/api/mcp/servers/{MISSING_MCP_SERVER_ID}"),
         json!({ "name": "x" }),
         &token,
         &csrf,
@@ -432,7 +437,7 @@ async fn update_name_to_existing_is_rejected() {
     let req = json_with_token("POST", "/api/mcp/servers", stdio_server_json("server-b"), &token, &csrf);
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let b_id = json["data"]["id"].as_i64().unwrap().to_string();
+    let b_id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Renaming is rejected before name conflict handling.
     let req = json_with_token(
@@ -465,7 +470,7 @@ async fn delete_server() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
 
     // Delete
     let req = delete_with_token(&format!("/api/mcp/servers/{id}"), &token, &csrf);
@@ -486,7 +491,11 @@ async fn delete_nonexistent_server_returns_404() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = delete_with_token("/api/mcp/servers/nonexistent", &token, &csrf);
+    let req = delete_with_token(
+        &format!("/api/mcp/servers/{MISSING_MCP_SERVER_ID}"),
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -510,7 +519,7 @@ async fn toggle_server_enables_then_disables() {
     );
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
-    let id = json["data"]["id"].as_i64().unwrap().to_string();
+    let id = json["data"]["id"].as_str().unwrap().to_owned();
     assert!(!json["data"]["enabled"].as_bool().unwrap());
 
     // Toggle → enabled
@@ -544,7 +553,13 @@ async fn toggle_nonexistent_server_returns_404() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let req = json_with_token("POST", "/api/mcp/servers/nonexistent/toggle", json!({}), &token, &csrf);
+    let req = json_with_token(
+        "POST",
+        &format!("/api/mcp/servers/{MISSING_MCP_SERVER_ID}/toggle"),
+        json!({}),
+        &token,
+        &csrf,
+    );
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

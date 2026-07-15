@@ -1,6 +1,6 @@
 //! Spec §9.B wiring test: deleting a terminal session must dispatch the
 //! `OnTerminalDelete` hook into `RequirementService::clear_owner_for_session`,
-//! clearing the dual-domain `owner_session_id`/`owner_kind` (no FK to cascade)
+//! clearing the typed terminal owner column
 //! of every requirement that terminal owned and re-pending any `in_progress`
 //! one. This exercises the real wiring (`TerminalService::with_delete_hook` +
 //! dispatch in `delete()`), not just the service method in isolation.
@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{AutoWorkTargetKind, CreateRequirementRequest, RequirementStatus};
 use nomifun_common::OnTerminalDelete;
+use nomifun_common::{TerminalId, UserId};
 use nomifun_db::{
     CreateTerminalParams, IRequirementRepository, ITerminalRepository, SqliteRequirementRepository,
     SqliteTerminalRepository, init_database_memory,
@@ -35,24 +36,14 @@ impl UserEventSink for NoopBroadcaster {
 async fn deleting_terminal_clears_requirement_owner_via_hook() {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
-    sqlx::query(
-        "INSERT INTO users (id, username, password_hash, created_at, updated_at) \
-         VALUES ('user_1', 'tester', 'h', 0, 0)",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
+    let installation_owner = nomifun_db::installation_owner_id(&pool).await.unwrap();
     let term_repo: Arc<dyn ITerminalRepository> = Arc::new(SqliteTerminalRepository::new(pool.clone()));
     let req_repo: Arc<dyn IRequirementRepository> = Arc::new(SqliteRequirementRepository::new(pool.clone()));
 
     // Requirement service is the hook target.
     let req_service = Arc::new(RequirementService::new(
         req_repo,
-        RequirementEventEmitter::new(
-            Arc::new(NoopBroadcaster),
-            Arc::from("system_default_user"),
-        ),
+        RequirementEventEmitter::new(Arc::new(NoopBroadcaster), Arc::from(installation_owner.clone())),
     ));
 
     // Terminal service wired exactly as `nomifun-app::build_terminal_state` does:
@@ -68,6 +59,7 @@ async fn deleting_terminal_clears_requirement_owner_via_hook() {
     // id is minted by SQLite and returned on the row.
     let term = term_repo
         .create(&CreateTerminalParams {
+            id: TerminalId::new(),
             name: "Term One".into(),
             cwd: std::env::temp_dir().to_string_lossy().into_owned(),
             command: "claude".into(),
@@ -77,7 +69,7 @@ async fn deleting_terminal_clears_requirement_owner_via_hook() {
             mode: None,
             cols: 80,
             rows: 24,
-            user_id: "user_1".into(),
+            user_id: UserId::parse(installation_owner).unwrap(),
         })
         .await
         .unwrap();
@@ -97,20 +89,20 @@ async fn deleting_terminal_clears_requirement_owner_via_hook() {
         .await
         .unwrap();
     let claimed = req_service
-        .claim_next("auto", term_id, AutoWorkTargetKind::Terminal, 60_000)
+        .claim_next("auto", &term_id, AutoWorkTargetKind::Terminal, 60_000)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(claimed.owner_session_id, Some(term_id));
-    assert_eq!(claimed.owner_kind.as_deref(), Some("terminal"));
+    assert_eq!(claimed.owner_terminal_id.as_deref(), Some(term_id.as_str()));
+    assert!(claimed.owner_conversation_id.is_none());
     assert_eq!(claimed.status, RequirementStatus::InProgress);
 
     // Delete the terminal through the service → the hook fires and clears owner.
-    term_service.delete(term_id).await.unwrap();
+    term_service.delete(&term_id).await.unwrap();
 
-    let after = req_service.get(r.id).await.unwrap();
-    assert_eq!(after.owner_session_id, None, "owner_session_id cleared on terminal delete");
-    assert_eq!(after.owner_kind, None, "owner_kind cleared alongside (paired-NULL)");
+    let after = req_service.get(&r.id).await.unwrap();
+    assert_eq!(after.owner_terminal_id, None, "terminal owner cleared on delete");
+    assert_eq!(after.owner_conversation_id, None);
     assert_eq!(
         after.status,
         RequirementStatus::Pending,

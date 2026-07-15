@@ -5,7 +5,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     CreateWebhookRequest, TagSetting, UpdateWebhookRequest, UpsertTagSettingRequest, Webhook, WebhookPlatform,
 };
-use nomifun_common::{AppError, now_ms};
+use nomifun_common::{AppError, WebhookId, now_ms};
 use nomifun_db::models::{TagSettingRow, WebhookRow};
 use nomifun_db::{ITagSettingRepository, IWebhookRepository};
 
@@ -14,7 +14,7 @@ use crate::sender::WebhookSender;
 /// Map a DB row to the client DTO (dropping the secret; exposing `has_secret`).
 fn row_to_dto(row: &WebhookRow) -> Webhook {
     Webhook {
-        id: row.id,
+        id: row.id.clone(),
         name: row.name.clone(),
         platform: WebhookPlatform::from_db(&row.platform),
         url: row.url.clone(),
@@ -29,7 +29,7 @@ fn row_to_dto(row: &WebhookRow) -> Webhook {
 fn tag_setting_to_dto(row: &TagSettingRow) -> TagSetting {
     TagSetting {
         tag: row.tag.clone(),
-        webhook_id: row.webhook_id,
+        webhook_id: row.webhook_id.clone(),
         description: row.description.clone(),
         notify_events: row.notify_events.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
     }
@@ -68,7 +68,7 @@ impl WebhookService {
         Ok(rows.iter().map(row_to_dto).collect())
     }
 
-    pub async fn get(&self, id: i64) -> Result<Webhook, AppError> {
+    pub async fn get(&self, id: &WebhookId) -> Result<Webhook, AppError> {
         let row = self
             .webhooks
             .get_by_id(id)
@@ -85,8 +85,8 @@ impl WebhookService {
             return Err(AppError::BadRequest("url must not be empty".into()));
         }
         let now = now_ms();
-        let mut row = WebhookRow {
-            id: 0, // ignored by insert(); the DB assigns the real id
+        let row = WebhookRow {
+            id: WebhookId::new(),
             name: req.name,
             platform: req.platform.as_db().to_string(),
             url: req.url,
@@ -96,11 +96,11 @@ impl WebhookService {
             created_at: now,
             updated_at: now,
         };
-        row.id = self.webhooks.insert(&row).await?;
+        self.webhooks.insert(&row).await?;
         Ok(row_to_dto(&row))
     }
 
-    pub async fn update(&self, id: i64, req: UpdateWebhookRequest) -> Result<Webhook, AppError> {
+    pub async fn update(&self, id: &WebhookId, req: UpdateWebhookRequest) -> Result<Webhook, AppError> {
         let mut row = self
             .webhooks
             .get_by_id(id)
@@ -136,14 +136,14 @@ impl WebhookService {
         Ok(row_to_dto(&row))
     }
 
-    pub async fn delete(&self, id: i64) -> Result<(), AppError> {
+    pub async fn delete(&self, id: &WebhookId) -> Result<(), AppError> {
         self.webhooks.delete(id).await?;
         Ok(())
     }
 
     /// Send a sample card to verify the endpoint works. Surfaces send errors to
     /// the caller as a 502 (this is the only path that exposes webhook errors).
-    pub async fn test(&self, id: i64) -> Result<(), AppError> {
+    pub async fn test(&self, id: &WebhookId) -> Result<(), AppError> {
         let row = self
             .webhooks
             .get_by_id(id)
@@ -194,10 +194,12 @@ impl WebhookService {
         let existing = self.tag_settings.get(tag).await?;
         let webhook_id = match req.webhook_id {
             Some(v) => v, // Some(Some)=bind, Some(None)=clear
-            None => existing.as_ref().and_then(|r| r.webhook_id),
+            None => existing
+                .as_ref()
+                .and_then(|r| r.webhook_id.clone()),
         };
         // If binding a webhook, verify it exists (clean 400 vs a dangling id).
-        if let Some(wh_id) = webhook_id
+        if let Some(wh_id) = webhook_id.as_ref()
             && self.webhooks.get_by_id(wh_id).await?.is_none()
         {
             return Err(AppError::BadRequest(format!("webhook {wh_id} does not exist")));

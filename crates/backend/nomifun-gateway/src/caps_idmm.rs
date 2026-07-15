@@ -95,7 +95,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
     // exposes the DECISION watch (the agent-facing decision capability).
     let mut cfg = match deps
         .idmm_service
-        .read_config_persisted(&ctx.user_id, kind, &p.target_id)
+        .read_config_persisted(ctx.user_id.as_str(), kind, &p.target_id)
         .await
     {
         Ok(c) => c.unwrap_or_default(),
@@ -117,7 +117,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
 
     if let Err(e) = deps
         .idmm_service
-        .save_config(&ctx.user_id, kind, &p.target_id, &cfg)
+        .save_config(ctx.user_id.as_str(), kind, &p.target_id, &cfg)
         .await
     {
         // Typical validation errors: sidecar tier without a steering prompt
@@ -127,7 +127,7 @@ async fn set(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: SetIdmmParams) -> Value 
     }
     match deps
         .idmm_service
-        .build_state(&ctx.user_id, kind, &p.target_id)
+        .build_state(ctx.user_id.as_str(), kind, &p.target_id)
         .await
     {
         Ok(state) => ok(state),
@@ -145,7 +145,7 @@ async fn get(deps: Arc<GatewayDeps>, ctx: CallerCtx, p: GetIdmmParams) -> Value 
     }
     match deps
         .idmm_service
-        .build_state(&ctx.user_id, kind, &p.target_id)
+        .build_state(ctx.user_id.as_str(), kind, &p.target_id)
         .await
     {
         Ok(state) => ok(state),

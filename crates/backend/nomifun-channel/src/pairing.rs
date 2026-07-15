@@ -508,7 +508,7 @@ mod tests {
         async fn update_session_activity(&self, _id: &str, _last_activity: TimestampMs) -> Result<(), DbError> {
             Ok(())
         }
-        async fn update_session_conversation(&self, _id: &str, _conversation_id: i64) -> Result<(), DbError> {
+        async fn update_session_conversation(&self, _id: &str, _conversation_id: &str) -> Result<(), DbError> {
             Ok(())
         }
         async fn update_session_agent_type(&self, _id: &str, _agent_type: &str) -> Result<(), DbError> {

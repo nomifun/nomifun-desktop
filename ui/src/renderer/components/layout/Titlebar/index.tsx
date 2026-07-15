@@ -5,6 +5,13 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { ipcBridge } from '@/common';
+import { parseConversationId } from '@/common/types/ids';
+import {
+  conversationTarget,
+  isSameSessionTarget,
+  terminalTarget,
+  type SessionTarget,
+} from '@/common/types/ids';
 import InstantHoverTooltip from '@renderer/components/base/InstantHoverTooltip';
 import MobileConversationBrand from './MobileConversationBrand';
 import TitlebarLanguageMenu from './TitlebarLanguageMenu';
@@ -77,6 +84,15 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const lastNonSettingsPathRef = useRef('/guid');
+  const activeWorkspaceTarget = useMemo<SessionTarget | null>(() => {
+    const match = location.pathname.match(/^\/(conversation|terminal)\/([^/?#]+)/);
+    if (!match) return null;
+    try {
+      return match[1] === 'conversation' ? conversationTarget(match[2]) : terminalTarget(match[2]);
+    } catch {
+      return null;
+    }
+  }, [location.pathname]);
 
   // 监听工作空间折叠状态，保持按钮图标一致 / Sync workspace collapsed state for toggle button
   useEffect(() => {
@@ -85,7 +101,12 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     }
     const handler = (event: Event) => {
       const customEvent = event as CustomEvent<WorkspaceStateDetail>;
-      if (typeof customEvent.detail?.collapsed === 'boolean') {
+      if (
+        activeWorkspaceTarget &&
+        customEvent.detail?.target &&
+        isSameSessionTarget(customEvent.detail.target, activeWorkspaceTarget) &&
+        typeof customEvent.detail.collapsed === 'boolean'
+      ) {
         setWorkspaceCollapsed(customEvent.detail.collapsed);
       }
     };
@@ -93,7 +114,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     return () => {
       window.removeEventListener(WORKSPACE_STATE_EVENT, handler as EventListener);
     };
-  }, []);
+  }, [activeWorkspaceTarget]);
 
   // 同步会话二级侧栏折叠状态，使标题栏开关图标保持一致
   // Sync session secondary-sidebar collapsed state for the titlebar toggle icon
@@ -159,10 +180,10 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   };
 
   const handleWorkspaceToggle = () => {
-    if (!workspaceAvailable) {
+    if (!workspaceAvailable || !activeWorkspaceTarget) {
       return;
     }
-    dispatchWorkspaceToggleEvent();
+    dispatchWorkspaceToggleEvent(activeWorkspaceTarget);
   };
 
   const handleBackToChat = () => {
@@ -225,7 +246,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
 
     let cancelled = false;
     void ipcBridge.conversation.get
-      .invoke({ id: Number(conversation_id) })
+      .invoke({ id: parseConversationId(conversation_id) })
       .then((conversation) => {
         if (cancelled) return;
         setMobileCenterTitle(conversation?.name || appTitle);
@@ -381,7 +402,7 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             const conversationMatch = location.pathname.match(/^\/conversation\/([^/]+)/);
             const conversation_id = conversationMatch?.[1];
             if (conversation_id) {
-              return <MobileConversationBrand conversation_id={Number(conversation_id)} fallbackTitle={mobileCenterTitle} />;
+              return <MobileConversationBrand conversation_id={parseConversationId(conversation_id)} fallbackTitle={mobileCenterTitle} />;
             }
             return (
               <span className='app-titlebar__brand-mobile'>

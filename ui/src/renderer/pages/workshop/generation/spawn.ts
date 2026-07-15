@@ -13,6 +13,7 @@
  */
 
 import type { ReactFlowInstance } from '@xyflow/react';
+import { parseWorkshopNodeId, type AssetId, type ProviderId } from '@/common/types/ids';
 import {
   makeGeneratorNode,
   makeImageNode,
@@ -53,7 +54,7 @@ function rightOf(rf: RF, card: WorkshopFlowNode): { x: number; y: number; width:
  * Fan out a batch of result images into a grid of image nodes to the card's
  * right, each wired from the card. Used when a run yields more than one image.
  */
-export function spawnResultNodes(rf: RF, card: WorkshopFlowNode, assetIds: string[]): void {
+export function spawnResultNodes(rf: RF, card: WorkshopFlowNode, assetIds: AssetId[]): void {
   if (assetIds.length === 0) return;
   const origin = rightOf(rf, card);
   const cols = Math.min(3, Math.ceil(Math.sqrt(assetIds.length)));
@@ -79,7 +80,7 @@ export function spawnResultNodes(rf: RF, card: WorkshopFlowNode, assetIds: strin
 export function spawnContinueCard(
   rf: RF,
   card: WorkshopFlowNode,
-  opts: { instruction: string; providerId?: string; model?: string; mode: 'image' | 'video' }
+  opts: { instruction: string; providerId?: ProviderId; model?: string; mode: 'image' | 'video' }
 ): void {
   const origin = rightOf(rf, card);
   const pos = { x: origin.x, y: origin.y };
@@ -87,7 +88,7 @@ export function spawnContinueCard(
     prompt: opts.instruction,
     providerId: opts.providerId,
     model: opts.model,
-    mentions: [mentionRefForNode(card.id)],
+    mentions: [mentionRefForNode(parseWorkshopNodeId(card.id))],
     autoRun: true,
   });
   rf.addNodes(node);

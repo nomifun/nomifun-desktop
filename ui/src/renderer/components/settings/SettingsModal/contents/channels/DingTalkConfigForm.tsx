@@ -163,7 +163,7 @@ const DingTalkConfigForm: React.FC<DingTalkConfigFormProps> = ({
     try {
       // testPlugin returns { success, botUsername?, error? } directly
       const result = await channel.testPlugin.invoke({
-        plugin_id: 'dingtalk',
+        plugin_type: 'dingtalk',
         token: clientId.trim(),
         extra_config: {
           app_secret: clientSecret.trim(),
@@ -198,7 +198,7 @@ const DingTalkConfigForm: React.FC<DingTalkConfigFormProps> = ({
       const result = await channel.enablePlugin.invoke(
         channelTarget
           ? { plugin_id: channelTarget.channelId, plugin_type: 'dingtalk', ...(channelTarget.publicAgentId ? { public_agent_id: channelTarget.publicAgentId } : { companion_id: channelTarget.companionId }), config }
-          : { plugin_id: 'dingtalk', config }
+          : { plugin_type: 'dingtalk', config }
       );
       if (!result.success) {
         throw new Error(result.error || result.message || t('nomi.settings.remoteEnableFailed', { defaultValue: 'Failed to enable channel' }));
@@ -254,7 +254,7 @@ const DingTalkConfigForm: React.FC<DingTalkConfigFormProps> = ({
   };
 
   // Revoke user
-  const handleRevokeUser = async (user_id: string) => {
+  const handleRevokeUser = async (user_id: import('@/common/types/ids').ChannelUserId) => {
     try {
       await channel.revokeUser.invoke({ user_id });
       Message.success(t('settings.channels.userRevoked', 'User access revoked'));

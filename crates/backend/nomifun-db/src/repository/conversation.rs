@@ -1,4 +1,4 @@
-use nomifun_common::{PaginatedResult, TimestampMs};
+use nomifun_common::{McpServerId, MessageId, PaginatedResult, TimestampMs};
 use serde::{Deserialize, Serialize};
 
 use crate::error::DbError;
@@ -29,11 +29,10 @@ pub trait IConversationRepository: Send + Sync {
     // ── Conversation CRUD ───────────────────────────────────────────
 
     /// Returns a conversation by ID, or `None` if not found.
-    async fn get(&self, id: i64) -> Result<Option<ConversationRow>, DbError>;
+    async fn get(&self, id: &str) -> Result<Option<ConversationRow>, DbError>;
 
-    /// Inserts a new conversation row. The `id` field of `row` is ignored: the
-    /// id is allocated by SQLite (INTEGER PK AUTOINCREMENT) and returned.
-    async fn create(&self, row: &ConversationRow) -> Result<i64, DbError>;
+    /// Inserts a new conversation row using its caller-minted global ID.
+    async fn create(&self, row: &ConversationRow) -> Result<String, DbError>;
 
     /// Trusted internal creation boundary with a stable operation key.  The
     /// public Conversation API never supplies this value.  Returns
@@ -43,7 +42,7 @@ pub trait IConversationRepository: Send + Sync {
         &self,
         row: &ConversationRow,
         _creation_key: &str,
-    ) -> Result<(i64, bool), DbError> {
+    ) -> Result<(String, bool), DbError> {
         let id = self.create(row).await?;
         Ok((id, true))
     }
@@ -62,7 +61,7 @@ pub trait IConversationRepository: Send + Sync {
     async fn claim_delivery_receipt(
         &self,
         _user_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
         _operation_id: &str,
         _kind: &str,
         _request_payload: &str,
@@ -76,7 +75,7 @@ pub trait IConversationRepository: Send + Sync {
     async fn get_delivery_receipt(
         &self,
         _user_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
         _operation_id: &str,
     ) -> Result<Option<ConversationDeliveryReceiptRow>, DbError> {
         Ok(None)
@@ -85,7 +84,7 @@ pub trait IConversationRepository: Send + Sync {
     async fn complete_delivery_receipt(
         &self,
         _user_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
         _operation_id: &str,
         _result_ok: bool,
         _result_text: Option<&str>,
@@ -103,7 +102,7 @@ pub trait IConversationRepository: Send + Sync {
     async fn project_assistant_message_with_receipt(
         &self,
         _user_id: &str,
-        _conversation_id: i64,
+        _conversation_id: &str,
         _operation_id: &str,
         _kind: &str,
         _request_payload: &str,
@@ -116,11 +115,11 @@ pub trait IConversationRepository: Send + Sync {
     }
 
     /// Partially updates a conversation. Returns `DbError::NotFound` if ID is missing.
-    async fn update(&self, id: i64, updates: &ConversationRowUpdate) -> Result<(), DbError>;
+    async fn update(&self, id: &str, updates: &ConversationRowUpdate) -> Result<(), DbError>;
 
     /// Deletes a conversation (messages cascade via FK).
     /// Returns `DbError::NotFound` if ID is missing.
-    async fn delete(&self, id: i64) -> Result<(), DbError>;
+    async fn delete(&self, id: &str) -> Result<(), DbError>;
 
     /// Lists conversations with cursor-based pagination and optional filters.
     async fn list_paginated(
@@ -145,7 +144,7 @@ pub trait IConversationRepository: Send + Sync {
 
     /// Lists conversations sharing the same `extra.workspace` value.
     /// The conversation identified by `conversation_id` is excluded.
-    async fn list_associated(&self, user_id: &str, conversation_id: i64) -> Result<Vec<ConversationRow>, DbError>;
+    async fn list_associated(&self, user_id: &str, conversation_id: &str) -> Result<Vec<ConversationRow>, DbError>;
 
     /// Lists every retained Conversation whose top-level current model is
     /// bound to `provider_id`. These are hard references: deleting the
@@ -153,7 +152,7 @@ pub trait IConversationRepository: Send + Sync {
     async fn list_conversations_using_model_provider(
         &self,
         _provider_id: &str,
-    ) -> Result<Vec<(i64, String)>, DbError> {
+    ) -> Result<Vec<(String, String)>, DbError> {
         Err(DbError::Init(
             "conversation model-provider usage scan is not supported".to_owned(),
         ))
@@ -163,14 +162,14 @@ pub trait IConversationRepository: Send + Sync {
 
     /// Returns the MCP server IDs selected for a conversation, ordered by
     /// `sort_order`. Replaces the legacy `extra.selected_mcp_server_ids` array.
-    async fn list_mcp_server_ids(&self, _conversation_id: i64) -> Result<Vec<i64>, DbError> {
+    async fn list_mcp_server_ids(&self, _conversation_id: &str) -> Result<Vec<McpServerId>, DbError> {
         Ok(Vec::new())
     }
 
     /// Replaces the conversation's selected MCP server set with `ids`, preserving
     /// order via `sort_order`. Implemented as a single DELETE + ordered INSERT
     /// transaction. Replaces writes to `extra.selected_mcp_server_ids`.
-    async fn set_mcp_server_ids(&self, _conversation_id: i64, _ids: &[i64]) -> Result<(), DbError> {
+    async fn set_mcp_server_ids(&self, _conversation_id: &str, _ids: &[McpServerId]) -> Result<(), DbError> {
         Ok(())
     }
 
@@ -179,7 +178,7 @@ pub trait IConversationRepository: Send + Sync {
     /// Returns paginated messages for a conversation, ordered by `created_at`.
     async fn get_messages(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         page: u32,
         page_size: u32,
         order: SortOrder,
@@ -195,7 +194,7 @@ pub trait IConversationRepository: Send + Sync {
     /// repo overrides it.
     async fn get_messages_keyset(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
         _before: Option<(i64, String)>,
         _limit: u32,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
@@ -207,25 +206,38 @@ pub trait IConversationRepository: Send + Sync {
     }
 
     /// Returns a single message scoped to a conversation.
-    async fn get_message(&self, _conv_id: i64, _message_id: &str) -> Result<Option<MessageRow>, DbError> {
+    async fn get_message(&self, _conv_id: &str, _message_id: &str) -> Result<Option<MessageRow>, DbError> {
         Ok(None)
     }
 
     /// Inserts a new message row.
     async fn insert_message(&self, message: &MessageRow) -> Result<(), DbError>;
 
+    /// Atomically resolves a protocol correlation key to one durable canonical
+    /// message ID. Correlation keys are scoped by Conversation, parent turn,
+    /// and message type; they never become entity IDs themselves.
+    async fn claim_message_correlation(
+        &self,
+        _conversation_id: &str,
+        _turn_message_id: &str,
+        _message_type: &str,
+        _correlation_key: &str,
+    ) -> Result<String, DbError> {
+        Ok(MessageId::new().into_string())
+    }
+
     /// Partially updates a message. Returns `DbError::NotFound` if ID is missing.
     async fn update_message(&self, id: &str, updates: &MessageRowUpdate) -> Result<(), DbError>;
 
     /// Deletes all messages belonging to a conversation.
-    async fn delete_messages_by_conversation(&self, conv_id: i64) -> Result<(), DbError>;
+    async fn delete_messages_by_conversation(&self, conv_id: &str) -> Result<(), DbError>;
 
     /// Deletes the message at the `(created_at, id)` keyset cursor (inclusive)
     /// and every newer message in the conversation. Returns the number of rows
     /// deleted. Default no-op so mock repos compile; SQLite overrides it.
     async fn delete_messages_from(
         &self,
-        _conv_id: i64,
+        _conv_id: &str,
         _from_created_at: i64,
         _from_id: &str,
     ) -> Result<u64, DbError> {
@@ -235,7 +247,7 @@ pub trait IConversationRepository: Send + Sync {
     /// Finds a message by (conversation_id, msg_id, type) triple.
     async fn get_message_by_msg_id(
         &self,
-        conv_id: i64,
+        conv_id: &str,
         msg_id: &str,
         msg_type: &str,
     ) -> Result<Option<MessageRow>, DbError>;
@@ -250,15 +262,15 @@ pub trait IConversationRepository: Send + Sync {
     ) -> Result<PaginatedResult<MessageSearchRow>, DbError>;
 
     /// Returns persisted conversation artifacts ordered by `created_at`.
-    async fn list_artifacts(&self, _conversation_id: i64) -> Result<Vec<ConversationArtifactRow>, DbError> {
+    async fn list_artifacts(&self, _conversation_id: &str) -> Result<Vec<ConversationArtifactRow>, DbError> {
         Ok(Vec::new())
     }
 
     /// Returns a conversation artifact by ID scoped to a conversation.
     async fn get_artifact(
         &self,
-        _conversation_id: i64,
-        _artifact_id: i64,
+        _conversation_id: &str,
+        _artifact_id: &str,
     ) -> Result<Option<ConversationArtifactRow>, DbError> {
         Ok(None)
     }
@@ -279,8 +291,8 @@ pub trait IConversationRepository: Send + Sync {
     /// Updates artifact status and returns the updated row if found.
     async fn update_artifact_status(
         &self,
-        _conversation_id: i64,
-        _artifact_id: i64,
+        _conversation_id: &str,
+        _artifact_id: &str,
         _status: &str,
         _updated_at: TimestampMs,
     ) -> Result<Option<ConversationArtifactRow>, DbError> {
@@ -300,13 +312,13 @@ pub trait IConversationRepository: Send + Sync {
     }
 
     /// Deletes all artifacts belonging to a conversation.
-    async fn delete_artifacts_by_conversation(&self, _conversation_id: i64) -> Result<(), DbError> {
+    async fn delete_artifacts_by_conversation(&self, _conversation_id: &str) -> Result<(), DbError> {
         Ok(())
     }
 
     /// Returns legacy persisted cron trigger rows so callers can synthesize
     /// artifact cards for historical conversations created before artifact migration.
-    async fn list_legacy_cron_trigger_messages(&self, _conversation_id: i64) -> Result<Vec<MessageRow>, DbError> {
+    async fn list_legacy_cron_trigger_messages(&self, _conversation_id: &str) -> Result<Vec<MessageRow>, DbError> {
         Ok(Vec::new())
     }
 }
@@ -334,7 +346,7 @@ impl SortOrder {
 #[derive(Debug, Clone, Default)]
 pub struct ConversationFilters {
     /// Cursor: the ID of the last conversation from the previous page.
-    pub cursor: Option<i64>,
+    pub cursor: Option<String>,
     /// Max items per page (default 20).
     pub limit: u32,
     /// Filter by conversation source.
@@ -344,7 +356,7 @@ pub struct ConversationFilters {
     /// Filter by pinned status.
     pub pinned: Option<bool>,
     /// Exclude companion companion (work-partner) sessions — rows whose
-    /// `extra.companionSession` is `1`. Used by the companion's own conversation
+    /// `extra.companion_session` is `1`. Used by the companion's own conversation
     /// listing/count so its single companion thread does not inflate the
     /// "how many conversations" total. Default `false` (companion rows
     /// returned, matching the normal `/api/conversations` behavior).
@@ -400,7 +412,7 @@ pub struct MessageSearchRow {
     pub content: String,
     pub created_at: TimestampMs,
     // Conversation fields
-    pub conversation_id: i64,
+    pub conversation_id: String,
     pub conversation_name: String,
     pub conversation_type: String,
     pub conversation_extra: String,

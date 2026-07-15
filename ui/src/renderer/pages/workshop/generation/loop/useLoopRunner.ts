@@ -19,11 +19,12 @@ import type { ModelOption } from '../genTypes';
 import { abortLoopRun, getLoopProgress, isLoopRunning, subscribeLoop } from './loopRegistry';
 import type { LoopConfig, LoopProgress } from './loopTypes';
 import { startLoopRun } from './runLoop';
+import type { WorkshopNodeId } from '@/common/types/ids';
 
 export interface UseLoopRunnerArgs {
-  loopId: string;
-  targetId: string | null;
-  canvasId: string;
+  loopId: WorkshopNodeId;
+  targetId: WorkshopNodeId | null;
+  canvasId: import('@/common/types/ids').CanvasId;
   config: LoopConfig;
   model: ModelOption | null;
 }

@@ -6,7 +6,7 @@
  * Reuses PresetTagFilterBar, filterPresetsByTags, filterSkillsByTags,
  * usePresetTags, PresetAvatar (via DrawerPresetCard).
  */
-import type { Preset } from '@/common/types/agent/presetTypes';
+import type { Preset, PresetReference } from '@/common/types/agent/presetTypes';
 import type { SkillInfo } from '@/renderer/pages/settings/PresetSettings/types';
 import type { TagFilterState } from '@/renderer/pages/settings/PresetSettings/presetUtils';
 import type { SkillTagFilterState } from '@/renderer/pages/settings/skill/skillFilter';
@@ -36,7 +36,7 @@ export interface PresetPickerDrawerProps {
   presets: Preset[];
   localeKey: string;
   // Preset single-select
-  onSelectPreset: (presetId: string) => void;
+  onSelectPreset: (presetId: PresetReference) => void;
   onFree: () => void;
   // Skills multi-select (controlled by parent GuidPage)
   allSkills: Array<{ name: string; description: string; isAuto: boolean }>;
@@ -152,7 +152,7 @@ const PresetPickerDrawer: React.FC<PresetPickerDrawerProps> = ({
 
   // ── Handle preset select (single-select then close) ──
   const handleSelectPreset = useCallback(
-    (id: string) => {
+    (id: PresetReference) => {
       onSelectPreset(id);
       onClose();
     },

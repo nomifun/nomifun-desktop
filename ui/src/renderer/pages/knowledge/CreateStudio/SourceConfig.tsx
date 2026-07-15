@@ -25,6 +25,7 @@ import { ipcBridge } from '@/common';
 import type { IConnectorCredentialSummary } from '@/common/adapter/ipcBridge';
 import { isDesktopShell } from '@renderer/utils/platform';
 import type { StudioSourceType } from './sourceTypes';
+import type { ConnectorCredentialId } from '@/common/types/ids';
 
 // ─── Value Shape ────────────────────────────────────────────────────────────
 
@@ -44,7 +45,7 @@ export interface SourceConfigValue {
   urlEntries?: UrlEntry[];
   browserRender?: boolean;
   /** feishu */
-  credentialId?: string;
+  credentialId?: ConnectorCredentialId;
   spaceId?: string;
   syncInterval?: SyncInterval;
   /** import */
@@ -456,11 +457,11 @@ const FeishuConfig: React.FC<FeishuConfigInternalProps> = ({ value, onChange }) 
             className={`${sourceInputClass} flex-1`}
             placeholder={t('knowledge.studio.feishuCredPlaceholder', { defaultValue: '选择一个已保存的飞书应用凭证…' })}
             value={value.credentialId}
-            onChange={(v: string) => onChange({ credentialId: v })}
+            onChange={(v: ConnectorCredentialId | undefined) => onChange({ credentialId: v })}
             loading={loading}
             allowClear
             renderFormat={(_option, val) => {
-              const cred = creds.find((c) => c.id === (val as unknown as string));
+              const cred = creds.find((c) => c.id === val);
               return cred ? cred.name : '';
             }}
           >

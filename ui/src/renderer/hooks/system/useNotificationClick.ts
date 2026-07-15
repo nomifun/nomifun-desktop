@@ -3,6 +3,7 @@
  * Copyright 2025-2026 NomiFun (nomifun.com)
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ConversationId } from '@/common/types/ids';
 
 import { useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -16,7 +17,7 @@ export const useNotificationClick = () => {
   const navigate = useNavigate();
 
   const handler = useCallback(
-    (payload: { conversation_id?: number }) => {
+    (payload: { conversation_id?: ConversationId }) => {
       console.log('[useNotificationClick] Received notification click:', payload);
       if (payload.conversation_id) {
         // Navigate to the conversation page / 导航到会话页面

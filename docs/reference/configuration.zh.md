@@ -142,7 +142,8 @@ NomiFun 交付的是**一个**统一的 Rust 后端（`nomifun-app`，二进制
 `JwtService` 由单一密钥构造；`AppServices::from_config` 按以下顺序解析它：
 
 1. 若已设置，使用 `JWT_SECRET` 环境变量。
-2. 否则，使用系统用户行（`system_default_user.jwt_secret`）中持久化的值。
+2. 否则，使用 `installation_identity.owner_user_id` 所指向的安装所有者用户行中
+   持久化的值。
 3. 否则，生成一个全新的强随机密钥，并**持久化到数据库**供后续启动使用。
 
 修改密码流会顺带轮换 JWT 密钥，使所有现有会话失效。

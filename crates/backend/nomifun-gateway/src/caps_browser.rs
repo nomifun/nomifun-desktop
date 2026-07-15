@@ -66,7 +66,8 @@ fn registry_and_key<'a>(deps: &'a GatewayDeps, ctx: &CallerCtx) -> Result<(&'a B
         .browser_registry
         .as_ref()
         .ok_or_else(|| json!({"error": "browser tools are not available on this desktop"}))?;
-    let key = BrowserRegistry::key_for(ctx.companion_id.as_deref(), &ctx.conversation_id);
+    let key = BrowserRegistry::key_for(ctx.companion_id.as_ref(), ctx.conversation_id.as_ref())
+        .map_err(|error| json!({"error": error}))?;
     Ok((registry, key))
 }
 
@@ -245,9 +246,16 @@ mod tests {
 
     #[test]
     fn approval_required_value_mirrors_confirmation_shape() {
-        let v = approval_required_value("browser_oob_123", "click", &json!({"ref": "f0e3"}));
+        let v = approval_required_value(
+            "browseroob_019f6672-ed10-7193-8a86-7981f6c6feae",
+            "click",
+            &json!({"ref": "f0e3"}),
+        );
         let ar = v.get("approval_required").expect("approval_required envelope");
-        assert_eq!(ar.get("call_id").and_then(Value::as_str), Some("browser_oob_123"));
+        assert_eq!(
+            ar.get("call_id").and_then(Value::as_str),
+            Some("browseroob_019f6672-ed10-7193-8a86-7981f6c6feae")
+        );
         let opts = ar.get("options").and_then(Value::as_array).expect("options");
         let values: Vec<&str> = opts.iter().filter_map(|o| o.get("value").and_then(Value::as_str)).collect();
         assert!(values.contains(&"proceed_once") && values.contains(&"cancel"));
